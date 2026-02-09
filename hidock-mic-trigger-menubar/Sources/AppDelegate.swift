@@ -38,9 +38,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         showWindow()
+        setDockIcon()
         if autoStartOnLaunch {
             startTrigger()
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -143,9 +149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let logPath = "\(NSHomeDirectory())/Library/Logs/mic-trigger.log"
         let errPath = "\(NSHomeDirectory())/Library/Logs/mic-trigger.err"
         if FileManager.default.fileExists(atPath: logPath) {
-            NSWorkspace.shared.openFile(logPath)
+            NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
         } else if FileManager.default.fileExists(atPath: errPath) {
-            NSWorkspace.shared.openFile(errPath)
+            NSWorkspace.shared.open(URL(fileURLWithPath: errPath))
         } else {
             showError("No log files found yet.\nExpected:\n\(logPath)\n\(errPath)")
         }
@@ -176,6 +182,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func setDockIcon() {
+        guard let base = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil) else { return }
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.clear.set()
+        NSRect(origin: .zero, size: size).fill()
+        base.size = NSSize(width: 256, height: 256)
+        base.draw(in: NSRect(x: 128, y: 128, width: 256, height: 256))
+        image.unlockFocus()
+        NSApplication.shared.applicationIconImage = image
     }
 
     @objc private func quitApp() {
