@@ -37,9 +37,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        setupMainMenu()
         setupStatusItem()
-        showWindow()
         setDockIcon()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.showWindow()
+            self?.showStartupAlert()
+        }
         if autoStartOnLaunch {
             startTrigger()
         }
@@ -62,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "HiDock"
         statusItem.button?.image = statusImage(running: false)
-        statusItem.button?.imagePosition = .imageOnly
+        statusItem.button?.imagePosition = .imageLeft
 
         startItem = NSMenuItem(title: "Start", action: #selector(startTrigger), keyEquivalent: "s")
         stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
@@ -88,6 +92,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
         updateMenuState()
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+        appMenuItem.submenu = appMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func statusImage(running: Bool) -> NSImage? {
@@ -187,6 +203,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showStartupAlert() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "HiDock Mic Trigger"
+        alert.informativeText = "App launched. If you see this, UI is working."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func setDockIcon() {
