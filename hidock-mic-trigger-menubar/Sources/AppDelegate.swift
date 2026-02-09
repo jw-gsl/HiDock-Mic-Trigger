@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.title = "HiDock"
         statusItem.button?.image = statusImage(running: false)
         statusItem.button?.imagePosition = .imageOnly
 
@@ -54,18 +55,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
         autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStart), keyEquivalent: "")
         logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
+        let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
         startItem.target = self
         stopItem.target = self
         autoStartItem.target = self
         logsItem.target = self
+        statusInfoItem.target = self
         quitItem.target = self
 
         menu.addItem(startItem)
         menu.addItem(stopItem)
         menu.addItem(autoStartItem)
         menu.addItem(logsItem)
+        menu.addItem(statusInfoItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -86,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopItem.isEnabled = running
         autoStartItem.state = autoStartOnLaunch ? .on : .off
         statusItem.button?.image = statusImage(running: running)
+        statusItem.button?.title = running ? "HiDock*" : "HiDock"
     }
 
     @objc private func startTrigger() {
@@ -142,6 +147,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showError("No log files found yet.\nExpected:\n\(logPath)\n\(errPath)")
         }
+    }
+
+    @objc private func showStatus() {
+        let running = (process != nil)
+        let message = running ? "hidock-mic-trigger is running." : "hidock-mic-trigger is not running."
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Status"
+        alert.informativeText = message
+        alert.runModal()
     }
 
     @objc private func quitApp() {
