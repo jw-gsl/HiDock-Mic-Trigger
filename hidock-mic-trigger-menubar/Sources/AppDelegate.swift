@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var logsItem: NSMenuItem!
     private var process: Process?
     private var window: NSWindow?
+    private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
 
     private let repoRoot = "/Users/jameswhiting/_git/hidock-tools"
     private lazy var binaryPath: String = {
@@ -36,13 +37,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        log("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.regular)
         setupMainMenu()
         setupStatusItem()
         setDockIcon()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.log("showWindow (delayed)")
             self?.showWindow()
             self?.showStartupAlert()
+            NSApp.setActivationPolicy(.regular)
         }
         if autoStartOnLaunch {
             startTrigger()
@@ -54,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        log("applicationShouldHandleReopen")
         showWindow()
         return true
     }
@@ -63,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupStatusItem() {
+        log("setupStatusItem")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "HiDock"
         statusItem.button?.image = statusImage(running: false)
@@ -95,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupMainMenu() {
+        log("setupMainMenu")
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
@@ -189,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showWindow() {
+        log("showWindow")
         if window == nil {
             let rect = NSRect(x: 0, y: 0, width: 380, height: 180)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
@@ -202,16 +210,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window = win
         }
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private func showStartupAlert() {
+        log("showStartupAlert")
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "HiDock Mic Trigger"
         alert.informativeText = "App launched. If you see this, UI is working."
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+
+    private func log(_ message: String) {
+        let line = "[\(Date())] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try? handle.close()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logPath))
+            }
+        }
+        NSLog("%@", message)
     }
 
     private func setDockIcon() {
