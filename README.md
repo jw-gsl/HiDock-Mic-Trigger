@@ -2,7 +2,7 @@
 
 Small utilities for working with the HiDock device.
 
-## mic-trigger
+## hidock-mic-trigger
 
 A macOS Swift CLI that watches a USB mic being used and holds the HiDock mic input open via `ffmpeg`, causing the HiDock to auto-record.
 
@@ -10,13 +10,13 @@ A macOS Swift CLI that watches a USB mic being used and holds the HiDock mic inp
 
 ```bash
 cd "mic-trigger"
-swiftc MicTrigger.swift -o mic-trigger
+swiftc MicTrigger.swift -o hidock-mic-trigger
 ```
 
 ### Run
 
 ```bash
-./mic-trigger
+./hidock-mic-trigger
 ```
 
 ### Requirements

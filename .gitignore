@@ -6,4 +6,4 @@
 *.pid
 
 # Build artifacts
-mic-trigger/mic-trigger
+mic-trigger/hidock-mic-trigger
