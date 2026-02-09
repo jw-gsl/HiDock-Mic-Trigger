@@ -1,0 +1,9 @@
+.DS_Store
+*.swp
+*.swo
+*.tmp
+*.log
+*.pid
+
+# Build artifacts
+mic-trigger/mic-trigger
