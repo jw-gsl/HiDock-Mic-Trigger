@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoStartItem: NSMenuItem!
     private var logsItem: NSMenuItem!
     private var process: Process?
+    private var window: NSWindow?
 
     private let repoRoot = "/Users/jameswhiting/_git/hidock-tools"
     private lazy var binaryPath: String = {
@@ -36,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
+        showWindow()
         if autoStartOnLaunch {
             startTrigger()
         }
@@ -157,6 +159,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "Status"
         alert.informativeText = message
         alert.runModal()
+    }
+
+    private func showWindow() {
+        if window == nil {
+            let rect = NSRect(x: 0, y: 0, width: 380, height: 180)
+            let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
+            let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+            win.center()
+            win.title = "HiDock Mic Trigger"
+            let label = NSTextField(labelWithString: "HiDock Mic Trigger is running.\nUse the menu bar or Dock menu to Start/Stop.")
+            label.frame = NSRect(x: 20, y: 70, width: 340, height: 60)
+            label.alignment = .left
+            win.contentView?.addSubview(label)
+            window = win
+        }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func quitApp() {
