@@ -20,8 +20,8 @@
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>LSUIElement</key>
-	<true/>
+  <key>LSUIElement</key>
+  <false/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.</string>
 </dict>

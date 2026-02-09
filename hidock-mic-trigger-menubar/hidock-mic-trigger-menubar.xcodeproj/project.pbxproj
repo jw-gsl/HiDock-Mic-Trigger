@@ -164,7 +164,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSMainNibFile = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
@@ -184,7 +184,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSMainNibFile = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
