@@ -1,26 +1,25 @@
 # hidock-tools
 
-Small utilities for working with the HiDock device.
+Utilities for working with the HiDock device.
 
-## hidock-mic-trigger
+## Contents
 
-A macOS Swift CLI that watches a USB mic being used and holds the HiDock mic input open via `ffmpeg`, causing the HiDock to auto-record.
+- `mic-trigger/` — Swift CLI that watches a USB mic and holds the HiDock input open via `ffmpeg`.
+- `hidock-mic-trigger-menubar/` — Menu bar wrapper app that starts/stops the CLI and shows status.
 
-### Build
+## Quick start
+
+1. Build the CLI:
 
 ```bash
 cd "mic-trigger"
 swiftc MicTrigger.swift -o hidock-mic-trigger
 ```
 
-### Run
+2. Run the CLI:
 
 ```bash
 ./hidock-mic-trigger
 ```
 
-### Requirements
-
-- macOS
-- `ffmpeg` installed (Homebrew recommended)
-- Microphone permission granted for Terminal
+3. For the menu bar app, see `hidock-mic-trigger-menubar/README.md`.
