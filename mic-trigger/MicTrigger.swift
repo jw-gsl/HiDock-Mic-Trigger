@@ -1,6 +1,9 @@
 import Foundation
 import CoreAudio
 
+// Force line-buffered stdout so output reaches the parent app via pipe
+setlinebuf(stdout)
+
 // MARK: - CoreAudio helpers
 
 func getAllAudioDevices() -> [AudioDeviceID] {
