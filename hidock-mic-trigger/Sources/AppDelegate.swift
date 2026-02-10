@@ -1,11 +1,14 @@
 import AppKit
+import CoreAudio
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var startItem: NSMenuItem!
     private var stopItem: NSMenuItem!
     private var autoStartItem: NSMenuItem!
+    private var micMenuItem: NSMenuItem!
+    private var micSubmenu: NSMenu!
     private var process: Process?
     private var window: NSWindow?
 
@@ -14,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var windowStatusLabel: NSTextField?
     private var windowUptimeLabel: NSTextField?
     private var windowAutoStartCheckbox: NSButton?
+    private var windowMicPopup: NSPopUpButton?
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
@@ -48,6 +52,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    private let selectedMicKey = "selectedMicName"
+    private var selectedMicName: String? {
+        get { UserDefaults.standard.string(forKey: selectedMicKey) }
+        set { UserDefaults.standard.set(newValue, forKey: selectedMicKey) }
+    }
+
     // MARK: - App lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -80,6 +90,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
     }
 
+    // MARK: - NSMenuDelegate
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu == micSubmenu {
+            rebuildMicSubmenu()
+        }
+    }
+
+    // MARK: - CoreAudio device enumeration
+
+    private func getInputDeviceNames() -> [String] {
+        var propsize: UInt32 = 0
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var status = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &propsize)
+        guard status == noErr else { return [] }
+
+        let count = Int(propsize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = Array(repeating: AudioDeviceID(0), count: count)
+        status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &propsize, &deviceIDs)
+        guard status == noErr else { return [] }
+
+        var names: [String] = []
+        for deviceID in deviceIDs {
+            // Check if device has input channels
+            var streamAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var streamSize: UInt32 = 0
+            status = AudioObjectGetPropertyDataSize(deviceID, &streamAddress, 0, nil, &streamSize)
+            guard status == noErr else { continue }
+
+            let bufferListPtr = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: Int(streamSize))
+            defer { bufferListPtr.deallocate() }
+            status = AudioObjectGetPropertyData(deviceID, &streamAddress, 0, nil, &streamSize, bufferListPtr)
+            guard status == noErr else { continue }
+
+            let bufferList = UnsafeMutableAudioBufferListPointer(bufferListPtr)
+            let channels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
+            guard channels > 0 else { continue }
+
+            // Get device name
+            var nameAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioObjectPropertyName,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var cfName: CFString = "" as CFString
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            status = AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &cfName)
+            guard status == noErr else { continue }
+
+            names.append(cfName as String)
+        }
+        return names
+    }
+
     // MARK: - Menu bar
 
     private func setupStatusItem() {
@@ -92,6 +164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         startItem = NSMenuItem(title: "Start", action: #selector(startTrigger), keyEquivalent: "s")
         stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
         autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStart), keyEquivalent: "")
+
+        micSubmenu = NSMenu()
+        micSubmenu.delegate = self
+        micMenuItem = NSMenuItem(title: "Trigger Mic", action: nil, keyEquivalent: "")
+        micMenuItem.submenu = micSubmenu
+
         let logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
@@ -103,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(startItem)
         menu.addItem(stopItem)
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(micMenuItem)
         menu.addItem(autoStartItem)
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
@@ -111,6 +190,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         statusItem.menu = menu
         updateMenuState()
+    }
+
+    private func rebuildMicSubmenu() {
+        micSubmenu.removeAllItems()
+        let devices = getInputDeviceNames()
+        let current = selectedMicName
+
+        for name in devices {
+            let item = NSMenuItem(title: name, action: #selector(micMenuItemSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = (name == current) ? .on : .off
+            micSubmenu.addItem(item)
+        }
+
+        if devices.isEmpty {
+            let noDevices = NSMenuItem(title: "No input devices found", action: nil, keyEquivalent: "")
+            noDevices.isEnabled = false
+            micSubmenu.addItem(noDevices)
+        }
+    }
+
+    @objc private func micMenuItemSelected(_ sender: NSMenuItem) {
+        selectedMicName = sender.title
+        log("Selected trigger mic: \(sender.title)")
+        refreshWindowMicPopup()
     }
 
     private func setupMainMenu() {
@@ -149,6 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         windowStartButton?.isEnabled = !running
         windowStopButton?.isEnabled = running
         windowAutoStartCheckbox?.state = autoStartOnLaunch ? .on : .off
+        windowMicPopup?.isEnabled = !running
         if running {
             let pid = process.map { "\($0.processIdentifier)" } ?? ""
             windowStatusLabel?.stringValue = "Running (pid \(pid))"
@@ -223,6 +328,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func launchProcess() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binaryPath)
+
+        var args: [String] = []
+        if let mic = selectedMicName, !mic.isEmpty {
+            args += ["--mic", mic]
+        }
+        p.arguments = args
+
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         p.terminationHandler = { [weak self] proc in
@@ -238,7 +350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try p.run()
             process = p
             processStartDate = Date()
-            log("Started hidock-mic-trigger (pid \(p.processIdentifier))")
+            let micDesc = selectedMicName ?? "(default)"
+            log("Started hidock-mic-trigger (pid \(p.processIdentifier), mic: \(micDesc))")
             updateMenuState()
         } catch {
             log("Failed to start: \(error)")
@@ -299,9 +412,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.runModal()
     }
 
+    @objc private func windowMicChanged(_ sender: NSPopUpButton) {
+        selectedMicName = sender.titleOfSelectedItem
+        log("Selected trigger mic: \(sender.titleOfSelectedItem ?? "none")")
+    }
+
+    private func refreshWindowMicPopup() {
+        guard let popup = windowMicPopup else { return }
+        let devices = getInputDeviceNames()
+        popup.removeAllItems()
+        popup.addItems(withTitles: devices)
+        if let current = selectedMicName, devices.contains(current) {
+            popup.selectItem(withTitle: current)
+        }
+    }
+
     private func showWindow() {
         if window == nil {
-            let rect = NSRect(x: 0, y: 0, width: 380, height: 280)
+            let rect = NSRect(x: 0, y: 0, width: 380, height: 320)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
             let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
             win.center()
@@ -313,42 +441,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             let titleLabel = NSTextField(labelWithString: "HiDock Mic Trigger")
             titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
-            titleLabel.frame = NSRect(x: 20, y: 228, width: 340, height: 30)
+            titleLabel.frame = NSRect(x: 20, y: 268, width: 340, height: 30)
             contentView.addSubview(titleLabel)
 
             let status = NSTextField(labelWithString: "Stopped")
             status.font = .systemFont(ofSize: 14)
             status.textColor = .secondaryLabelColor
-            status.frame = NSRect(x: 20, y: 200, width: 340, height: 22)
+            status.frame = NSRect(x: 20, y: 240, width: 340, height: 22)
             contentView.addSubview(status)
             windowStatusLabel = status
 
             let uptime = NSTextField(labelWithString: "")
             uptime.font = .systemFont(ofSize: 12)
             uptime.textColor = .secondaryLabelColor
-            uptime.frame = NSRect(x: 20, y: 178, width: 340, height: 18)
+            uptime.frame = NSRect(x: 20, y: 218, width: 340, height: 18)
             contentView.addSubview(uptime)
             windowUptimeLabel = uptime
 
             let startBtn = NSButton(title: "Start", target: self, action: #selector(startTrigger))
             startBtn.bezelStyle = .rounded
-            startBtn.frame = NSRect(x: 80, y: 130, width: 100, height: 32)
+            startBtn.frame = NSRect(x: 80, y: 170, width: 100, height: 32)
             contentView.addSubview(startBtn)
             windowStartButton = startBtn
 
             let stopBtn = NSButton(title: "Stop", target: self, action: #selector(stopTrigger))
             stopBtn.bezelStyle = .rounded
-            stopBtn.frame = NSRect(x: 200, y: 130, width: 100, height: 32)
+            stopBtn.frame = NSRect(x: 200, y: 170, width: 100, height: 32)
             contentView.addSubview(stopBtn)
             windowStopButton = stopBtn
 
             let separator = NSBox()
             separator.boxType = .separator
-            separator.frame = NSRect(x: 20, y: 110, width: 340, height: 1)
+            separator.frame = NSRect(x: 20, y: 150, width: 340, height: 1)
             contentView.addSubview(separator)
 
+            let micLabel = NSTextField(labelWithString: "Trigger Mic:")
+            micLabel.font = .systemFont(ofSize: 13)
+            micLabel.frame = NSRect(x: 20, y: 118, width: 90, height: 20)
+            contentView.addSubview(micLabel)
+
+            let micPopup = NSPopUpButton(frame: NSRect(x: 112, y: 114, width: 248, height: 28), pullsDown: false)
+            micPopup.target = self
+            micPopup.action = #selector(windowMicChanged(_:))
+            contentView.addSubview(micPopup)
+            windowMicPopup = micPopup
+
             let autoStart = NSButton(checkboxWithTitle: "Auto-start on launch", target: self, action: #selector(toggleAutoStart))
-            autoStart.frame = NSRect(x: 20, y: 75, width: 200, height: 22)
+            autoStart.frame = NSRect(x: 20, y: 80, width: 200, height: 22)
             contentView.addSubview(autoStart)
             windowAutoStartCheckbox = autoStart
 
@@ -360,6 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window = win
             updateWindowState()
         }
+        refreshWindowMicPopup()
         NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

@@ -120,11 +120,43 @@ final class FFmpegHolder {
     }
 }
 
+// MARK: - Argument parsing
+
+func parseArgs() -> (micName: String, audioIndex: Int) {
+    let args = CommandLine.arguments
+    var micName = "Samson Q2U Microphone"
+    var audioIndex = 1
+
+    var i = 1
+    while i < args.count {
+        switch args[i] {
+        case "--mic":
+            i += 1
+            if i < args.count { micName = args[i] }
+        case "--audio-index":
+            i += 1
+            if i < args.count, let idx = Int(args[i]) { audioIndex = idx }
+        case "--list-inputs":
+            for dev in getAllAudioDevices() {
+                guard deviceHasInput(dev) else { continue }
+                if let name = getDeviceName(dev) {
+                    print(name)
+                }
+            }
+            exit(0)
+        default:
+            break
+        }
+        i += 1
+    }
+    return (micName, audioIndex)
+}
+
 // MARK: - Main
 
-// Device names from your ffmpeg list
-let usbMicName = "Samson Q2U Microphone"
-let hiDockAudioIndex = 1
+let config = parseArgs()
+let usbMicName = config.micName
+let hiDockAudioIndex = config.audioIndex
 
 let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
 
