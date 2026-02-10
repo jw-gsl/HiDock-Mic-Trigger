@@ -4,13 +4,15 @@ Menu bar app that launches and controls the `hidock-mic-trigger` CLI.
 
 ## What it does
 
-- Starts/stops the CLI from the menu bar or the app window
-- Shows a menu bar icon with status
-- Start/Stop buttons in the app window
-- Dock icon hides when the window is closed
-- Optional auto-start on launch
-- Opens logs
-- Builds the CLI automatically if missing
+- Start/Stop the CLI from the menu bar or the app window
+- Select the trigger mic from a dropdown (window or menu bar submenu)
+- macOS notifications when recording starts and stops
+- Auto-restart on crash (up to 3 retries)
+- Auto-start on launch (configurable)
+- Uptime display
+- Dock icon hides when the window is closed; menu bar icon stays
+- Open log files from the window
+- Builds the CLI automatically if the binary is missing
 
 ## Build (Xcode)
 
@@ -23,6 +25,7 @@ Then Build & Run.
 ## Build (CLI)
 
 ```bash
+xcodegen generate
 xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Release build
 ```
 
@@ -40,7 +43,6 @@ Or double-click:
 
 ## Notes
 
-- The app expects the CLI binary at:
-  `/Users/jameswhiting/_git/hidock-tools/mic-trigger/hidock-mic-trigger`
-- You can override the path with the environment variable:
-  `HIDOCK_MIC_TRIGGER_PATH`
+- The app looks for the CLI binary at `mic-trigger/hidock-mic-trigger` relative to the repo root
+- You can override the path with the environment variable `HIDOCK_MIC_TRIGGER_PATH`
+- Trigger mic selection and auto-start preference are saved in UserDefaults
