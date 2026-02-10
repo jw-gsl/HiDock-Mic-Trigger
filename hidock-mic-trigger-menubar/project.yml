@@ -14,16 +14,15 @@ targets:
       - Sources
     settings:
       INFOPLIST_KEY_LSUIElement: NO
-      INFOPLIST_KEY_NSMainNibFile: ""
-      INFOPLIST_KEY_NSPrincipalClass: "NSApplication"
       INFOPLIST_KEY_NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
       PRODUCT_NAME: hidock-mic-trigger-menubar
     info:
       path: Info.plist
       properties:
-        CFBundleName: hidock-mic-trigger-menubar
-        CFBundleDisplayName: hidock-mic-trigger-menubar
+        CFBundleName: HiDock Mic Trigger
+        CFBundleDisplayName: HiDock Mic Trigger
         CFBundleIdentifier: com.hidock.tools.hidock-mic-trigger-menubar
+        CFBundleExecutable: hidock-mic-trigger-menubar
         CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "1"
         LSUIElement: false

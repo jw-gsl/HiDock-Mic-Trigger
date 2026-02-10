@@ -7,10 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A76BCC26556B118F25C91280 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0771E77E22529B76C1409CEE /* main.swift */; };
 		D47399A46F48CF74D8292D23 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4F13824A5AB4E12595E9013 /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		0771E77E22529B76C1409CEE /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		8D9B1E8CCFBE98384F5807EC /* hidock-mic-trigger-menubar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger-menubar.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B4F13824A5AB4E12595E9013 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -20,6 +22,7 @@
 			isa = PBXGroup;
 			children = (
 				B4F13824A5AB4E12595E9013 /* AppDelegate.swift */,
+				0771E77E22529B76C1409CEE /* main.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -94,6 +97,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D47399A46F48CF74D8292D23 /* AppDelegate.swift in Sources */,
+				A76BCC26556B118F25C91280 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -165,9 +169,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_LSUIElement = NO;
-				INFOPLIST_KEY_NSMainNibFile = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
-				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -185,9 +187,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_LSUIElement = NO;
-				INFOPLIST_KEY_NSMainNibFile = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
-				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

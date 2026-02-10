@@ -1,24 +1,27 @@
 import AppKit
 
-@main
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var startItem: NSMenuItem!
     private var stopItem: NSMenuItem!
     private var autoStartItem: NSMenuItem!
-    private var logsItem: NSMenuItem!
     private var process: Process?
     private var window: NSWindow?
-    private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
 
-    private let repoRoot = "/Users/jameswhiting/_git/hidock-tools"
+    private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
+    private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
+
     private lazy var binaryPath: String = {
         if let override = ProcessInfo.processInfo.environment["HIDOCK_MIC_TRIGGER_PATH"], !override.isEmpty {
             return override
         }
+        if let bundled = Bundle.main.path(forResource: "hidock-mic-trigger", ofType: nil) {
+            return bundled
+        }
         return "\(repoRoot)/mic-trigger/hidock-mic-trigger"
     }()
+
     private lazy var sourcePath: String = {
         return "\(repoRoot)/mic-trigger/MicTrigger.swift"
     }()
@@ -36,18 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - App lifecycle
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.regular)
         setupMainMenu()
         setupStatusItem()
         setDockIcon()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.log("showWindow (delayed)")
-            self?.showWindow()
-            self?.showStartupAlert()
-            NSApp.setActivationPolicy(.regular)
-        }
+        showWindow()
         if autoStartOnLaunch {
             startTrigger()
         }
@@ -58,7 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        log("applicationShouldHandleReopen")
         showWindow()
         return true
     }
@@ -66,6 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         stopTrigger()
     }
+
+    // MARK: - Menu bar
 
     private func setupStatusItem() {
         log("setupStatusItem")
@@ -77,19 +78,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startItem = NSMenuItem(title: "Start", action: #selector(startTrigger), keyEquivalent: "s")
         stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
         autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStart), keyEquivalent: "")
-        logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
+        let logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
-        startItem.target = self
-        stopItem.target = self
-        autoStartItem.target = self
-        logsItem.target = self
-        statusInfoItem.target = self
-        quitItem.target = self
+        for item in [startItem, stopItem, autoStartItem, logsItem, statusInfoItem, quitItem] {
+            item?.target = self
+        }
 
         menu.addItem(startItem)
         menu.addItem(stopItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(autoStartItem)
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
@@ -101,13 +100,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupMainMenu() {
-        log("setupMainMenu")
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
 
         let appMenu = NSMenu()
-        appMenu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(title: "About HiDock Mic Trigger", action: #selector(showAbout), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
 
         NSApp.mainMenu = mainMenu
@@ -115,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func statusImage(running: Bool) -> NSImage? {
         let name = running ? "waveform" : "waveform.slash"
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: running ? "Running" : "Stopped")
         image?.isTemplate = true
         return image
     }
@@ -129,21 +129,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = running ? "HiDock*" : "HiDock"
     }
 
+    // MARK: - Process management
+
     @objc private func startTrigger() {
         guard process == nil else { return }
+
         if !FileManager.default.isExecutableFile(atPath: binaryPath) {
-            if !buildTriggerBinary() {
-                showError("Binary not found and build failed.\nExpected: \(binaryPath)")
-                return
+            log("Binary not found at \(binaryPath), attempting build...")
+            startItem.isEnabled = false
+            buildTriggerBinaryAsync { [weak self] success in
+                guard let self = self else { return }
+                if success {
+                    self.log("Build succeeded, starting trigger")
+                    self.launchProcess()
+                } else {
+                    self.startItem.isEnabled = true
+                    self.showError("Binary not found and build failed.\nExpected: \(self.binaryPath)")
+                }
             }
+            return
         }
 
+        launchProcess()
+    }
+
+    private func launchProcess() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binaryPath)
         p.standardOutput = Pipe()
         p.standardError = Pipe()
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
+                self?.log("Process terminated with status \(proc.terminationStatus)")
                 self?.process = nil
                 self?.updateMenuState()
             }
@@ -152,17 +169,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try p.run()
             process = p
+            log("Started hidock-mic-trigger (pid \(p.processIdentifier))")
             updateMenuState()
         } catch {
-            showError("Failed to start hidock-mic-trigger: \(error)")
+            log("Failed to start: \(error)")
+            showError("Failed to start hidock-mic-trigger:\n\(error.localizedDescription)")
         }
     }
 
     @objc private func stopTrigger() {
         guard let p = process else { return }
-        p.terminate()
-        process = nil
-        updateMenuState()
+        log("Stopping hidock-mic-trigger (pid \(p.processIdentifier))")
+        p.interrupt()
+        DispatchQueue.global().async { [weak self] in
+            p.waitUntilExit()
+            DispatchQueue.main.async {
+                self?.log("Process stopped")
+                self?.process = nil
+                self?.updateMenuState()
+            }
+        }
     }
 
     @objc private func toggleAutoStart() {
@@ -173,21 +199,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - UI
+
     @objc private func showLogs() {
-        let logPath = "\(NSHomeDirectory())/Library/Logs/mic-trigger.log"
-        let errPath = "\(NSHomeDirectory())/Library/Logs/mic-trigger.err"
-        if FileManager.default.fileExists(atPath: logPath) {
-            NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
-        } else if FileManager.default.fileExists(atPath: errPath) {
-            NSWorkspace.shared.open(URL(fileURLWithPath: errPath))
-        } else {
-            showError("No log files found yet.\nExpected:\n\(logPath)\n\(errPath)")
+        let cliLogPath = "\(NSHomeDirectory())/Library/Logs/mic-trigger.log"
+        let cliErrPath = "\(NSHomeDirectory())/Library/Logs/mic-trigger.err"
+
+        var opened = false
+        for path in [logPath, cliLogPath, cliErrPath] {
+            if FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                opened = true
+            }
+        }
+        if !opened {
+            showError("No log files found yet.\nExpected:\n\(cliLogPath)\n\(cliErrPath)")
         }
     }
 
     @objc private func showStatus() {
         let running = (process != nil)
-        let message = running ? "hidock-mic-trigger is running." : "hidock-mic-trigger is not running."
+        let pid = process.map { " (pid \($0.processIdentifier))" } ?? ""
+        let message = running
+            ? "hidock-mic-trigger is running\(pid)."
+            : "hidock-mic-trigger is not running."
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Status"
@@ -195,8 +230,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
+    @objc private func showAbout() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "HiDock Mic Trigger"
+        alert.informativeText = "Menu bar app for controlling the HiDock mic trigger CLI.\nVersion 1.0.0"
+        alert.runModal()
+    }
+
     private func showWindow() {
-        log("showWindow")
         if window == nil {
             let rect = NSRect(x: 0, y: 0, width: 380, height: 180)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
@@ -210,80 +252,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window = win
         }
         window?.makeKeyAndOrderFront(nil)
-        window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func showStartupAlert() {
-        log("showStartupAlert")
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "HiDock Mic Trigger"
-        alert.informativeText = "App launched. If you see this, UI is working."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+    // MARK: - Dock icon
+
+    private func setDockIcon() {
+        guard let base = NSImage(systemSymbolName: "waveform", accessibilityDescription: "HiDock") else { return }
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size, flipped: false) { _ in
+            base.draw(in: NSRect(x: 128, y: 128, width: 256, height: 256))
+            return true
+        }
+        NSApp.applicationIconImage = image
     }
+
+    // MARK: - Logging
 
     private func log(_ message: String) {
         let line = "[\(Date())] \(message)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: logPath) {
-                if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    try? handle.close()
-                }
-            } else {
-                try? data.write(to: URL(fileURLWithPath: logPath))
-            }
-        }
         NSLog("%@", message)
+        guard let data = line.data(using: .utf8) else { return }
+        do {
+            let logURL = URL(fileURLWithPath: logPath)
+            if FileManager.default.fileExists(atPath: logPath) {
+                let handle = try FileHandle(forWritingTo: logURL)
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try handle.close()
+            } else {
+                let logDir = (logPath as NSString).deletingLastPathComponent
+                try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+                try data.write(to: logURL)
+            }
+        } catch {
+            NSLog("Failed to write log: %@", error.localizedDescription)
+        }
     }
 
-    private func setDockIcon() {
-        guard let base = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil) else { return }
-        let size = NSSize(width: 512, height: 512)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        NSColor.clear.set()
-        NSRect(origin: .zero, size: size).fill()
-        base.size = NSSize(width: 256, height: 256)
-        base.draw(in: NSRect(x: 128, y: 128, width: 256, height: 256))
-        image.unlockFocus()
-        NSApplication.shared.applicationIconImage = image
+    // MARK: - Build
+
+    private func buildTriggerBinaryAsync(completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let success = self.buildTriggerBinary()
+            DispatchQueue.main.async {
+                completion(success)
+            }
+        }
     }
+
+    private func buildTriggerBinary() -> Bool {
+        let source = sourcePath
+        guard FileManager.default.fileExists(atPath: source) else {
+            log("Source not found at \(source)")
+            return false
+        }
+
+        let dir = "\(repoRoot)/mic-trigger"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.currentDirectoryURL = URL(fileURLWithPath: dir)
+        p.arguments = ["swiftc", "MicTrigger.swift", "-o", "hidock-mic-trigger"]
+
+        let errPipe = Pipe()
+        p.standardOutput = Pipe()
+        p.standardError = errPipe
+
+        do {
+            try p.run()
+            p.waitUntilExit()
+        } catch {
+            log("Build process failed to launch: \(error)")
+            return false
+        }
+
+        if p.terminationStatus != 0 {
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
+                log("Build failed:\n\(errStr)")
+            }
+            return false
+        }
+
+        return FileManager.default.isExecutableFile(atPath: binaryPath)
+    }
+
+    // MARK: - Actions
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
     }
 
     private func showError(_ message: String) {
+        log("ERROR: \(message)")
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "hidock-mic-trigger"
+        alert.messageText = "HiDock Mic Trigger"
         alert.informativeText = message
         alert.runModal()
-    }
-
-    private func buildTriggerBinary() -> Bool {
-        let dir = "\(repoRoot)/mic-trigger"
-        let source = sourcePath
-        guard FileManager.default.fileExists(atPath: source) else { return false }
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.currentDirectoryURL = URL(fileURLWithPath: dir)
-        p.arguments = ["swiftc", "MicTrigger.swift", "-o", "hidock-mic-trigger"]
-        p.standardOutput = Pipe()
-        p.standardError = Pipe()
-
-        do {
-            try p.run()
-            p.waitUntilExit()
-        } catch {
-            return false
-        }
-
-        return p.terminationStatus == 0 && FileManager.default.isExecutableFile(atPath: binaryPath)
     }
 }
