@@ -7,9 +7,9 @@
 	<key>CFBundleDisplayName</key>
 	<string>HiDock Mic Trigger</string>
 	<key>CFBundleExecutable</key>
-	<string>hidock-mic-trigger-menubar</string>
+	<string>hidock-mic-trigger</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.hidock.tools.hidock-mic-trigger-menubar</string>
+	<string>com.hidock.tools.hidock-mic-trigger</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSUIElement</key>
-	<false/>
+	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.</string>
 </dict>

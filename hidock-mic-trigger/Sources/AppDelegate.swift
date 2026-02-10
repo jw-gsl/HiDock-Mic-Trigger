@@ -1,6 +1,6 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var startItem: NSMenuItem!
@@ -8,6 +8,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoStartItem: NSMenuItem!
     private var process: Process?
     private var window: NSWindow?
+
+    private var windowStartButton: NSButton?
+    private var windowStopButton: NSButton?
+    private var windowStatusLabel: NSTextField?
 
     private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
     private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
@@ -43,10 +47,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("applicationDidFinishLaunching")
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         setupMainMenu()
         setupStatusItem()
-        setDockIcon()
         showWindow()
         if autoStartOnLaunch {
             startTrigger()
@@ -64,6 +67,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         stopTrigger()
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
     }
 
     // MARK: - Menu bar
@@ -126,7 +135,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopItem.isEnabled = running
         autoStartItem.state = autoStartOnLaunch ? .on : .off
         statusItem.button?.image = statusImage(running: running)
-        statusItem.button?.title = running ? "HiDock*" : "HiDock"
+        statusItem.button?.title = "HiDock"
+        updateWindowState()
+    }
+
+    private func updateWindowState() {
+        let running = (process != nil)
+        windowStartButton?.isEnabled = !running
+        windowStopButton?.isEnabled = running
+        if running {
+            let pid = process.map { "\($0.processIdentifier)" } ?? ""
+            windowStatusLabel?.stringValue = "Running (pid \(pid))"
+            windowStatusLabel?.textColor = .systemGreen
+        } else {
+            windowStatusLabel?.stringValue = "Stopped"
+            windowStatusLabel?.textColor = .secondaryLabelColor
+        }
     }
 
     // MARK: - Process management
@@ -137,6 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !FileManager.default.isExecutableFile(atPath: binaryPath) {
             log("Binary not found at \(binaryPath), attempting build...")
             startItem.isEnabled = false
+            windowStartButton?.isEnabled = false
             buildTriggerBinaryAsync { [weak self] success in
                 guard let self = self else { return }
                 if success {
@@ -144,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.launchProcess()
                 } else {
                     self.startItem.isEnabled = true
+                    self.windowStartButton?.isEnabled = true
                     self.showError("Binary not found and build failed.\nExpected: \(self.binaryPath)")
                 }
             }
@@ -218,16 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showStatus() {
-        let running = (process != nil)
-        let pid = process.map { " (pid \($0.processIdentifier))" } ?? ""
-        let message = running
-            ? "hidock-mic-trigger is running\(pid)."
-            : "hidock-mic-trigger is not running."
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "Status"
-        alert.informativeText = message
-        alert.runModal()
+        showWindow()
     }
 
     @objc private func showAbout() {
@@ -240,31 +257,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showWindow() {
         if window == nil {
-            let rect = NSRect(x: 0, y: 0, width: 380, height: 180)
+            let rect = NSRect(x: 0, y: 0, width: 380, height: 220)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
             let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
             win.center()
             win.title = "HiDock Mic Trigger"
-            let label = NSTextField(labelWithString: "HiDock Mic Trigger is running.\nUse the menu bar or Dock menu to Start/Stop.")
-            label.frame = NSRect(x: 20, y: 70, width: 340, height: 60)
-            label.alignment = .left
-            win.contentView?.addSubview(label)
+            win.delegate = self
+
+            let contentView = win.contentView!
+
+            let titleLabel = NSTextField(labelWithString: "HiDock Mic Trigger")
+            titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+            titleLabel.frame = NSRect(x: 20, y: 160, width: 340, height: 30)
+            contentView.addSubview(titleLabel)
+
+            let status = NSTextField(labelWithString: "Stopped")
+            status.font = .systemFont(ofSize: 14)
+            status.textColor = .secondaryLabelColor
+            status.frame = NSRect(x: 20, y: 128, width: 340, height: 22)
+            contentView.addSubview(status)
+            windowStatusLabel = status
+
+            let startBtn = NSButton(title: "Start", target: self, action: #selector(startTrigger))
+            startBtn.bezelStyle = .rounded
+            startBtn.frame = NSRect(x: 80, y: 70, width: 100, height: 32)
+            contentView.addSubview(startBtn)
+            windowStartButton = startBtn
+
+            let stopBtn = NSButton(title: "Stop", target: self, action: #selector(stopTrigger))
+            stopBtn.bezelStyle = .rounded
+            stopBtn.frame = NSRect(x: 200, y: 70, width: 100, height: 32)
+            contentView.addSubview(stopBtn)
+            windowStopButton = stopBtn
+
+            let hint = NSTextField(labelWithString: "Also available from the menu bar icon.")
+            hint.font = .systemFont(ofSize: 11)
+            hint.textColor = .tertiaryLabelColor
+            hint.frame = NSRect(x: 20, y: 30, width: 340, height: 18)
+            hint.alignment = .center
+            contentView.addSubview(hint)
+
             window = win
+            updateWindowState()
         }
+        NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    // MARK: - Dock icon
-
-    private func setDockIcon() {
-        guard let base = NSImage(systemSymbolName: "waveform", accessibilityDescription: "HiDock") else { return }
-        let size = NSSize(width: 512, height: 512)
-        let image = NSImage(size: size, flipped: false) { _ in
-            base.draw(in: NSRect(x: 128, y: 128, width: 256, height: 256))
-            return true
-        }
-        NSApp.applicationIconImage = image
     }
 
     // MARK: - Logging

@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-APP="$HOME/Applications/hidock-mic-trigger-menubar.app"
+APP="$HOME/Applications/HiDock Mic Trigger.app"
 if [ ! -d "$APP" ]; then
   echo "App not found at: $APP"
   exit 1

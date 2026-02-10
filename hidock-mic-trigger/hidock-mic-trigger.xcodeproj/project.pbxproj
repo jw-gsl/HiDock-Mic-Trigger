@@ -7,72 +7,76 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A76BCC26556B118F25C91280 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0771E77E22529B76C1409CEE /* main.swift */; };
-		D47399A46F48CF74D8292D23 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4F13824A5AB4E12595E9013 /* AppDelegate.swift */; };
+		2DD3DE44A7801C45E36FFC37 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */; };
+		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
+		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		0771E77E22529B76C1409CEE /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
-		8D9B1E8CCFBE98384F5807EC /* hidock-mic-trigger-menubar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger-menubar.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		B4F13824A5AB4E12595E9013 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		640A7BCEAB107C1993E023E0 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		8CDAD4DE368D4BD1A70444DB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
-		125972B13464484A35793AD8 /* Sources */ = {
+		395C21CA479F546E2F018216 = {
 			isa = PBXGroup;
 			children = (
-				B4F13824A5AB4E12595E9013 /* AppDelegate.swift */,
-				0771E77E22529B76C1409CEE /* main.swift */,
+				EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */,
+				E53BDC58969FA907D9833E0B /* Sources */,
+				F17E692D4D29F11982F4DCBD /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E53BDC58969FA907D9833E0B /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				640A7BCEAB107C1993E023E0 /* AppDelegate.swift */,
+				8CDAD4DE368D4BD1A70444DB /* main.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
 		};
-		4805B2538BCFCE7A47BD6D43 /* Products */ = {
+		F17E692D4D29F11982F4DCBD /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				8D9B1E8CCFBE98384F5807EC /* hidock-mic-trigger-menubar.app */,
+				AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		54218F45C6AA1FDCB831D233 = {
-			isa = PBXGroup;
-			children = (
-				125972B13464484A35793AD8 /* Sources */,
-				4805B2538BCFCE7A47BD6D43 /* Products */,
-			);
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		4F77EF3E24BF1BFF869A19D6 /* hidock-mic-trigger-menubar */ = {
+		D71A44800DD561C06AB4A29E /* hidock-mic-trigger */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 0892B66F7A7C3397F66EA2D3 /* Build configuration list for PBXNativeTarget "hidock-mic-trigger-menubar" */;
+			buildConfigurationList = 6EFD777B6FC8F377CF9DBECC /* Build configuration list for PBXNativeTarget "hidock-mic-trigger" */;
 			buildPhases = (
-				7E60FBD4C0B065F55D783A81 /* Sources */,
+				B8B35C05E704237791E8FFDC /* Sources */,
+				9D47208B9B2A0D651E37F96B /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 			);
-			name = "hidock-mic-trigger-menubar";
+			name = "hidock-mic-trigger";
 			packageProductDependencies = (
 			);
-			productName = "hidock-mic-trigger-menubar";
-			productReference = 8D9B1E8CCFBE98384F5807EC /* hidock-mic-trigger-menubar.app */;
+			productName = "hidock-mic-trigger";
+			productReference = AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		204A7515B981CF4BD2CC4CAC /* Project object */ = {
+		DAF9D8607B4AF4D05DE02267 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 			};
-			buildConfigurationList = 62098D9D8E83C862EE15EA25 /* Build configuration list for PBXProject "hidock-mic-trigger-menubar" */;
+			buildConfigurationList = F82CB7DAE873C64AB23F3107 /* Build configuration list for PBXProject "hidock-mic-trigger" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -80,31 +84,78 @@
 				Base,
 				en,
 			);
-			mainGroup = 54218F45C6AA1FDCB831D233;
+			mainGroup = 395C21CA479F546E2F018216;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				4F77EF3E24BF1BFF869A19D6 /* hidock-mic-trigger-menubar */,
+				D71A44800DD561C06AB4A29E /* hidock-mic-trigger */,
 			);
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		9D47208B9B2A0D651E37F96B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2DD3DE44A7801C45E36FFC37 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
-		7E60FBD4C0B065F55D783A81 /* Sources */ = {
+		B8B35C05E704237791E8FFDC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				D47399A46F48CF74D8292D23 /* AppDelegate.swift in Sources */,
-				A76BCC26556B118F25C91280 /* main.swift in Sources */,
+				4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */,
+				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		308B82C68FFC73F6D39B3EDD /* Release */ = {
+		34D438F454BDEAA876CB6D68 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger";
+				PRODUCT_NAME = "hidock-mic-trigger";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		7BE964A4FC4DA1CE3ED0067F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger";
+				PRODUCT_NAME = "hidock-mic-trigger";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		853B07977097EB753183478E /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -162,43 +213,7 @@
 			};
 			name = Release;
 		};
-		405D852D1D0BA773B5DD119E /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				COMBINE_HIDPI_IMAGES = YES;
-				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_LSUIElement = NO;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-menubar";
-				PRODUCT_NAME = "hidock-mic-trigger-menubar";
-				SDKROOT = macosx;
-			};
-			name = Release;
-		};
-		5B4C936C39162A783197821A /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				COMBINE_HIDPI_IMAGES = YES;
-				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_LSUIElement = NO;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-menubar";
-				PRODUCT_NAME = "hidock-mic-trigger-menubar";
-				SDKROOT = macosx;
-			};
-			name = Debug;
-		};
-		5FC5627902180E56D527DBD1 /* Debug */ = {
+		CE43E6BD8DB45F46A2BD54B2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -266,25 +281,25 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		0892B66F7A7C3397F66EA2D3 /* Build configuration list for PBXNativeTarget "hidock-mic-trigger-menubar" */ = {
+		6EFD777B6FC8F377CF9DBECC /* Build configuration list for PBXNativeTarget "hidock-mic-trigger" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				5B4C936C39162A783197821A /* Debug */,
-				405D852D1D0BA773B5DD119E /* Release */,
+				7BE964A4FC4DA1CE3ED0067F /* Debug */,
+				34D438F454BDEAA876CB6D68 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
-		62098D9D8E83C862EE15EA25 /* Build configuration list for PBXProject "hidock-mic-trigger-menubar" */ = {
+		F82CB7DAE873C64AB23F3107 /* Build configuration list for PBXProject "hidock-mic-trigger" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				5FC5627902180E56D527DBD1 /* Debug */,
-				308B82C68FFC73F6D39B3EDD /* Release */,
+				CE43E6BD8DB45F46A2BD54B2 /* Debug */,
+				853B07977097EB753183478E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 	};
-	rootObject = 204A7515B981CF4BD2CC4CAC /* Project object */;
+	rootObject = DAF9D8607B4AF4D05DE02267 /* Project object */;
 }
