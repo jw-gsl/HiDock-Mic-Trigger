@@ -12,6 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var windowStartButton: NSButton?
     private var windowStopButton: NSButton?
     private var windowStatusLabel: NSTextField?
+    private var windowUptimeLabel: NSTextField?
+    private var windowAutoStartCheckbox: NSButton?
+
+    private var processStartDate: Date?
+    private var uptimeTimer: Timer?
 
     private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
     private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
@@ -143,14 +148,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let running = (process != nil)
         windowStartButton?.isEnabled = !running
         windowStopButton?.isEnabled = running
+        windowAutoStartCheckbox?.state = autoStartOnLaunch ? .on : .off
         if running {
             let pid = process.map { "\($0.processIdentifier)" } ?? ""
             windowStatusLabel?.stringValue = "Running (pid \(pid))"
             windowStatusLabel?.textColor = .systemGreen
+            updateUptimeLabel()
+            startUptimeTimer()
         } else {
             windowStatusLabel?.stringValue = "Stopped"
             windowStatusLabel?.textColor = .secondaryLabelColor
+            windowUptimeLabel?.stringValue = ""
+            stopUptimeTimer()
         }
+    }
+
+    private func updateUptimeLabel() {
+        guard let start = processStartDate else {
+            windowUptimeLabel?.stringValue = ""
+            return
+        }
+        let elapsed = Int(Date().timeIntervalSince(start))
+        let text: String
+        if elapsed < 60 {
+            text = "Uptime: \(elapsed)s"
+        } else if elapsed < 3600 {
+            text = "Uptime: \(elapsed / 60)m \(elapsed % 60)s"
+        } else {
+            let h = elapsed / 3600
+            let m = (elapsed % 3600) / 60
+            text = "Uptime: \(h)h \(m)m"
+        }
+        windowUptimeLabel?.stringValue = text
+    }
+
+    private func startUptimeTimer() {
+        guard uptimeTimer == nil else { return }
+        uptimeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.updateUptimeLabel()
+        }
+    }
+
+    private func stopUptimeTimer() {
+        uptimeTimer?.invalidate()
+        uptimeTimer = nil
     }
 
     // MARK: - Process management
@@ -188,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 self?.log("Process terminated with status \(proc.terminationStatus)")
                 self?.process = nil
+                self?.processStartDate = nil
                 self?.updateMenuState()
             }
         }
@@ -195,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             try p.run()
             process = p
+            processStartDate = Date()
             log("Started hidock-mic-trigger (pid \(p.processIdentifier))")
             updateMenuState()
         } catch {
@@ -212,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 self?.log("Process stopped")
                 self?.process = nil
+                self?.processStartDate = nil
                 self?.updateMenuState()
             }
         }
@@ -257,45 +301,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func showWindow() {
         if window == nil {
-            let rect = NSRect(x: 0, y: 0, width: 380, height: 220)
+            let rect = NSRect(x: 0, y: 0, width: 380, height: 280)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
             let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
             win.center()
             win.title = "HiDock Mic Trigger"
+            win.isReleasedWhenClosed = false
             win.delegate = self
 
             let contentView = win.contentView!
 
             let titleLabel = NSTextField(labelWithString: "HiDock Mic Trigger")
             titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
-            titleLabel.frame = NSRect(x: 20, y: 160, width: 340, height: 30)
+            titleLabel.frame = NSRect(x: 20, y: 228, width: 340, height: 30)
             contentView.addSubview(titleLabel)
 
             let status = NSTextField(labelWithString: "Stopped")
             status.font = .systemFont(ofSize: 14)
             status.textColor = .secondaryLabelColor
-            status.frame = NSRect(x: 20, y: 128, width: 340, height: 22)
+            status.frame = NSRect(x: 20, y: 200, width: 340, height: 22)
             contentView.addSubview(status)
             windowStatusLabel = status
 
+            let uptime = NSTextField(labelWithString: "")
+            uptime.font = .systemFont(ofSize: 12)
+            uptime.textColor = .secondaryLabelColor
+            uptime.frame = NSRect(x: 20, y: 178, width: 340, height: 18)
+            contentView.addSubview(uptime)
+            windowUptimeLabel = uptime
+
             let startBtn = NSButton(title: "Start", target: self, action: #selector(startTrigger))
             startBtn.bezelStyle = .rounded
-            startBtn.frame = NSRect(x: 80, y: 70, width: 100, height: 32)
+            startBtn.frame = NSRect(x: 80, y: 130, width: 100, height: 32)
             contentView.addSubview(startBtn)
             windowStartButton = startBtn
 
             let stopBtn = NSButton(title: "Stop", target: self, action: #selector(stopTrigger))
             stopBtn.bezelStyle = .rounded
-            stopBtn.frame = NSRect(x: 200, y: 70, width: 100, height: 32)
+            stopBtn.frame = NSRect(x: 200, y: 130, width: 100, height: 32)
             contentView.addSubview(stopBtn)
             windowStopButton = stopBtn
 
-            let hint = NSTextField(labelWithString: "Also available from the menu bar icon.")
-            hint.font = .systemFont(ofSize: 11)
-            hint.textColor = .tertiaryLabelColor
-            hint.frame = NSRect(x: 20, y: 30, width: 340, height: 18)
-            hint.alignment = .center
-            contentView.addSubview(hint)
+            let separator = NSBox()
+            separator.boxType = .separator
+            separator.frame = NSRect(x: 20, y: 110, width: 340, height: 1)
+            contentView.addSubview(separator)
+
+            let autoStart = NSButton(checkboxWithTitle: "Auto-start on launch", target: self, action: #selector(toggleAutoStart))
+            autoStart.frame = NSRect(x: 20, y: 75, width: 200, height: 22)
+            contentView.addSubview(autoStart)
+            windowAutoStartCheckbox = autoStart
+
+            let logsBtn = NSButton(title: "Open Logs", target: self, action: #selector(showLogs))
+            logsBtn.bezelStyle = .rounded
+            logsBtn.frame = NSRect(x: 140, y: 28, width: 100, height: 32)
+            contentView.addSubview(logsBtn)
 
             window = win
             updateWindowState()
