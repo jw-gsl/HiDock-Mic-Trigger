@@ -198,7 +198,10 @@ sigtermSource.setEventHandler(handler: shutdownHandler)
 sigintSource.resume()
 sigtermSource.resume()
 
-while true {
+// Poll on a timer so the main run loop stays free for signal handling
+let pollTimer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+pollTimer.schedule(deadline: .now(), repeating: pollInterval)
+pollTimer.setEventHandler {
     let current = isDeviceRunningSomewhere(usbID)
     if current == lastState {
         stableCount = 0
@@ -216,5 +219,6 @@ while true {
             }
         }
     }
-    Thread.sleep(forTimeInterval: pollInterval)
 }
+pollTimer.resume()
+dispatchMain()

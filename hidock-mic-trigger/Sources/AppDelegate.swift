@@ -1,7 +1,8 @@
 import AppKit
 import CoreAudio
+import UserNotifications
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var startItem: NSMenuItem!
@@ -21,6 +22,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
+
+    // Auto-restart tracking
+    private var stoppingIntentionally = false
+    private var crashCount = 0
+    private let maxCrashRetries = 3
+    private let crashRetryDelay: TimeInterval = 3
 
     private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
     private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
@@ -63,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.accessory)
+        setupNotifications()
         setupMainMenu()
         setupStatusItem()
         showWindow()
@@ -81,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stoppingIntentionally = true
         stopTrigger()
     }
 
@@ -95,6 +104,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu == micSubmenu {
             rebuildMicSubmenu()
+        }
+    }
+
+    // MARK: - UNUserNotificationCenterDelegate
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    // MARK: - Notifications
+
+    private func setupNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error = error {
+                self.log("Notification auth error: \(error)")
+            }
+            self.log("Notification auth granted: \(granted)")
+        }
+    }
+
+    private func postNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    // MARK: - CLI output monitoring
+
+    private func handleCLIOutput(_ text: String) {
+        for line in text.components(separatedBy: .newlines) {
+            if line.contains("IN USE") && line.contains("holding HiDock") {
+                log("Trigger: USB mic in use, HiDock recording started")
+                postNotification(title: "HiDock Recording Started", body: "USB mic is in use — HiDock input held open.")
+            } else if line.contains("NOT IN USE") && line.contains("releasing HiDock") {
+                log("Trigger: USB mic idle, HiDock recording stopped")
+                postNotification(title: "HiDock Recording Stopped", body: "USB mic went idle — HiDock input released.")
+            }
         }
     }
 
@@ -117,7 +170,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var names: [String] = []
         for deviceID in deviceIDs {
-            // Check if device has input channels
             var streamAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyStreamConfiguration,
                 mScope: kAudioDevicePropertyScopeInput,
@@ -136,7 +188,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let channels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
             guard channels > 0 else { continue }
 
-            // Get device name
             var nameAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioObjectPropertyName,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -212,9 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func micMenuItemSelected(_ sender: NSMenuItem) {
+        let oldMic = selectedMicName
         selectedMicName = sender.title
         log("Selected trigger mic: \(sender.title)")
         refreshWindowMicPopup()
+        if process != nil && sender.title != oldMic {
+            restartTrigger()
+        }
     }
 
     private func setupMainMenu() {
@@ -253,7 +308,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         windowStartButton?.isEnabled = !running
         windowStopButton?.isEnabled = running
         windowAutoStartCheckbox?.state = autoStartOnLaunch ? .on : .off
-        windowMicPopup?.isEnabled = !running
         if running {
             let pid = process.map { "\($0.processIdentifier)" } ?? ""
             windowStatusLabel?.stringValue = "Running (pid \(pid))"
@@ -335,14 +389,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         p.arguments = args
 
-        p.standardOutput = Pipe()
+        let outPipe = Pipe()
+        p.standardOutput = outPipe
         p.standardError = Pipe()
+
+        // Monitor CLI stdout for trigger events
+        outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                self?.handleCLIOutput(text)
+            }
+        }
+
         p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
-                self?.log("Process terminated with status \(proc.terminationStatus)")
-                self?.process = nil
-                self?.processStartDate = nil
-                self?.updateMenuState()
+                guard let self = self else { return }
+                let status = proc.terminationStatus
+                self.log("Process terminated with status \(status)")
+
+                // Clean up stdout handler
+                outPipe.fileHandleForReading.readabilityHandler = nil
+
+                self.process = nil
+                self.processStartDate = nil
+                self.updateMenuState()
+
+                // Auto-restart on unexpected crash
+                if !self.stoppingIntentionally && status != 0 {
+                    self.handleCrash(exitStatus: status)
+                } else if self.stoppingIntentionally {
+                    // Reset crash count on clean stop
+                    self.crashCount = 0
+                }
+                self.stoppingIntentionally = false
             }
         }
 
@@ -359,8 +439,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    private func handleCrash(exitStatus: Int32) {
+        crashCount += 1
+        log("Unexpected exit (status \(exitStatus)), crash #\(crashCount)/\(maxCrashRetries)")
+
+        if crashCount >= maxCrashRetries {
+            log("Max crash retries reached, giving up")
+            postNotification(title: "HiDock Mic Trigger Stopped",
+                             body: "Crashed \(maxCrashRetries) times. Restart manually.")
+            crashCount = 0
+            return
+        }
+
+        log("Auto-restarting in \(Int(crashRetryDelay))s...")
+        postNotification(title: "HiDock Mic Trigger Restarting",
+                         body: "Process crashed (exit \(exitStatus)). Restarting...")
+        DispatchQueue.main.asyncAfter(deadline: .now() + crashRetryDelay) { [weak self] in
+            guard let self = self, self.process == nil else { return }
+            self.startTrigger()
+        }
+    }
+
     @objc private func stopTrigger() {
         guard let p = process else { return }
+        stoppingIntentionally = true
         log("Stopping hidock-mic-trigger (pid \(p.processIdentifier))")
         p.interrupt()
         DispatchQueue.global().async { [weak self] in
@@ -369,7 +471,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.log("Process stopped")
                 self?.process = nil
                 self?.processStartDate = nil
+                self?.stoppingIntentionally = false
+                self?.crashCount = 0
                 self?.updateMenuState()
+            }
+        }
+    }
+
+    private func restartTrigger() {
+        guard let p = process else {
+            startTrigger()
+            return
+        }
+        stoppingIntentionally = true
+        log("Restarting trigger with new mic selection...")
+        p.interrupt()
+        DispatchQueue.global().async { [weak self] in
+            p.waitUntilExit()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.process = nil
+                self.processStartDate = nil
+                self.stoppingIntentionally = false
+                self.updateMenuState()
+                self.startTrigger()
             }
         }
     }
@@ -413,8 +538,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func windowMicChanged(_ sender: NSPopUpButton) {
+        let oldMic = selectedMicName
         selectedMicName = sender.titleOfSelectedItem
         log("Selected trigger mic: \(sender.titleOfSelectedItem ?? "none")")
+        if process != nil && sender.titleOfSelectedItem != oldMic {
+            restartTrigger()
+        }
     }
 
     private func refreshWindowMicPopup() {
@@ -424,6 +553,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         popup.addItems(withTitles: devices)
         if let current = selectedMicName, devices.contains(current) {
             popup.selectItem(withTitle: current)
+        } else if !devices.isEmpty {
+            popup.selectItem(at: 0)
+            selectedMicName = popup.titleOfSelectedItem
         }
     }
 
