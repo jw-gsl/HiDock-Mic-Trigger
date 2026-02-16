@@ -57,7 +57,7 @@ func deviceHasInput(_ deviceID: AudioDeviceID) -> Bool {
     return channels > 0
 }
 
-func isDeviceRunningSomewhere(_ deviceID: AudioDeviceID) -> Bool {
+func readDeviceRunningSomewhere(_ deviceID: AudioDeviceID) -> Bool? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
         mScope: kAudioObjectPropertyScopeGlobal,
@@ -66,7 +66,7 @@ func isDeviceRunningSomewhere(_ deviceID: AudioDeviceID) -> Bool {
     var running: UInt32 = 0
     var size = UInt32(MemoryLayout<UInt32>.size)
     let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &running)
-    guard status == noErr else { return false }
+    guard status == noErr else { return nil }
     return running != 0
 }
 
@@ -168,10 +168,11 @@ guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
     exit(1)
 }
 
-guard let usbID = findInputDeviceID(named: usbMicName) else {
+guard let foundUSBID = findInputDeviceID(named: usbMicName) else {
     print("Could not find USB mic input device named '\(usbMicName)'. Check the name.")
     exit(1)
 }
+var usbID = foundUSBID
 
 print("Found USB mic '\(usbMicName)' (deviceID \(usbID)).")
 print("Using HiDock AVFoundation audio index: \(hiDockAudioIndex)")
@@ -182,10 +183,18 @@ let holder = FFmpegHolder()
 let pollInterval: TimeInterval = 0.25
 let debounceSamples = 4  // 4 * 0.25s = 1s
 
-var lastState = isDeviceRunningSomewhere(usbID)
+let initialState = readDeviceRunningSomewhere(usbID) ?? false
+var lastState = initialState
 var stableCount = 0
+var failedReadCount = 0
 
-print("Initial USB mic in-use state: \(lastState ? "IN USE" : "NOT IN USE")")
+print("Initial USB mic in-use state: \(initialState ? "IN USE" : "NOT IN USE")")
+
+// Important: if mic is already in-use when app starts, begin holding immediately.
+if initialState {
+    print("Initial state already IN USE → holding HiDock mic open.")
+    holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
+}
 
 // Handle SIGINT/SIGTERM to stop ffmpeg cleanly
 signal(SIGINT, SIG_IGN)
@@ -205,21 +214,43 @@ sigtermSource.resume()
 let pollTimer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
 pollTimer.schedule(deadline: .now(), repeating: pollInterval)
 pollTimer.setEventHandler {
-    let current = isDeviceRunningSomewhere(usbID)
-    if current == lastState {
-        stableCount = 0
-    } else {
-        stableCount += 1
-        if stableCount >= debounceSamples {
-            lastState = current
-            stableCount = 0
-            if current {
-                print("USB mic became IN USE → holding HiDock mic open.")
-                holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
-            } else {
-                print("USB mic became NOT IN USE → releasing HiDock mic.")
-                holder.stop()
+    guard let current = readDeviceRunningSomewhere(usbID) else {
+        failedReadCount += 1
+        if failedReadCount % 8 == 0 {
+            if let refreshedID = findInputDeviceID(named: usbMicName), refreshedID != usbID {
+                print("Trigger mic deviceID changed \(usbID) -> \(refreshedID); continuing monitoring.")
+                usbID = refreshedID
+                failedReadCount = 0
             }
+        }
+        return
+    }
+
+    failedReadCount = 0
+
+    if current == lastState {
+        // Reconcile if we somehow missed a transition.
+        if current && !holder.isRunning() {
+            print("Reconciled IN USE state with holder stopped → holding HiDock mic open.")
+            holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
+        } else if !current && holder.isRunning() {
+            print("Reconciled NOT IN USE state with holder running → releasing HiDock mic.")
+            holder.stop()
+        }
+        stableCount = 0
+        return
+    }
+
+    stableCount += 1
+    if stableCount >= debounceSamples {
+        lastState = current
+        stableCount = 0
+        if current {
+            print("USB mic became IN USE → holding HiDock mic open.")
+            holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
+        } else {
+            print("USB mic became NOT IN USE → releasing HiDock mic.")
+            holder.stop()
         }
     }
 }
