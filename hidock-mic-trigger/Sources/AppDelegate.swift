@@ -8,9 +8,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var startItem: NSMenuItem!
     private var stopItem: NSMenuItem!
     private var autoStartItem: NSMenuItem!
+    private var automationStatusItem: NSMenuItem!
+    private var automationBootstrapItem: NSMenuItem!
+    private var automationStartItem: NSMenuItem!
+    private var automationStopItem: NSMenuItem!
     private var micMenuItem: NSMenuItem!
     private var micSubmenu: NSMenu!
     private var process: Process?
+    private var automationProcess: Process?
+    private var automationBootstrapProcess: Process?
     private var window: NSWindow?
 
     private var windowStartButton: NSButton?
@@ -19,18 +25,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var windowUptimeLabel: NSTextField?
     private var windowAutoStartCheckbox: NSButton?
     private var windowMicPopup: NSPopUpButton?
+    private var windowAutomationStatusLabel: NSTextField?
+    private var windowAutomationBootstrapButton: NSButton?
+    private var windowAutomationStartButton: NSButton?
+    private var windowAutomationStopButton: NSButton?
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
+    private var lastAutomationMessage: String?
 
     // Auto-restart tracking
     private var stoppingIntentionally = false
+    private var stoppingAutomationIntentionally = false
     private var crashCount = 0
     private let maxCrashRetries = 3
     private let crashRetryDelay: TimeInterval = 3
 
     private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
     private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
+
+    private var automationRoot: String {
+        "\(repoRoot)/hidock-automation"
+    }
+
+    private var automationRunnerPath: String {
+        "\(automationRoot)/src/runner.py"
+    }
+
+    private var automationPythonPath: String {
+        "\(automationRoot)/.venv/bin/python"
+    }
+
+    private var automationEnvPath: String {
+        "\(automationRoot)/.env"
+    }
 
     private lazy var binaryPath: String = {
         if let override = ProcessInfo.processInfo.environment["HIDOCK_MIC_TRIGGER_PATH"], !override.isEmpty {
@@ -65,14 +93,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         set { UserDefaults.standard.set(newValue, forKey: selectedMicKey) }
     }
 
+    private let preferredMicKey = "preferredMicName"
+    private var preferredMicName: String? {
+        get { UserDefaults.standard.string(forKey: preferredMicKey) }
+        set { UserDefaults.standard.set(newValue, forKey: preferredMicKey) }
+    }
+
+    private let fallbackMicKey = "fallbackMicName"
+    private var fallbackMicName: String? {
+        get { UserDefaults.standard.string(forKey: fallbackMicKey) }
+        set { UserDefaults.standard.set(newValue, forKey: fallbackMicKey) }
+    }
+
+    private var previousDeviceNames: Set<String> = []
+    private var deviceChangeDebounceTimer: Timer?
+
     // MARK: - App lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.accessory)
         setupNotifications()
+        applyPreferredMicOnStartup()
         setupMainMenu()
         setupStatusItem()
+        registerDeviceChangeListener()
+        previousDeviceNames = Set(getInputDeviceNames())
         showWindow()
         if autoStartOnLaunch {
             startTrigger()
@@ -89,8 +135,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        removeDeviceChangeListener()
         stoppingIntentionally = true
         stopTrigger()
+        stoppingAutomationIntentionally = true
+        stopAutomationLoopInternal()
     }
 
     // MARK: - NSWindowDelegate
@@ -115,6 +164,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         completionHandler([.banner, .sound])
     }
 
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.actionIdentifier == Self.micSwitchActionID {
+            DispatchQueue.main.async { [weak self] in
+                self?.showWindow()
+            }
+        }
+        completionHandler()
+    }
+
     // MARK: - Notifications
 
     private func setupNotifications() {
@@ -126,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             self.log("Notification auth granted: \(granted)")
         }
+        registerNotificationCategories()
     }
 
     private func postNotification(title: String, body: String) {
@@ -203,18 +264,180 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return names
     }
 
+    // MARK: - Preferred mic startup
+
+    private func applyPreferredMicOnStartup() {
+        guard let preferred = preferredMicName, !preferred.isEmpty else { return }
+        let devices = getInputDeviceNames()
+        if devices.contains(preferred) {
+            log("Preferred mic '\(preferred)' found on startup, selecting it")
+            selectedMicName = preferred
+        } else {
+            log("Preferred mic '\(preferred)' not connected on startup, using fallback")
+        }
+    }
+
+    // MARK: - CoreAudio device change listener
+
+    private func registerDeviceChangeListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            deviceChangeListenerBlock
+        )
+        if status != noErr {
+            log("Failed to register device change listener: \(status)")
+        } else {
+            log("Registered CoreAudio device change listener")
+        }
+    }
+
+    private func removeDeviceChangeListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            deviceChangeListenerBlock
+        )
+    }
+
+    private lazy var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        self?.scheduleDeviceChangeHandler()
+    }
+
+    private func scheduleDeviceChangeHandler() {
+        // Debounce: CoreAudio fires multiple rapid events when docking/undocking.
+        // Wait 1.5s for devices to settle before checking what changed.
+        deviceChangeDebounceTimer?.invalidate()
+        deviceChangeDebounceTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+            self?.handleDeviceListChanged()
+        }
+    }
+
+    private func handleDeviceListChanged() {
+        let currentDevices = Set(getInputDeviceNames())
+        let oldDevices = previousDeviceNames
+        previousDeviceNames = currentDevices
+
+        let appeared = currentDevices.subtracting(oldDevices)
+        let disappeared = oldDevices.subtracting(currentDevices)
+
+        if !appeared.isEmpty { log("Devices appeared: \(appeared)") }
+        if !disappeared.isEmpty { log("Devices disappeared: \(disappeared)") }
+
+        let preferred = preferredMicName
+        let selected = selectedMicName
+
+        // Case 1: Preferred mic just appeared and isn't already selected
+        if let preferred = preferred, !preferred.isEmpty,
+           appeared.contains(preferred), selected != preferred {
+            log("Preferred mic '\(preferred)' just connected, auto-switching")
+            let oldMic = selectedMicName
+            selectedMicName = preferred
+            refreshWindowMicPopup()
+            updateMenuState()
+            if process != nil && preferred != oldMic {
+                restartTrigger()
+            }
+            postMicChangeNotification(
+                title: "Switched to \(shortenMicName(preferred))",
+                body: "Your preferred mic is now connected.",
+                micName: preferred
+            )
+            return
+        }
+
+        // Case 2: Current mic disappeared — fall back
+        if let selected = selected, !selected.isEmpty,
+           disappeared.contains(selected) {
+            log("Current mic '\(selected)' disconnected")
+            let fallback = resolveFallbackMic(from: currentDevices)
+            if let fallback = fallback {
+                selectedMicName = fallback
+                refreshWindowMicPopup()
+                updateMenuState()
+                if process != nil { restartTrigger() }
+                postMicChangeNotification(
+                    title: "Mic Disconnected",
+                    body: "\(shortenMicName(selected)) was unplugged. Fell back to \(shortenMicName(fallback)).",
+                    micName: fallback
+                )
+            } else {
+                selectedMicName = nil
+                updateMenuState()
+                if process != nil { restartTrigger() }
+                postNotification(title: "Mic Disconnected", body: "\(shortenMicName(selected)) was unplugged. No mics available.")
+            }
+            return
+        }
+    }
+
+    private func resolveFallbackMic(from devices: Set<String>) -> String? {
+        // Use explicit fallback if set and available
+        if let fb = fallbackMicName, !fb.isEmpty, devices.contains(fb) {
+            return fb
+        }
+        // Otherwise pick first device with "MacBook" in the name
+        if let macbook = devices.first(where: { $0.contains("MacBook") }) {
+            return macbook
+        }
+        // Last resort: first available device
+        return devices.first
+    }
+
+    private static let micSwitchCategoryID = "MIC_SWITCH"
+    private static let micSwitchActionID = "OPEN_MIC_MENU"
+
+    private func registerNotificationCategories() {
+        let openAction = UNNotificationAction(identifier: Self.micSwitchActionID, title: "Open Mic Settings", options: .foreground)
+        let category = UNNotificationCategory(identifier: Self.micSwitchCategoryID, actions: [openAction], intentIdentifiers: [])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
+    }
+
+    private func postMicChangeNotification(title: String, body: String, micName: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = Self.micSwitchCategoryID
+        let request = UNNotificationRequest(identifier: "mic-change-\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
     // MARK: - Menu bar
 
     private func setupStatusItem() {
         log("setupStatusItem")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "HiDock"
         statusItem.button?.image = statusImage(running: false)
         statusItem.button?.imagePosition = .imageLeft
+        if let mic = selectedMicName, !mic.isEmpty {
+            let isFallback = preferredMicName != nil && !preferredMicName!.isEmpty && mic != preferredMicName
+            let suffix = isFallback ? " (fallback)" : ""
+            statusItem.button?.title = "HiDock · \(shortenMicName(mic))\(suffix)"
+        } else {
+            statusItem.button?.title = "HiDock · No Mic"
+        }
 
         startItem = NSMenuItem(title: "Start", action: #selector(startTrigger), keyEquivalent: "s")
         stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
         autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStart), keyEquivalent: "")
+        automationStatusItem = NSMenuItem(title: "HiNotes Automation: Stopped", action: nil, keyEquivalent: "")
+        automationStatusItem.isEnabled = false
+        automationBootstrapItem = NSMenuItem(title: "HiNotes: Re-authenticate (CAPTCHA)", action: #selector(bootstrapAutomationAuth), keyEquivalent: "")
+        automationStartItem = NSMenuItem(title: "HiNotes: Start Sync Loop", action: #selector(startAutomationLoop), keyEquivalent: "")
+        automationStopItem = NSMenuItem(title: "HiNotes: Stop Sync Loop", action: #selector(stopAutomationLoop), keyEquivalent: "")
 
         micSubmenu = NSMenu()
         micSubmenu.delegate = self
@@ -225,7 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
-        for item in [startItem, stopItem, autoStartItem, logsItem, statusInfoItem, quitItem] {
+        for item in [startItem, stopItem, autoStartItem, automationBootstrapItem, automationStartItem, automationStopItem, logsItem, statusInfoItem, quitItem] {
             item?.target = self
         }
 
@@ -234,11 +457,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(NSMenuItem.separator())
         menu.addItem(micMenuItem)
         menu.addItem(autoStartItem)
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(automationStatusItem)
+        menu.addItem(automationBootstrapItem)
+        menu.addItem(automationStartItem)
+        menu.addItem(automationStopItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
+        menu.autoenablesItems = false
         statusItem.menu = menu
         updateMenuState()
     }
@@ -247,9 +477,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         micSubmenu.removeAllItems()
         let devices = getInputDeviceNames()
         let current = selectedMicName
+        let preferred = preferredMicName
+        let fallback = fallbackMicName
 
+        // --- Device list ---
         for name in devices {
-            let item = NSMenuItem(title: name, action: #selector(micMenuItemSelected(_:)), keyEquivalent: "")
+            var badges: [String] = []
+            if name == preferred { badges.append("Default") }
+            if name == fallback { badges.append("Fallback") }
+            let suffix = badges.isEmpty ? "" : "  [\(badges.joined(separator: ", "))]"
+            let item = NSMenuItem(title: "\(name)\(suffix)", action: #selector(micMenuItemSelected(_:)), keyEquivalent: "")
+            item.representedObject = name
             item.target = self
             item.state = (name == current) ? .on : .off
             micSubmenu.addItem(item)
@@ -260,16 +498,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             noDevices.isEnabled = false
             micSubmenu.addItem(noDevices)
         }
+
+        guard !devices.isEmpty else { return }
+
+        // --- Actions ---
+        micSubmenu.addItem(NSMenuItem.separator())
+
+        // Set / clear default (preferred) mic
+        if let current = current, !current.isEmpty, current != preferred {
+            let setDefault = NSMenuItem(title: "Set \"\(shortenMicName(current))\" as Default", action: #selector(setPreferredMic), keyEquivalent: "")
+            setDefault.target = self
+            micSubmenu.addItem(setDefault)
+        }
+        if preferred != nil && !(preferred!.isEmpty) {
+            let clearDefault = NSMenuItem(title: "Clear Default Mic", action: #selector(clearPreferredMic), keyEquivalent: "")
+            clearDefault.target = self
+            micSubmenu.addItem(clearDefault)
+        }
+
+        // Set / clear fallback mic
+        if let current = current, !current.isEmpty, current != fallback {
+            let setFallback = NSMenuItem(title: "Set \"\(shortenMicName(current))\" as Fallback", action: #selector(setFallbackMic), keyEquivalent: "")
+            setFallback.target = self
+            micSubmenu.addItem(setFallback)
+        }
+        if fallback != nil && !(fallback!.isEmpty) {
+            let clearFallback = NSMenuItem(title: "Clear Fallback Mic", action: #selector(clearFallbackMic), keyEquivalent: "")
+            clearFallback.target = self
+            micSubmenu.addItem(clearFallback)
+        }
+
+        // --- Status info ---
+        micSubmenu.addItem(NSMenuItem.separator())
+        let defaultInfo = NSMenuItem(
+            title: "Default: \(preferred.flatMap { $0.isEmpty ? nil : shortenMicName($0) } ?? "Not set")",
+            action: nil, keyEquivalent: ""
+        )
+        defaultInfo.isEnabled = false
+        micSubmenu.addItem(defaultInfo)
+
+        let fallbackInfo = NSMenuItem(
+            title: "Fallback: \(fallback.flatMap { $0.isEmpty ? nil : shortenMicName($0) } ?? "MacBook (auto)")",
+            action: nil, keyEquivalent: ""
+        )
+        fallbackInfo.isEnabled = false
+        micSubmenu.addItem(fallbackInfo)
     }
 
     @objc private func micMenuItemSelected(_ sender: NSMenuItem) {
+        let micName = (sender.representedObject as? String) ?? sender.title
         let oldMic = selectedMicName
-        selectedMicName = sender.title
-        log("Selected trigger mic: \(sender.title)")
+        selectedMicName = micName
+        log("Selected trigger mic: \(micName)")
         refreshWindowMicPopup()
-        if process != nil && sender.title != oldMic {
+        updateMenuState()
+        if process != nil && micName != oldMic {
             restartTrigger()
         }
+    }
+
+    @objc private func setPreferredMic() {
+        guard let current = selectedMicName, !current.isEmpty else { return }
+        preferredMicName = current
+        log("Set preferred mic to '\(current)'")
+        updateMenuState()
+    }
+
+    @objc private func clearPreferredMic() {
+        log("Cleared preferred mic (was '\(preferredMicName ?? "nil")')")
+        preferredMicName = nil
+        updateMenuState()
+    }
+
+    @objc private func setFallbackMic() {
+        guard let current = selectedMicName, !current.isEmpty else { return }
+        fallbackMicName = current
+        log("Set fallback mic to '\(current)'")
+    }
+
+    @objc private func clearFallbackMic() {
+        log("Cleared fallback mic (was '\(fallbackMicName ?? "nil")')")
+        fallbackMicName = nil
     }
 
     private func setupMainMenu() {
@@ -293,14 +602,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return image
     }
 
+    private func formatUptime() -> String? {
+        guard let start = processStartDate else { return nil }
+        let elapsed = Int(Date().timeIntervalSince(start))
+        if elapsed < 60 {
+            return "\(elapsed)s"
+        } else if elapsed < 3600 {
+            return "\(elapsed / 60)m \(elapsed % 60)s"
+        } else {
+            let h = elapsed / 3600
+            let m = (elapsed % 3600) / 60
+            return "\(h)h \(m)m"
+        }
+    }
+
     private func updateMenuState() {
         let running = (process != nil)
         startItem.isEnabled = !running
         stopItem.isEnabled = running
+        if running, let uptime = formatUptime() {
+            startItem.title = "Running · \(uptime)"
+        } else {
+            startItem.title = "Start"
+        }
         autoStartItem.state = autoStartOnLaunch ? .on : .off
         statusItem.button?.image = statusImage(running: running)
-        statusItem.button?.title = "HiDock"
+        if let mic = selectedMicName, !mic.isEmpty {
+            let isFallback = preferredMicName != nil && !preferredMicName!.isEmpty && mic != preferredMicName
+            let suffix = isFallback ? " (fallback)" : ""
+            statusItem.button?.title = "HiDock · \(shortenMicName(mic))\(suffix)"
+        } else {
+            statusItem.button?.title = "HiDock · No Mic"
+        }
+        updateAutomationMenuState()
         updateWindowState()
+    }
+
+    private func shortenMicName(_ name: String) -> String {
+        let noise: [String] = [
+            "Microphone", "Mic", "USB Audio", "USB", "Audio Device",
+            "Digital", "Sound", "Device", "Input",
+        ]
+        var parts = name.components(separatedBy: " ")
+        parts = parts.filter { word in
+            !noise.contains { word.caseInsensitiveCompare($0) == .orderedSame }
+        }
+        let short = parts.joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        if short.isEmpty { return name }
+        return short
+    }
+
+    private func updateAutomationMenuState() {
+        let running = (automationProcess != nil)
+        let bootstrapping = (automationBootstrapProcess != nil)
+
+        if running {
+            automationStatusItem.title = "HiNotes Automation: Running"
+        } else if bootstrapping {
+            automationStatusItem.title = "HiNotes Automation: Auth In Progress"
+        } else if let last = lastAutomationMessage, !last.isEmpty {
+            automationStatusItem.title = "HiNotes Automation: Stopped (\(last.prefix(28)))"
+        } else {
+            automationStatusItem.title = "HiNotes Automation: Stopped"
+        }
+
+        automationBootstrapItem.isEnabled = !bootstrapping
+        automationStartItem.isEnabled = !running && !bootstrapping
+        automationStopItem.isEnabled = running || bootstrapping
+        updateAutomationWindowState()
     }
 
     private func updateWindowState() {
@@ -320,31 +690,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             windowUptimeLabel?.stringValue = ""
             stopUptimeTimer()
         }
+        updateAutomationWindowState()
+    }
+
+    private func updateAutomationWindowState() {
+        let running = (automationProcess != nil)
+        let bootstrapping = (automationBootstrapProcess != nil)
+
+        if bootstrapping {
+            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: Auth bootstrap in progress"
+            windowAutomationStatusLabel?.textColor = .systemOrange
+        } else if running {
+            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: Loop running"
+            windowAutomationStatusLabel?.textColor = .systemGreen
+        } else if let last = lastAutomationMessage, !last.isEmpty {
+            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: \(last)"
+            windowAutomationStatusLabel?.textColor = .secondaryLabelColor
+        } else {
+            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: Stopped"
+            windowAutomationStatusLabel?.textColor = .secondaryLabelColor
+        }
+
+        windowAutomationBootstrapButton?.isEnabled = !bootstrapping
+        windowAutomationStartButton?.isEnabled = !running && !bootstrapping
+        windowAutomationStopButton?.isEnabled = running || bootstrapping
     }
 
     private func updateUptimeLabel() {
-        guard let start = processStartDate else {
-            windowUptimeLabel?.stringValue = ""
-            return
-        }
-        let elapsed = Int(Date().timeIntervalSince(start))
-        let text: String
-        if elapsed < 60 {
-            text = "Uptime: \(elapsed)s"
-        } else if elapsed < 3600 {
-            text = "Uptime: \(elapsed / 60)m \(elapsed % 60)s"
+        if let uptime = formatUptime() {
+            windowUptimeLabel?.stringValue = "Uptime: \(uptime)"
         } else {
-            let h = elapsed / 3600
-            let m = (elapsed % 3600) / 60
-            text = "Uptime: \(h)h \(m)m"
+            windowUptimeLabel?.stringValue = ""
         }
-        windowUptimeLabel?.stringValue = text
+    }
+
+    private func updateMenuUptime() {
+        guard process != nil, let uptime = formatUptime() else { return }
+        startItem.title = "Running · \(uptime)"
+        startItem.isEnabled = false
     }
 
     private func startUptimeTimer() {
         guard uptimeTimer == nil else { return }
         uptimeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.updateUptimeLabel()
+            self?.updateMenuUptime()
         }
     }
 
@@ -507,6 +897,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    // MARK: - HiNotes automation
+
+    private func ensureAutomationReady() -> Bool {
+        guard FileManager.default.fileExists(atPath: automationRunnerPath) else {
+            showError("HiNotes automation runner not found.\nExpected: \(automationRunnerPath)")
+            return false
+        }
+        guard FileManager.default.isExecutableFile(atPath: automationPythonPath) else {
+            showError("Python venv not found for HiNotes automation.\nExpected executable: \(automationPythonPath)\n\nRun setup in hidock-automation first.")
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: automationEnvPath) else {
+            showError("HiNotes automation .env not found.\nExpected: \(automationEnvPath)")
+            return false
+        }
+        return true
+    }
+
+    @objc private func bootstrapAutomationAuth() {
+        guard automationBootstrapProcess == nil else { return }
+        guard ensureAutomationReady() else { return }
+        launchAutomation(arguments: ["bootstrap-auth"], isBootstrap: true)
+    }
+
+    @objc private func startAutomationLoop() {
+        guard automationProcess == nil else { return }
+        guard ensureAutomationReady() else { return }
+        launchAutomation(arguments: ["loop"], isBootstrap: false)
+    }
+
+    @objc private func stopAutomationLoop() {
+        stoppingAutomationIntentionally = true
+        stopAutomationLoopInternal()
+    }
+
+    private func stopAutomationLoopInternal() {
+        if let p = automationProcess {
+            log("Stopping HiNotes automation loop (pid \(p.processIdentifier))")
+            p.terminate()
+        }
+        if let p = automationBootstrapProcess {
+            log("Stopping HiNotes auth bootstrap (pid \(p.processIdentifier))")
+            p.terminate()
+        }
+    }
+
+    private func handleAutomationOutput(_ text: String) {
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            log("[automation] \(line)")
+
+            if line.contains("auth_required:") {
+                postNotification(title: "HiDock Reauth Required", body: "HiNotes session expired. Run auth bootstrap and solve CAPTCHA.")
+                lastAutomationMessage = "Reauth required"
+            } else if line.contains("downloaded=") {
+                lastAutomationMessage = line
+            } else if line.lowercased().contains("authentication saved") {
+                lastAutomationMessage = "Authentication saved"
+            }
+        }
+        updateAutomationMenuState()
+    }
+
+    private func launchAutomation(arguments: [String], isBootstrap: Bool) {
+        let p = Process()
+        p.currentDirectoryURL = URL(fileURLWithPath: automationRoot)
+        p.executableURL = URL(fileURLWithPath: automationPythonPath)
+        p.arguments = [automationRunnerPath] + arguments
+
+        var env = ProcessInfo.processInfo.environment
+        env["PYTHONUNBUFFERED"] = "1"
+        p.environment = env
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+
+        outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                self?.handleAutomationOutput(text)
+            }
+        }
+
+        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                self?.handleAutomationOutput(text)
+            }
+        }
+
+        p.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let status = proc.terminationStatus
+
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+
+                if isBootstrap {
+                    self.automationBootstrapProcess = nil
+                    if !self.stoppingAutomationIntentionally {
+                        if status == 0 {
+                            self.postNotification(title: "HiDock Auth Saved", body: "HiNotes login session saved successfully.")
+                            self.lastAutomationMessage = "Auth saved"
+                        } else {
+                            self.postNotification(title: "HiDock Auth Failed", body: "Authentication did not complete. Retry bootstrap and solve CAPTCHA.")
+                            self.lastAutomationMessage = "Auth bootstrap failed"
+                        }
+                    }
+                } else {
+                    self.automationProcess = nil
+                    if !self.stoppingAutomationIntentionally && status != 0 {
+                        self.postNotification(title: "HiNotes Automation Stopped", body: "Sync loop exited with status \(status).")
+                        self.lastAutomationMessage = "Loop exited (\(status))"
+                    }
+                }
+
+                self.stoppingAutomationIntentionally = false
+                self.log("HiNotes automation process ended (bootstrap=\(isBootstrap), status=\(status))")
+                self.updateMenuState()
+            }
+        }
+
+        do {
+            try p.run()
+            if isBootstrap {
+                automationBootstrapProcess = p
+                postNotification(title: "HiDock Auth Bootstrap", body: "Browser should open. Complete login + CAPTCHA.")
+                log("Started HiNotes auth bootstrap (pid \(p.processIdentifier))")
+            } else {
+                automationProcess = p
+                postNotification(title: "HiNotes Automation Started", body: "Background sync loop started.")
+                log("Started HiNotes automation loop (pid \(p.processIdentifier))")
+            }
+            updateMenuState()
+        } catch {
+            log("Failed to start HiNotes automation: \(error)")
+            showError("Failed to start HiNotes automation:\n\(error.localizedDescription)")
+        }
+    }
+
     // MARK: - UI
 
     @objc private func showLogs() {
@@ -623,10 +1159,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             contentView.addSubview(autoStart)
             windowAutoStartCheckbox = autoStart
 
-            let logsBtn = NSButton(title: "Open Logs", target: self, action: #selector(showLogs))
-            logsBtn.bezelStyle = .rounded
-            logsBtn.frame = NSRect(x: 140, y: 28, width: 100, height: 32)
-            contentView.addSubview(logsBtn)
+            let automationSeparator = NSBox()
+            automationSeparator.boxType = .separator
+            automationSeparator.frame = NSRect(x: 20, y: 68, width: 340, height: 1)
+            contentView.addSubview(automationSeparator)
+
+            let automationStatus = NSTextField(labelWithString: "HiNotes Automation: Stopped")
+            automationStatus.font = .systemFont(ofSize: 12)
+            automationStatus.textColor = .secondaryLabelColor
+            automationStatus.frame = NSRect(x: 20, y: 48, width: 340, height: 16)
+            contentView.addSubview(automationStatus)
+            windowAutomationStatusLabel = automationStatus
+
+            let authBtn = NSButton(title: "Auth (CAPTCHA)", target: self, action: #selector(bootstrapAutomationAuth))
+            authBtn.bezelStyle = .rounded
+            authBtn.frame = NSRect(x: 20, y: 14, width: 120, height: 28)
+            contentView.addSubview(authBtn)
+            windowAutomationBootstrapButton = authBtn
+
+            let autoStartBtn = NSButton(title: "Sync Start", target: self, action: #selector(startAutomationLoop))
+            autoStartBtn.bezelStyle = .rounded
+            autoStartBtn.frame = NSRect(x: 146, y: 14, width: 90, height: 28)
+            contentView.addSubview(autoStartBtn)
+            windowAutomationStartButton = autoStartBtn
+
+            let autoStopBtn = NSButton(title: "Sync Stop", target: self, action: #selector(stopAutomationLoop))
+            autoStopBtn.bezelStyle = .rounded
+            autoStopBtn.frame = NSRect(x: 242, y: 14, width: 90, height: 28)
+            contentView.addSubview(autoStopBtn)
+            windowAutomationStopButton = autoStopBtn
 
             window = win
             updateWindowState()
