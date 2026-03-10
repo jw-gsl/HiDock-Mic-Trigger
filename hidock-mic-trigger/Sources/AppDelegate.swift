@@ -1546,7 +1546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             switch result {
             case .success(let data):
                 if let payload = try? JSONDecoder().decode(HiDockSyncDownloadResult.self, from: data) {
-                    let body = "\(payload.filename.replacingOccurrences(of: \".hda\", with: \".mp3\")) saved successfully."
+                    let body = "\(payload.filename.replacingOccurrences(of: ".hda", with: ".mp3")) saved successfully."
                     self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
                 } else {
                     let body = "\(recording.outputName) saved successfully."
@@ -1586,7 +1586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         if payload.downloaded.count > 0 {
                             let body: String
                             if payload.downloaded.count == 1, let first = payload.downloaded.first {
-                                body = "\(first.filename.replacingOccurrences(of: \".hda\", with: \".mp3\")) saved successfully."
+                                body = "\(first.filename.replacingOccurrences(of: ".hda", with: ".mp3")) saved successfully."
                             } else {
                                 body = "\(payload.downloaded.count) new recordings were saved successfully."
                             }
