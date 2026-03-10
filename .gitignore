@@ -4,6 +4,7 @@
 *.tmp
 *.log
 *.pid
+*.bak
 
 # Build artifacts
 mic-trigger/hidock-mic-trigger
@@ -15,3 +16,22 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 *.xcuserstate
 IDEWorkspaceChecks.plist
+
+# Python / local tooling
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# Local outputs and downloaded recordings
+usb-extractor/out/
+usb-extractor/*.mp3
+usb-extractor/*.wav
+usb-extractor/config.json
+usb-extractor/state.json
+
+# Automation local state
+hidock-automation/.env
+hidock-automation/state.json
+
+# Local editor / backup artifacts
+hidock-mic-trigger/Sources/*.bak

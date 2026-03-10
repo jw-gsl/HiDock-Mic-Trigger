@@ -2,16 +2,73 @@ import AppKit
 import CoreAudio
 import UserNotifications
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
+private struct HiDockSyncRecording: Codable {
+    let name: String
+    let createDate: String
+    let createTime: String
+    let length: Int
+    let duration: Double
+    let version: Int
+    let mode: String
+    let signature: String
+    let outputPath: String
+    let outputName: String
+    let downloaded: Bool
+    let localExists: Bool
+    let downloadedAt: String?
+    let lastError: String?
+    let status: String
+    let humanLength: String
+}
+
+private struct HiDockSyncStatusResponse: Codable {
+    let connected: Bool
+    let outputDir: String
+    let statePath: String
+    let configPath: String
+    let recordings: [HiDockSyncRecording]
+    let error: String?
+}
+
+private struct HiDockSyncDownloadResult: Codable {
+    let filename: String
+    let written: Int
+    let expectedLength: Int
+    let outputPath: String
+    let downloaded: Bool
+}
+
+private struct HiDockSyncDownloadNewResponse: Codable {
+    struct Skipped: Codable {
+        let filename: String
+        let reason: String
+    }
+
+    let connected: Bool
+    let outputDir: String
+    let downloaded: [HiDockSyncDownloadResult]
+    let skipped: [Skipped]
+    let error: String?
+}
+
+private func formatRecordingDuration(_ seconds: Double) -> String {
+    let total = max(Int(seconds.rounded()), 0)
+    let hours = total / 3600
+    let minutes = (total % 3600) / 60
+    let secs = total % 60
+    if hours > 0 {
+        return String(format: "%d:%02d:%02d", hours, minutes, secs)
+    }
+    return String(format: "%d:%02d", minutes, secs)
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var startItem: NSMenuItem!
     private var stopItem: NSMenuItem!
     private var autoStartItem: NSMenuItem!
-    private var automationStatusItem: NSMenuItem!
-    private var automationBootstrapItem: NSMenuItem!
-    private var automationStartItem: NSMenuItem!
-    private var automationStopItem: NSMenuItem!
+    private var syncWindowItem: NSMenuItem!
     private var micMenuItem: NSMenuItem!
     private var micSubmenu: NSMenu!
     private var process: Process?
@@ -25,10 +82,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var windowUptimeLabel: NSTextField?
     private var windowAutoStartCheckbox: NSButton?
     private var windowMicPopup: NSPopUpButton?
-    private var windowAutomationStatusLabel: NSTextField?
-    private var windowAutomationBootstrapButton: NSButton?
-    private var windowAutomationStartButton: NSButton?
-    private var windowAutomationStopButton: NSButton?
+    private var windowSyncButton: NSButton?
+    private var syncWindow: NSWindow?
+    private var syncStatusLabel: NSTextField?
+    private var syncFolderLabel: NSTextField?
+    private var syncTableView: NSTableView?
+    private var syncRefreshButton: NSButton?
+    private var syncDownloadSelectedButton: NSButton?
+    private var syncDownloadNewButton: NSButton?
+    private var syncPairButton: NSButton?
+    private var syncUnpairButton: NSButton?
+    private var syncSummaryLabel: NSTextField?
+    private var syncOutputFolder: String?
+    private var syncRecords: [HiDockSyncRecording] = []
+    private var syncBusy = false
+    private var syncRefreshStartDate: Date?
+    private var syncRefreshTimer: Timer?
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
@@ -43,9 +112,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
     private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
+    private let syncPairedKey = "hidockSyncPaired"
+    private let syncOutputFolderKey = "hidockSyncOutputFolder"
 
     private var automationRoot: String {
         "\(repoRoot)/hidock-automation"
+    }
+
+    private var extractorRoot: String {
+        "\(repoRoot)/usb-extractor"
+    }
+
+    private var extractorScriptPath: String {
+        "\(extractorRoot)/extractor.py"
+    }
+
+    private var extractorPythonPath: String {
+        "\(extractorRoot)/.venv/bin/python"
     }
 
     private var automationRunnerPath: String {
@@ -107,6 +190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var previousDeviceNames: Set<String> = []
     private var deviceChangeDebounceTimer: Timer?
+    private var syncPaired: Bool {
+        get { UserDefaults.standard.bool(forKey: syncPairedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: syncPairedKey) }
+    }
 
     // MARK: - App lifecycle
 
@@ -196,6 +283,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    private func postSyncDownloadNotification(title: String, body: String) {
+        postNotification(title: title, body: body)
     }
 
     // MARK: - CLI output monitoring
@@ -433,11 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         startItem = NSMenuItem(title: "Start", action: #selector(startTrigger), keyEquivalent: "s")
         stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
         autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStart), keyEquivalent: "")
-        automationStatusItem = NSMenuItem(title: "HiNotes Automation: Stopped", action: nil, keyEquivalent: "")
-        automationStatusItem.isEnabled = false
-        automationBootstrapItem = NSMenuItem(title: "HiNotes: Re-authenticate (CAPTCHA)", action: #selector(bootstrapAutomationAuth), keyEquivalent: "")
-        automationStartItem = NSMenuItem(title: "HiNotes: Start Sync Loop", action: #selector(startAutomationLoop), keyEquivalent: "")
-        automationStopItem = NSMenuItem(title: "HiNotes: Stop Sync Loop", action: #selector(stopAutomationLoop), keyEquivalent: "")
+        syncWindowItem = NSMenuItem(title: "HiDock Sync...", action: #selector(showSyncWindow), keyEquivalent: "d")
 
         micSubmenu = NSMenu()
         micSubmenu.delegate = self
@@ -448,7 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
-        for item in [startItem, stopItem, autoStartItem, automationBootstrapItem, automationStartItem, automationStopItem, logsItem, statusInfoItem, quitItem] {
+        for item in [startItem, stopItem, autoStartItem, syncWindowItem, logsItem, statusInfoItem, quitItem] {
             item?.target = self
         }
 
@@ -458,10 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(micMenuItem)
         menu.addItem(autoStartItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(automationStatusItem)
-        menu.addItem(automationBootstrapItem)
-        menu.addItem(automationStartItem)
-        menu.addItem(automationStopItem)
+        menu.addItem(syncWindowItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
@@ -634,7 +718,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } else {
             statusItem.button?.title = "HiDock · No Mic"
         }
-        updateAutomationMenuState()
         updateWindowState()
     }
 
@@ -651,26 +734,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .trimmingCharacters(in: .whitespaces)
         if short.isEmpty { return name }
         return short
-    }
-
-    private func updateAutomationMenuState() {
-        let running = (automationProcess != nil)
-        let bootstrapping = (automationBootstrapProcess != nil)
-
-        if running {
-            automationStatusItem.title = "HiNotes Automation: Running"
-        } else if bootstrapping {
-            automationStatusItem.title = "HiNotes Automation: Auth In Progress"
-        } else if let last = lastAutomationMessage, !last.isEmpty {
-            automationStatusItem.title = "HiNotes Automation: Stopped (\(last.prefix(28)))"
-        } else {
-            automationStatusItem.title = "HiNotes Automation: Stopped"
-        }
-
-        automationBootstrapItem.isEnabled = !bootstrapping
-        automationStartItem.isEnabled = !running && !bootstrapping
-        automationStopItem.isEnabled = running || bootstrapping
-        updateAutomationWindowState()
     }
 
     private func updateWindowState() {
@@ -690,30 +753,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             windowUptimeLabel?.stringValue = ""
             stopUptimeTimer()
         }
-        updateAutomationWindowState()
-    }
-
-    private func updateAutomationWindowState() {
-        let running = (automationProcess != nil)
-        let bootstrapping = (automationBootstrapProcess != nil)
-
-        if bootstrapping {
-            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: Auth bootstrap in progress"
-            windowAutomationStatusLabel?.textColor = .systemOrange
-        } else if running {
-            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: Loop running"
-            windowAutomationStatusLabel?.textColor = .systemGreen
-        } else if let last = lastAutomationMessage, !last.isEmpty {
-            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: \(last)"
-            windowAutomationStatusLabel?.textColor = .secondaryLabelColor
-        } else {
-            windowAutomationStatusLabel?.stringValue = "HiNotes Automation: Stopped"
-            windowAutomationStatusLabel?.textColor = .secondaryLabelColor
-        }
-
-        windowAutomationBootstrapButton?.isEnabled = !bootstrapping
-        windowAutomationStartButton?.isEnabled = !running && !bootstrapping
-        windowAutomationStopButton?.isEnabled = running || bootstrapping
     }
 
     private func updateUptimeLabel() {
@@ -958,7 +997,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 lastAutomationMessage = "Authentication saved"
             }
         }
-        updateAutomationMenuState()
     }
 
     private func launchAutomation(arguments: [String], isBootstrap: Bool) {
@@ -1159,35 +1197,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             contentView.addSubview(autoStart)
             windowAutoStartCheckbox = autoStart
 
-            let automationSeparator = NSBox()
-            automationSeparator.boxType = .separator
-            automationSeparator.frame = NSRect(x: 20, y: 68, width: 340, height: 1)
-            contentView.addSubview(automationSeparator)
-
-            let automationStatus = NSTextField(labelWithString: "HiNotes Automation: Stopped")
-            automationStatus.font = .systemFont(ofSize: 12)
-            automationStatus.textColor = .secondaryLabelColor
-            automationStatus.frame = NSRect(x: 20, y: 48, width: 340, height: 16)
-            contentView.addSubview(automationStatus)
-            windowAutomationStatusLabel = automationStatus
-
-            let authBtn = NSButton(title: "Auth (CAPTCHA)", target: self, action: #selector(bootstrapAutomationAuth))
-            authBtn.bezelStyle = .rounded
-            authBtn.frame = NSRect(x: 20, y: 14, width: 120, height: 28)
-            contentView.addSubview(authBtn)
-            windowAutomationBootstrapButton = authBtn
-
-            let autoStartBtn = NSButton(title: "Sync Start", target: self, action: #selector(startAutomationLoop))
-            autoStartBtn.bezelStyle = .rounded
-            autoStartBtn.frame = NSRect(x: 146, y: 14, width: 90, height: 28)
-            contentView.addSubview(autoStartBtn)
-            windowAutomationStartButton = autoStartBtn
-
-            let autoStopBtn = NSButton(title: "Sync Stop", target: self, action: #selector(stopAutomationLoop))
-            autoStopBtn.bezelStyle = .rounded
-            autoStopBtn.frame = NSRect(x: 242, y: 14, width: 90, height: 28)
-            contentView.addSubview(autoStopBtn)
-            windowAutomationStopButton = autoStopBtn
+            let syncButton = NSButton(title: "Open HiDock Sync", target: self, action: #selector(showSyncWindow))
+            syncButton.bezelStyle = .rounded
+            syncButton.frame = NSRect(x: 220, y: 76, width: 140, height: 28)
+            contentView.addSubview(syncButton)
+            windowSyncButton = syncButton
 
             window = win
             updateWindowState()
@@ -1196,6 +1210,454 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showSyncWindow() {
+        if syncWindow == nil {
+            let rect = NSRect(x: 0, y: 0, width: 860, height: 520)
+            let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+            let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+            win.center()
+            win.title = "HiDock Sync"
+            win.isReleasedWhenClosed = false
+            win.delegate = self
+
+            let contentView = win.contentView!
+
+            let titleLabel = NSTextField(labelWithString: "HiDock Sync")
+            titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+            titleLabel.frame = NSRect(x: 20, y: 480, width: 300, height: 26)
+            contentView.addSubview(titleLabel)
+
+            let status = NSTextField(labelWithString: "Status: Not loaded")
+            status.font = .systemFont(ofSize: 13)
+            status.frame = NSRect(x: 20, y: 452, width: 520, height: 18)
+            contentView.addSubview(status)
+            syncStatusLabel = status
+
+            let folder = NSTextField(labelWithString: "Output folder: Not set")
+            folder.font = .systemFont(ofSize: 12)
+            folder.textColor = .secondaryLabelColor
+            folder.frame = NSRect(x: 20, y: 430, width: 760, height: 18)
+            contentView.addSubview(folder)
+            syncFolderLabel = folder
+            if let savedFolder = UserDefaults.standard.string(forKey: syncOutputFolderKey), !savedFolder.isEmpty {
+                syncOutputFolder = savedFolder
+                syncFolderLabel?.stringValue = "Output folder: \(savedFolder)"
+            }
+
+            let pairBtn = NSButton(title: "Pair Dock", target: self, action: #selector(pairSyncDock))
+            pairBtn.bezelStyle = .rounded
+            pairBtn.frame = NSRect(x: 20, y: 392, width: 100, height: 28)
+            contentView.addSubview(pairBtn)
+            syncPairButton = pairBtn
+
+            let unpairBtn = NSButton(title: "Unpair", target: self, action: #selector(unpairSyncDock))
+            unpairBtn.bezelStyle = .rounded
+            unpairBtn.frame = NSRect(x: 128, y: 392, width: 90, height: 28)
+            contentView.addSubview(unpairBtn)
+            syncUnpairButton = unpairBtn
+
+            let chooseBtn = NSButton(title: "Choose Folder", target: self, action: #selector(chooseSyncOutputFolder))
+            chooseBtn.bezelStyle = .rounded
+            chooseBtn.frame = NSRect(x: 226, y: 392, width: 120, height: 28)
+            contentView.addSubview(chooseBtn)
+
+            let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(refreshSyncStatus))
+            refreshBtn.bezelStyle = .rounded
+            refreshBtn.frame = NSRect(x: 354, y: 392, width: 90, height: 28)
+            contentView.addSubview(refreshBtn)
+            syncRefreshButton = refreshBtn
+
+            let downloadSelectedBtn = NSButton(title: "Download Selected", target: self, action: #selector(downloadSelectedSyncRecording))
+            downloadSelectedBtn.bezelStyle = .rounded
+            downloadSelectedBtn.frame = NSRect(x: 452, y: 392, width: 140, height: 28)
+            contentView.addSubview(downloadSelectedBtn)
+            syncDownloadSelectedButton = downloadSelectedBtn
+
+            let downloadNewBtn = NSButton(title: "Download New", target: self, action: #selector(downloadNewSyncRecordings))
+            downloadNewBtn.bezelStyle = .rounded
+            downloadNewBtn.frame = NSRect(x: 600, y: 392, width: 120, height: 28)
+            contentView.addSubview(downloadNewBtn)
+            syncDownloadNewButton = downloadNewBtn
+
+            let summary = NSTextField(labelWithString: "No recordings loaded")
+            summary.font = .systemFont(ofSize: 12)
+            summary.textColor = .secondaryLabelColor
+            summary.frame = NSRect(x: 20, y: 366, width: 760, height: 18)
+            contentView.addSubview(summary)
+            syncSummaryLabel = summary
+
+            let scrollView = NSScrollView(frame: NSRect(x: 20, y: 20, width: 820, height: 334))
+            scrollView.hasVerticalScroller = true
+            scrollView.hasHorizontalScroller = false
+            scrollView.borderType = .bezelBorder
+
+            let tableView = NSTableView(frame: scrollView.bounds)
+            tableView.delegate = self
+            tableView.dataSource = self
+            tableView.usesAlternatingRowBackgroundColors = true
+            tableView.allowsEmptySelection = true
+            tableView.rowSizeStyle = .medium
+
+            let columns: [(String, String, CGFloat)] = [
+                ("status", "Status", 110),
+                ("name", "Recording", 250),
+                ("created", "Created", 170),
+                ("duration", "Length", 80),
+                ("size", "Size", 90),
+                ("mode", "Mode", 90),
+                ("path", "Output", 220),
+            ]
+            for (identifier, title, width) in columns {
+                let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(rawValue: identifier))
+                column.title = title
+                column.width = width
+                tableView.addTableColumn(column)
+            }
+
+            scrollView.documentView = tableView
+            contentView.addSubview(scrollView)
+            syncTableView = tableView
+
+            syncWindow = win
+            updateSyncWindowState()
+        }
+
+        NSApp.setActivationPolicy(.regular)
+        syncWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        refreshSyncStatus()
+    }
+
+    private func ensureExtractorReady() -> Bool {
+        guard FileManager.default.fileExists(atPath: extractorScriptPath) else {
+            showError("HiDock extractor not found.\nExpected: \(extractorScriptPath)")
+            return false
+        }
+        guard FileManager.default.isExecutableFile(atPath: extractorPythonPath) else {
+            showError("Extractor Python venv not found.\nExpected executable: \(extractorPythonPath)")
+            return false
+        }
+        return true
+    }
+
+    private func runExtractor(arguments: [String], completion: @escaping (Result<Data, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
+            process.executableURL = URL(fileURLWithPath: self.extractorPythonPath)
+            process.arguments = [self.extractorScriptPath] + arguments
+
+            let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            let outURL = tempDir.appendingPathComponent("hidock-sync-\(UUID().uuidString).out")
+            let errURL = tempDir.appendingPathComponent("hidock-sync-\(UUID().uuidString).err")
+
+            do {
+                FileManager.default.createFile(atPath: outURL.path, contents: nil)
+                FileManager.default.createFile(atPath: errURL.path, contents: nil)
+                let outHandle = try FileHandle(forWritingTo: outURL)
+                let errHandle = try FileHandle(forWritingTo: errURL)
+                process.standardOutput = outHandle
+                process.standardError = errHandle
+                try process.run()
+                process.waitUntilExit()
+                try outHandle.close()
+                try errHandle.close()
+
+                let outData = (try? Data(contentsOf: outURL)) ?? Data()
+                let errData = (try? Data(contentsOf: errURL)) ?? Data()
+                try? FileManager.default.removeItem(at: outURL)
+                try? FileManager.default.removeItem(at: errURL)
+
+                if process.terminationStatus == 0 {
+                    DispatchQueue.main.async {
+                        completion(.success(outData))
+                    }
+                } else {
+                    let message = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? "Extractor failed"
+                    let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
+                        NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ])
+                    DispatchQueue.main.async {
+                        completion(.failure(error))
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func updateSyncWindowState() {
+        let selectedRow = syncTableView?.selectedRow ?? -1
+        let hasSelection = selectedRow >= 0 && selectedRow < syncRecords.count
+
+        syncRefreshButton?.isEnabled = !syncBusy
+        syncDownloadNewButton?.isEnabled = !syncBusy && syncPaired
+        syncDownloadSelectedButton?.isEnabled = !syncBusy && syncPaired && hasSelection
+        syncPairButton?.isEnabled = !syncBusy && !syncPaired
+        syncUnpairButton?.isEnabled = !syncBusy && syncPaired
+    }
+
+    private func renderSyncStatus(_ status: HiDockSyncStatusResponse) {
+        syncOutputFolder = status.outputDir
+        UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
+        syncRecords = status.recordings
+        syncTableView?.reloadData()
+
+        let downloadedCount = status.recordings.filter(\.downloaded).count
+        let statusText: String
+        if status.connected {
+            statusText = syncPaired ? "Status: Paired and connected" : "Status: Connected"
+            syncStatusLabel?.textColor = .systemGreen
+        } else if let error = status.error {
+            statusText = syncPaired ? "Status: Paired but unavailable (\(error))" : "Status: Unavailable (\(error))"
+            syncStatusLabel?.textColor = .systemOrange
+        } else {
+            statusText = "Status: Not connected"
+            syncStatusLabel?.textColor = .secondaryLabelColor
+        }
+        syncStatusLabel?.stringValue = statusText
+        syncFolderLabel?.stringValue = "Output folder: \(status.outputDir)"
+        syncSummaryLabel?.stringValue = "\(status.recordings.count) recordings, \(downloadedCount) downloaded"
+        updateSyncWindowState()
+    }
+
+    private func syncErrorDescription(_ error: String) -> String {
+        if error.contains("Errno 13") || error.localizedCaseInsensitiveContains("Access denied") {
+            return "Dock busy: close browsers or other tools using HiDock, then Refresh"
+        }
+        return error
+    }
+
+    private func startSyncRefreshTimer() {
+        syncRefreshStartDate = Date()
+        syncRefreshTimer?.invalidate()
+        syncRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self = self, let start = self.syncRefreshStartDate else { return }
+            let elapsed = Int(Date().timeIntervalSince(start))
+            self.syncStatusLabel?.stringValue = "Status: Refreshing... \(elapsed)s"
+        }
+    }
+
+    private func stopSyncRefreshTimer() {
+        syncRefreshTimer?.invalidate()
+        syncRefreshTimer = nil
+        syncRefreshStartDate = nil
+    }
+
+    private func selectedSyncRecording() -> HiDockSyncRecording? {
+        let row = syncTableView?.selectedRow ?? -1
+        guard row >= 0, row < syncRecords.count else { return nil }
+        return syncRecords[row]
+    }
+
+    @objc private func refreshSyncStatus() {
+        guard ensureExtractorReady() else { return }
+        syncBusy = true
+        syncStatusLabel?.stringValue = "Status: Refreshing..."
+        syncStatusLabel?.textColor = .secondaryLabelColor
+        startSyncRefreshTimer()
+        updateSyncWindowState()
+
+        runExtractor(arguments: ["status", "--timeout-ms", "2000"]) { [weak self] result in
+            guard let self = self else { return }
+            self.syncBusy = false
+            self.stopSyncRefreshTimer()
+            switch result {
+            case .success(let data):
+                do {
+                    let payload = try JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data)
+                    self.renderSyncStatus(payload)
+                } catch {
+                    self.syncStatusLabel?.stringValue = "Status: Failed to decode extractor output"
+                    self.syncStatusLabel?.textColor = .systemRed
+                    self.log("HiDock sync decode failure: \(error.localizedDescription)")
+                    self.showError("Failed to decode HiDock sync status:\n\(error.localizedDescription)")
+                }
+            case .failure(let error):
+                let message = self.syncErrorDescription(error.localizedDescription)
+                self.syncStatusLabel?.stringValue = "Status: \(message)"
+                self.syncStatusLabel?.textColor = .systemRed
+                self.log("HiDock sync status error: \(error.localizedDescription)")
+            }
+            self.updateSyncWindowState()
+        }
+    }
+
+    @objc private func chooseSyncOutputFolder() {
+        guard ensureExtractorReady() else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Output Folder"
+        if let current = syncOutputFolder {
+            panel.directoryURL = URL(fileURLWithPath: current)
+        }
+
+        if panel.runModal() == .OK, let url = panel.url {
+            runExtractor(arguments: ["set-output", url.path]) { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success:
+                    self.syncOutputFolder = url.path
+                    self.syncFolderLabel?.stringValue = "Output folder: \(url.path)"
+                    UserDefaults.standard.set(url.path, forKey: self.syncOutputFolderKey)
+                    self.refreshSyncStatus()
+                case .failure(let error):
+                    self.log("HiDock sync set-output error: \(error.localizedDescription)")
+                    self.showError("Failed to set HiDock output folder:\n\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    @objc private func pairSyncDock() {
+        syncPaired = true
+        refreshSyncStatus()
+    }
+
+    @objc private func unpairSyncDock() {
+        syncPaired = false
+        syncRecords = []
+        syncTableView?.reloadData()
+        syncStatusLabel?.stringValue = "Status: Unpaired"
+        syncStatusLabel?.textColor = .secondaryLabelColor
+        syncSummaryLabel?.stringValue = "No recordings loaded"
+        updateSyncWindowState()
+    }
+
+    @objc private func downloadSelectedSyncRecording() {
+        guard ensureExtractorReady() else { return }
+        guard let recording = selectedSyncRecording() else { return }
+
+        syncBusy = true
+        syncStatusLabel?.stringValue = "Status: Downloading \(recording.outputName)..."
+        syncStatusLabel?.textColor = .secondaryLabelColor
+        updateSyncWindowState()
+
+        runExtractor(arguments: ["download", recording.name, "--length", "\(recording.length)"]) { [weak self] result in
+            guard let self = self else { return }
+            self.syncBusy = false
+            switch result {
+            case .success(let data):
+                if let payload = try? JSONDecoder().decode(HiDockSyncDownloadResult.self, from: data) {
+                    let body = "\(payload.filename.replacingOccurrences(of: \".hda\", with: \".mp3\")) saved successfully."
+                    self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
+                } else {
+                    let body = "\(recording.outputName) saved successfully."
+                    self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
+                }
+                self.refreshSyncStatus()
+            case .failure(let error):
+                self.syncStatusLabel?.stringValue = "Status: Download failed"
+                self.syncStatusLabel?.textColor = .systemRed
+                self.showError("Failed to download \(recording.name):\n\(error.localizedDescription)")
+                self.updateSyncWindowState()
+            }
+        }
+    }
+
+    @objc private func downloadNewSyncRecordings() {
+        guard ensureExtractorReady() else { return }
+
+        syncBusy = true
+        syncStatusLabel?.stringValue = "Status: Downloading new recordings..."
+        syncStatusLabel?.textColor = .secondaryLabelColor
+        updateSyncWindowState()
+
+        runExtractor(arguments: ["download-new"]) { [weak self] result in
+            guard let self = self else { return }
+            self.syncBusy = false
+            switch result {
+            case .success(let data):
+                do {
+                    let payload = try JSONDecoder().decode(HiDockSyncDownloadNewResponse.self, from: data)
+                    if let error = payload.error {
+                        self.syncStatusLabel?.stringValue = "Status: \(error)"
+                        self.syncStatusLabel?.textColor = .systemRed
+                    } else {
+                        self.syncStatusLabel?.stringValue = "Status: Downloaded \(payload.downloaded.count) new recordings"
+                        self.syncStatusLabel?.textColor = .systemGreen
+                        if payload.downloaded.count > 0 {
+                            let body: String
+                            if payload.downloaded.count == 1, let first = payload.downloaded.first {
+                                body = "\(first.filename.replacingOccurrences(of: \".hda\", with: \".mp3\")) saved successfully."
+                            } else {
+                                body = "\(payload.downloaded.count) new recordings were saved successfully."
+                            }
+                            self.postSyncDownloadNotification(title: "✅ HiDock Downloads Complete", body: body)
+                        }
+                    }
+                    self.refreshSyncStatus()
+                } catch {
+                    self.syncStatusLabel?.stringValue = "Status: Download finished"
+                    self.syncStatusLabel?.textColor = .secondaryLabelColor
+                    self.refreshSyncStatus()
+                }
+            case .failure(let error):
+                self.syncStatusLabel?.stringValue = "Status: Download failed"
+                self.syncStatusLabel?.textColor = .systemRed
+                self.showError("Failed to download new HiDock recordings:\n\(error.localizedDescription)")
+                self.updateSyncWindowState()
+            }
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        if tableView == syncTableView {
+            return syncRecords.count
+        }
+        return 0
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateSyncWindowState()
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard tableView == syncTableView, row >= 0, row < syncRecords.count, let tableColumn = tableColumn else {
+            return nil
+        }
+
+        let recording = syncRecords[row]
+        let identifier = tableColumn.identifier
+        let text: String
+        switch identifier.rawValue {
+        case "status":
+            text = recording.downloaded ? "Downloaded" : (recording.lastError == nil ? "On device" : "Failed")
+        case "name":
+            text = recording.outputName
+        case "created":
+            text = "\(recording.createDate) \(recording.createTime)"
+        case "duration":
+            text = formatRecordingDuration(recording.duration)
+        case "size":
+            text = recording.humanLength
+        case "mode":
+            text = recording.mode.capitalized
+        case "path":
+            text = recording.downloaded ? recording.outputPath : "-"
+        default:
+            text = ""
+        }
+
+        let view = NSTextField(labelWithString: text)
+        view.lineBreakMode = .byTruncatingMiddle
+        if identifier.rawValue == "status" {
+            if recording.downloaded {
+                view.textColor = .systemGreen
+            } else if recording.lastError != nil {
+                view.textColor = .systemRed
+            } else {
+                view.textColor = .secondaryLabelColor
+            }
+        }
+        return view
     }
 
     // MARK: - Logging
