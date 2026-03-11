@@ -29,9 +29,9 @@ usb-extractor/out/
 usb-extractor/config.json
 usb-extractor/state.json
 
-# Automation local state
-hidock-automation/.env
-hidock-automation/state.json
+# Windows-Script local state
+Windows-Script/config.json
+Windows-Script/state.json
 
 # Local editor / backup artifacts
 hidock-mic-trigger/Sources/*.bak
