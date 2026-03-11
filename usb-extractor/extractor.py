@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import struct
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,14 +161,19 @@ def md5_hex(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-def find_device():
-    dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+def find_device(product_id: int | None = None):
+    pid = product_id if product_id is not None else PRODUCT_ID
+    dev = usb.core.find(idVendor=VENDOR_ID, idProduct=pid)
     if dev is None:
-        raise FileNotFoundError(f"HiDock device {VENDOR_ID}:{PRODUCT_ID} not found")
+        raise FileNotFoundError(f"HiDock device {VENDOR_ID}:{pid} not found")
     return dev
 
 
 def prepare_device(dev):
+    try:
+        dev.reset()
+    except usb.core.USBError:
+        pass
     try:
         dev.set_configuration()
     except usb.core.USBError:
@@ -194,6 +201,20 @@ def release_device(dev, interface_number: int) -> None:
     except usb.core.USBError:
         pass
     usb.util.dispose_resources(dev)
+
+
+# Global reference for signal handler cleanup
+_active_dev = None
+_active_intf = None
+
+
+def _sigterm_handler(signum, frame):
+    if _active_dev is not None and _active_intf is not None:
+        release_device(_active_dev, _active_intf)
+    sys.exit(143)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def parse_frame(buf: bytes) -> tuple[int, int, bytes]:
@@ -288,21 +309,10 @@ def parse_query_file_list_payload(raw_payloads: list[bytes], expected_count: int
         if ts is None:
             continue
 
-        duration = 0.0
-        if version == 1:
-            duration = file_len / 32 * 2
-        elif version == 2:
-            duration = (file_len - 44) / 48 / 2
-        elif version == 3:
-            duration = (file_len - 44) / 48 / 2 / 2
-        elif version == 5:
-            duration = file_len / 12
-        elif version == 6:
-            duration = file_len / 16
-        elif version == 7:
-            duration = file_len / 10
-        else:
-            duration = file_len / 32 * 4
+        # Downloaded recordings are 16 kHz mono MP3 at ~64 kbps, so duration is
+        # well approximated by bytes / 8000. The earlier version-based formulas
+        # produced wildly incorrect values for current devices.
+        duration = max(file_len / 8000.0, 0.0)
 
         mode = "room"
         upper_name = name.upper()
@@ -738,7 +748,7 @@ def probe_device(timeout_ms: int = 2000) -> dict:
         release_device(dev, interface_number)
 
 
-def build_recording_status_items(recordings: list[dict], state: dict, output_dir: Path) -> list[dict]:
+def build_recording_status_items(recordings: list[dict], state: dict, output_dir: Path, product_id: int | None = None) -> list[dict]:
     downloads = state.get("downloads", {})
     items: list[dict] = []
     seen_names: set[str] = set()
@@ -748,7 +758,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         stored = downloads.get(name, {})
         output_path = Path(stored.get("output_path", output_path_for(name, output_dir)))
         local_exists = output_path.exists()
-        downloaded = bool(stored.get("downloaded")) and local_exists
+        downloaded = bool(stored.get("downloaded"))
         status = "downloaded" if downloaded else "on_device"
         if stored.get("last_error") and not downloaded:
             status = "failed"
@@ -769,6 +779,10 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
     for name, stored in downloads.items():
         if name in seen_names:
             continue
+        # Skip orphan records that don't belong to this device
+        stored_pid = stored.get("product_id")
+        if product_id is not None and stored_pid != product_id:
+            continue
         output_path = Path(stored.get("output_path", output_path_for(name, output_dir)))
         local_exists = output_path.exists()
         length = int(stored.get("length", 0))
@@ -784,11 +798,11 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "signature": stored.get("signature", md5_hex(name)),
                 "outputPath": str(output_path),
                 "outputName": output_name_for(name),
-                "downloaded": bool(stored.get("downloaded")) and local_exists,
+                "downloaded": bool(stored.get("downloaded")),
                 "localExists": local_exists,
                 "downloadedAt": stored.get("downloaded_at"),
                 "lastError": stored.get("last_error"),
-                "status": "downloaded" if bool(stored.get("downloaded")) and local_exists else "missing_local",
+                "status": "downloaded" if bool(stored.get("downloaded")) else "missing_local",
                 "humanLength": human_size(length),
             }
         )
@@ -796,7 +810,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
     return items
 
 
-def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH) -> dict:
+def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH, product_id: int | None = None) -> dict:
     config = load_config(config_path)
     output_dir = resolved_output_dir(config)
     state = load_state(state_path)
@@ -809,7 +823,7 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     }
 
     try:
-        dev = find_device()
+        dev = find_device(product_id=product_id)
     except FileNotFoundError:
         payload["error"] = "HiDock device not found"
         return payload
@@ -823,7 +837,7 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     try:
         recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
         payload["connected"] = True
-        payload["recordings"] = build_recording_status_items(recordings, state, output_dir)
+        payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
     finally:
         release_device(dev, interface_number)
     return payload
@@ -836,6 +850,7 @@ def download_one(
     timeout_ms: int = 5000,
     config_path: Path = DEFAULT_CONFIG_PATH,
     state_path: Path = DEFAULT_STATE_PATH,
+    product_id: int | None = None,
 ) -> dict:
     config = load_config(config_path)
     if output_dir is None:
@@ -845,8 +860,11 @@ def download_one(
     state = load_state(state_path)
     downloads = state["downloads"]
 
-    dev = find_device()
+    global _active_dev, _active_intf
+    dev = find_device(product_id=product_id)
     interface_number = prepare_device(dev)
+    _active_dev = dev
+    _active_intf = interface_number
     try:
         if length is None:
             recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
@@ -859,6 +877,11 @@ def download_one(
             signature = None
 
         out_path = output_path_for(filename, output_dir)
+
+        def _progress(received, total):
+            pct = int(received * 100 / total) if total else 0
+            print(f"PROGRESS:{received}:{total}:{pct}", file=sys.stderr, flush=True)
+
         written = transfer_file_stream_to_path(
             dev,
             filename,
@@ -866,19 +889,25 @@ def download_one(
             out_path=out_path,
             request_id=0x100,
             timeout_ms=timeout_ms,
+            progress=_progress,
         )
     except Exception as exc:
-        downloads[filename] = {
+        error_record = {
             **downloads.get(filename, {}),
             "downloaded": False,
             "last_error": str(exc),
             "output_path": str(output_path_for(filename, output_dir)),
             "updated_at": utc_now_iso(),
         }
+        if product_id is not None:
+            error_record["product_id"] = product_id
+        downloads[filename] = error_record
         save_state(state, state_path)
         raise
     finally:
         release_device(dev, interface_number)
+        _active_dev = None
+        _active_intf = None
 
     record = {
         **downloads.get(filename, {}),
@@ -889,6 +918,8 @@ def download_one(
         "length": length,
         "last_error": None,
     }
+    if product_id is not None:
+        record["product_id"] = product_id
     if signature is not None:
         record["signature"] = signature
     downloads[filename] = record
@@ -906,8 +937,9 @@ def download_new(
     timeout_ms: int = 5000,
     config_path: Path = DEFAULT_CONFIG_PATH,
     state_path: Path = DEFAULT_STATE_PATH,
+    product_id: int | None = None,
 ) -> dict:
-    status = status_payload(timeout_ms=timeout_ms, config_path=config_path, state_path=state_path)
+    status = status_payload(timeout_ms=timeout_ms, config_path=config_path, state_path=state_path, product_id=product_id)
     if not status["connected"]:
         return {
             "connected": False,
@@ -930,6 +962,7 @@ def download_new(
             timeout_ms=timeout_ms,
             config_path=config_path,
             state_path=state_path,
+            product_id=product_id,
         )
         downloaded.append(result)
 
@@ -996,6 +1029,7 @@ def pull_file(filename: str, out_dir: Path, request_id: int = 1, timeout_ms: int
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--product-id", type=int, default=None, help="USB product ID to target a specific HiDock model")
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="Report sync status and device recordings as JSON")
@@ -1008,6 +1042,11 @@ def main() -> int:
     download.add_argument("filename", help="Device-side filename, e.g. 2026Mar09-131439-Rec39.hda")
     download.add_argument("--length", type=int, default=None, help="Known device-side length in bytes")
     download.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
+
+    sub.add_parser("list-devices", help="List all connected HiDock devices as JSON")
+
+    mark_dl = sub.add_parser("mark-downloaded", help="Mark recordings as already downloaded without transferring")
+    mark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to mark")
 
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
@@ -1054,8 +1093,40 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    if args.command == "list-devices":
+        devices = []
+        for dev in usb.core.find(idVendor=VENDOR_ID, find_all=True):
+            devices.append({
+                "vendorId": dev.idVendor,
+                "productId": dev.idProduct,
+                "productName": usb.util.get_string(dev, dev.iProduct) if dev.iProduct else None,
+                "serialNumber": usb.util.get_string(dev, dev.iSerialNumber) if dev.iSerialNumber else None,
+                "bus": dev.bus,
+                "address": dev.address,
+            })
+        print(json.dumps({"devices": devices}, indent=2))
+        return 0
+    if args.command == "mark-downloaded":
+        state = load_state()
+        downloads = state["downloads"]
+        marked = []
+        for filename in args.filenames:
+            record = {
+                **downloads.get(filename, {}),
+                "downloaded": True,
+                "downloaded_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+                "last_error": None,
+            }
+            if args.product_id is not None:
+                record["product_id"] = args.product_id
+            downloads[filename] = record
+            marked.append(filename)
+        save_state(state)
+        print(json.dumps({"marked": marked}, indent=2))
+        return 0
     if args.command == "status":
-        print(json.dumps(status_payload(timeout_ms=args.timeout_ms), indent=2))
+        print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
         return 0
     if args.command == "set-output":
         config = load_config()
@@ -1069,11 +1140,12 @@ def main() -> int:
             args.filename,
             length=args.length,
             timeout_ms=args.timeout_ms,
+            product_id=args.product_id,
         )
         print(json.dumps(result, indent=2))
         return 0
     if args.command == "download-new":
-        print(json.dumps(download_new(timeout_ms=args.timeout_ms), indent=2))
+        print(json.dumps(download_new(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
         return 0
 
     if args.command == "pull":
