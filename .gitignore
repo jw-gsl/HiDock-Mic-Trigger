@@ -23,9 +23,9 @@ IDEWorkspaceChecks.plist
 *.pyc
 
 # Local outputs and downloaded recordings
+*.mp3
+*.wav
 usb-extractor/out/
-usb-extractor/*.mp3
-usb-extractor/*.wav
 usb-extractor/config.json
 usb-extractor/state.json
 
