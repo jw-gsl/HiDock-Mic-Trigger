@@ -756,7 +756,15 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         name = recording["name"]
         seen_names.add(name)
         stored = downloads.get(name, {})
-        output_path = Path(stored.get("output_path", output_path_for(name, output_dir)))
+        stored_path = Path(stored["output_path"]) if "output_path" in stored else None
+        expected_path = output_path_for(name, output_dir)
+        # Prefer the stored path if it exists, otherwise check the current output dir
+        if stored_path and stored_path.exists():
+            output_path = stored_path
+        elif expected_path.exists():
+            output_path = expected_path
+        else:
+            output_path = stored_path or expected_path
         local_exists = output_path.exists()
         downloaded = bool(stored.get("downloaded"))
         status = "downloaded" if downloaded else "on_device"
@@ -783,7 +791,14 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         stored_pid = stored.get("product_id")
         if product_id is not None and stored_pid != product_id:
             continue
-        output_path = Path(stored.get("output_path", output_path_for(name, output_dir)))
+        stored_path = Path(stored["output_path"]) if "output_path" in stored else None
+        expected_path = output_path_for(name, output_dir)
+        if stored_path and stored_path.exists():
+            output_path = stored_path
+        elif expected_path.exists():
+            output_path = expected_path
+        else:
+            output_path = stored_path or expected_path
         local_exists = output_path.exists()
         length = int(stored.get("length", 0))
         items.append(
@@ -1130,10 +1145,29 @@ def main() -> int:
         return 0
     if args.command == "set-output":
         config = load_config()
-        output_dir = str(Path(args.path).expanduser().resolve())
-        config["output_dir"] = output_dir
+        output_dir = Path(args.path).expanduser().resolve()
+        config["output_dir"] = str(output_dir)
         save_config(config)
-        print(json.dumps({"outputDir": output_dir, "configPath": str(DEFAULT_CONFIG_PATH.resolve())}, indent=2))
+
+        # Scan new folder and remap state entries to match existing files
+        state = load_state()
+        downloads = state.get("downloads", {})
+        remapped = 0
+        for name, record in downloads.items():
+            expected = output_dir / output_name_for(name)
+            old_path = record.get("output_path", "")
+            if expected.exists():
+                if str(expected) != old_path:
+                    record["output_path"] = str(expected)
+                    remapped += 1
+            elif not Path(old_path).exists() if old_path else True:
+                # Old path gone and not in new folder either — clear the path
+                record["output_path"] = str(expected)
+                remapped += 1
+        if remapped:
+            save_state(state)
+
+        print(json.dumps({"outputDir": str(output_dir), "configPath": str(DEFAULT_CONFIG_PATH.resolve()), "remapped": remapped}, indent=2))
         return 0
     if args.command == "download":
         result = download_one(
