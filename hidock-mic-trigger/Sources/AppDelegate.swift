@@ -1027,6 +1027,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - HiDock Sync Startup
 
     private func autoConnectSyncIfPaired() {
+        guard !syncBusy else {
+            log("autoConnectSyncIfPaired: skipping, already busy")
+            return
+        }
         guard ensureExtractorReady() else {
             log("autoConnectSyncIfPaired: extractor not ready, aborting")
             return
@@ -1052,6 +1056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let devices = self.syncPairedDevices
             guard !devices.isEmpty else { return }
             self.log("Auto-connecting \(devices.count) paired HiDock device(s) on startup")
+            self.syncBusy = true
             self.windowSyncSummaryLabel?.stringValue = "Sync: Refreshing \(devices.count) device(s)..."
             self.windowSyncSummaryLabel?.textColor = .secondaryLabelColor
 
@@ -1069,14 +1074,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                             self.renderSyncStatus(status, deviceProductId: device.productId, deviceName: device.cleanName)
                             if status.connected {
                                 anyConnected = true
-                            } else if let err = status.error {
+                                self.log("Auto-connect: \(device.cleanName) connected (\(status.recordings.count) recordings)")
+                            } else {
+                                let err = status.error ?? "unknown"
                                 self.log("Auto-connect: \(device.cleanName) not connected: \(err)")
                                 lastError = err
                             }
+                        } else {
+                            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "(binary)"
+                            self.log("Auto-connect: \(device.cleanName) decode failed: \(preview)")
+                            lastError = "Failed to decode status response"
                         }
                     case .failure(let error):
                         let desc = error.localizedDescription
-                        // Extract last line of traceback for cleaner display
                         let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
                         self.log("Auto-connect: \(device.cleanName) failed: \(shortDesc)")
                         lastError = shortDesc
@@ -1087,6 +1097,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             group.notify(queue: .main) { [weak self] in
                 guard let self = self else { return }
+                self.syncBusy = false
                 if !anyConnected, let err = lastError {
                     let message = self.syncErrorDescription(err)
                     self.syncStatusLabel?.stringValue = "Status: \(message)"
@@ -1094,6 +1105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.updateWindowSyncSummary()
                 self.updateMenuSyncStatus(connected: anyConnected)
+                self.updateSyncWindowState()
             }
         }
     }
@@ -1511,6 +1523,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
+    /// Maximum time (seconds) an extractor process may run before being killed.
+    private let extractorProcessTimeout: TimeInterval = 30
+
     private func runExtractor(arguments: [String], productId: Int? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         log("runExtractor: \(fullArgs.joined(separator: " "))")
@@ -1533,7 +1548,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 process.standardOutput = outHandle
                 process.standardError = errHandle
                 try process.run()
-                process.waitUntilExit()
+                NSLog("runExtractor: process started (pid %d)", process.processIdentifier)
+
+                // Wait with a timeout — kill the process if it hangs
+                let deadline = Date().addingTimeInterval(self.extractorProcessTimeout)
+                while process.isRunning && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                if process.isRunning {
+                    NSLog("runExtractor: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
+                    process.terminate()
+                    // Give it a moment to die, then force kill
+                    Thread.sleep(forTimeInterval: 1)
+                    if process.isRunning { process.interrupt() }
+                    process.waitUntilExit()
+                } else {
+                    NSLog("runExtractor: process exited with status %d", process.terminationStatus)
+                }
+
                 DispatchQueue.main.async { self.syncExtractorProcess = nil }
                 try outHandle.close()
                 try errHandle.close()
@@ -1546,6 +1578,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if process.terminationStatus == 0 {
                     DispatchQueue.main.async {
                         completion(.success(outData))
+                    }
+                } else if process.terminationReason == .uncaughtSignal {
+                    let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
+                        NSLocalizedDescriptionKey: "Device query timed out — device may be busy recording"
+                    ])
+                    DispatchQueue.main.async {
+                        completion(.failure(error))
                     }
                 } else {
                     let message = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? "Extractor failed"
@@ -1896,6 +1935,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func refreshSyncStatus() {
+        guard !syncBusy else {
+            log("refreshSyncStatus: skipping, already busy")
+            return
+        }
         guard ensureExtractorReady() else { return }
         let devices = syncPairedDevices
         guard !devices.isEmpty else {
