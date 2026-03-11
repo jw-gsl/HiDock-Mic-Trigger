@@ -18,9 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import signal
 import struct
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -175,6 +177,50 @@ def md5_hex(text: str) -> str:
     import hashlib
 
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def detect_usb_owner(product_id: int | None = None) -> str | None:
+    """On macOS, check ioreg for which process holds the USB interface exclusively."""
+    if platform.system() != "Darwin":
+        return None
+    pid = product_id if product_id is not None else PRODUCT_ID
+    try:
+        result = subprocess.run(
+            ["ioreg", "-r", "-c", "IOUSBHostInterface", "-l", "-w0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Parse blocks separated by +-o markers
+        blocks = re.split(r"\+-o IOUSBHostInterface", result.stdout)
+        for block in blocks:
+            # Match vendor-specific interface (class 255) for our device
+            pid_match = re.search(r'"idProduct"\s*=\s*(\d+)', block)
+            vid_match = re.search(r'"idVendor"\s*=\s*(\d+)', block)
+            iclass_match = re.search(r'"bInterfaceClass"\s*=\s*(\d+)', block)
+            owner_match = re.search(r'"UsbExclusiveOwner"\s*=\s*"(.+?)"', block)
+            if (pid_match and int(pid_match.group(1)) == pid and
+                    vid_match and int(vid_match.group(1)) == VENDOR_ID and
+                    iclass_match and int(iclass_match.group(1)) == 255):
+                if owner_match:
+                    owner = owner_match.group(1)
+                    # If owner contains a PID, try to resolve the process name
+                    pid_in_owner = re.search(r"pid (\d+)", owner)
+                    if pid_in_owner:
+                        try:
+                            ps = subprocess.run(
+                                ["ps", "-p", pid_in_owner.group(1), "-o", "comm="],
+                                capture_output=True, text=True, timeout=3,
+                            )
+                            proc_name = ps.stdout.strip()
+                            if proc_name:
+                                return f"{proc_name} (pid {pid_in_owner.group(1)})"
+                        except Exception:
+                            pass
+                    return owner
+        # No exclusive owner found — could be WebUSB/Chrome holding at a different level
+        # Check if any Chrome-like process has USB connections
+        return None
+    except Exception:
+        return None
 
 
 def find_device(product_id: int | None = None):
@@ -757,6 +803,17 @@ def pull_file_by_partials_to_path(
     return offset
 
 
+def _enrich_usb_error(error_str: str, product_id: int | None = None) -> str:
+    """If a USB access error occurs, try to identify which process holds the device."""
+    owner = detect_usb_owner(product_id)
+    if owner:
+        return f"{error_str} — device held by {owner}"
+    # On macOS, "Access denied" with no ioreg owner often means WebUSB (Chrome/Edge)
+    if "Access denied" in error_str or "Errno 13" in error_str:
+        return f"{error_str} — another app (possibly a browser with WebUSB) may have the device open"
+    return error_str
+
+
 def probe_device(timeout_ms: int = 2000) -> dict:
     try:
         dev = find_device()
@@ -766,7 +823,7 @@ def probe_device(timeout_ms: int = 2000) -> dict:
     try:
         interface_number = prepare_device(dev)
     except usb.core.USBError as exc:
-        return {"connected": False, "available": True, "error": str(exc)}
+        return {"connected": False, "available": True, "error": _enrich_usb_error(str(exc))}
 
     try:
         items = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
@@ -875,13 +932,15 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     try:
         interface_number = prepare_device(dev)
     except usb.core.USBError as exc:
-        payload["error"] = str(exc)
+        payload["error"] = _enrich_usb_error(str(exc), product_id)
         return payload
 
     try:
         recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
+    except Exception as exc:
+        payload["error"] = f"Failed to query device: {exc}"
     finally:
         release_device(dev, interface_number)
     return payload

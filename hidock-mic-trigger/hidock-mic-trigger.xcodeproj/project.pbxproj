@@ -10,6 +10,7 @@
 		0F10797C46358815E38F5F11 /* HelpersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31F45B509F970DE308F947FD /* HelpersTests.swift */; };
 		2DD3DE44A7801C45E36FFC37 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */; };
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
+		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
 /* End PBXBuildFile section */
 
@@ -28,6 +29,7 @@
 		31F45B509F970DE308F947FD /* HelpersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpersTests.swift; sourceTree = "<group>"; };
 		614034CD6D618507904C5FFA /* hidock-mic-trigger-tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "hidock-mic-trigger-tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		640A7BCEAB107C1993E023E0 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		8CDAD4DE368D4BD1A70444DB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -56,6 +58,7 @@
 			children = (
 				640A7BCEAB107C1993E023E0 /* AppDelegate.swift */,
 				2588C13D72780DEF82479DD3 /* Helpers.swift */,
+				8CDAD4DE368D4BD1A70444DB /* main.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -178,6 +181,7 @@
 			files = (
 				4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */,
 				D0DA62924A664A5011685A7A /* Helpers.swift in Sources */,
+				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

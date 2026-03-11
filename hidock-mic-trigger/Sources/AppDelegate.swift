@@ -106,7 +106,6 @@ private struct HiDockSyncRecordingEntry {
 
 // formatRecordingDuration is now in Helpers.swift
 
-@main
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
@@ -1028,7 +1027,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - HiDock Sync Startup
 
     private func autoConnectSyncIfPaired() {
-        guard ensureExtractorReady() else { return }
+        guard ensureExtractorReady() else {
+            log("autoConnectSyncIfPaired: extractor not ready, aborting")
+            return
+        }
+        log("autoConnectSyncIfPaired: running list-devices")
 
         // First, discover all connected USB HiDock devices and auto-pair any new ones
         runExtractor(arguments: ["list-devices"]) { [weak self] result in
@@ -1054,6 +1057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             let group = DispatchGroup()
             var anyConnected = false
+            var lastError: String?
 
             for device in devices {
                 group.enter()
@@ -1063,10 +1067,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     case .success(let data):
                         if let status = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) {
                             self.renderSyncStatus(status, deviceProductId: device.productId, deviceName: device.cleanName)
-                            if status.connected { anyConnected = true }
+                            if status.connected {
+                                anyConnected = true
+                            } else if let err = status.error {
+                                self.log("Auto-connect: \(device.cleanName) not connected: \(err)")
+                                lastError = err
+                            }
                         }
-                    case .failure:
-                        break
+                    case .failure(let error):
+                        let desc = error.localizedDescription
+                        // Extract last line of traceback for cleaner display
+                        let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
+                        self.log("Auto-connect: \(device.cleanName) failed: \(shortDesc)")
+                        lastError = shortDesc
                     }
                     group.leave()
                 }
@@ -1074,6 +1087,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             group.notify(queue: .main) { [weak self] in
                 guard let self = self else { return }
+                if !anyConnected, let err = lastError {
+                    let message = self.syncErrorDescription(err)
+                    self.syncStatusLabel?.stringValue = "Status: \(message)"
+                    self.syncStatusLabel?.textColor = .systemOrange
+                }
                 self.updateWindowSyncSummary()
                 self.updateMenuSyncStatus(connected: anyConnected)
             }
@@ -1495,6 +1513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func runExtractor(arguments: [String], productId: Int? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
+        log("runExtractor: \(fullArgs.joined(separator: " "))")
         syncExtractorQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
@@ -1681,7 +1700,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func syncErrorDescription(_ error: String) -> String {
         if error.contains("Errno 13") || error.localizedCaseInsensitiveContains("Access denied") {
-            return "Dock busy: close browsers or other tools using HiDock, then Refresh"
+            // Extract the "held by ..." part if the extractor identified the owner
+            if let range = error.range(of: "held by ") {
+                let owner = String(error[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return "USB busy — held by \(owner). Close it and Refresh."
+            }
+            if error.contains("WebUSB") || error.contains("browser") {
+                return "USB busy — a browser (WebUSB) may have the device open. Close the tab and Refresh."
+            }
+            return "USB busy — another app has the device open. Close it and Refresh."
         }
         return error
     }
@@ -1897,14 +1924,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     do {
                         let payload = try JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data)
                         self.renderSyncStatus(payload, deviceProductId: device.productId, deviceName: device.cleanName)
-                        if payload.connected { anyConnected = true }
+                        if payload.connected {
+                            anyConnected = true
+                        } else if let err = payload.error {
+                            self.log("HiDock sync: \(device.cleanName) not connected: \(err)")
+                            lastError = err
+                        }
                     } catch {
                         self.log("HiDock sync decode failure for \(device.cleanName): \(error.localizedDescription)")
                         lastError = error.localizedDescription
                     }
                 case .failure(let error):
-                    self.log("HiDock sync status error for \(device.cleanName): \(error.localizedDescription)")
-                    lastError = error.localizedDescription
+                    let desc = error.localizedDescription
+                    let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
+                    self.log("HiDock sync status error for \(device.cleanName): \(shortDesc)")
+                    lastError = shortDesc
                 }
                 group.leave()
             }
