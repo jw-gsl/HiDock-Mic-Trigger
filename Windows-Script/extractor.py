@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import platform
+import signal
 import struct
 import sys
 import tempfile
@@ -191,17 +192,22 @@ def md5_hex(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-def find_device():
-    dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID, backend=_backend)
+def find_device(product_id: int | None = None):
+    pid = product_id if product_id is not None else PRODUCT_ID
+    dev = usb.core.find(idVendor=VENDOR_ID, idProduct=pid, backend=_backend)
     if dev is None:
         raise FileNotFoundError(
-            f"HiDock device {VENDOR_ID}:{PRODUCT_ID} not found. "
+            f"HiDock device {VENDOR_ID}:{pid} not found. "
             f"On Windows, ensure the WinUSB driver is installed via Zadig."
         )
     return dev
 
 
 def prepare_device(dev):
+    try:
+        dev.reset()
+    except usb.core.USBError:
+        pass
     try:
         dev.set_configuration()
     except usb.core.USBError:
@@ -232,6 +238,20 @@ def release_device(dev, interface_number: int) -> None:
     except usb.core.USBError:
         pass
     usb.util.dispose_resources(dev)
+
+
+# Global reference for signal handler cleanup
+_active_dev = None
+_active_intf = None
+
+
+def _sigterm_handler(signum, frame):
+    if _active_dev is not None and _active_intf is not None:
+        release_device(_active_dev, _active_intf)
+    sys.exit(143)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def parse_frame(buf: bytes) -> tuple[int, int, bytes]:
@@ -866,8 +886,11 @@ def download_one(
     state = load_state(state_path)
     downloads = state["downloads"]
 
+    global _active_dev, _active_intf
     dev = find_device()
     interface_number = prepare_device(dev)
+    _active_dev = dev
+    _active_intf = interface_number
     try:
         if length is None:
             recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
@@ -900,6 +923,8 @@ def download_one(
         raise
     finally:
         release_device(dev, interface_number)
+        _active_dev = None
+        _active_intf = None
 
     record = {
         **downloads.get(filename, {}),
