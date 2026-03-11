@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import signal
 import struct
 import sys
@@ -73,6 +74,7 @@ CMD_QUERY_FILE_COUNT = 0x0006
 CMD_GET_FILE_BLOCK = 0x000D
 CMD_TRANSFER_FILE_PARTIAL = 0x0015
 MAX_EMPTY_READS = 4
+MAX_PAYLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_STATE_PATH = BASE_DIR / "state.json"
@@ -177,8 +179,20 @@ def build_offset_length_name_payload(filename: str, offset: int, length: int) ->
     return struct.pack(">I", offset) + struct.pack(">I", length) + filename.encode("ascii")
 
 
+SAFE_FILENAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+
+
+def validate_filename(filename: str) -> str:
+    """Validate a device-provided filename, rejecting path traversal attempts."""
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        raise HiDockProtocolError(f"unsafe filename from device: {filename!r}")
+    if not SAFE_FILENAME_RE.match(filename):
+        raise HiDockProtocolError(f"unsafe filename from device: {filename!r}")
+    return filename
+
+
 def output_name_for(filename: str) -> str:
-    base = Path(filename).name
+    base = validate_filename(filename)
     if base.lower().endswith(".hda"):
         return base[:-4] + ".mp3"
     return base + ".mp3"
@@ -264,6 +278,8 @@ def parse_frame(buf: bytes) -> tuple[int, int, bytes]:
     cmd = struct.unpack(">H", buf[2:4])[0]
     req_id = struct.unpack(">I", buf[4:8])[0]
     payload_len = struct.unpack(">I", buf[8:12])[0]
+    if payload_len > MAX_PAYLOAD_SIZE:
+        raise HiDockProtocolError(f"payload too large: {payload_len} bytes (max {MAX_PAYLOAD_SIZE})")
     payload = buf[12 : 12 + payload_len]
     return cmd, req_id, payload
 

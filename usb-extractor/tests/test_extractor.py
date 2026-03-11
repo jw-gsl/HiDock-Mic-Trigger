@@ -12,6 +12,7 @@ from extractor import (
     HEADER,
     CMD_TRANSFER,
     CMD_QUERY_FILE_LIST,
+    MAX_PAYLOAD_SIZE,
     HiDockProtocolError,
     human_size,
     build_transfer_request,
@@ -19,6 +20,7 @@ from extractor import (
     build_name_only_payload,
     build_length_name_payload,
     build_offset_length_name_payload,
+    validate_filename,
     output_name_for,
     output_path_for,
     md5_hex,
@@ -68,9 +70,10 @@ class TestOutputNaming:
     def test_already_mp3(self):
         assert output_name_for("file.mp3") == "file.mp3.mp3"
 
-    def test_path_traversal_stripped(self):
-        # Path.name strips directory components
-        assert output_name_for("../../etc/passwd.hda") == "passwd.mp3"
+    def test_path_traversal_rejected(self):
+        # validate_filename rejects path traversal attempts
+        with pytest.raises(HiDockProtocolError, match="unsafe filename"):
+            output_name_for("../../etc/passwd.hda")
 
     def test_output_path_for(self):
         result = output_path_for("test.hda", Path("/tmp/out"))
@@ -404,6 +407,69 @@ class TestBuildRecordingStatusItems:
         items = build_recording_status_items(recordings, state, tmp_path)
         assert items[0]["status"] == "failed"
         assert items[0]["lastError"] == "timed out"
+
+
+# ---------------------------------------------------------------------------
+# utc_now_iso
+# ---------------------------------------------------------------------------
+class TestValidateFilename:
+    def test_valid_simple_name(self):
+        assert validate_filename("recording.hda") == "recording.hda"
+
+    def test_valid_with_dashes_and_dots(self):
+        assert validate_filename("2026Feb25-111702-Rec25.hda") == "2026Feb25-111702-Rec25.hda"
+
+    def test_valid_underscores(self):
+        assert validate_filename("my_file_01.wav") == "my_file_01.wav"
+
+    def test_path_traversal_rejected(self):
+        with pytest.raises(HiDockProtocolError, match="unsafe filename"):
+            validate_filename("../../etc/passwd")
+
+    def test_path_traversal_backslash_rejected(self):
+        with pytest.raises(HiDockProtocolError, match="unsafe filename"):
+            validate_filename("..\\..\\windows\\system32\\config")
+
+    def test_empty_string_rejected(self):
+        with pytest.raises(HiDockProtocolError, match="unsafe filename"):
+            validate_filename("")
+
+    def test_spaces_rejected(self):
+        with pytest.raises(HiDockProtocolError, match="unsafe filename"):
+            validate_filename("my file.hda")
+
+    def test_directory_component_rejected(self):
+        with pytest.raises(HiDockProtocolError, match="unsafe filename"):
+            validate_filename("subdir/safe.hda")
+
+
+# ---------------------------------------------------------------------------
+# parse_frame — oversized payload
+# ---------------------------------------------------------------------------
+class TestParseFramePayloadLimit:
+    def test_oversized_payload_rejected(self):
+        oversized_len = MAX_PAYLOAD_SIZE + 1
+        frame = (
+            HEADER
+            + struct.pack(">H", 0x0005)
+            + struct.pack(">I", 1)
+            + struct.pack(">I", oversized_len)
+        )
+        with pytest.raises(HiDockProtocolError, match="payload too large"):
+            parse_frame(frame)
+
+    def test_max_payload_accepted(self):
+        # Exactly MAX_PAYLOAD_SIZE should not raise (even if payload bytes are short)
+        frame = (
+            HEADER
+            + struct.pack(">H", 0x0005)
+            + struct.pack(">I", 1)
+            + struct.pack(">I", MAX_PAYLOAD_SIZE)
+            + b"\x00"  # truncated payload is fine — parse_frame just slices
+        )
+        cmd, req_id, payload = parse_frame(frame)
+        assert cmd == 0x0005
+        assert req_id == 1
 
 
 # ---------------------------------------------------------------------------
