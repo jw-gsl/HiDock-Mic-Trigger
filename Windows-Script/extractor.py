@@ -98,7 +98,9 @@ def load_json_file(path: Path, default):
 
 def save_json_file(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(str(tmp), str(path))
 
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -616,6 +618,7 @@ def transfer_file_stream_to_path(
     progress=None,
 ) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(out_path.suffix + '.downloading')
     payload = build_name_only_payload(filename)
     request = build_simple_request(CMD_TRANSFER, request_id, payload)
     dev.write(OUT_ENDPOINT, request, timeout=timeout_ms)
@@ -626,44 +629,54 @@ def transfer_file_stream_to_path(
     started = False
     last_seq = request_id
 
-    with out_path.open("wb") as fh:
-        while received < total_length:
-            try:
-                data = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=timeout_ms))
-            except usb.core.USBTimeoutError:
-                timeouts += 1
-                if received and timeouts >= 8:
-                    break
-                if timeouts >= 8:
-                    raise TimeoutError("timed out waiting for HiDock transfer stream")
-                continue
+    try:
+        with tmp_path.open("wb") as fh:
+            while received < total_length:
+                try:
+                    data = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=timeout_ms))
+                except usb.core.USBTimeoutError:
+                    timeouts += 1
+                    if received and timeouts >= 8:
+                        break
+                    if timeouts >= 8:
+                        raise TimeoutError("timed out waiting for HiDock transfer stream")
+                    continue
 
-            timeouts = 0
-            pending += data
-            frames, pending = extract_frames(pending)
-            for cmd, req, body in frames:
-                if cmd != CMD_TRANSFER:
-                    continue
-                if not started:
-                    if req != request_id:
+                timeouts = 0
+                pending += data
+                frames, pending = extract_frames(pending)
+                for cmd, req, body in frames:
+                    if cmd != CMD_TRANSFER:
                         continue
-                    started = True
-                else:
-                    if req < last_seq:
+                    if not started:
+                        if req != request_id:
+                            continue
+                        started = True
+                    else:
+                        if req < last_seq:
+                            continue
+                    last_seq = req
+                    if not body:
+                        if received:
+                            os.replace(str(tmp_path), str(out_path))
+                            return received
                         continue
-                last_seq = req
-                if not body:
-                    if received:
+                    if received + len(body) > total_length:
+                        body = body[: total_length - received]
+                    fh.write(body)
+                    received += len(body)
+                    if progress is not None:
+                        progress(received, total_length)
+                    if received >= total_length:
+                        os.replace(str(tmp_path), str(out_path))
                         return received
-                    continue
-                if received + len(body) > total_length:
-                    body = body[: total_length - received]
-                fh.write(body)
-                received += len(body)
-                if progress is not None:
-                    progress(received, total_length)
-                if received >= total_length:
-                    return received
+        os.replace(str(tmp_path), str(out_path))
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return received
 
 
