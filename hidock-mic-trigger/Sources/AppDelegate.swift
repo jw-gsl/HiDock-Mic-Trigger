@@ -172,12 +172,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let crashRetryDelay: TimeInterval = 3
 
     private let logPath = "\(NSHomeDirectory())/Library/Logs/hidock-menubar.log"
-    private let repoRoot = "\(NSHomeDirectory())/_git/hidock-tools"
+    private let repoRootKey = "hidockRepoRoot"
     private let syncPairedKey = "hidockSyncPaired"
     private let syncPairedDevicesKey = "hidockSyncPairedDevices"
     private let syncOutputFolderKey = "hidockSyncOutputFolder"
     private let syncHideDownloadedKey = "hidockSyncHideDownloaded"
     private let syncAutoDownloadKey = "hidockSyncAutoDownload"
+
+    /// Repo root resolved from UserDefaults, falling back to the default home directory path.
+    private var repoRoot: String {
+        if let saved = UserDefaults.standard.string(forKey: repoRootKey), !saved.isEmpty {
+            return saved
+        }
+        return "\(NSHomeDirectory())/_git/hidock-tools"
+    }
 
     private var extractorRoot: String {
         "\(repoRoot)/usb-extractor"
@@ -1473,12 +1481,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func ensureExtractorReady() -> Bool {
+        let configHint = "\n\nTo fix, set the repo path via:\n  defaults write com.hidock.mic-trigger \(repoRootKey) /path/to/hidock-tools"
         guard FileManager.default.fileExists(atPath: extractorScriptPath) else {
-            showError("HiDock extractor not found.\nExpected: \(extractorScriptPath)")
+            showError("HiDock extractor not found.\nExpected: \(extractorScriptPath)\(configHint)")
             return false
         }
         guard FileManager.default.isExecutableFile(atPath: extractorPythonPath) else {
-            showError("Extractor Python venv not found.\nExpected executable: \(extractorPythonPath)")
+            showError("Extractor Python venv not found.\nExpected executable: \(extractorPythonPath)\(configHint)")
             return false
         }
         return true
@@ -2438,6 +2447,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let line = "[\(Date())] \(message)\n"
         NSLog("%@", message)
         guard let data = line.data(using: .utf8) else { return }
+
+        // Rotate if over 5 MB
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
+           let size = attrs[.size] as? UInt64, size > 5 * 1024 * 1024 {
+            let oldPath = logPath + ".old"
+            try? FileManager.default.removeItem(atPath: oldPath)
+            try? FileManager.default.moveItem(atPath: logPath, toPath: oldPath)
+        }
+
         do {
             let logURL = URL(fileURLWithPath: logPath)
             if FileManager.default.fileExists(atPath: logPath) {

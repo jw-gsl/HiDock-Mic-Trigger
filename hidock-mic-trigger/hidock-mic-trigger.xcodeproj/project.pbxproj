@@ -94,6 +94,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6EFD777B6FC8F377CF9DBECC /* Build configuration list for PBXNativeTarget "hidock-mic-trigger" */;
 			buildPhases = (
+				1379B50CC7CFED673B7DF228 /* Run Python Tests */,
 				B8B35C05E704237791E8FFDC /* Sources */,
 				9D47208B9B2A0D651E37F96B /* Resources */,
 			);
@@ -147,6 +148,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		1379B50CC7CFED673B7DF228 /* Run Python Tests */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Run Python Tests";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cd \"$SRCROOT/../usb-extractor\"\nif [ -f \".venv/bin/python\" ]; then\n  .venv/bin/python -m pytest tests/ --tb=short -q\nelse\n  echo \"warning: Python venv not found, skipping extractor tests\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		B8B35C05E704237791E8FFDC /* Sources */ = {

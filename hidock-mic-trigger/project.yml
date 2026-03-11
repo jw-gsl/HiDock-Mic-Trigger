@@ -10,6 +10,16 @@ targets:
   hidock-mic-trigger:
     type: application
     platform: macOS
+    preBuildScripts:
+      - name: "Run Python Tests"
+        script: |
+          cd "$SRCROOT/../usb-extractor"
+          if [ -f ".venv/bin/python" ]; then
+            .venv/bin/python -m pytest tests/ --tb=short -q
+          else
+            echo "warning: Python venv not found, skipping extractor tests"
+          fi
+        basedOnDependencyAnalysis: false
     sources:
       - Sources
       - Assets.xcassets
