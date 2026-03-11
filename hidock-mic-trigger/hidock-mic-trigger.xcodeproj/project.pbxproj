@@ -7,24 +7,46 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0F10797C46358815E38F5F11 /* HelpersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31F45B509F970DE308F947FD /* HelpersTests.swift */; };
 		2DD3DE44A7801C45E36FFC37 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */; };
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
-		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
+		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		588D119139E1BFE27EF5452D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DAF9D8607B4AF4D05DE02267 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D71A44800DD561C06AB4A29E;
+			remoteInfo = "hidock-mic-trigger";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		2588C13D72780DEF82479DD3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
+		31F45B509F970DE308F947FD /* HelpersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpersTests.swift; sourceTree = "<group>"; };
+		614034CD6D618507904C5FFA /* hidock-mic-trigger-tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "hidock-mic-trigger-tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		640A7BCEAB107C1993E023E0 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		8CDAD4DE368D4BD1A70444DB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		069FA42684CEB8AD8A4040FF /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				31F45B509F970DE308F947FD /* HelpersTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
 		395C21CA479F546E2F018216 = {
 			isa = PBXGroup;
 			children = (
 				EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */,
 				E53BDC58969FA907D9833E0B /* Sources */,
+				069FA42684CEB8AD8A4040FF /* Tests */,
 				F17E692D4D29F11982F4DCBD /* Products */,
 			);
 			sourceTree = "<group>";
@@ -33,7 +55,7 @@
 			isa = PBXGroup;
 			children = (
 				640A7BCEAB107C1993E023E0 /* AppDelegate.swift */,
-				8CDAD4DE368D4BD1A70444DB /* main.swift */,
+				2588C13D72780DEF82479DD3 /* Helpers.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -41,6 +63,7 @@
 		F17E692D4D29F11982F4DCBD /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				614034CD6D618507904C5FFA /* hidock-mic-trigger-tests.xctest */,
 				AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */,
 			);
 			name = Products;
@@ -49,6 +72,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		518EB9CFAD539596CE17C732 /* hidock-mic-trigger-tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 042202FC73613A04F4A2F6FA /* Build configuration list for PBXNativeTarget "hidock-mic-trigger-tests" */;
+			buildPhases = (
+				DF9A37D9E815C1592A16D009 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9CEC0132B607C25ADF0A0AEA /* PBXTargetDependency */,
+			);
+			name = "hidock-mic-trigger-tests";
+			packageProductDependencies = (
+			);
+			productName = "hidock-mic-trigger-tests";
+			productReference = 614034CD6D618507904C5FFA /* hidock-mic-trigger-tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		D71A44800DD561C06AB4A29E /* hidock-mic-trigger */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6EFD777B6FC8F377CF9DBECC /* Build configuration list for PBXNativeTarget "hidock-mic-trigger" */;
@@ -91,6 +132,7 @@
 			projectRoot = "";
 			targets = (
 				D71A44800DD561C06AB4A29E /* hidock-mic-trigger */,
+				518EB9CFAD539596CE17C732 /* hidock-mic-trigger-tests */,
 			);
 		};
 /* End PBXProject section */
@@ -112,13 +154,46 @@
 			buildActionMask = 2147483647;
 			files = (
 				4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */,
-				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,
+				D0DA62924A664A5011685A7A /* Helpers.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DF9A37D9E815C1592A16D009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0F10797C46358815E38F5F11 /* HelpersTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		9CEC0132B607C25ADF0A0AEA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D71A44800DD561C06AB4A29E /* hidock-mic-trigger */;
+			targetProxy = 588D119139E1BFE27EF5452D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		0207486B0A598D5EDBF43A33 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-tests";
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hidock-mic-trigger.app/Contents/MacOS/hidock-mic-trigger";
+			};
+			name = Release;
+		};
 		34D438F454BDEAA876CB6D68 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -213,6 +288,23 @@
 			};
 			name = Release;
 		};
+		9ED26B4ED8E8A7B9BB4D6738 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-tests";
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hidock-mic-trigger.app/Contents/MacOS/hidock-mic-trigger";
+			};
+			name = Debug;
+		};
 		CE43E6BD8DB45F46A2BD54B2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -281,6 +373,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		042202FC73613A04F4A2F6FA /* Build configuration list for PBXNativeTarget "hidock-mic-trigger-tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9ED26B4ED8E8A7B9BB4D6738 /* Debug */,
+				0207486B0A598D5EDBF43A33 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		6EFD777B6FC8F377CF9DBECC /* Build configuration list for PBXNativeTarget "hidock-mic-trigger" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

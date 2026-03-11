@@ -28,3 +28,14 @@ targets:
         CFBundleVersion: "1"
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
+  hidock-mic-trigger-tests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+    dependencies:
+      - target: hidock-mic-trigger
+    settings:
+      TEST_HOST: "$(BUILT_PRODUCTS_DIR)/hidock-mic-trigger.app/Contents/MacOS/hidock-mic-trigger"
+      BUNDLE_LOADER: "$(TEST_HOST)"
+      GENERATE_INFOPLIST_FILE: YES

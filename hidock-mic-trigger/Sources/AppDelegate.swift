@@ -60,12 +60,7 @@ private struct HiDockDevice: Codable {
     let address: Int?
 
     var displayName: String {
-        var raw = productName ?? "HiDock"
-        // Remove serial number in brackets/parentheses, e.g. "HiDock_H1_(SN12345)" -> "HiDock_H1"
-        if let range = raw.range(of: "\\s*[\\(\\[].*[\\)\\]]", options: .regularExpression) {
-            raw.removeSubrange(range)
-        }
-        return raw.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces)
+        sanitizeDeviceName(productName ?? "HiDock")
     }
 
     var shortName: String {
@@ -87,11 +82,7 @@ private struct HiDockPairedDevice: Codable, Equatable {
 
     /// Sanitized name: removes serial in brackets, replaces underscores
     var cleanName: String {
-        var raw = displayName
-        if let range = raw.range(of: "\\s*[\\(\\[].*[\\)\\]]", options: .regularExpression) {
-            raw.removeSubrange(range)
-        }
-        return raw.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces)
+        sanitizeDeviceName(displayName)
     }
 
     var shortName: String {
@@ -113,17 +104,9 @@ private struct HiDockSyncRecordingEntry {
     let deviceName: String
 }
 
-private func formatRecordingDuration(_ seconds: Double) -> String {
-    let total = max(Int(seconds.rounded()), 0)
-    let hours = total / 3600
-    let minutes = (total % 3600) / 60
-    let secs = total % 60
-    if hours > 0 {
-        return String(format: "%d:%02d:%02d", hours, minutes, secs)
-    }
-    return String(format: "%d:%02d", minutes, secs)
-}
+// formatRecordingDuration is now in Helpers.swift
 
+@main
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
@@ -832,20 +815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateWindowState()
     }
 
-    private func shortenMicName(_ name: String) -> String {
-        let noise: [String] = [
-            "Microphone", "Mic", "USB Audio", "USB", "Audio Device",
-            "Digital", "Sound", "Device", "Input",
-        ]
-        var parts = name.components(separatedBy: " ")
-        parts = parts.filter { word in
-            !noise.contains { word.caseInsensitiveCompare($0) == .orderedSame }
-        }
-        let short = parts.joined(separator: " ")
-            .trimmingCharacters(in: .whitespaces)
-        if short.isEmpty { return name }
-        return short
-    }
+    // shortenMicName is now in Helpers.swift
 
     private func updateWindowState() {
         let running = (process != nil)
