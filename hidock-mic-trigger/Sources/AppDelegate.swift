@@ -172,6 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncAutoDownloadTimer: Timer?
     private var windowSyncSummaryLabel: NSTextField?
     private var syncExtractorProcess: Process?
+    private let syncExtractorQueue = DispatchQueue(label: "hidock.extractor", qos: .userInitiated)
     private var syncStopButton: NSButton?
     private var syncDownloadStartDate: Date?
     private var syncDownloadTimer: Timer?
@@ -1515,7 +1516,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func runExtractor(arguments: [String], productId: Int? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
-        DispatchQueue.global(qos: .userInitiated).async {
+        syncExtractorQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
             process.executableURL = URL(fileURLWithPath: self.extractorPythonPath)
@@ -1567,7 +1568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func runExtractorWithProgress(arguments: [String], productId: Int? = nil, onProgress: @escaping (Int, Int, Int) -> Void, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
-        DispatchQueue.global(qos: .userInitiated).async {
+        syncExtractorQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
             process.executableURL = URL(fileURLWithPath: self.extractorPythonPath)
