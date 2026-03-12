@@ -138,6 +138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncHideDownloadedCheckbox: NSButton?
     private var syncAutoDownloadCheckbox: NSButton?
     private var syncOutputFolder: String?
+    private var syncTranscriptFolderLabel: NSTextField?
+    private var syncTranscriptFolder: String?
     private var syncEntries: [HiDockSyncRecordingEntry] = []
     private var syncCheckedRecordings: Set<String> = []
     private var syncHideDownloaded = false
@@ -184,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let syncPairedKey = "hidockSyncPaired"
     private let syncPairedDevicesKey = "hidockSyncPairedDevices"
     private let syncOutputFolderKey = "hidockSyncOutputFolder"
+    private let syncTranscriptFolderKey = "hidockSyncTranscriptFolder"
     private let syncHideDownloadedKey = "hidockSyncHideDownloaded"
     private let syncAutoDownloadKey = "hidockSyncAutoDownload"
 
@@ -1279,7 +1282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             contentView.addSubview(status)
             syncStatusLabel = status
 
-            let folder = NSTextField(labelWithString: "Output folder: Not set")
+            let folder = NSTextField(labelWithString: "Recordings folder: Not set")
             folder.font = .systemFont(ofSize: 12)
             folder.textColor = .secondaryLabelColor
             folder.frame = NSRect(x: 20, y: 478, width: 1080, height: 18)
@@ -1288,7 +1291,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncFolderLabel = folder
             if let savedFolder = UserDefaults.standard.string(forKey: syncOutputFolderKey), !savedFolder.isEmpty {
                 syncOutputFolder = savedFolder
-                syncFolderLabel?.stringValue = "Output folder: \(savedFolder)"
+                syncFolderLabel?.stringValue = "Recordings folder: \(savedFolder)"
+            }
+
+            let transcriptFolder = NSTextField(labelWithString: "Transcript folder: ~/HiDock/Raw Transcripts")
+            transcriptFolder.font = .systemFont(ofSize: 12)
+            transcriptFolder.textColor = .secondaryLabelColor
+            transcriptFolder.frame = NSRect(x: 20, y: 460, width: 1080, height: 18)
+            transcriptFolder.autoresizingMask = [.width, .minYMargin]
+            contentView.addSubview(transcriptFolder)
+            syncTranscriptFolderLabel = transcriptFolder
+            if let savedTranscriptFolder = UserDefaults.standard.string(forKey: syncTranscriptFolderKey), !savedTranscriptFolder.isEmpty {
+                syncTranscriptFolder = savedTranscriptFolder
+                syncTranscriptFolderLabel?.stringValue = "Transcript folder: \(savedTranscriptFolder)"
+            } else {
+                syncTranscriptFolder = "\(NSHomeDirectory())/HiDock/Raw Transcripts"
             }
 
             let summary = NSTextField(labelWithString: "No recordings loaded")
@@ -1300,30 +1317,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             contentView.addSubview(summary)
             syncSummaryLabel = summary
 
-            // Row 1 (top toolbar): Pair, Unpair, Choose Folder, Refresh
+            // Row 1 (top toolbar): Pair, Unpair, Recordings Folder, Transcript Folder, Refresh
             let pairBtn = NSButton(title: "Pair Dock", target: self, action: #selector(pairSyncDock))
             pairBtn.bezelStyle = .rounded
-            pairBtn.frame = NSRect(x: 20, y: 450, width: 100, height: 28)
+            pairBtn.frame = NSRect(x: 20, y: 432, width: 100, height: 28)
             pairBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(pairBtn)
             syncPairButton = pairBtn
 
             let unpairBtn = NSButton(title: "Unpair", target: self, action: #selector(unpairSyncDock))
             unpairBtn.bezelStyle = .rounded
-            unpairBtn.frame = NSRect(x: 128, y: 450, width: 90, height: 28)
+            unpairBtn.frame = NSRect(x: 128, y: 432, width: 90, height: 28)
             unpairBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(unpairBtn)
             syncUnpairButton = unpairBtn
 
-            let chooseBtn = NSButton(title: "Choose Folder", target: self, action: #selector(chooseSyncOutputFolder))
+            let chooseBtn = NSButton(title: "Recordings Folder", target: self, action: #selector(chooseSyncOutputFolder))
             chooseBtn.bezelStyle = .rounded
-            chooseBtn.frame = NSRect(x: 226, y: 450, width: 120, height: 28)
+            chooseBtn.frame = NSRect(x: 226, y: 432, width: 140, height: 28)
             chooseBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(chooseBtn)
 
+            let chooseTranscriptBtn = NSButton(title: "Transcript Folder", target: self, action: #selector(chooseTranscriptOutputFolder))
+            chooseTranscriptBtn.bezelStyle = .rounded
+            chooseTranscriptBtn.frame = NSRect(x: 374, y: 432, width: 140, height: 28)
+            chooseTranscriptBtn.autoresizingMask = [.maxXMargin, .minYMargin]
+            contentView.addSubview(chooseTranscriptBtn)
+
             let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(refreshSyncStatus))
             refreshBtn.bezelStyle = .rounded
-            refreshBtn.frame = NSRect(x: 354, y: 450, width: 90, height: 28)
+            refreshBtn.frame = NSRect(x: 522, y: 432, width: 90, height: 28)
             refreshBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(refreshBtn)
             syncRefreshButton = refreshBtn
@@ -1331,27 +1354,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // Row 2: Download Selected, Download New, Mark Downloaded, Stop, Transcribe Selected, Transcribe All
             let downloadSelectedBtn = NSButton(title: "Download Selected", target: self, action: #selector(downloadSelectedSyncRecording))
             downloadSelectedBtn.bezelStyle = .rounded
-            downloadSelectedBtn.frame = NSRect(x: 20, y: 422, width: 140, height: 28)
+            downloadSelectedBtn.frame = NSRect(x: 20, y: 404, width: 140, height: 28)
             downloadSelectedBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(downloadSelectedBtn)
             syncDownloadSelectedButton = downloadSelectedBtn
 
             let downloadNewBtn = NSButton(title: "Download New", target: self, action: #selector(downloadNewSyncRecordings))
             downloadNewBtn.bezelStyle = .rounded
-            downloadNewBtn.frame = NSRect(x: 168, y: 422, width: 120, height: 28)
+            downloadNewBtn.frame = NSRect(x: 168, y: 404, width: 120, height: 28)
             downloadNewBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(downloadNewBtn)
             syncDownloadNewButton = downloadNewBtn
 
             let markBtn = NSButton(title: "Mark Downloaded", target: self, action: #selector(markSyncRecordingsAsDownloaded))
             markBtn.bezelStyle = .rounded
-            markBtn.frame = NSRect(x: 296, y: 422, width: 140, height: 28)
+            markBtn.frame = NSRect(x: 296, y: 404, width: 140, height: 28)
             markBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(markBtn)
 
             let stopBtn = NSButton(title: "Stop Download", target: self, action: #selector(stopSyncDownload))
             stopBtn.bezelStyle = .rounded
-            stopBtn.frame = NSRect(x: 20, y: 422, width: 416, height: 28)
+            stopBtn.frame = NSRect(x: 20, y: 404, width: 416, height: 28)
             stopBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             stopBtn.contentTintColor = .systemRed
             stopBtn.isHidden = true
@@ -1360,14 +1383,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             let transcribeSelectedBtn = NSButton(title: "Transcribe Selected", target: self, action: #selector(transcribeSelectedRecordings))
             transcribeSelectedBtn.bezelStyle = .rounded
-            transcribeSelectedBtn.frame = NSRect(x: 444, y: 422, width: 150, height: 28)
+            transcribeSelectedBtn.frame = NSRect(x: 444, y: 404, width: 150, height: 28)
             transcribeSelectedBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(transcribeSelectedBtn)
             syncTranscribeSelectedButton = transcribeSelectedBtn
 
             let transcribeAllBtn = NSButton(title: "Transcribe All", target: self, action: #selector(transcribeAllRecordings))
             transcribeAllBtn.bezelStyle = .rounded
-            transcribeAllBtn.frame = NSRect(x: 602, y: 422, width: 120, height: 28)
+            transcribeAllBtn.frame = NSRect(x: 602, y: 404, width: 120, height: 28)
             transcribeAllBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(transcribeAllBtn)
             syncTranscribeAllButton = transcribeAllBtn
@@ -1377,7 +1400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             selectAllBtn.bezelStyle = .rounded
             selectAllBtn.controlSize = .small
             selectAllBtn.font = .systemFont(ofSize: 11)
-            selectAllBtn.frame = NSRect(x: 20, y: 394, width: 80, height: 22)
+            selectAllBtn.frame = NSRect(x: 20, y: 376, width: 80, height: 22)
             selectAllBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(selectAllBtn)
 
@@ -1385,7 +1408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             selectNoneBtn.bezelStyle = .rounded
             selectNoneBtn.controlSize = .small
             selectNoneBtn.font = .systemFont(ofSize: 11)
-            selectNoneBtn.frame = NSRect(x: 108, y: 394, width: 86, height: 22)
+            selectNoneBtn.frame = NSRect(x: 108, y: 376, width: 86, height: 22)
             selectNoneBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(selectNoneBtn)
 
@@ -1393,20 +1416,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             selectNewBtn.bezelStyle = .rounded
             selectNewBtn.controlSize = .small
             selectNewBtn.font = .systemFont(ofSize: 11)
-            selectNewBtn.frame = NSRect(x: 202, y: 394, width: 150, height: 22)
+            selectNewBtn.frame = NSRect(x: 202, y: 376, width: 150, height: 22)
             selectNewBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(selectNewBtn)
 
             // Device filter buttons
             let filterLabel = NSTextField(labelWithString: "Filter:")
             filterLabel.font = .systemFont(ofSize: 11, weight: .medium)
-            filterLabel.frame = NSRect(x: 380, y: 394, width: 40, height: 22)
+            filterLabel.frame = NSRect(x: 380, y: 376, width: 40, height: 22)
             filterLabel.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(filterLabel)
 
             // Checkboxes on the right side of Row 3
             let hideDownloadedCheckbox = NSButton(checkboxWithTitle: "Hide Downloaded", target: self, action: #selector(toggleHideDownloaded(_:)))
-            hideDownloadedCheckbox.frame = NSRect(x: 820, y: 396, width: 150, height: 22)
+            hideDownloadedCheckbox.frame = NSRect(x: 820, y: 378, width: 150, height: 22)
             hideDownloadedCheckbox.state = UserDefaults.standard.bool(forKey: syncHideDownloadedKey) ? .on : .off
             hideDownloadedCheckbox.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(hideDownloadedCheckbox)
@@ -1414,7 +1437,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncHideDownloaded = hideDownloadedCheckbox.state == .on
 
             let autoDownloadCheckbox = NSButton(checkboxWithTitle: "Auto-download New", target: self, action: #selector(toggleAutoDownload(_:)))
-            autoDownloadCheckbox.frame = NSRect(x: 970, y: 396, width: 170, height: 22)
+            autoDownloadCheckbox.frame = NSRect(x: 970, y: 378, width: 170, height: 22)
             autoDownloadCheckbox.state = UserDefaults.standard.bool(forKey: syncAutoDownloadKey) ? .on : .off
             autoDownloadCheckbox.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(autoDownloadCheckbox)
@@ -1426,7 +1449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             allDevicesBtn.controlSize = .small
             allDevicesBtn.font = .systemFont(ofSize: 11, weight: .semibold)
             allDevicesBtn.tag = 0
-            allDevicesBtn.frame = NSRect(x: 422, y: 394, width: 40, height: 22)
+            allDevicesBtn.frame = NSRect(x: 422, y: 376, width: 40, height: 22)
             allDevicesBtn.autoresizingMask = [.maxXMargin, .minYMargin]
             contentView.addSubview(allDevicesBtn)
             syncDeviceFilterButtons = [allDevicesBtn]
@@ -1439,14 +1462,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 btn.font = .systemFont(ofSize: 11)
                 btn.tag = device.productId
                 let btnWidth = max(CGFloat(device.shortName.count) * 8 + 16, 50)
-                btn.frame = NSRect(x: filterX, y: 394, width: btnWidth, height: 22)
+                btn.frame = NSRect(x: filterX, y: 376, width: btnWidth, height: 22)
                 btn.autoresizingMask = [.maxXMargin, .minYMargin]
                 contentView.addSubview(btn)
                 syncDeviceFilterButtons.append(btn)
                 filterX += btnWidth + 8
             }
 
-            let scrollView = NSScrollView(frame: NSRect(x: 20, y: 20, width: 1080, height: 364))
+            let scrollView = NSScrollView(frame: NSRect(x: 20, y: 20, width: 1080, height: 346))
             scrollView.hasVerticalScroller = true
             scrollView.hasHorizontalScroller = true
             scrollView.borderType = .bezelBorder
@@ -2016,7 +2039,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.prompt = "Choose Output Folder"
+        panel.prompt = "Choose Recordings Folder"
         if let current = syncOutputFolder {
             panel.directoryURL = URL(fileURLWithPath: current)
         }
@@ -2027,14 +2050,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 switch result {
                 case .success:
                     self.syncOutputFolder = url.path
-                    self.syncFolderLabel?.stringValue = "Output folder: \(url.path)"
+                    self.syncFolderLabel?.stringValue = "Recordings folder: \(url.path)"
                     UserDefaults.standard.set(url.path, forKey: self.syncOutputFolderKey)
                     self.refreshSyncStatus()
                 case .failure(let error):
                     self.log("HiDock sync set-output error: \(error.localizedDescription)")
-                    self.showError("Failed to set HiDock output folder:\n\(error.localizedDescription)")
+                    self.showError("Failed to set recordings folder:\n\(error.localizedDescription)")
                 }
             }
+        }
+    }
+
+    @objc private func chooseTranscriptOutputFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Transcript Folder"
+        if let current = syncTranscriptFolder {
+            panel.directoryURL = URL(fileURLWithPath: current)
+        }
+
+        if panel.runModal() == .OK, let url = panel.url {
+            syncTranscriptFolder = url.path
+            syncTranscriptFolderLabel?.stringValue = "Transcript folder: \(url.path)"
+            UserDefaults.standard.set(url.path, forKey: syncTranscriptFolderKey)
         }
     }
 
@@ -2461,11 +2501,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if identifier.rawValue == "transcribed" {
             if entry.transcribed {
                 let button = NSButton(title: "", target: self, action: #selector(revealTranscriptInFinder(_:)))
-                button.bezelStyle = .inline
+                button.bezelStyle = .rounded
                 button.controlSize = .small
-                button.isBordered = false
                 let greenTick = NSAttributedString(string: "✓", attributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: .bold),
+                    .font: NSFont.systemFont(ofSize: 12, weight: .bold),
                     .foregroundColor: NSColor.systemGreen,
                 ])
                 button.attributedTitle = greenTick
