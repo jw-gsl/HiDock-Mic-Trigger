@@ -33,5 +33,11 @@ usb-extractor/state.json
 Windows-Script/config.json
 Windows-Script/state.json
 
+# Xcode profiling
+*.profraw
+
+# Transcription pipeline local config
+transcription-pipeline/config.json
+
 # Local editor / backup artifacts
 hidock-mic-trigger/Sources/*.bak

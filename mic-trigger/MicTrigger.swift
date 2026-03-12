@@ -82,6 +82,35 @@ func findInputDeviceID(named targetName: String) -> AudioDeviceID? {
 
 // MARK: - ffmpeg helpers
 
+/// Kill any orphaned ffmpeg processes that are holding a HiDock audio input.
+/// This prevents stale processes from blocking new trigger sessions.
+func killOrphanedFFmpeg(audioIndex: Int) {
+    let pipe = Pipe()
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/ps")
+    p.arguments = ["-eo", "pid,args"]
+    p.standardOutput = pipe
+    p.standardError = Pipe()
+    do {
+        try p.run()
+        p.waitUntilExit()
+    } catch { return }
+
+    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let needle = "ffmpeg -loglevel error -f avfoundation -i :\(audioIndex)"
+    let myPid = ProcessInfo.processInfo.processIdentifier
+    for line in output.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains(needle) else { continue }
+        let parts = trimmed.split(separator: " ", maxSplits: 1)
+        guard let pid = Int32(parts.first ?? "") else { continue }
+        if pid != myPid {
+            print("Killing orphaned ffmpeg (pid \(pid)).")
+            kill(pid, SIGTERM)
+        }
+    }
+}
+
 final class FFmpegHolder {
     private var proc: Process?
 
@@ -178,6 +207,9 @@ print("Found USB mic '\(usbMicName)' (deviceID \(usbID)).")
 print("Using HiDock AVFoundation audio index: \(hiDockAudioIndex)")
 
 let holder = FFmpegHolder()
+
+// Kill any orphaned ffmpeg from a previous crashed/restarted session
+killOrphanedFFmpeg(audioIndex: hiDockAudioIndex)
 
 // Debounce: require state to be stable for this many samples
 let pollInterval: TimeInterval = 0.25

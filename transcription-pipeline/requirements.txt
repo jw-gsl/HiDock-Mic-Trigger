@@ -1,0 +1,12 @@
+# Core transcription
+openai-whisper>=20240930
+torch>=2.1
+torchaudio>=2.1
+
+# Folder watching
+watchdog>=4.0
+
+# Speaker diarization (Phase 3 — requires HuggingFace token for first download)
+# Uncomment when ready:
+# pyannote.audio>=3.3
+# speechbrain>=1.0

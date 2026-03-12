@@ -1,95 +1,98 @@
-# HiDock Mic Trigger
+# HiDock Tools
 
-Automatically trigger HiDock auto-recording when you're using an external USB microphone.
+A suite of macOS tools for working with [HiDock](https://www.hidock.com) USB docking stations. Automatically trigger recording with an external mic, download recordings over USB, and transcribe them locally using Whisper.
 
-## The problem
-
-The [HiDock](https://www.hidock.com) has a built-in mic and can auto-record meetings when it detects audio input. But if you use a higher-quality USB mic (like a Samson Q2U, Blue Yeti, etc.), the HiDock never sees any audio on its own input — so auto-recording doesn't kick in.
-
-## How this solves it
-
-This tool watches your USB mic via CoreAudio. When it detects the mic is in use (e.g. you joined a call), it silently opens the HiDock's audio input using `ffmpeg`. The HiDock sees activity on its mic and triggers auto-recording. When the USB mic goes idle, the tool releases the HiDock input and recording stops.
-
-The result: you get HiDock auto-recording while using whatever mic you prefer.
-
-## Features
-
-- **Mic selector** — pick your trigger mic from a dropdown in the app window or menu bar (no code editing needed)
-- **Notifications** — get a macOS notification when recording starts and stops
-- **Auto-restart** — if the CLI crashes, the app restarts it automatically (up to 3 retries)
-- **Auto-start on launch** — configurable; enabled by default
-- **Uptime display** — see how long the trigger has been running
-- **Dock icon hiding** — closing the window hides the dock icon; the menu bar icon stays
-
-## What's included
+## Components
 
 | Folder | Description |
 |---|---|
-| `mic-trigger/` | Swift CLI that does the actual watching and ffmpeg control |
-| `hidock-mic-trigger/` | macOS menu bar app that wraps the CLI with a full UI |
+| `mic-trigger/` | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
+| `hidock-mic-trigger/` | macOS menu bar app — unified UI for mic trigger, USB sync, and transcription |
+| `usb-extractor/` | Python USB extractor that downloads recordings directly from HiDock over USB |
+| `transcription-pipeline/` | Python transcription pipeline using OpenAI Whisper on Apple MPS |
 
-## Setup
+## How it works
 
-### Prerequisites
+1. **Mic Trigger** — watches your USB mic (e.g. Samson Q2U) via CoreAudio. When it detects the mic is in use, it silently opens the HiDock's audio input using `ffmpeg`, causing the HiDock to auto-record.
+2. **USB Sync** — pairs with one or more HiDock devices over USB and downloads recordings as MP3 files to a local folder.
+3. **Transcription** — runs OpenAI Whisper (`large-v3-turbo`) on Apple Silicon MPS to transcribe downloaded recordings to Markdown files. Optional speaker diarization via pyannote.audio.
+
+All three are controlled from a single menu bar app with a unified window.
+
+## Prerequisites
 
 - macOS 13+
+- Apple Silicon (M1/M2/M3/M4) for MPS-accelerated transcription
 - [Homebrew](https://brew.sh)
 - [ffmpeg](https://formulae.brew.sh/formula/ffmpeg): `brew install ffmpeg`
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 - Xcode Command Line Tools: `xcode-select --install`
+- Python 3.11+ (for USB extractor and transcription)
 
-### 1. Find your HiDock audio index
+## Quick start
 
-List your audio input devices:
+### 1. Build the menu bar app
+
+```bash
+cd hidock-mic-trigger
+xcodegen generate
+xcodebuild -scheme hidock-mic-trigger -configuration Release build
+```
+
+### 2. Set up the USB extractor
+
+```bash
+cd usb-extractor
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Set up the transcription pipeline
+
+```bash
+cd transcription-pipeline
+./setup-venv.sh
+```
+
+This creates a Python venv with PyTorch, OpenAI Whisper, and verifies MPS availability.
+
+### 4. Find your HiDock audio index
 
 ```bash
 ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -A 20 "audio devices"
 ```
 
-Note the **index number** of your HiDock audio input (e.g. `1`). You'll select your trigger mic from the app UI — no need to note its name here.
+Note the index number of your HiDock audio input (e.g. `1`).
 
-### 2. Build
-
-```bash
-# Build the CLI
-cd mic-trigger
-swiftc MicTrigger.swift -o hidock-mic-trigger
-
-# Build the menu bar app
-cd ../hidock-mic-trigger
-xcodegen generate
-xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Release build
-```
-
-### 3. Install the menu bar app
+### 5. Install and run
 
 ```bash
 cp -R ~/Library/Developer/Xcode/DerivedData/hidock-mic-trigger-*/Build/Products/Release/hidock-mic-trigger.app \
   ~/Applications/"HiDock Mic Trigger.app"
+open ~/Applications/"HiDock Mic Trigger.app"
 ```
 
-Then open `HiDock Mic Trigger.app` from `~/Applications`. It will:
-- Appear in the menu bar with a waveform icon
-- Show a window where you can select your trigger mic, start/stop, and view uptime
-- Auto-start the trigger on launch (configurable)
-- Send notifications when recording starts and stops
+The app opens a unified window with:
+- **Mic Trigger** controls at the top (Start/Stop, mic selector, auto-start)
+- **Sync** controls and recording table below (pair devices, download, transcribe)
 
-### 4. Select your trigger mic
-
-Use the **Trigger Mic** dropdown in the app window or the menu bar submenu to pick which USB mic triggers the HiDock. Your selection is saved automatically.
-
-### 5. (Optional) Start at login
+### 6. (Optional) Start at login
 
 Open **System Settings > General > Login Items** and add `HiDock Mic Trigger.app`.
 
-## How it works (under the hood)
+## File output
 
-1. The CLI polls CoreAudio every 250ms to check if your USB mic's `kAudioDevicePropertyDeviceIsRunningSomewhere` flag is set
-2. When the mic becomes active (debounced over 1 second), it launches `ffmpeg` to silently capture from the HiDock's audio input and discard it (`-f null -`)
-3. This makes the HiDock think its mic is in use, which triggers auto-recording
-4. When the USB mic goes idle, ffmpeg is stopped and the HiDock input is released
-5. The menu bar app monitors the CLI output and sends macOS notifications on state changes
+All files are stored under `~/HiDock/`:
+
+```
+~/HiDock/
+  Recordings/          # Downloaded MP3 files
+  Raw Transcripts/     # Whisper transcription output (.md)
+  Speech-to-Text/      # Whisper model cache
+  Voice Library/       # Speaker embeddings (when diarization is enabled)
+```
 
 ## Permissions
 
-The app needs **Microphone** and **Notification** access. macOS will prompt you on first launch. Microphone access is required for `ffmpeg` to open the HiDock audio input.
+The app needs **Microphone** and **Notification** access. macOS will prompt on first launch.
