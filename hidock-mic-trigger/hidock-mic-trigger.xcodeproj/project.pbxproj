@@ -170,7 +170,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cd \"$SRCROOT/../usb-extractor\"\nif [ -f \".venv/bin/python\" ]; then\n  .venv/bin/python -m pytest tests/ --tb=short -q\nelse\n  echo \"warning: Python venv not found, skipping extractor tests\"\nfi\n";
+			shellScript = "cd \"$SRCROOT/../usb-extractor\"\nif [ -f \".venv/bin/python\" ]; then\n  .venv/bin/python -m pytest tests/ --tb=short -q\nelse\n  echo \"warning: Python venv not found, skipping extractor tests\"\nfi\ncd \"$SRCROOT/../transcription-pipeline\"\nif [ -f \".venv/bin/python\" ]; then\n  .venv/bin/python -m pytest tests/ --tb=short -q\nelse\n  echo \"warning: transcription-pipeline venv not found, skipping tests\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -217,7 +217,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-tests";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hidock-mic-trigger.app/Contents/MacOS/hidock-mic-trigger";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/HiDock Mic Trigger.app/Contents/MacOS/hidock-mic-trigger";
 			};
 			name = Release;
 		};
@@ -226,6 +226,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				EXECUTABLE_NAME = "hidock-mic-trigger";
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
@@ -234,7 +235,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger";
-				PRODUCT_NAME = "hidock-mic-trigger";
+				PRODUCT_NAME = "HiDock Mic Trigger";
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -244,6 +245,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				EXECUTABLE_NAME = "hidock-mic-trigger";
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.";
@@ -252,7 +254,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger";
-				PRODUCT_NAME = "hidock-mic-trigger";
+				PRODUCT_NAME = "HiDock Mic Trigger";
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -328,7 +330,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-tests";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hidock-mic-trigger.app/Contents/MacOS/hidock-mic-trigger";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/HiDock Mic Trigger.app/Contents/MacOS/hidock-mic-trigger";
 			};
 			name = Debug;
 		};

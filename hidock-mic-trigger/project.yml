@@ -32,7 +32,8 @@ targets:
     settings:
       INFOPLIST_KEY_LSUIElement: YES
       INFOPLIST_KEY_NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
-      PRODUCT_NAME: hidock-mic-trigger
+      PRODUCT_NAME: HiDock Mic Trigger
+      EXECUTABLE_NAME: hidock-mic-trigger
     info:
       path: Info.plist
       properties:
@@ -52,6 +53,6 @@ targets:
     dependencies:
       - target: hidock-mic-trigger
     settings:
-      TEST_HOST: "$(BUILT_PRODUCTS_DIR)/hidock-mic-trigger.app/Contents/MacOS/hidock-mic-trigger"
+      TEST_HOST: "$(BUILT_PRODUCTS_DIR)/HiDock Mic Trigger.app/Contents/MacOS/hidock-mic-trigger"
       BUNDLE_LOADER: "$(TEST_HOST)"
       GENERATE_INFOPLIST_FILE: YES
