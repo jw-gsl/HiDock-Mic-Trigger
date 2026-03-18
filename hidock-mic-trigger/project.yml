@@ -19,6 +19,12 @@ targets:
           else
             echo "warning: Python venv not found, skipping extractor tests"
           fi
+          cd "$SRCROOT/../transcription-pipeline"
+          if [ -f ".venv/bin/python" ]; then
+            .venv/bin/python -m pytest tests/ --tb=short -q
+          else
+            echo "warning: transcription-pipeline venv not found, skipping tests"
+          fi
         basedOnDependencyAnalysis: false
     sources:
       - Sources

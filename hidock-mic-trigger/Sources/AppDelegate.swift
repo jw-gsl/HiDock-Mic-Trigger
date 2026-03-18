@@ -1113,7 +1113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard let self = self else { return }
                 self.syncBusy = false
                 if !anyConnected, let err = lastError {
-                    let message = self.syncErrorDescription(err)
+                    let message = syncErrorDescription(err)
                     self.syncStatusLabel?.stringValue = "Status: \(message)"
                     self.syncStatusLabel?.textColor = .systemOrange
                 }
@@ -1764,20 +1764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func syncErrorDescription(_ error: String) -> String {
-        if error.contains("Errno 13") || error.localizedCaseInsensitiveContains("Access denied") {
-            // Extract the "held by ..." part if the extractor identified the owner
-            if let range = error.range(of: "held by ") {
-                let owner = String(error[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                return "USB busy — held by \(owner). Close it and Refresh."
-            }
-            if error.contains("WebUSB") || error.contains("browser") {
-                return "USB busy — a browser (WebUSB) may have the device open. Close the tab and Refresh."
-            }
-            return "USB busy — another app has the device open. Close it and Refresh."
-        }
-        return error
-    }
+    // syncErrorDescription is now a free function in Helpers.swift
 
     private func startSyncRefreshTimer() {
         syncRefreshStartDate = Date()
@@ -2022,7 +2009,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.syncStatusLabel?.stringValue = "Status: Paired and connected (\(devices.count) device\(devices.count == 1 ? "" : "s"))"
                 self.syncStatusLabel?.textColor = .systemGreen
             } else if let err = lastError {
-                let message = self.syncErrorDescription(err)
+                let message = syncErrorDescription(err)
                 self.syncStatusLabel?.stringValue = "Status: \(message)"
                 self.syncStatusLabel?.textColor = .systemRed
             }

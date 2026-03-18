@@ -1,0 +1,46 @@
+name: Python Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  usb-extractor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: usb-extractor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest numpy
+      - run: python -m pytest tests/ -v
+
+  transcription-pipeline:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: transcription-pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest numpy
+      - run: python -m pytest tests/ -v
+
+  windows-app-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Windows-App
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest numpy
+      - run: python -m pytest tests/ -v

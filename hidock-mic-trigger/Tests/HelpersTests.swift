@@ -1,6 +1,29 @@
 import XCTest
 @testable import hidock_mic_trigger
 
+final class SyncErrorDescriptionTests: XCTestCase {
+
+    func testErrno13ReturnsGenericUSBBusy() {
+        let msg = syncErrorDescription("Errno 13: Permission denied")
+        XCTAssertEqual(msg, "USB busy — another app has the device open. Close it and Refresh.")
+    }
+
+    func testHeldByExtractsOwner() {
+        let msg = syncErrorDescription("Errno 13: Access denied, held by Chrome")
+        XCTAssertEqual(msg, "USB busy — held by Chrome. Close it and Refresh.")
+    }
+
+    func testWebUSBMention() {
+        let msg = syncErrorDescription("Access denied by browser WebUSB")
+        XCTAssertTrue(msg.contains("browser (WebUSB)"))
+    }
+
+    func testUnrelatedErrorPassedThrough() {
+        let err = "Connection timed out"
+        XCTAssertEqual(syncErrorDescription(err), err)
+    }
+}
+
 final class FormatRecordingDurationTests: XCTestCase {
 
     func testZeroSeconds() {

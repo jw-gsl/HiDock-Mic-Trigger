@@ -323,6 +323,10 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object, object)
     def _on_sync_complete(self, data, error):
         self._sync_busy = False
+        # Route transcription-done signals to separate handler
+        if data and isinstance(data, dict) and data.get("_transcription_done"):
+            self._on_transcription_done(data, error)
+            return
         if error:
             self.sync_status_label.setText(f"Status: {error}")
             self.sync_status_label.setStyleSheet("color: red;")
@@ -459,13 +463,78 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _transcribe_selected(self):
-        # TODO: implement transcription of selected recordings
-        QMessageBox.information(self, "Transcribe", "Transcription of selected recordings — coming soon.\n\nUse 'Transcribe All' for batch processing.")
+        indices = self.table_view.selectionModel().selectedRows()
+        if not indices:
+            return
+        entries = self.table_model.entries()
+        # Filter to downloaded files only
+        targets = []
+        for i in indices:
+            entry = entries[i.row()]
+            if entry.recording.downloaded and entry.recording.output_path:
+                targets.append(Path(entry.recording.output_path))
+        if not targets:
+            QMessageBox.information(self, "Transcribe", "No downloaded recordings selected.")
+            return
+        self._run_transcription(targets)
 
     @pyqtSlot()
     def _transcribe_all(self):
-        # TODO: implement batch transcription with progress
-        QMessageBox.information(self, "Transcribe", "Batch transcription — coming soon.")
+        # Collect all downloaded + untranscribed recordings
+        targets = []
+        for entry in self._entries:
+            if (entry.recording.downloaded
+                    and not entry.recording.transcribed
+                    and entry.recording.output_path):
+                targets.append(Path(entry.recording.output_path))
+        if not targets:
+            QMessageBox.information(self, "Transcribe", "No untranscribed recordings to process.")
+            return
+        self._run_transcription(targets)
+
+    def _run_transcription(self, targets: list[Path]):
+        """Transcribe a list of audio files in a background thread."""
+        from core.transcription import transcribe_file
+
+        self.transcribe_selected_btn.setEnabled(False)
+        self.transcribe_all_btn.setEnabled(False)
+        self.sync_status_label.setText(f"Status: Transcribing {len(targets)} file(s)...")
+
+        def _worker():
+            model = None
+            results = []
+            for i, mp3_path in enumerate(targets):
+                try:
+                    def _progress(pct, _i=i):
+                        total_pct = int((_i * 100 + pct) / len(targets))
+                        self._log_signal.emit(f"Transcribing {_i+1}/{len(targets)}: {total_pct}%")
+
+                    result = transcribe_file(mp3_path, model=model, on_progress=_progress)
+                    results.append(result)
+                    # Reuse model for subsequent files (returned in result isn't accessible,
+                    # but transcribe_file caches internally on subsequent calls)
+                except Exception as e:
+                    self._log_signal.emit(f"Error transcribing {mp3_path.name}: {e}")
+
+            # Signal completion
+            succeeded = sum(1 for r in results if r.get("transcribed"))
+            self._sync_complete_signal.emit(
+                {"_transcription_done": True, "succeeded": succeeded, "total": len(targets)},
+                None,
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @pyqtSlot(object, object)
+    def _on_transcription_done(self, data, error):
+        """Handle transcription batch completion (routed through _on_sync_complete)."""
+        self.transcribe_selected_btn.setEnabled(True)
+        self.transcribe_all_btn.setEnabled(True)
+        succeeded = data.get("succeeded", 0)
+        total = data.get("total", 0)
+        self.sync_status_label.setText(f"Status: Transcribed {succeeded}/{total} files")
+        self._refresh_transcription_state()
+        self._update_table()
 
     def _on_hide_downloaded_changed(self, state):
         self.settings.setValue("hideDownloaded", state == Qt.CheckState.Checked.value)
