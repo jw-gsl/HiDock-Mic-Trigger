@@ -1,15 +1,19 @@
 # HiDock Tools
 
-A suite of macOS tools for working with [HiDock](https://www.hidock.com) USB docking stations. Automatically trigger recording with an external mic, download recordings over USB, and transcribe them locally using Whisper.
+A suite of tools for working with [HiDock](https://www.hidock.com) USB docking stations. Automatically trigger recording with an external mic, download recordings over USB, and transcribe them locally using Whisper.
 
 ## Components
 
-| Folder | Description |
-|---|---|
-| `mic-trigger/` | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
-| `hidock-mic-trigger/` | macOS menu bar app — unified UI for mic trigger, USB sync, and transcription |
-| `usb-extractor/` | Python USB extractor that downloads recordings directly from HiDock over USB |
-| `transcription-pipeline/` | Python transcription pipeline using OpenAI Whisper on Apple MPS |
+| Folder | Platform | Description |
+|---|---|---|
+| `hidock-mic-trigger/` | macOS | Menu bar app — unified UI for mic trigger, USB sync, and transcription |
+| `mic-trigger/` | macOS | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
+| `usb-extractor/` | macOS | Python USB extractor that downloads recordings directly from HiDock over USB |
+| `transcription-pipeline/` | macOS | Python transcription pipeline using OpenAI Whisper on Apple MPS |
+| `Windows-App/` | Windows | PyQt6 desktop app — Windows port of the macOS menu bar app |
+| `Windows-Script/` | Windows | Python USB extractor and background watcher for Windows |
+
+> **macOS is the primary development platform.** The Windows app is a secondary port. See [Windows-App/PORTING.md](Windows-App/PORTING.md) for the porting workflow.
 
 ## How it works
 
