@@ -80,11 +80,24 @@ func findInputDeviceID(named targetName: String) -> AudioDeviceID? {
     return nil
 }
 
+// MARK: - HiDock device discovery
+
+/// Find the first audio input device whose name starts with "HiDock".
+func findHiDockDeviceName() -> String? {
+    for dev in getAllAudioDevices() {
+        guard deviceHasInput(dev) else { continue }
+        if let name = getDeviceName(dev), name.hasPrefix("HiDock") {
+            return name
+        }
+    }
+    return nil
+}
+
 // MARK: - ffmpeg helpers
 
 /// Kill any orphaned ffmpeg processes that are holding a HiDock audio input.
 /// This prevents stale processes from blocking new trigger sessions.
-func killOrphanedFFmpeg(audioIndex: Int) {
+func killOrphanedFFmpeg(hidockDevice: String) {
     let pipe = Pipe()
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -97,11 +110,15 @@ func killOrphanedFFmpeg(audioIndex: Int) {
     } catch { return }
 
     let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    let needle = "ffmpeg -loglevel error -f avfoundation -i :\(audioIndex)"
+    // Match both old numeric-index style and new device-name style
+    let needles = [
+        "ffmpeg -loglevel error -f avfoundation -i :\(hidockDevice)",
+        "ffmpeg -loglevel error -f avfoundation -i :1",  // legacy default
+    ]
     let myPid = ProcessInfo.processInfo.processIdentifier
     for line in output.components(separatedBy: "\n") {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.contains(needle) else { continue }
+        guard needles.contains(where: { trimmed.contains($0) }) else { continue }
         let parts = trimmed.split(separator: " ", maxSplits: 1)
         guard let pid = Int32(parts.first ?? "") else { continue }
         if pid != myPid {
@@ -114,14 +131,14 @@ func killOrphanedFFmpeg(audioIndex: Int) {
 final class FFmpegHolder {
     private var proc: Process?
 
-    func start(ffmpegPath: String, audioIndex: Int) {
+    func start(ffmpegPath: String, hidockDevice: String) {
         guard proc == nil else { return }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: ffmpegPath)
         p.arguments = [
             "-loglevel", "error",
             "-f", "avfoundation",
-            "-i", ":\(audioIndex)",
+            "-i", ":\(hidockDevice)",
             "-ac", "1",
             "-ar", "48000",
             "-f", "null",
@@ -154,10 +171,10 @@ final class FFmpegHolder {
 
 // MARK: - Argument parsing
 
-func parseArgs() -> (micName: String, audioIndex: Int) {
+func parseArgs() -> (micName: String, hidockDevice: String?) {
     let args = CommandLine.arguments
     var micName = "Samson Q2U Microphone"
-    var audioIndex = 1
+    var hidockDevice: String? = nil
 
     var i = 1
     while i < args.count {
@@ -165,9 +182,12 @@ func parseArgs() -> (micName: String, audioIndex: Int) {
         case "--mic":
             i += 1
             if i < args.count { micName = args[i] }
-        case "--audio-index":
+        case "--hidock":
             i += 1
-            if i < args.count, let idx = Int(args[i]) { audioIndex = idx }
+            if i < args.count { hidockDevice = args[i] }
+        case "--audio-index":
+            // Legacy flag — ignored (auto-detect is now used)
+            i += 1
         case "--list-inputs":
             for dev in getAllAudioDevices() {
                 guard deviceHasInput(dev) else { continue }
@@ -181,14 +201,13 @@ func parseArgs() -> (micName: String, audioIndex: Int) {
         }
         i += 1
     }
-    return (micName, audioIndex)
+    return (micName, hidockDevice)
 }
 
 // MARK: - Main
 
 let config = parseArgs()
 let usbMicName = config.micName
-let hiDockAudioIndex = config.audioIndex
 
 let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
 
@@ -203,13 +222,24 @@ guard let foundUSBID = findInputDeviceID(named: usbMicName) else {
 }
 var usbID = foundUSBID
 
+// Resolve HiDock device name for ffmpeg (auto-detect or use --hidock override)
+let hidockDevice: String
+if let override = config.hidockDevice {
+    hidockDevice = override
+} else if let detected = findHiDockDeviceName() {
+    hidockDevice = detected
+} else {
+    print("Could not find a HiDock audio input device. Is the HiDock connected?")
+    exit(1)
+}
+
 print("Found USB mic '\(usbMicName)' (deviceID \(usbID)).")
-print("Using HiDock AVFoundation audio index: \(hiDockAudioIndex)")
+print("Using HiDock audio device: \(hidockDevice)")
 
 let holder = FFmpegHolder()
 
 // Kill any orphaned ffmpeg from a previous crashed/restarted session
-killOrphanedFFmpeg(audioIndex: hiDockAudioIndex)
+killOrphanedFFmpeg(hidockDevice: hidockDevice)
 
 // Debounce: require state to be stable for this many samples
 let pollInterval: TimeInterval = 0.25
@@ -225,7 +255,7 @@ print("Initial USB mic in-use state: \(initialState ? "IN USE" : "NOT IN USE")")
 // Important: if mic is already in-use when app starts, begin holding immediately.
 if initialState {
     print("Initial state already IN USE → holding HiDock mic open.")
-    holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
+    holder.start(ffmpegPath: ffmpegPath, hidockDevice: hidockDevice)
 }
 
 // Handle SIGINT/SIGTERM to stop ffmpeg cleanly
@@ -264,7 +294,7 @@ pollTimer.setEventHandler {
         // Reconcile if we somehow missed a transition.
         if current && !holder.isRunning() {
             print("Reconciled IN USE state with holder stopped → holding HiDock mic open.")
-            holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
+            holder.start(ffmpegPath: ffmpegPath, hidockDevice: hidockDevice)
         } else if !current && holder.isRunning() {
             print("Reconciled NOT IN USE state with holder running → releasing HiDock mic.")
             holder.stop()
@@ -279,7 +309,7 @@ pollTimer.setEventHandler {
         stableCount = 0
         if current {
             print("USB mic became IN USE → holding HiDock mic open.")
-            holder.start(ffmpegPath: ffmpegPath, audioIndex: hiDockAudioIndex)
+            holder.start(ffmpegPath: ffmpegPath, hidockDevice: hidockDevice)
         } else {
             print("USB mic became NOT IN USE → releasing HiDock mic.")
             holder.stop()
