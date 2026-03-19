@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-app:
-    runs-on: macos-14  # Apple Silicon (M1)
+    runs-on: macos-15  # Apple Silicon with newer Xcode
 
     steps:
       - uses: actions/checkout@v4
