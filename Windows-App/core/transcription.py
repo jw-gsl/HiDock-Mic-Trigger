@@ -1,29 +1,44 @@
-"""Transcription wrapper — runs Whisper on CUDA or CPU.
+"""Transcription wrapper — uses whisper.cpp via pywhispercpp.
 
-Mirrors transcription-pipeline/transcribe.py but adapted for Windows.
-Can either use the shared transcription-pipeline scripts (if available)
-or run Whisper directly.
+Replaces the PyTorch/openai-whisper approach with a lightweight
+whisper.cpp backend. Same model accuracy, ~50MB binary vs ~2GB.
 """
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from core.config import (
-    HIDOCK_ROOT,
     MODELS_DIR,
     RAW_TRANSCRIPTS_DIR,
     WHISPER_LANGUAGE,
     WHISPER_MODEL,
-    whisper_device,
+    whisper_model_path,
+    whisper_model_ready,
 )
 from core.state import load_state, save_state
+
+# Cached model instance
+_model = None
+
+
+def _load_model():
+    """Load whisper.cpp model (cached after first call)."""
+    global _model
+    if _model is not None:
+        return _model
+
+    if not whisper_model_ready():
+        raise RuntimeError(
+            "Whisper model not downloaded. Use the 'Download Model' button to get it."
+        )
+
+    from pywhispercpp.model import Model
+
+    _model = Model(str(whisper_model_path()), n_threads=4)
+    return _model
 
 
 def transcribe_file(
@@ -54,27 +69,24 @@ def transcribe_file(
 
     start_time = time.monotonic()
     try:
-        if model is None:
-            if on_progress:
-                on_progress(5)
-            model = _load_whisper_model()
-            if on_progress:
-                on_progress(10)
+        if on_progress:
+            on_progress(5)
+
+        m = model if model is not None else _load_model()
 
         if on_progress:
             on_progress(15)
-        result = model.transcribe(
-            str(mp3_path),
-            language=WHISPER_LANGUAGE,
-            verbose=False,
-        )
+
+        segments = m.transcribe(str(mp3_path), language=WHISPER_LANGUAGE)
+
         if on_progress:
             on_progress(85)
 
-        text = result["text"].strip()
+        text = " ".join(seg.text.strip() for seg in segments).strip()
 
         RAW_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         transcript_path.write_text(text + "\n", encoding="utf-8")
+
         if on_progress:
             on_progress(95)
 
@@ -154,18 +166,3 @@ def get_transcription_status() -> dict:
                             }
                             break
     return lookup
-
-
-def _load_whisper_model():
-    """Load Whisper model onto best available device."""
-    import torch
-    import whisper
-
-    device = whisper_device()
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model = whisper.load_model(
-        WHISPER_MODEL,
-        device=device,
-        download_root=str(MODELS_DIR),
-    )
-    return model

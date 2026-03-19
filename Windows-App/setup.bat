@@ -65,37 +65,18 @@ echo Upgrading pip...
 python -m pip install --upgrade pip
 
 echo.
-echo Installing core dependencies...
-pip install -r requirements-core.txt
+echo Installing dependencies...
+pip install -r requirements.txt
 if errorlevel 1 (
-    echo ERROR: Failed to install core dependencies.
+    echo ERROR: Failed to install dependencies.
     pause
     exit /b 1
 )
 
 echo.
-echo Installing transcription dependencies...
-if "%PROCESSOR_ARCHITECTURE%"=="ARM64" goto :install_torch_arm
-goto :install_torch_x64
-
-:install_torch_arm
-echo Detected ARM64 — installing PyTorch CPU build...
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu 2>nul
-if errorlevel 1 (
-    echo WARNING: PyTorch not available for ARM64 Windows.
-    echo The app will work but transcription will be disabled.
-    goto :done
-)
-pip install openai-whisper
-goto :done
-
-:install_torch_x64
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install openai-whisper
-goto :done
-
-:done
-echo.
 echo === Setup complete ===
 echo Run the app with: run.bat
+echo.
+echo NOTE: The speech recognition model (~550 MB) will be downloaded
+echo from within the app when you click "Download Model".
 pause

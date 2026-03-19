@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.config import HIDOCK_ROOT, RECORDINGS_DIR, RAW_TRANSCRIPTS_DIR
+from core.config import HIDOCK_ROOT, RECORDINGS_DIR, RAW_TRANSCRIPTS_DIR, whisper_model_ready
 from core.mic_trigger import MicTrigger, list_audio_input_devices
 from core.usb_sync import SyncRecording, SyncRecordingEntry, extractor_ready, run_extractor
 from core.transcription import get_transcription_status
@@ -183,6 +183,11 @@ class MainWindow(QMainWindow):
         self.transcribe_all_btn = QPushButton("Transcribe All")
         self.transcribe_all_btn.clicked.connect(self._transcribe_all)
         row2.addWidget(self.transcribe_all_btn)
+
+        self.download_model_btn = QPushButton("Download Model")
+        self.download_model_btn.clicked.connect(self._download_model)
+        row2.addWidget(self.download_model_btn)
+        self._update_model_button_state()
 
         row2.addStretch()
 
@@ -494,6 +499,13 @@ class MainWindow(QMainWindow):
 
     def _run_transcription(self, targets: list[Path]):
         """Transcribe a list of audio files in a background thread."""
+        if not whisper_model_ready():
+            QMessageBox.information(
+                self, "Model Required",
+                "The speech recognition model needs to be downloaded first.\n"
+                "Click 'Download Model' to get started."
+            )
+            return
         from core.transcription import transcribe_file
 
         self.transcribe_selected_btn.setEnabled(False)
@@ -563,6 +575,77 @@ class MainWindow(QMainWindow):
                 entry.recording.transcribed = status[key].get("transcribed", False)
                 entry.recording.transcript_path = status[key].get("transcript_path")
         self._update_table()
+
+    def _update_model_button_state(self):
+        """Update Download Model button based on whether model exists."""
+        if whisper_model_ready():
+            self.download_model_btn.setText("✓ Model Ready")
+            self.download_model_btn.setEnabled(False)
+            self.download_model_btn.setToolTip("Whisper model is downloaded and ready")
+            self.transcribe_selected_btn.setEnabled(True)
+            self.transcribe_all_btn.setEnabled(True)
+        else:
+            self.download_model_btn.setText("Download Model (~550 MB)")
+            self.download_model_btn.setEnabled(True)
+            self.download_model_btn.setToolTip("Download the speech recognition model")
+            self.transcribe_selected_btn.setEnabled(False)
+            self.transcribe_all_btn.setEnabled(False)
+
+    _model_download_signal = pyqtSignal(int, int)       # bytes_downloaded, total_bytes
+    _model_download_done_signal = pyqtSignal()
+    _model_download_error_signal = pyqtSignal(str)
+
+    @pyqtSlot()
+    def _download_model(self):
+        """Download the Whisper model in a background thread with progress."""
+        from core.model_download import download_model
+
+        self.download_model_btn.setEnabled(False)
+        self.download_model_btn.setText("Downloading... 0%")
+        self.sync_status_label.setText("Status: Downloading speech recognition model...")
+
+        # Connect signals
+        self._model_download_signal.connect(self._on_model_progress)
+        self._model_download_done_signal.connect(self._on_model_done)
+        self._model_download_error_signal.connect(self._on_model_error)
+
+        def _worker():
+            download_model(
+                on_progress=lambda dl, total: self._model_download_signal.emit(dl, total),
+                on_complete=lambda: self._model_download_done_signal.emit(),
+                on_error=lambda msg: self._model_download_error_signal.emit(msg),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @pyqtSlot(int, int)
+    def _on_model_progress(self, downloaded: int, total: int):
+        if total > 0:
+            pct = int(downloaded * 100 / total)
+            mb_dl = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            self.download_model_btn.setText(f"Downloading... {pct}%")
+            self.sync_status_label.setText(
+                f"Status: Downloading model — {pct}% ({mb_dl:.0f}/{mb_total:.0f} MB)"
+            )
+
+    @pyqtSlot()
+    def _on_model_done(self):
+        self._update_model_button_state()
+        self.sync_status_label.setText("Status: Model downloaded — ready to transcribe")
+        self._model_download_signal.disconnect(self._on_model_progress)
+        self._model_download_done_signal.disconnect(self._on_model_done)
+        self._model_download_error_signal.disconnect(self._on_model_error)
+
+    @pyqtSlot(str)
+    def _on_model_error(self, msg: str):
+        self.download_model_btn.setText("Download Model (~550 MB)")
+        self.download_model_btn.setEnabled(True)
+        self.sync_status_label.setText("Status: Model download failed")
+        QMessageBox.warning(self, "Download Failed", f"Failed to download model:\n{msg}")
+        self._model_download_signal.disconnect(self._on_model_progress)
+        self._model_download_done_signal.disconnect(self._on_model_done)
+        self._model_download_error_signal.disconnect(self._on_model_error)
 
     def closeEvent(self, event):
         self.mic_trigger.stop()
