@@ -37,6 +37,11 @@ jobs:
             -configuration Release \
             -derivedDataPath /tmp/hidock-build \
             -arch arm64
+          # The post-build deploy script may move the app to /Applications/
+          # Copy it back if that happened
+          if [ ! -d "/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app" ]; then
+            cp -R "/Applications/HiDock Mic Trigger.app" "/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app" 2>/dev/null || true
+          fi
 
       - name: Prepare bundle resources
         run: |
