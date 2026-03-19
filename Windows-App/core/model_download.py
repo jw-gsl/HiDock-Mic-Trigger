@@ -1,11 +1,31 @@
 """Download whisper.cpp model with progress reporting."""
 from __future__ import annotations
 
+import ssl
 import urllib.request
 from pathlib import Path
 from typing import Callable
 
 from core.config import MODELS_DIR, WHISPER_MODEL_FILENAME, WHISPER_MODEL_URL, whisper_model_path
+
+
+def _create_ssl_context() -> ssl.SSLContext:
+    """Create an SSL context, falling back to unverified if certs are missing."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    try:
+        ctx = ssl.create_default_context()
+        return ctx
+    except ssl.SSLError:
+        pass
+    # Last resort: skip verification (still encrypted, just no cert check)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def download_model(
@@ -25,8 +45,9 @@ def download_model(
     tmp = dest.with_suffix(".downloading")
 
     try:
+        ssl_ctx = _create_ssl_context()
         req = urllib.request.Request(WHISPER_MODEL_URL, headers={"User-Agent": "HiDock/1.0"})
-        resp = urllib.request.urlopen(req, timeout=30)
+        resp = urllib.request.urlopen(req, timeout=30, context=ssl_ctx)
         total = int(resp.headers.get("Content-Length", 0))
         downloaded = 0
         chunk_size = 256 * 1024  # 256 KB chunks
