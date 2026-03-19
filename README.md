@@ -18,7 +18,7 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 | `hidock-mic-trigger/` | macOS | Menu bar app — unified UI for mic trigger, USB sync, and transcription |
 | `mic-trigger/` | macOS | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
 | `usb-extractor/` | macOS | Python USB extractor that downloads recordings directly from HiDock over USB |
-| `transcription-pipeline/` | macOS | Python transcription pipeline using OpenAI Whisper on Apple MPS |
+| `transcription-pipeline/` | macOS | Transcription pipeline — whisper.cpp (bundled) or OpenAI Whisper on MPS (dev) |
 | `Windows-App/` | Windows | PyQt6 desktop app — Windows port of the macOS menu bar app |
 | `Windows-Script/` | Windows | Python USB extractor and background watcher for Windows |
 
@@ -28,7 +28,7 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 
 1. **Mic Trigger** — watches your USB mic (e.g. Samson Q2U) via CoreAudio. When it detects the mic is in use, it silently opens the HiDock's audio input using `ffmpeg`, causing the HiDock to auto-record.
 2. **USB Sync** — pairs with one or more HiDock devices over USB and downloads recordings as MP3 files to a local folder.
-3. **Transcription** — runs OpenAI Whisper (`large-v3-turbo`) on Apple Silicon MPS to transcribe downloaded recordings to Markdown files. Optional speaker diarization via pyannote.audio.
+3. **Transcription** — runs Whisper `large-v3-turbo` (via whisper.cpp) to transcribe downloaded recordings to Markdown files. The ~550 MB model is downloaded on first use.
 
 All three are controlled from a single menu bar app with a unified window.
 

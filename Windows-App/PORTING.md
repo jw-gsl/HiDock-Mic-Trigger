@@ -57,10 +57,21 @@ The macOS app (`hidock-mic-trigger/`) is the primary development target. This do
 | `fcntl.flock()` | `msvcrt.locking()` or file-based lock |
 | Signal handling (`SIGINT`, `SIGTERM`) | `signal.signal()` (same API, fewer signals) |
 
+### Transcription (whisper.cpp on both platforms)
+
+Both platforms now use whisper.cpp via `pywhispercpp`. The model file is the same (`ggml-large-v3-turbo-q5_0.bin`).
+
+| macOS | Windows |
+|-------|---------|
+| `transcription-pipeline/transcribe_cpp.py` (CLI) | `core/transcription.py` (library) |
+| Invoked as subprocess by Swift app | Called directly from PyQt6 |
+| Model at `~/HiDock/Speech-to-Text/` | Model at `%USERPROFILE%\HiDock\Speech-to-Text\` |
+| Model download via `transcribe_cpp.py` auto-download | Model download via `core/model_download.py` + UI button |
+
 ## What typically does NOT need porting
 
 - USB protocol changes (shared `extractor.py` in `Windows-Script/`)
-- Whisper model/language changes (config-only)
+- Whisper model/language changes (config-only, same model on both platforms)
 - State file format changes (JSON, same schema)
 
 ## What always needs manual porting
@@ -69,3 +80,4 @@ The macOS app (`hidock-mic-trigger/`) is the primary development target. This do
 - New toolbar actions or menu items
 - Changes to the mic trigger detection logic
 - New notification types
+- UX changes (dark theme, layout, shortcuts are platform-specific)

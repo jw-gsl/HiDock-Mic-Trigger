@@ -1,14 +1,29 @@
 # Transcription Pipeline
 
-Local transcription pipeline using OpenAI Whisper on Apple Silicon MPS. Transcribes HiDock recordings to Markdown files with optional speaker diarization.
+Local transcription pipeline for HiDock recordings. Two backends available:
+- **`transcribe.py`** — OpenAI Whisper on Apple Silicon MPS (development, requires PyTorch)
+- **`transcribe_cpp.py`** — whisper.cpp via pywhispercpp (bundled builds, lightweight, no PyTorch)
+
+Both produce identical output (Markdown transcripts) and use the same CLI protocol.
 
 ## Setup
+
+### Development (PyTorch + MPS)
 
 ```bash
 ./setup-venv.sh
 ```
 
 This creates a Python 3.13 venv, installs PyTorch + Whisper, and verifies MPS availability.
+
+### Bundled builds (whisper.cpp)
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-bundle.txt
+```
+
+The GGML model (~550 MB) is downloaded automatically on first transcription.
 
 ## Usage
 
@@ -59,13 +74,15 @@ Enroll speakers and auto-identify them in diarized transcripts:
 ## Architecture
 
 ```
-transcribe.py          CLI entry point (transcribe, transcribe-batch, status)
+transcribe.py          CLI entry point — PyTorch/MPS backend (dev)
+transcribe_cpp.py      CLI entry point — whisper.cpp backend (bundled builds)
 config.py              Paths and model configuration
 state.py               Atomic state management (state.json)
 diarize.py             Speaker diarization via pyannote.audio
 voice_library.py       Speaker embeddings via SpeechBrain ECAPA-TDNN
 setup-venv.sh          Venv creation and dependency installation
-requirements.txt       Python dependencies
+requirements.txt       Python dependencies (PyTorch + Whisper)
+requirements-bundle.txt  Lightweight deps (whisper.cpp only, no PyTorch)
 config.json            Runtime config (gitignored) — HuggingFace token, feature flags
 ```
 
@@ -97,14 +114,22 @@ Plain text transcript saved as `<recording-name>.md`.
 ## Integration
 
 The menu bar app (`hidock-mic-trigger`) calls this pipeline via subprocess:
-- `transcribe.py transcribe <path>` for individual files
+- `transcribe.py transcribe <path>` (dev) or `transcribe_cpp.py transcribe <path>` (bundled)
 - `transcribe.py transcribe-batch` for batch processing
 - `transcribe.py status` to refresh the UI table
+
+The bundled macOS .app (built by CI) uses `transcribe_cpp.py` with whisper.cpp. The development setup uses `transcribe.py` with PyTorch/MPS.
 
 Progress is reported via `PROGRESS:<pct>` lines on stderr.
 
 ## Requirements
 
+### Development
 - macOS with Apple Silicon (MPS acceleration)
 - Python 3.11+
-- ~5GB disk for the Whisper `large-v3-turbo` model (downloaded on first run)
+- ~5 GB disk for the Whisper `large-v3-turbo` PyTorch model
+
+### Bundled (whisper.cpp)
+- macOS 13+ (Apple Silicon)
+- Python 3.11+
+- ~550 MB for the GGML quantized model (downloaded on first run)
