@@ -1005,7 +1005,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             let group = DispatchGroup()
             var anyConnected = false
-            var lastError: String?
+            var deviceErrors: [String: String] = [:]  // device name -> error
 
             for device in devices {
                 group.enter()
@@ -1021,18 +1021,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                             } else {
                                 let err = status.error ?? "unknown"
                                 self.log("Auto-connect: \(device.cleanName) not connected: \(err)")
-                                lastError = err
+                                deviceErrors[device.cleanName] = err
                             }
                         } else {
                             let preview = String(data: data.prefix(200), encoding: .utf8) ?? "(binary)"
                             self.log("Auto-connect: \(device.cleanName) decode failed: \(preview)")
-                            lastError = "Failed to decode status response"
+                            deviceErrors[device.cleanName] = "Failed to decode status response"
                         }
                     case .failure(let error):
                         let desc = error.localizedDescription
                         let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
                         self.log("Auto-connect: \(device.cleanName) failed: \(shortDesc)")
-                        lastError = shortDesc
+                        deviceErrors[device.cleanName] = shortDesc
                     }
                     group.leave()
                 }
@@ -1041,8 +1041,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             group.notify(queue: .main) { [weak self] in
                 guard let self = self else { return }
                 self.syncBusy = false
-                if !anyConnected, let err = lastError {
-                    let message = syncErrorDescription(err)
+                if !anyConnected, !deviceErrors.isEmpty {
+                    // Prefer the most informative error (one with "held by" info)
+                    let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
+                        ?? deviceErrors.values.first ?? "unknown"
+                    let message = syncErrorDescription(bestError)
                     self.viewModel.syncStatus = message
                     self.viewModel.syncStatusLevel = .warning
                 }
@@ -1099,7 +1102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func showSyncWindow() {
         if syncWindow == nil {
-            let rect = NSRect(x: 0, y: 0, width: 1120, height: 590)
+            // Size window to fit all columns, capped to 90% of screen
+            let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            let idealWidth: CGFloat = 1380  // sum of ideal column widths + padding
+            let idealHeight: CGFloat = 700
+            let winWidth = min(idealWidth, screen.width * 0.9)
+            let winHeight = min(idealHeight, screen.height * 0.9)
+            let rect = NSRect(x: 0, y: 0, width: winWidth, height: winHeight)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
             let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
             win.center()
@@ -1430,7 +1439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let group = DispatchGroup()
         var anyConnected = false
-        var lastError: String?
+        var deviceErrors: [String: String] = [:]
 
         for device in devices {
             group.enter()
@@ -1445,17 +1454,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                             anyConnected = true
                         } else if let err = payload.error {
                             self.log("HiDock sync: \(device.cleanName) not connected: \(err)")
-                            lastError = err
+                            deviceErrors[device.cleanName] = err
                         }
                     } catch {
                         self.log("HiDock sync decode failure for \(device.cleanName): \(error.localizedDescription)")
-                        lastError = error.localizedDescription
+                        deviceErrors[device.cleanName] = error.localizedDescription
                     }
                 case .failure(let error):
                     let desc = error.localizedDescription
                     let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
                     self.log("HiDock sync status error for \(device.cleanName): \(shortDesc)")
-                    lastError = shortDesc
+                    deviceErrors[device.cleanName] = shortDesc
                 }
                 group.leave()
             }
@@ -1468,8 +1477,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if anyConnected {
                 self.viewModel.syncStatus = "Paired and connected (\(devices.count) device\(devices.count == 1 ? "" : "s"))"
                 self.viewModel.syncStatusLevel = .success
-            } else if let err = lastError {
-                let message = syncErrorDescription(err)
+            } else if !deviceErrors.isEmpty {
+                let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
+                    ?? deviceErrors.values.first ?? "unknown"
+                let message = syncErrorDescription(bestError)
                 self.viewModel.syncStatus = message
                 self.viewModel.syncStatusLevel = .error
             }

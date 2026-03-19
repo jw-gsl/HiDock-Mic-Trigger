@@ -19,12 +19,12 @@ struct RecordingsTableView: View {
                 Text(entry.deviceName)
                     .lineLimit(1)
             }
-            .width(min: 80, ideal: 130)
+            .width(min: 80, ideal: 120, max: 160)
 
             TableColumn("Status") { entry in
                 StatusBadge(text: entry.statusText, level: entry.statusLevel)
             }
-            .width(min: 80, ideal: 110)
+            .width(min: 80, ideal: 110, max: 130)
 
             TableColumn("Transcribed") { entry in
                 TranscriptionIndicator(
@@ -35,32 +35,32 @@ struct RecordingsTableView: View {
                     onRevealTranscript: viewModel.onRevealTranscript
                 )
             }
-            .width(min: 70, ideal: 90)
+            .width(min: 70, ideal: 90, max: 100)
 
             TableColumn("Recording") { entry in
                 Text(entry.recording.outputName)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .width(min: 150, ideal: 250)
+            .width(min: 120, ideal: 220, max: 400)
 
             TableColumn("Created") { entry in
                 Text("\(entry.recording.createDate) \(entry.recording.createTime)")
                     .font(.caption.monospacedDigit())
             }
-            .width(min: 120, ideal: 170)
+            .width(min: 120, ideal: 155, max: 170)
 
             TableColumn("Length") { entry in
                 Text(formatRecordingDuration(entry.recording.duration))
                     .font(.caption.monospacedDigit())
             }
-            .width(min: 60, ideal: 80)
+            .width(min: 50, ideal: 70, max: 80)
 
             TableColumn("Size") { entry in
                 Text(entry.recording.humanLength)
                     .font(.caption.monospacedDigit())
             }
-            .width(min: 60, ideal: 80)
+            .width(min: 50, ideal: 70, max: 80)
 
             TableColumn("Output") { entry in
                 if entry.recording.downloaded {
@@ -73,7 +73,7 @@ struct RecordingsTableView: View {
                         .foregroundColor(.secondary.opacity(0.5))
                 }
             }
-            .width(min: 150, ideal: 300)
+            .width(min: 100, ideal: 250, max: .infinity)
 
             TableColumn("") { entry in
                 if entry.recording.downloaded && entry.recording.localExists {
