@@ -813,7 +813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Only show connected devices in the menu bar
         let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
         if !connectedDevices.isEmpty {
-            let deviceParts = connectedDevices.map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            let deviceParts = connectedDevices.map { "\($0.shortName) ✓" }
             title += " · \(deviceParts.joined(separator: " · "))"
         }
         // Mic name on the far right
@@ -1122,7 +1122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if connectedDevices.isEmpty {
             syncWindowItem?.title = "Show Window..."
         } else {
-            let parts = connectedDevices.map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            let parts = connectedDevices.map { "\($0.shortName) ✓" }
             syncWindowItem?.title = "Sync: \(parts.joined(separator: " · "))"
         }
         updateMenuState()
@@ -1736,18 +1736,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateSyncSummary()
         // Only update status label and menu if we're not mid-refresh (group.notify handles that)
         if !syncBusy {
-            let devices = syncPairedDevices
-            var parts: [String] = []
-            for device in devices {
-                let connected = syncDeviceConnected[device.productId] ?? false
-                parts.append("\(device.shortName) \(connected ? "✓" : "⚠")")
-            }
-            if parts.isEmpty {
+            let connectedNames = syncPairedDevices
+                .filter { syncDeviceConnected[$0.productId] == true }
+                .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            if connectedNames.isEmpty {
                 syncStatusLabel?.stringValue = "Status: Not connected"
                 syncStatusLabel?.textColor = .secondaryLabelColor
             } else {
-                syncStatusLabel?.stringValue = "Status: \(parts.joined(separator: " · "))"
-                syncStatusLabel?.textColor = syncDeviceConnected.values.contains(true) ? .systemGreen : .systemOrange
+                syncStatusLabel?.stringValue = "Status: Connected — \(connectedNames.joined(separator: " · "))"
+                syncStatusLabel?.textColor = .systemGreen
             }
             updateSyncWindowState()
             updateMenuSyncStatus(connected: status.connected)
@@ -1996,8 +1993,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.syncBusy = false
             self.stopSyncRefreshTimer()
             if anyConnected {
-                let connectedCount = self.syncDeviceConnected.values.filter({ $0 }).count
-                self.syncStatusLabel?.stringValue = "Status: Connected (\(connectedCount) device\(connectedCount == 1 ? "" : "s"))"
+                let connectedNames = self.syncPairedDevices
+                    .filter { self.syncDeviceConnected[$0.productId] == true }
+                    .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+                let deviceList = connectedNames.joined(separator: " · ")
+                self.syncStatusLabel?.stringValue = "Status: Connected — \(deviceList)"
                 self.syncStatusLabel?.textColor = .systemGreen
             } else if let err = lastError {
                 let message = syncErrorDescription(err)
