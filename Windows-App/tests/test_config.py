@@ -17,35 +17,18 @@ class TestConfigPaths:
         assert len(cfg.WATCH_EXTENSIONS) >= 3
 
 
-class TestWhisperDevice:
-    def test_no_torch_returns_cpu(self, monkeypatch):
-        """When torch import fails, whisper_device() should return 'cpu'."""
+class TestWhisperModel:
+    def test_model_path_exists(self):
         import core.config as cfg
-        import builtins
+        path = cfg.whisper_model_path()
+        assert path.suffix == ".bin"
+        assert "ggml" in path.name
 
-        real_import = builtins.__import__
-
-        def mock_import(name, *args, **kwargs):
-            if name == "torch":
-                raise ImportError("no torch")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", mock_import)
-        assert cfg.whisper_device() == "cpu"
-
-    def test_cuda_available_returns_cuda(self, monkeypatch):
-        """When torch.cuda.is_available() is True, should return 'cuda'."""
+    def test_model_not_ready_when_missing(self, tmp_path, monkeypatch):
         import core.config as cfg
-        import sys
+        monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path)
+        assert not cfg.whisper_model_ready()
 
-        # Ensure torch mock has cuda.is_available = True
-        torch_mod = sys.modules["torch"]
-        orig = torch_mod.cuda.is_available
-
-        class MockCuda:
-            @staticmethod
-            def is_available():
-                return True
-
-        monkeypatch.setattr(torch_mod, "cuda", MockCuda)
-        assert cfg.whisper_device() == "cuda"
+    def test_model_url_is_huggingface(self):
+        import core.config as cfg
+        assert "huggingface.co" in cfg.WHISPER_MODEL_URL
