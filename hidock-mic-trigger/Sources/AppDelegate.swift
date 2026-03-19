@@ -609,14 +609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         statusItem.button?.image = statusImage(running: false)
         statusItem.button?.imagePosition = .imageLeft
         var initialTitle = "HiDock"
-        let pairedDevices = syncPairedDevices
-        if !pairedDevices.isEmpty {
-            let deviceParts = pairedDevices.map { device -> String in
-                let connected = syncDeviceConnected[device.productId] ?? false
-                return "\(device.shortName) \(connected ? "✓" : "⚠")"
-            }
-            initialTitle += " · \(deviceParts.joined(separator: " · "))"
-        }
+        // Don't show devices on initial launch — they'll appear once connection is confirmed
         if let mic = selectedMicName, !mic.isEmpty {
             let isFallback = preferredMicName != nil && !preferredMicName!.isEmpty && mic != preferredMicName
             let suffix = isFallback ? " (fallback)" : ""
@@ -817,13 +810,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         autoStartItem.state = autoStartOnLaunch ? .on : .off
         statusItem.button?.image = statusImage(running: running)
         var title = "HiDock"
-        // Device sync status right after HiDock
-        let pairedDevices = syncPairedDevices
-        if !pairedDevices.isEmpty {
-            let deviceParts = pairedDevices.map { device -> String in
-                let connected = syncDeviceConnected[device.productId] ?? false
-                return "\(device.shortName) \(connected ? "✓" : "⚠")"
-            }
+        // Only show connected devices in the menu bar
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        if !connectedDevices.isEmpty {
+            let deviceParts = connectedDevices.map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
             title += " · \(deviceParts.joined(separator: " · "))"
         }
         // Mic name on the far right
@@ -1128,13 +1118,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncWindowItem?.title = "Show Window..."
             return
         }
-        let devices = syncPairedDevices
-        var parts: [String] = []
-        for device in devices {
-            let isConnected = syncDeviceConnected[device.productId] ?? connected
-            parts.append("\(device.shortName) \(isConnected ? "✓" : "⚠")")
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        if connectedDevices.isEmpty {
+            syncWindowItem?.title = "Show Window..."
+        } else {
+            let parts = connectedDevices.map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            syncWindowItem?.title = "Sync: \(parts.joined(separator: " · "))"
         }
-        syncWindowItem?.title = "Sync: \(parts.joined(separator: " · "))"
         updateMenuState()
     }
 
@@ -2006,7 +1996,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.syncBusy = false
             self.stopSyncRefreshTimer()
             if anyConnected {
-                self.syncStatusLabel?.stringValue = "Status: Paired and connected (\(devices.count) device\(devices.count == 1 ? "" : "s"))"
+                let connectedCount = self.syncDeviceConnected.values.filter({ $0 }).count
+                self.syncStatusLabel?.stringValue = "Status: Connected (\(connectedCount) device\(connectedCount == 1 ? "" : "s"))"
                 self.syncStatusLabel?.textColor = .systemGreen
             } else if let err = lastError {
                 let message = syncErrorDescription(err)
