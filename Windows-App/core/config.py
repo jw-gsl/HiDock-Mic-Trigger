@@ -9,22 +9,23 @@ HIDOCK_ROOT = Path(os.environ.get("USERPROFILE", Path.home())) / "HiDock"
 RECORDINGS_DIR = HIDOCK_ROOT / "Recordings"
 RAW_TRANSCRIPTS_DIR = HIDOCK_ROOT / "Raw Transcripts"
 
-# Where Whisper .pt models live
+# Where whisper.cpp GGML models live
 MODELS_DIR = HIDOCK_ROOT / "Speech-to-Text"
 
 # ── Whisper settings ─────────────────────────────────────────────────────────
 WHISPER_MODEL = "large-v3-turbo"
+WHISPER_MODEL_FILENAME = "ggml-large-v3-turbo-q5_0.bin"
+WHISPER_MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_LANGUAGE = "en"
 
-def whisper_device() -> str:
-    """Return best available device: cuda > cpu."""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError:
-        pass
-    return "cpu"
+def whisper_model_path() -> Path:
+    """Return full path to the whisper.cpp model file."""
+    return MODELS_DIR / WHISPER_MODEL_FILENAME
+
+def whisper_model_ready() -> bool:
+    """Check if the model file exists and is non-empty."""
+    p = whisper_model_path()
+    return p.exists() and p.stat().st_size > 1_000_000
 
 # ── Watcher ──────────────────────────────────────────────────────────────────
 WATCH_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}

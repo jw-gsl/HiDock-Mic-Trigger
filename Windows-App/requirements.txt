@@ -5,10 +5,8 @@ PyQt6>=6.6
 pyusb>=1.2
 libusb-package>=1.0
 
-# Transcription
-openai-whisper>=20240930
-torch>=2.1
-torchaudio>=2.1
+# Transcription (whisper.cpp — no PyTorch needed)
+pywhispercpp>=1.2
 
 # Mic trigger (Windows audio session API)
 pycaw>=20240210
