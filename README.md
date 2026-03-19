@@ -2,6 +2,15 @@
 
 A suite of tools for working with [HiDock](https://www.hidock.com) USB docking stations. Automatically trigger recording with an external mic, download recordings over USB, and transcribe them locally using Whisper.
 
+## Downloads
+
+| Platform | Download | Build Status |
+|----------|----------|-------------|
+| **Windows** | [Download HiDock.exe](https://nightly.link/jw-gsl/HiDock-Mic-Trigger/workflows/build-windows/main/HiDock-Windows.zip) | [![Build Windows App](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/build-windows.yml/badge.svg)](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/build-windows.yml) |
+| **macOS** | Build from source (see below) | [![Python Tests](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/test.yml/badge.svg)](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/test.yml) |
+
+> The Windows download link always points to the latest successful build via [nightly.link](https://nightly.link). No GitHub login required.
+
 ## Components
 
 | Folder | Platform | Description |

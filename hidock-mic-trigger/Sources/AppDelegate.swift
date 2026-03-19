@@ -773,7 +773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Only show connected devices in the menu bar
         let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
         if !connectedDevices.isEmpty {
-            let deviceParts = connectedDevices.map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            let deviceParts = connectedDevices.map { "\($0.shortName) ✓" }
             title += " · \(deviceParts.joined(separator: " · "))"
         }
         if let mic = selectedMicName, !mic.isEmpty {
@@ -1055,7 +1055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if connectedDevices.isEmpty {
             syncWindowItem?.title = "Show Window..."
         } else {
-            let parts = connectedDevices.map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            let parts = connectedDevices.map { "\($0.shortName) ✓" }
             syncWindowItem?.title = "Sync: \(parts.joined(separator: " · "))"
         }
         updateMenuState()
@@ -1307,18 +1307,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
 
         if !syncBusy {
-            let devices = syncPairedDevices
-            var parts: [String] = []
-            for device in devices {
-                let connected = syncDeviceConnected[device.productId] ?? false
-                parts.append("\(device.shortName) \(connected ? "✓" : "⚠")")
-            }
-            if parts.isEmpty {
+            let connectedNames = syncPairedDevices
+                .filter { syncDeviceConnected[$0.productId] == true }
+                .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+            if connectedNames.isEmpty {
                 viewModel.syncStatus = "Not connected"
                 viewModel.syncStatusLevel = .secondary
             } else {
-                viewModel.syncStatus = parts.joined(separator: " · ")
-                viewModel.syncStatusLevel = syncDeviceConnected.values.contains(true) ? .success : .warning
+                viewModel.syncStatus = "Connected — \(connectedNames.joined(separator: " · "))"
+                viewModel.syncStatusLevel = .success
             }
             updateMenuSyncStatus(connected: status.connected)
         }
@@ -1466,8 +1463,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.syncBusy = false
             self.stopSyncRefreshTimer()
             if anyConnected {
-                let connectedCount = self.syncDeviceConnected.values.filter({ $0 }).count
-                self.viewModel.syncStatus = "Connected (\(connectedCount) device\(connectedCount == 1 ? "" : "s"))"
+                let connectedNames = self.syncPairedDevices
+                    .filter { self.syncDeviceConnected[$0.productId] == true }
+                    .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+                let deviceList = connectedNames.joined(separator: " · ")
+                self.viewModel.syncStatus = "Connected — \(deviceList)"
                 self.viewModel.syncStatusLevel = .success
             } else if !deviceErrors.isEmpty {
                 let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
