@@ -49,5 +49,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='resources/icon.ico',  # Uncomment when icon is available
+    icon='resources/icon.ico',
 )

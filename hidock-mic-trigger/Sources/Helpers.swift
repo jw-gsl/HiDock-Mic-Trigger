@@ -45,6 +45,31 @@ func shortenMicName(_ name: String) -> String {
     return short
 }
 
+/// Returns an SF Symbol name for a HiDock device type based on its short name.
+/// H1 = docking station with speaker, P1 = handheld recorder.
+func hidockDeviceIcon(_ shortName: String) -> String {
+    let name = shortName.lowercased()
+    if name.contains("h1") || name.contains("dock") {
+        return "hifispeaker"       // docking station / speaker
+    }
+    if name.contains("p1") || name.contains("portable") {
+        return "waveform.and.mic"  // handheld recorder / dictaphone
+    }
+    return "externaldrive.connected.to.line.below"  // generic USB device
+}
+
+/// Returns a Unicode emoji/symbol for a device type (for text-only contexts like menu bar).
+func hidockDeviceEmoji(_ shortName: String) -> String {
+    let name = shortName.lowercased()
+    if name.contains("h1") || name.contains("dock") {
+        return "🔊"  // speaker / dock
+    }
+    if name.contains("p1") || name.contains("portable") {
+        return "🎙️"  // microphone / recorder
+    }
+    return "🔌"  // generic device
+}
+
 /// Sanitizes a HiDock device name: removes serial numbers in brackets/parentheses
 /// and replaces underscores with spaces.
 func sanitizeDeviceName(_ raw: String) -> String {

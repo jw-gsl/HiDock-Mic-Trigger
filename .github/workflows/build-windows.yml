@@ -1,0 +1,53 @@
+name: Build Windows App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Windows-App/**'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Windows-App
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-core.txt
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+          pip install openai-whisper>=20240930
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+        continue-on-error: true
+
+      - name: Build HiDock.exe
+        run: pyinstaller hidock.spec --noconfirm
+
+      - name: Verify build
+        run: |
+          if (Test-Path dist\HiDock.exe) {
+            $size = (Get-Item dist\HiDock.exe).Length / 1MB
+            Write-Host "Build successful: HiDock.exe ($([math]::Round($size, 1)) MB)"
+          } else {
+            Write-Error "Build failed - HiDock.exe not found"
+            exit 1
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HiDock-Windows
+          path: Windows-App/dist/HiDock.exe
+          retention-days: 90
