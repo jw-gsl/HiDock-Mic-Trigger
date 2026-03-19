@@ -1,0 +1,136 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hidock-mic-trigger/**'
+      - 'usb-extractor/extractor.py'
+      - 'transcription-pipeline/**'
+  workflow_dispatch:
+
+jobs:
+  build-app:
+    runs-on: macos-14  # Apple Silicon (M1)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd hidock-mic-trigger
+          xcodegen generate
+
+      - name: Build Swift app
+        run: |
+          cd hidock-mic-trigger
+          xcodebuild -project hidock-mic-trigger.xcodeproj \
+            -scheme hidock-mic-trigger \
+            -configuration Release \
+            -derivedDataPath /tmp/hidock-build \
+            -arch arm64
+
+      - name: Prepare bundle resources
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          RES="$APP/Contents/Resources"
+
+          # Copy extractor scripts
+          mkdir -p "$RES/usb-extractor"
+          cp usb-extractor/extractor.py "$RES/usb-extractor/"
+
+          # Copy transcription scripts (both variants)
+          mkdir -p "$RES/transcription-pipeline"
+          cp transcription-pipeline/transcribe_cpp.py "$RES/transcription-pipeline/"
+          cp transcription-pipeline/transcribe.py "$RES/transcription-pipeline/"
+          cp transcription-pipeline/config.py "$RES/transcription-pipeline/"
+          cp transcription-pipeline/state.py "$RES/transcription-pipeline/"
+
+          # Copy mic-trigger CLI binary if it exists
+          if [ -f "mic-trigger/hidock-mic-trigger" ]; then
+            cp "mic-trigger/hidock-mic-trigger" "$RES/"
+          fi
+
+      - name: Create extractor venv
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          RES="$APP/Contents/Resources"
+
+          python3.11 -m venv "$RES/usb-extractor/.venv"
+          "$RES/usb-extractor/.venv/bin/pip" install --upgrade pip
+          "$RES/usb-extractor/.venv/bin/pip" install pyusb libusb-package numpy
+
+      - name: Create transcription venv
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          RES="$APP/Contents/Resources"
+
+          python3.11 -m venv "$RES/transcription-pipeline/.venv"
+          "$RES/transcription-pipeline/.venv/bin/pip" install --upgrade pip
+          "$RES/transcription-pipeline/.venv/bin/pip" install pywhispercpp certifi
+
+      - name: Make venvs relocatable
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          RES="$APP/Contents/Resources"
+          PYTHON_BIN="$(python3.11 -c 'import sys; print(sys.executable)')"
+
+          for VENV_DIR in "$RES/usb-extractor/.venv" "$RES/transcription-pipeline/.venv"; do
+            # Replace symlinks with actual Python binary copy
+            rm -f "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python3.11" "$VENV_DIR/bin/python"
+            cp "$PYTHON_BIN" "$VENV_DIR/bin/python3"
+            ln -sf python3 "$VENV_DIR/bin/python"
+
+            # Patch pyvenv.cfg
+            sed -i '' "s|^home = .*|home = .|" "$VENV_DIR/pyvenv.cfg"
+
+            # Fix shebangs
+            find "$VENV_DIR/bin" -type f -exec \
+              sed -i '' "1s|^#!.*python.*|#!/usr/bin/env python3|" {} \; 2>/dev/null || true
+          done
+
+      - name: Code sign bundle
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+
+          # Sign all dynamic libraries
+          find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
+            codesign --force --sign - {} \;
+
+          # Sign Python binaries
+          find "$APP" -type f -name "python*" -path "*/bin/*" -exec \
+            codesign --force --sign - {} \;
+
+          # Sign the app bundle
+          codesign --force --deep --sign - "$APP"
+
+      - name: Create distributable zip
+        run: |
+          cd "/tmp/hidock-build/Build/Products/Release"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "HiDock Mic Trigger.app" \
+            "HiDock-Mic-Trigger-macOS.zip"
+
+      - name: Report bundle size
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          ZIP="/tmp/hidock-build/Build/Products/Release/HiDock-Mic-Trigger-macOS.zip"
+          echo "App bundle:"
+          du -sh "$APP"
+          du -sh "$APP/Contents/Resources/usb-extractor/.venv" || true
+          du -sh "$APP/Contents/Resources/transcription-pipeline/.venv" || true
+          echo "Zip:"
+          ls -lh "$ZIP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HiDock-Mic-Trigger-macOS
+          path: /tmp/hidock-build/Build/Products/Release/HiDock-Mic-Trigger-macOS.zip
+          retention-days: 90

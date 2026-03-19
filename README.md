@@ -7,9 +7,9 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 | Platform | Download | Build Status |
 |----------|----------|-------------|
 | **Windows** | [Download HiDock.exe](https://nightly.link/jw-gsl/HiDock-Mic-Trigger/workflows/build-windows/main/HiDock-Windows.zip) | [![Build Windows App](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/build-windows.yml/badge.svg)](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/build-windows.yml) |
-| **macOS** | Build from source (see below) | [![Python Tests](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/test.yml/badge.svg)](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/test.yml) |
+| **macOS** | [Download HiDock Mic Trigger.app](https://nightly.link/jw-gsl/HiDock-Mic-Trigger/workflows/build-macos/main/HiDock-Mic-Trigger-macOS.zip) | [![Build macOS App](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/build-macos.yml/badge.svg)](https://github.com/jw-gsl/HiDock-Mic-Trigger/actions/workflows/build-macos.yml) |
 
-> The Windows download link always points to the latest successful build via [nightly.link](https://nightly.link). No GitHub login required.
+> Download links always point to the latest successful build via [nightly.link](https://nightly.link). No GitHub login required. The speech recognition model (~550 MB) is downloaded within the app on first use.
 
 ## Components
 

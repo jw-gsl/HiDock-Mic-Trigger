@@ -198,8 +198,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return "\(NSHomeDirectory())/_git/hidock-tools"
     }
 
+    /// When running from a bundled .app, resources are inside the app bundle.
+    private var bundledResourcesRoot: String? {
+        guard let resPath = Bundle.main.resourcePath else { return nil }
+        let bundledExtractor = "\(resPath)/usb-extractor/extractor.py"
+        if FileManager.default.fileExists(atPath: bundledExtractor) {
+            return resPath
+        }
+        return nil
+    }
+
     private var extractorRoot: String {
-        "\(repoRoot)/usb-extractor"
+        if let root = bundledResourcesRoot { return "\(root)/usb-extractor" }
+        return "\(repoRoot)/usb-extractor"
     }
 
     private var extractorScriptPath: String {
@@ -207,12 +218,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private var extractorPythonPath: String {
-        "\(extractorRoot)/.venv/bin/python"
+        "\(extractorRoot)/.venv/bin/python3"
     }
 
-    private var transcriptionRoot: String { "\(repoRoot)/transcription-pipeline" }
-    private var transcriptionPythonPath: String { "\(transcriptionRoot)/.venv/bin/python" }
-    private var transcriptionScriptPath: String { "\(transcriptionRoot)/transcribe.py" }
+    private var transcriptionRoot: String {
+        if let root = bundledResourcesRoot { return "\(root)/transcription-pipeline" }
+        return "\(repoRoot)/transcription-pipeline"
+    }
+
+    private var transcriptionPythonPath: String { "\(transcriptionRoot)/.venv/bin/python3" }
+
+    private var transcriptionScriptPath: String {
+        // Use whisper.cpp version in bundle, openai-whisper in dev
+        if bundledResourcesRoot != nil {
+            return "\(transcriptionRoot)/transcribe_cpp.py"
+        }
+        return "\(transcriptionRoot)/transcribe.py"
+    }
 
     private lazy var binaryPath: String = {
         if let override = ProcessInfo.processInfo.environment["HIDOCK_MIC_TRIGGER_PATH"], !override.isEmpty {
