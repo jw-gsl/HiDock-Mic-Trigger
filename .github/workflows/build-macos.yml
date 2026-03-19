@@ -101,16 +101,17 @@ jobs:
         run: |
           APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
 
-          # Sign all dynamic libraries
-          find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
+          # Sign all nested binaries first (inner to outer)
+          find "$APP/Contents/Resources" -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
+            codesign --force --sign - {} \;
+          find "$APP/Contents/Resources" -type f -name "python*" -path "*/bin/*" -exec \
             codesign --force --sign - {} \;
 
-          # Sign Python binaries
-          find "$APP" -type f -name "python*" -path "*/bin/*" -exec \
-            codesign --force --sign - {} \;
+          # Sign the main executable
+          codesign --force --sign - "$APP/Contents/MacOS/hidock-mic-trigger"
 
-          # Sign the app bundle
-          codesign --force --deep --sign - "$APP"
+          # Sign the app bundle (without --deep since we signed everything above)
+          codesign --force --sign - "$APP"
 
       - name: Create distributable zip
         run: |
