@@ -69,7 +69,7 @@ targets:
 
               rm -rf "$DEV_DIR/$DEV_NAME"
               cp -R "$BUILT_APP" "$DEV_DIR/$DEV_NAME"
-              codesign --force --sign - "$DEV_DIR/$DEV_NAME"
+              codesign --force --deep --sign - "$DEV_DIR/$DEV_NAME"
 
               open -a "$DEV_DIR/$DEV_NAME"
               echo "Deployed dev build to $DEV_DIR/$DEV_NAME"

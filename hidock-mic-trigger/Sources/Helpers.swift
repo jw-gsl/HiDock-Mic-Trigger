@@ -2,12 +2,15 @@ import Foundation
 
 /// Converts a raw sync error string into a user-friendly description.
 func syncErrorDescription(_ error: String) -> String {
-    if error.contains("Errno 13") || error.localizedCaseInsensitiveContains("Access denied") {
-        // Extract the "held by ..." part if the extractor identified the owner
-        if let range = error.range(of: "held by ") {
-            let owner = String(error[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return "USB busy — held by \(owner). Close it and Refresh."
+    // Check for "held by" in any error (device not found, access denied, etc.)
+    if let range = error.range(of: "held by ") {
+        let owner = String(error[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if error.localizedCaseInsensitiveContains("not found") {
+            return "Device held by \(owner). Close it and Refresh."
         }
+        return "USB busy — held by \(owner). Close it and Refresh."
+    }
+    if error.contains("Errno 13") || error.localizedCaseInsensitiveContains("Access denied") {
         if error.contains("WebUSB") || error.contains("browser") {
             return "USB busy — a browser (WebUSB) may have the device open. Close the tab and Refresh."
         }

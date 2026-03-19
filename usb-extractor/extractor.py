@@ -179,20 +179,38 @@ def md5_hex(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+def _resolve_owner_pid(owner: str) -> str:
+    """If owner string contains a PID, resolve it to a human-friendly process name."""
+    pid_in_owner = re.search(r"pid (\d+)", owner)
+    if pid_in_owner:
+        try:
+            ps = subprocess.run(
+                ["ps", "-p", pid_in_owner.group(1), "-o", "comm="],
+                capture_output=True, text=True, timeout=3,
+            )
+            proc_name = ps.stdout.strip()
+            if proc_name:
+                # Show just the app name, not the full path
+                short_name = proc_name.rsplit("/", 1)[-1]
+                return f"{short_name} (pid {pid_in_owner.group(1)})"
+        except Exception:
+            pass
+    return owner
+
+
 def detect_usb_owner(product_id: int | None = None) -> str | None:
-    """On macOS, check ioreg for which process holds the USB interface exclusively."""
+    """On macOS, check ioreg for which process holds the USB device or interface exclusively."""
     if platform.system() != "Darwin":
         return None
     pid = product_id if product_id is not None else PRODUCT_ID
     try:
+        # Check interface level first (most specific)
         result = subprocess.run(
             ["ioreg", "-r", "-c", "IOUSBHostInterface", "-l", "-w0"],
             capture_output=True, text=True, timeout=5,
         )
-        # Parse blocks separated by +-o markers
         blocks = re.split(r"\+-o IOUSBHostInterface", result.stdout)
         for block in blocks:
-            # Match vendor-specific interface (class 255) for our device
             pid_match = re.search(r'"idProduct"\s*=\s*(\d+)', block)
             vid_match = re.search(r'"idVendor"\s*=\s*(\d+)', block)
             iclass_match = re.search(r'"bInterfaceClass"\s*=\s*(\d+)', block)
@@ -201,23 +219,23 @@ def detect_usb_owner(product_id: int | None = None) -> str | None:
                     vid_match and int(vid_match.group(1)) == VENDOR_ID and
                     iclass_match and int(iclass_match.group(1)) == 255):
                 if owner_match:
-                    owner = owner_match.group(1)
-                    # If owner contains a PID, try to resolve the process name
-                    pid_in_owner = re.search(r"pid (\d+)", owner)
-                    if pid_in_owner:
-                        try:
-                            ps = subprocess.run(
-                                ["ps", "-p", pid_in_owner.group(1), "-o", "comm="],
-                                capture_output=True, text=True, timeout=3,
-                            )
-                            proc_name = ps.stdout.strip()
-                            if proc_name:
-                                return f"{proc_name} (pid {pid_in_owner.group(1)})"
-                        except Exception:
-                            pass
-                    return owner
-        # No exclusive owner found — could be WebUSB/Chrome holding at a different level
-        # Check if any Chrome-like process has USB connections
+                    return _resolve_owner_pid(owner_match.group(1))
+
+        # Check device level too — WebUSB/Chrome may claim at this level
+        result = subprocess.run(
+            ["ioreg", "-r", "-c", "IOUSBHostDevice", "-l", "-w0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        blocks = re.split(r"\+-o ", result.stdout)
+        for block in blocks:
+            pid_match = re.search(r'"idProduct"\s*=\s*(\d+)', block)
+            vid_match = re.search(r'"idVendor"\s*=\s*(\d+)', block)
+            owner_match = re.search(r'"UsbExclusiveOwner"\s*=\s*"(.+?)"', block)
+            if (pid_match and int(pid_match.group(1)) == pid and
+                    vid_match and int(vid_match.group(1)) == VENDOR_ID):
+                if owner_match:
+                    return _resolve_owner_pid(owner_match.group(1))
+
         return None
     except Exception:
         return None
@@ -818,7 +836,11 @@ def probe_device(timeout_ms: int = 2000) -> dict:
     try:
         dev = find_device()
     except FileNotFoundError:
-        return {"connected": False, "available": False, "error": "HiDock device not found"}
+        owner = detect_usb_owner()
+        error = "HiDock device not found"
+        if owner:
+            error += f" — device held by {owner}"
+        return {"connected": False, "available": False, "error": error}
 
     try:
         interface_number = prepare_device(dev)
@@ -926,7 +948,11 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     try:
         dev = find_device(product_id=product_id)
     except FileNotFoundError:
-        payload["error"] = "HiDock device not found"
+        owner = detect_usb_owner(product_id)
+        error = "HiDock device not found"
+        if owner:
+            error += f" — device held by {owner}"
+        payload["error"] = error
         return payload
 
     try:
