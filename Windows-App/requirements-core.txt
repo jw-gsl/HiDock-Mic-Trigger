@@ -1,0 +1,13 @@
+# UI
+PyQt6>=6.6
+
+# USB (shared with Windows-Script)
+pyusb>=1.2
+libusb-package>=1.0
+
+# Mic trigger (Windows audio session API)
+pycaw>=20240210
+comtypes>=1.4
+
+# Build
+pyinstaller>=6.0
