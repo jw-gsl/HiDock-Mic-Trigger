@@ -1,114 +1,9 @@
 import AppKit
+import SwiftUI
 import CoreAudio
 import UserNotifications
 
-private struct HiDockSyncRecording: Codable {
-    let name: String
-    let createDate: String
-    let createTime: String
-    let length: Int
-    let duration: Double
-    let version: Int
-    let mode: String
-    let signature: String
-    let outputPath: String
-    let outputName: String
-    let downloaded: Bool
-    let localExists: Bool
-    let downloadedAt: String?
-    let lastError: String?
-    let status: String
-    let humanLength: String
-}
-
-private struct HiDockSyncStatusResponse: Codable {
-    let connected: Bool
-    let outputDir: String
-    let statePath: String
-    let configPath: String
-    let recordings: [HiDockSyncRecording]
-    let error: String?
-}
-
-private struct HiDockSyncDownloadResult: Codable {
-    let filename: String
-    let written: Int
-    let expectedLength: Int
-    let outputPath: String
-    let downloaded: Bool
-}
-
-private struct HiDockSyncDownloadNewResponse: Codable {
-    struct Skipped: Codable {
-        let filename: String
-        let reason: String
-    }
-
-    let connected: Bool
-    let outputDir: String
-    let downloaded: [HiDockSyncDownloadResult]
-    let skipped: [Skipped]
-    let error: String?
-}
-
-private struct HiDockDevice: Codable {
-    let vendorId: Int
-    let productId: Int
-    let productName: String?
-    let serialNumber: String?
-    let bus: Int?
-    let address: Int?
-
-    var displayName: String {
-        sanitizeDeviceName(productName ?? "HiDock")
-    }
-
-    var shortName: String {
-        let name = displayName
-        if name.hasPrefix("HiDock ") {
-            return String(name.dropFirst("HiDock ".count))
-        }
-        return name
-    }
-}
-
-private struct HiDockDeviceListResponse: Codable {
-    let devices: [HiDockDevice]
-}
-
-private struct HiDockPairedDevice: Codable, Equatable {
-    let productId: Int
-    let displayName: String
-
-    /// Sanitized name: removes serial in brackets, replaces underscores
-    var cleanName: String {
-        sanitizeDeviceName(displayName)
-    }
-
-    var shortName: String {
-        let name = cleanName
-        if name.hasPrefix("HiDock ") {
-            return String(name.dropFirst("HiDock ".count))
-        }
-        return name
-    }
-
-    static func == (lhs: HiDockPairedDevice, rhs: HiDockPairedDevice) -> Bool {
-        lhs.productId == rhs.productId
-    }
-}
-
-private struct HiDockSyncRecordingEntry {
-    let recording: HiDockSyncRecording
-    let deviceProductId: Int
-    let deviceName: String
-    var transcribed: Bool = false
-    var transcriptPath: String? = nil
-}
-
-// formatRecordingDuration is now in Helpers.swift
-
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var startItem: NSMenuItem!
@@ -119,26 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var micSubmenu: NSMenu!
     private var process: Process?
 
-    private var windowStartButton: NSButton?
-    private var windowStopButton: NSButton?
-    private var windowStatusLabel: NSTextField?
-    private var windowUptimeLabel: NSTextField?
-    private var windowAutoStartCheckbox: NSButton?
-    private var windowMicPopup: NSPopUpButton?
     private var syncWindow: NSWindow?
-    private var syncStatusLabel: NSTextField?
-    private var syncFolderLabel: NSTextField?
-    private var syncTableView: NSTableView?
-    private var syncRefreshButton: NSButton?
-    private var syncDownloadSelectedButton: NSButton?
-    private var syncDownloadNewButton: NSButton?
-    private var syncPairButton: NSButton?
-    private var syncUnpairButton: NSButton?
-    private var syncSummaryLabel: NSTextField?
-    private var syncHideDownloadedCheckbox: NSButton?
-    private var syncAutoDownloadCheckbox: NSButton?
+    let viewModel = HiDockViewModel()
+
     private var syncOutputFolder: String?
-    private var syncTranscriptFolderLabel: NSTextField?
     private var syncTranscriptFolder: String?
     private var syncEntries: [HiDockSyncRecordingEntry] = []
     private var syncCheckedRecordings: Set<String> = []
@@ -147,30 +26,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceProductId: Int? = nil
-    private var syncDeviceFilterButtons: [NSButton] = []
     private var syncDeviceConnected: [Int: Bool] = [:]
-    private var syncLastCheckedRow: Int?
     private var syncBusy = false
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
     private var syncAutoDownloadTimer: Timer?
     private var syncExtractorProcess: Process?
     private let syncExtractorQueue = DispatchQueue(label: "hidock.extractor", qos: .userInitiated)
-    private var syncStopButton: NSButton?
     private var syncDownloadStartDate: Date?
     private var syncDownloadTimer: Timer?
     private var syncDownloadStopping = false
     private var syncDownloading = false
 
     // Transcription
-    private var syncTranscribeSelectedButton: NSButton?
-    private var syncTranscribeAllButton: NSButton?
     private let transcriptionQueue = DispatchQueue(label: "hidock.transcription", qos: .background)
     private var transcriptionBusy = false
-    private var transcriptionCurrentFile: String? = nil  // outputName of file being transcribed
-    private var transcriptionProgress: Int = 0           // 0-100
-    private var transcriptionFileIndex: Int = 0          // current index in batch
-    private var transcriptionFileCount: Int = 0          // total files in batch
+    private var transcriptionCurrentFile: String? = nil
+    private var transcriptionProgress: Int = 0
+    private var transcriptionFileIndex: Int = 0
+    private var transcriptionFileCount: Int = 0
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
@@ -285,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         applyPreferredMicOnStartup()
         setupMainMenu()
         setupStatusItem()
+        wireViewModel()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         showSyncWindow()
@@ -342,6 +217,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         completionHandler()
     }
 
+    // MARK: - Wire ViewModel
+
+    private func wireViewModel() {
+        viewModel.autoStartOnLaunch = autoStartOnLaunch
+        viewModel.selectedMicName = selectedMicName
+        viewModel.availableMics = getInputDeviceNames()
+        viewModel.syncPairedDevices = syncPairedDevices
+        viewModel.syncPaired = syncPaired
+        viewModel.syncHideDownloaded = UserDefaults.standard.bool(forKey: syncHideDownloadedKey)
+        syncHideDownloaded = viewModel.syncHideDownloaded
+        viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
+        syncAutoDownload = viewModel.syncAutoDownload
+
+        if let savedFolder = UserDefaults.standard.string(forKey: syncOutputFolderKey), !savedFolder.isEmpty {
+            syncOutputFolder = savedFolder
+            viewModel.syncOutputFolder = savedFolder
+        }
+        if let savedTranscriptFolder = UserDefaults.standard.string(forKey: syncTranscriptFolderKey), !savedTranscriptFolder.isEmpty {
+            syncTranscriptFolder = savedTranscriptFolder
+            viewModel.syncTranscriptFolder = savedTranscriptFolder
+        } else {
+            syncTranscriptFolder = "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+            viewModel.syncTranscriptFolder = syncTranscriptFolder
+        }
+
+        viewModel.onStartTrigger = { [weak self] in self?.startTrigger() }
+        viewModel.onStopTrigger = { [weak self] in self?.stopTrigger() }
+        viewModel.onToggleAutoStart = { [weak self] in self?.toggleAutoStart() }
+        viewModel.onSelectMic = { [weak self] mic in self?.selectMic(mic) }
+        viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus() }
+        viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
+        viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
+        viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
+        viewModel.onChooseTranscriptFolder = { [weak self] in self?.chooseTranscriptOutputFolder() }
+        viewModel.onDownloadSelected = { [weak self] in self?.downloadSelectedSyncRecording() }
+        viewModel.onDownloadNew = { [weak self] in self?.downloadNewSyncRecordings() }
+        viewModel.onStopDownload = { [weak self] in self?.stopSyncDownload() }
+        viewModel.onMarkDownloaded = { [weak self] in self?.markSyncRecordingsAsDownloaded() }
+        viewModel.onSelectAll = { [weak self] in self?.selectAllSyncRecordings() }
+        viewModel.onSelectNone = { [weak self] in self?.selectNoneSyncRecordings() }
+        viewModel.onSelectNotDownloaded = { [weak self] in self?.selectNotDownloadedSyncRecordings() }
+        viewModel.onFilterByDevice = { [weak self] pid in self?.filterSyncByDevice(pid) }
+        viewModel.onToggleChecked = { [weak self] name in self?.toggleSyncRecordingCheckbox(name) }
+        viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
+        viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
+        viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
+        viewModel.onTranscribeAll = { [weak self] in self?.transcribeAllRecordings() }
+        viewModel.onRevealRecording = { path in
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        }
+        viewModel.onRevealTranscript = { path in
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        }
+    }
+
+    /// Push all mutable state to the ViewModel so SwiftUI reflects it.
+    private func syncViewModelState() {
+        let running = process != nil
+        viewModel.triggerRunning = running
+        viewModel.triggerPID = process?.processIdentifier
+        viewModel.triggerUptime = formatUptime() ?? ""
+        viewModel.autoStartOnLaunch = autoStartOnLaunch
+        viewModel.selectedMicName = selectedMicName
+        viewModel.availableMics = getInputDeviceNames()
+        viewModel.syncBusy = syncBusy
+        viewModel.syncDownloading = syncDownloading
+        viewModel.syncEntries = syncEntries
+        viewModel.syncCheckedRecordings = syncCheckedRecordings
+        viewModel.syncHideDownloaded = syncHideDownloaded
+        viewModel.syncAutoDownload = syncAutoDownload
+        viewModel.syncFilterDeviceProductId = syncFilterDeviceProductId
+        viewModel.syncPairedDevices = syncPairedDevices
+        viewModel.syncPaired = syncPaired
+        viewModel.syncDeviceConnected = syncDeviceConnected
+        viewModel.syncOutputFolder = syncOutputFolder
+        viewModel.syncTranscriptFolder = syncTranscriptFolder
+        viewModel.transcriptionBusy = transcriptionBusy
+        viewModel.transcriptionCurrentFile = transcriptionCurrentFile
+        viewModel.transcriptionProgress = transcriptionProgress
+        viewModel.transcriptionFileIndex = transcriptionFileIndex
+        viewModel.transcriptionFileCount = transcriptionFileCount
+    }
+
     // MARK: - Notifications
 
     private func setupNotifications() {
@@ -379,7 +337,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             } else if line.contains("NOT IN USE") && line.contains("releasing HiDock") {
                 log("Trigger: USB mic idle, HiDock recording stopped")
                 postNotification(title: "HiDock Recording Stopped", body: "USB mic went idle — HiDock input released.")
-                // Refresh sync after a delay to let HiDock finalize the recording
                 DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                     guard let self = self, self.syncPaired, !self.syncBusy else { return }
                     self.log("Auto-refreshing sync after mic release")
@@ -495,8 +452,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func scheduleDeviceChangeHandler() {
-        // Debounce: CoreAudio fires multiple rapid events when docking/undocking.
-        // Wait 1.5s for devices to settle before checking what changed.
         deviceChangeDebounceTimer?.invalidate()
         deviceChangeDebounceTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
             self?.handleDeviceListChanged()
@@ -514,8 +469,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !appeared.isEmpty { log("Devices appeared: \(appeared)") }
         if !disappeared.isEmpty { log("Devices disappeared: \(disappeared)") }
 
-        // Refresh HiDock sync status when any device changes (dock connect/disconnect)
         if !appeared.isEmpty || !disappeared.isEmpty {
+            viewModel.availableMics = getInputDeviceNames()
             if syncPaired && !syncBusy {
                 log("USB device change detected, refreshing sync status")
                 autoConnectSyncIfPaired()
@@ -525,13 +480,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let preferred = preferredMicName
         let selected = selectedMicName
 
-        // Case 1: Preferred mic just appeared and isn't already selected
         if let preferred = preferred, !preferred.isEmpty,
            appeared.contains(preferred), selected != preferred {
             log("Preferred mic '\(preferred)' just connected, auto-switching")
             let oldMic = selectedMicName
             selectedMicName = preferred
-            refreshWindowMicPopup()
+            viewModel.selectedMicName = preferred
+            viewModel.availableMics = getInputDeviceNames()
             updateMenuState()
             if process != nil && preferred != oldMic {
                 restartTrigger()
@@ -544,14 +499,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        // Case 2: Current mic disappeared — fall back
         if let selected = selected, !selected.isEmpty,
            disappeared.contains(selected) {
             log("Current mic '\(selected)' disconnected")
             let fallback = resolveFallbackMic(from: currentDevices)
             if let fallback = fallback {
                 selectedMicName = fallback
-                refreshWindowMicPopup()
+                viewModel.selectedMicName = fallback
+                viewModel.availableMics = getInputDeviceNames()
                 updateMenuState()
                 if process != nil { restartTrigger() }
                 postMicChangeNotification(
@@ -561,6 +516,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 )
             } else {
                 selectedMicName = nil
+                viewModel.selectedMicName = nil
                 updateMenuState()
                 if process != nil { restartTrigger() }
                 postNotification(title: "Mic Disconnected", body: "\(shortenMicName(selected)) was unplugged. No mics available.")
@@ -570,15 +526,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func resolveFallbackMic(from devices: Set<String>) -> String? {
-        // Use explicit fallback if set and available
         if let fb = fallbackMicName, !fb.isEmpty, devices.contains(fb) {
             return fb
         }
-        // Otherwise pick first device with "MacBook" in the name
         if let macbook = devices.first(where: { $0.contains("MacBook") }) {
             return macbook
         }
-        // Last resort: first available device
         return devices.first
     }
 
@@ -608,7 +561,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = statusImage(running: false)
         statusItem.button?.imagePosition = .imageLeft
+        #if DEV_BUILD
+        var initialTitle = "HiDock DEV"
+        #else
         var initialTitle = "HiDock"
+        #endif
         let pairedDevices = syncPairedDevices
         if !pairedDevices.isEmpty {
             let deviceParts = pairedDevices.map { device -> String in
@@ -626,9 +583,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         statusItem.button?.title = initialTitle
 
-        startItem = NSMenuItem(title: "Start", action: #selector(startTrigger), keyEquivalent: "s")
-        stopItem = NSMenuItem(title: "Stop", action: #selector(stopTrigger), keyEquivalent: "t")
-        autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStart), keyEquivalent: "")
+        startItem = NSMenuItem(title: "Start", action: #selector(startTriggerMenu), keyEquivalent: "s")
+        stopItem = NSMenuItem(title: "Stop", action: #selector(stopTriggerMenu), keyEquivalent: "t")
+        autoStartItem = NSMenuItem(title: "Auto-start on launch", action: #selector(toggleAutoStartMenu), keyEquivalent: "")
         syncWindowItem = NSMenuItem(title: "Show Window...", action: #selector(showSyncWindow), keyEquivalent: "d")
 
         micSubmenu = NSMenu()
@@ -669,7 +626,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let preferred = preferredMicName
         let fallback = fallbackMicName
 
-        // --- Device list ---
         for name in devices {
             var badges: [String] = []
             if name == preferred { badges.append("Default") }
@@ -690,10 +646,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         guard !devices.isEmpty else { return }
 
-        // --- Actions ---
         micSubmenu.addItem(NSMenuItem.separator())
 
-        // Set / clear default (preferred) mic
         if let current = current, !current.isEmpty, current != preferred {
             let setDefault = NSMenuItem(title: "Set \"\(shortenMicName(current))\" as Default", action: #selector(setPreferredMic), keyEquivalent: "")
             setDefault.target = self
@@ -705,7 +659,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             micSubmenu.addItem(clearDefault)
         }
 
-        // Set / clear fallback mic
         if let current = current, !current.isEmpty, current != fallback {
             let setFallback = NSMenuItem(title: "Set \"\(shortenMicName(current))\" as Fallback", action: #selector(setFallbackMic), keyEquivalent: "")
             setFallback.target = self
@@ -717,7 +670,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             micSubmenu.addItem(clearFallback)
         }
 
-        // --- Status info ---
         micSubmenu.addItem(NSMenuItem.separator())
         let defaultInfo = NSMenuItem(
             title: "Default: \(preferred.flatMap { $0.isEmpty ? nil : shortenMicName($0) } ?? "Not set")",
@@ -736,10 +688,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func micMenuItemSelected(_ sender: NSMenuItem) {
         let micName = (sender.representedObject as? String) ?? sender.title
+        selectMic(micName)
+    }
+
+    private func selectMic(_ micName: String) {
         let oldMic = selectedMicName
         selectedMicName = micName
+        viewModel.selectedMicName = micName
         log("Selected trigger mic: \(micName)")
-        refreshWindowMicPopup()
         updateMenuState()
         if process != nil && micName != oldMic {
             restartTrigger()
@@ -816,8 +772,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         autoStartItem.state = autoStartOnLaunch ? .on : .off
         statusItem.button?.image = statusImage(running: running)
+        #if DEV_BUILD
+        var title = "HiDock DEV"
+        #else
         var title = "HiDock"
-        // Device sync status right after HiDock
+        #endif
         let pairedDevices = syncPairedDevices
         if !pairedDevices.isEmpty {
             let deviceParts = pairedDevices.map { device -> String in
@@ -826,7 +785,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             title += " · \(deviceParts.joined(separator: " · "))"
         }
-        // Mic name on the far right
         if let mic = selectedMicName, !mic.isEmpty {
             let isFallback = preferredMicName != nil && !preferredMicName!.isEmpty && mic != preferredMicName
             let suffix = isFallback ? " (fallback)" : ""
@@ -835,49 +793,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             title += " · No Mic"
         }
         statusItem.button?.title = title
-        updateWindowState()
-    }
-
-    // shortenMicName is now in Helpers.swift
-
-    private func updateWindowState() {
-        let running = (process != nil)
-        windowStartButton?.isEnabled = !running
-        windowStopButton?.isEnabled = running
-        windowAutoStartCheckbox?.state = autoStartOnLaunch ? .on : .off
-        if running {
-            let pid = process.map { "\($0.processIdentifier)" } ?? ""
-            windowStatusLabel?.stringValue = "Running (pid \(pid))"
-            windowStatusLabel?.textColor = .systemGreen
-            updateUptimeLabel()
-            startUptimeTimer()
-        } else {
-            windowStatusLabel?.stringValue = "Stopped"
-            windowStatusLabel?.textColor = .secondaryLabelColor
-            windowUptimeLabel?.stringValue = ""
-            stopUptimeTimer()
-        }
-    }
-
-    private func updateUptimeLabel() {
-        if let uptime = formatUptime() {
-            windowUptimeLabel?.stringValue = "Uptime: \(uptime)"
-        } else {
-            windowUptimeLabel?.stringValue = ""
-        }
-    }
-
-    private func updateMenuUptime() {
-        guard process != nil, let uptime = formatUptime() else { return }
-        startItem.title = "Running · \(uptime)"
-        startItem.isEnabled = false
+        syncViewModelState()
     }
 
     private func startUptimeTimer() {
         guard uptimeTimer == nil else { return }
         uptimeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.updateUptimeLabel()
-            self?.updateMenuUptime()
+            guard let self = self else { return }
+            self.viewModel.triggerUptime = self.formatUptime() ?? ""
+            self.updateMenuUptime()
         }
     }
 
@@ -886,23 +810,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         uptimeTimer = nil
     }
 
+    private func updateMenuUptime() {
+        guard process != nil, let uptime = formatUptime() else { return }
+        startItem.title = "Running · \(uptime)"
+        startItem.isEnabled = false
+    }
+
     // MARK: - Process management
 
-    @objc private func startTrigger() {
+    @objc private func startTriggerMenu() { startTrigger() }
+    @objc private func stopTriggerMenu() { stopTrigger() }
+    @objc private func toggleAutoStartMenu() { toggleAutoStart() }
+
+    private func startTrigger() {
         guard process == nil else { return }
 
         if !FileManager.default.isExecutableFile(atPath: binaryPath) {
             log("Binary not found at \(binaryPath), attempting build...")
-            startItem.isEnabled = false
-            windowStartButton?.isEnabled = false
             buildTriggerBinaryAsync { [weak self] success in
                 guard let self = self else { return }
                 if success {
                     self.log("Build succeeded, starting trigger")
                     self.launchProcess()
                 } else {
-                    self.startItem.isEnabled = true
-                    self.windowStartButton?.isEnabled = true
                     self.showError("Binary not found and build failed.\nExpected: \(self.binaryPath)")
                 }
             }
@@ -926,7 +856,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         p.standardOutput = outPipe
         p.standardError = Pipe()
 
-        // Monitor CLI stdout for trigger events
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
@@ -941,18 +870,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let status = proc.terminationStatus
                 self.log("Process terminated with status \(status)")
 
-                // Clean up stdout handler
                 outPipe.fileHandleForReading.readabilityHandler = nil
 
                 self.process = nil
                 self.processStartDate = nil
+                self.stopUptimeTimer()
                 self.updateMenuState()
 
-                // Auto-restart on unexpected crash
                 if !self.stoppingIntentionally && status != 0 {
                     self.handleCrash(exitStatus: status)
                 } else if self.stoppingIntentionally {
-                    // Reset crash count on clean stop
                     self.crashCount = 0
                 }
                 self.stoppingIntentionally = false
@@ -965,6 +892,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             processStartDate = Date()
             let micDesc = selectedMicName ?? "(default)"
             log("Started hidock-mic-trigger (pid \(p.processIdentifier), mic: \(micDesc))")
+            startUptimeTimer()
             updateMenuState()
         } catch {
             log("Failed to start: \(error)")
@@ -993,7 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func stopTrigger() {
+    private func stopTrigger() {
         guard let p = process else { return }
         stoppingIntentionally = true
         log("Stopping hidock-mic-trigger (pid \(p.processIdentifier))")
@@ -1006,6 +934,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.processStartDate = nil
                 self?.stoppingIntentionally = false
                 self?.crashCount = 0
+                self?.stopUptimeTimer()
                 self?.updateMenuState()
             }
         }
@@ -1032,8 +961,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func toggleAutoStart() {
+    private func toggleAutoStart() {
         autoStartOnLaunch.toggle()
+        viewModel.autoStartOnLaunch = autoStartOnLaunch
         updateMenuState()
         if autoStartOnLaunch && process == nil {
             startTrigger()
@@ -1053,7 +983,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("autoConnectSyncIfPaired: running list-devices")
 
-        // First, discover all connected USB HiDock devices and auto-pair any new ones
         runExtractor(arguments: ["list-devices"]) { [weak self] result in
             guard let self = self else { return }
             if case .success(let data) = result,
@@ -1068,11 +997,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             }
 
-            // Now connect to all paired devices
             let devices = self.syncPairedDevices
             guard !devices.isEmpty else { return }
             self.log("Auto-connecting \(devices.count) paired HiDock device(s) on startup")
             self.syncBusy = true
+            self.syncViewModelState()
 
             let group = DispatchGroup()
             var anyConnected = false
@@ -1114,11 +1043,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.syncBusy = false
                 if !anyConnected, let err = lastError {
                     let message = syncErrorDescription(err)
-                    self.syncStatusLabel?.stringValue = "Status: \(message)"
-                    self.syncStatusLabel?.textColor = .systemOrange
+                    self.viewModel.syncStatus = message
+                    self.viewModel.syncStatusLevel = .warning
                 }
                 self.updateMenuSyncStatus(connected: anyConnected)
-                self.updateSyncWindowState()
+                self.syncViewModelState()
             }
         }
     }
@@ -1168,365 +1097,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.runModal()
     }
 
-    @objc private func windowMicChanged(_ sender: NSPopUpButton) {
-        let oldMic = selectedMicName
-        selectedMicName = sender.titleOfSelectedItem
-        log("Selected trigger mic: \(sender.titleOfSelectedItem ?? "none")")
-        if process != nil && sender.titleOfSelectedItem != oldMic {
-            restartTrigger()
-        }
-    }
-
-    private func refreshWindowMicPopup() {
-        guard let popup = windowMicPopup else { return }
-        let devices = getInputDeviceNames()
-        popup.removeAllItems()
-        popup.addItems(withTitles: devices)
-        if let current = selectedMicName, devices.contains(current) {
-            popup.selectItem(withTitle: current)
-        } else if !devices.isEmpty {
-            popup.selectItem(at: 0)
-            selectedMicName = popup.titleOfSelectedItem
-        }
-    }
-
-    private func showWindow() {
-        showSyncWindow()
-    }
-
     @objc private func showSyncWindow() {
         if syncWindow == nil {
             let rect = NSRect(x: 0, y: 0, width: 1120, height: 590)
             let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
             let win = NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
             win.center()
+            #if DEV_BUILD
+            win.title = "HiDock DEV"
+            #else
             win.title = "HiDock"
+            #endif
             win.isReleasedWhenClosed = false
             win.delegate = self
             win.minSize = NSSize(width: 980, height: 510)
 
-            let contentView = win.contentView!
-
-            // ── Mic Trigger section (top strip) ──
-            let micTriggerLabel = NSTextField(labelWithString: "Mic Trigger")
-            micTriggerLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-            micTriggerLabel.frame = NSRect(x: 20, y: 560, width: 100, height: 20)
-            micTriggerLabel.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(micTriggerLabel)
-
-            let triggerStatus = NSTextField(labelWithString: "Stopped")
-            triggerStatus.font = .systemFont(ofSize: 13)
-            triggerStatus.textColor = .secondaryLabelColor
-            triggerStatus.frame = NSRect(x: 126, y: 560, width: 160, height: 20)
-            triggerStatus.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(triggerStatus)
-            windowStatusLabel = triggerStatus
-
-            let triggerUptime = NSTextField(labelWithString: "")
-            triggerUptime.font = .systemFont(ofSize: 12)
-            triggerUptime.textColor = .secondaryLabelColor
-            triggerUptime.frame = NSRect(x: 290, y: 560, width: 180, height: 20)
-            triggerUptime.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(triggerUptime)
-            windowUptimeLabel = triggerUptime
-
-            let startBtn = NSButton(title: "Start", target: self, action: #selector(startTrigger))
-            startBtn.bezelStyle = .rounded
-            startBtn.controlSize = .small
-            startBtn.frame = NSRect(x: 20, y: 534, width: 60, height: 24)
-            startBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(startBtn)
-            windowStartButton = startBtn
-
-            let stopBtn2 = NSButton(title: "Stop", target: self, action: #selector(stopTrigger))
-            stopBtn2.bezelStyle = .rounded
-            stopBtn2.controlSize = .small
-            stopBtn2.frame = NSRect(x: 88, y: 534, width: 60, height: 24)
-            stopBtn2.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(stopBtn2)
-            windowStopButton = stopBtn2
-
-            let micLabel = NSTextField(labelWithString: "Trigger Mic:")
-            micLabel.font = .systemFont(ofSize: 12)
-            micLabel.frame = NSRect(x: 170, y: 536, width: 80, height: 18)
-            micLabel.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(micLabel)
-
-            let micPopup = NSPopUpButton(frame: NSRect(x: 252, y: 532, width: 240, height: 26), pullsDown: false)
-            micPopup.controlSize = .small
-            micPopup.target = self
-            micPopup.action = #selector(windowMicChanged(_:))
-            micPopup.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(micPopup)
-            windowMicPopup = micPopup
-
-            let autoStart = NSButton(checkboxWithTitle: "Auto-start on launch", target: self, action: #selector(toggleAutoStart))
-            autoStart.controlSize = .small
-            autoStart.font = .systemFont(ofSize: 12)
-            autoStart.frame = NSRect(x: 510, y: 536, width: 170, height: 18)
-            autoStart.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(autoStart)
-            windowAutoStartCheckbox = autoStart
-
-            let micSeparator = NSBox()
-            micSeparator.boxType = .separator
-            micSeparator.frame = NSRect(x: 20, y: 524, width: 1080, height: 1)
-            micSeparator.autoresizingMask = [.width, .minYMargin]
-            contentView.addSubview(micSeparator)
-
-            // ── Sync section ──
-            let status = NSTextField(labelWithString: "Status: Not loaded")
-            status.font = .systemFont(ofSize: 13)
-            status.frame = NSRect(x: 20, y: 498, width: 760, height: 18)
-            status.autoresizingMask = [.width, .minYMargin]
-            contentView.addSubview(status)
-            syncStatusLabel = status
-
-            let folder = NSTextField(labelWithString: "Recordings folder: Not set")
-            folder.font = .systemFont(ofSize: 12)
-            folder.textColor = .secondaryLabelColor
-            folder.frame = NSRect(x: 20, y: 478, width: 1080, height: 18)
-            folder.autoresizingMask = [.width, .minYMargin]
-            contentView.addSubview(folder)
-            syncFolderLabel = folder
-            if let savedFolder = UserDefaults.standard.string(forKey: syncOutputFolderKey), !savedFolder.isEmpty {
-                syncOutputFolder = savedFolder
-                syncFolderLabel?.stringValue = "Recordings folder: \(savedFolder)"
-            }
-
-            let transcriptFolder = NSTextField(labelWithString: "Transcript folder: ~/HiDock/Raw Transcripts")
-            transcriptFolder.font = .systemFont(ofSize: 12)
-            transcriptFolder.textColor = .secondaryLabelColor
-            transcriptFolder.frame = NSRect(x: 20, y: 460, width: 1080, height: 18)
-            transcriptFolder.autoresizingMask = [.width, .minYMargin]
-            contentView.addSubview(transcriptFolder)
-            syncTranscriptFolderLabel = transcriptFolder
-            if let savedTranscriptFolder = UserDefaults.standard.string(forKey: syncTranscriptFolderKey), !savedTranscriptFolder.isEmpty {
-                syncTranscriptFolder = savedTranscriptFolder
-                syncTranscriptFolderLabel?.stringValue = "Transcript folder: \(savedTranscriptFolder)"
-            } else {
-                syncTranscriptFolder = "\(NSHomeDirectory())/HiDock/Raw Transcripts"
-            }
-
-            let summary = NSTextField(labelWithString: "No recordings loaded")
-            summary.font = .systemFont(ofSize: 12)
-            summary.textColor = .secondaryLabelColor
-            summary.alignment = .right
-            summary.frame = NSRect(x: 500, y: 498, width: 600, height: 18)
-            summary.autoresizingMask = [.width, .minYMargin]
-            contentView.addSubview(summary)
-            syncSummaryLabel = summary
-
-            // Row 1 (top toolbar): Pair, Unpair, Recordings Folder, Transcript Folder, Refresh
-            let pairBtn = NSButton(title: "Pair Dock", target: self, action: #selector(pairSyncDock))
-            pairBtn.bezelStyle = .rounded
-            pairBtn.frame = NSRect(x: 20, y: 432, width: 100, height: 28)
-            pairBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(pairBtn)
-            syncPairButton = pairBtn
-
-            let unpairBtn = NSButton(title: "Unpair", target: self, action: #selector(unpairSyncDock))
-            unpairBtn.bezelStyle = .rounded
-            unpairBtn.frame = NSRect(x: 128, y: 432, width: 90, height: 28)
-            unpairBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(unpairBtn)
-            syncUnpairButton = unpairBtn
-
-            let chooseBtn = NSButton(title: "Recordings Folder", target: self, action: #selector(chooseSyncOutputFolder))
-            chooseBtn.bezelStyle = .rounded
-            chooseBtn.frame = NSRect(x: 226, y: 432, width: 140, height: 28)
-            chooseBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(chooseBtn)
-
-            let chooseTranscriptBtn = NSButton(title: "Transcript Folder", target: self, action: #selector(chooseTranscriptOutputFolder))
-            chooseTranscriptBtn.bezelStyle = .rounded
-            chooseTranscriptBtn.frame = NSRect(x: 374, y: 432, width: 140, height: 28)
-            chooseTranscriptBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(chooseTranscriptBtn)
-
-            let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(refreshSyncStatus))
-            refreshBtn.bezelStyle = .rounded
-            refreshBtn.frame = NSRect(x: 522, y: 432, width: 90, height: 28)
-            refreshBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(refreshBtn)
-            syncRefreshButton = refreshBtn
-
-            // Row 2: Download Selected, Download New, Mark Downloaded, Stop, Transcribe Selected, Transcribe All
-            let downloadSelectedBtn = NSButton(title: "Download Selected", target: self, action: #selector(downloadSelectedSyncRecording))
-            downloadSelectedBtn.bezelStyle = .rounded
-            downloadSelectedBtn.frame = NSRect(x: 20, y: 404, width: 140, height: 28)
-            downloadSelectedBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(downloadSelectedBtn)
-            syncDownloadSelectedButton = downloadSelectedBtn
-
-            let downloadNewBtn = NSButton(title: "Download New", target: self, action: #selector(downloadNewSyncRecordings))
-            downloadNewBtn.bezelStyle = .rounded
-            downloadNewBtn.frame = NSRect(x: 168, y: 404, width: 120, height: 28)
-            downloadNewBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(downloadNewBtn)
-            syncDownloadNewButton = downloadNewBtn
-
-            let markBtn = NSButton(title: "Mark Downloaded", target: self, action: #selector(markSyncRecordingsAsDownloaded))
-            markBtn.bezelStyle = .rounded
-            markBtn.frame = NSRect(x: 296, y: 404, width: 140, height: 28)
-            markBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(markBtn)
-
-            let stopBtn = NSButton(title: "Stop Download", target: self, action: #selector(stopSyncDownload))
-            stopBtn.bezelStyle = .rounded
-            stopBtn.frame = NSRect(x: 20, y: 404, width: 416, height: 28)
-            stopBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            stopBtn.contentTintColor = .systemRed
-            stopBtn.isHidden = true
-            contentView.addSubview(stopBtn)
-            syncStopButton = stopBtn
-
-            let transcribeSelectedBtn = NSButton(title: "Transcribe Selected", target: self, action: #selector(transcribeSelectedRecordings))
-            transcribeSelectedBtn.bezelStyle = .rounded
-            transcribeSelectedBtn.frame = NSRect(x: 444, y: 404, width: 150, height: 28)
-            transcribeSelectedBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(transcribeSelectedBtn)
-            syncTranscribeSelectedButton = transcribeSelectedBtn
-
-            let transcribeAllBtn = NSButton(title: "Transcribe All", target: self, action: #selector(transcribeAllRecordings))
-            transcribeAllBtn.bezelStyle = .rounded
-            transcribeAllBtn.frame = NSRect(x: 602, y: 404, width: 120, height: 28)
-            transcribeAllBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(transcribeAllBtn)
-            syncTranscribeAllButton = transcribeAllBtn
-
-            // Row 3: Select buttons, filter, checkboxes
-            let selectAllBtn = NSButton(title: "Select All", target: self, action: #selector(selectAllSyncRecordings))
-            selectAllBtn.bezelStyle = .rounded
-            selectAllBtn.controlSize = .small
-            selectAllBtn.font = .systemFont(ofSize: 11)
-            selectAllBtn.frame = NSRect(x: 20, y: 376, width: 80, height: 22)
-            selectAllBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(selectAllBtn)
-
-            let selectNoneBtn = NSButton(title: "Select None", target: self, action: #selector(selectNoneSyncRecordings))
-            selectNoneBtn.bezelStyle = .rounded
-            selectNoneBtn.controlSize = .small
-            selectNoneBtn.font = .systemFont(ofSize: 11)
-            selectNoneBtn.frame = NSRect(x: 108, y: 376, width: 86, height: 22)
-            selectNoneBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(selectNoneBtn)
-
-            let selectNewBtn = NSButton(title: "Select Not Downloaded", target: self, action: #selector(selectNotDownloadedSyncRecordings))
-            selectNewBtn.bezelStyle = .rounded
-            selectNewBtn.controlSize = .small
-            selectNewBtn.font = .systemFont(ofSize: 11)
-            selectNewBtn.frame = NSRect(x: 202, y: 376, width: 150, height: 22)
-            selectNewBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(selectNewBtn)
-
-            // Device filter buttons
-            let filterLabel = NSTextField(labelWithString: "Filter:")
-            filterLabel.font = .systemFont(ofSize: 11, weight: .medium)
-            filterLabel.frame = NSRect(x: 380, y: 376, width: 40, height: 22)
-            filterLabel.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(filterLabel)
-
-            // Checkboxes on the right side of Row 3
-            let hideDownloadedCheckbox = NSButton(checkboxWithTitle: "Hide Downloaded", target: self, action: #selector(toggleHideDownloaded(_:)))
-            hideDownloadedCheckbox.frame = NSRect(x: 820, y: 378, width: 150, height: 22)
-            hideDownloadedCheckbox.state = UserDefaults.standard.bool(forKey: syncHideDownloadedKey) ? .on : .off
-            hideDownloadedCheckbox.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(hideDownloadedCheckbox)
-            syncHideDownloadedCheckbox = hideDownloadedCheckbox
-            syncHideDownloaded = hideDownloadedCheckbox.state == .on
-
-            let autoDownloadCheckbox = NSButton(checkboxWithTitle: "Auto-download New", target: self, action: #selector(toggleAutoDownload(_:)))
-            autoDownloadCheckbox.frame = NSRect(x: 970, y: 378, width: 170, height: 22)
-            autoDownloadCheckbox.state = UserDefaults.standard.bool(forKey: syncAutoDownloadKey) ? .on : .off
-            autoDownloadCheckbox.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(autoDownloadCheckbox)
-            syncAutoDownloadCheckbox = autoDownloadCheckbox
-            syncAutoDownload = autoDownloadCheckbox.state == .on
-
-            let allDevicesBtn = NSButton(title: "All", target: self, action: #selector(filterSyncByDevice(_:)))
-            allDevicesBtn.bezelStyle = .rounded
-            allDevicesBtn.controlSize = .small
-            allDevicesBtn.font = .systemFont(ofSize: 11, weight: .semibold)
-            allDevicesBtn.tag = 0
-            allDevicesBtn.frame = NSRect(x: 422, y: 376, width: 40, height: 22)
-            allDevicesBtn.autoresizingMask = [.maxXMargin, .minYMargin]
-            contentView.addSubview(allDevicesBtn)
-            syncDeviceFilterButtons = [allDevicesBtn]
-
-            var filterX: CGFloat = 470
-            for device in syncPairedDevices {
-                let btn = NSButton(title: device.shortName, target: self, action: #selector(filterSyncByDevice(_:)))
-                btn.bezelStyle = .rounded
-                btn.controlSize = .small
-                btn.font = .systemFont(ofSize: 11)
-                btn.tag = device.productId
-                let btnWidth = max(CGFloat(device.shortName.count) * 8 + 16, 50)
-                btn.frame = NSRect(x: filterX, y: 376, width: btnWidth, height: 22)
-                btn.autoresizingMask = [.maxXMargin, .minYMargin]
-                contentView.addSubview(btn)
-                syncDeviceFilterButtons.append(btn)
-                filterX += btnWidth + 8
-            }
-
-            let scrollView = NSScrollView(frame: NSRect(x: 20, y: 20, width: 1080, height: 346))
-            scrollView.hasVerticalScroller = true
-            scrollView.hasHorizontalScroller = true
-            scrollView.borderType = .bezelBorder
-            scrollView.autoresizingMask = [.width, .height]
-
-            let tableView = NSTableView(frame: scrollView.bounds)
-            tableView.delegate = self
-            tableView.dataSource = self
-            tableView.usesAlternatingRowBackgroundColors = true
-            tableView.allowsEmptySelection = true
-            tableView.rowSizeStyle = .medium
-            tableView.columnAutoresizingStyle = .noColumnAutoresizing
-
-            let columns: [(String, String, CGFloat)] = [
-                ("selected", "", 36),
-                ("device", "Device", 130),
-                ("status", "Status", 110),
-                ("transcribed", "Transcribed", 90),
-                ("name", "Recording", 250),
-                ("created", "Created", 170),
-                ("duration", "Length", 90),
-                ("size", "Size", 90),
-                ("path", "Output", 300),
-                ("reveal", "MP3", 60),
-            ]
-            var totalColumnWidth: CGFloat = 0
-            for (identifier, title, width) in columns {
-                let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(rawValue: identifier))
-                column.title = title
-                column.width = width
-                if identifier != "selected" {
-                    column.sortDescriptorPrototype = NSSortDescriptor(key: identifier, ascending: true)
-                }
-                tableView.addTableColumn(column)
-                totalColumnWidth += width
-            }
-            tableView.frame = NSRect(x: 0, y: 0, width: totalColumnWidth, height: scrollView.bounds.height)
-
-            let tableMenu = NSMenu()
-            tableMenu.addItem(NSMenuItem(title: "Mark as Downloaded", action: #selector(markSyncRecordingsAsDownloaded), keyEquivalent: ""))
-            tableMenu.addItem(NSMenuItem(title: "Show in Finder", action: #selector(revealSelectedSyncRecordingInFinder), keyEquivalent: ""))
-            tableView.menu = tableMenu
-
-            scrollView.documentView = tableView
-            contentView.addSubview(scrollView)
-            syncTableView = tableView
+            let hostingView = NSHostingView(rootView: MainWindowView(viewModel: viewModel))
+            win.contentView = hostingView
 
             syncWindow = win
-            updateWindowState()
-            updateSyncWindowState()
         }
-        refreshWindowMicPopup()
+        syncViewModelState()
         NSApp.setActivationPolicy(.regular)
         syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshSyncStatus()
     }
+
+    // MARK: - Extractor
 
     private func extractorArguments(_ arguments: [String], productId: Int? = nil) -> [String] {
         if let pid = productId {
@@ -1548,7 +1146,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    /// Maximum time (seconds) an extractor process may run before being killed.
     private let extractorProcessTimeout: TimeInterval = 30
 
     private func runExtractor(arguments: [String], productId: Int? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
@@ -1575,7 +1172,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 try process.run()
                 NSLog("runExtractor: process started (pid %d)", process.processIdentifier)
 
-                // Wait with a timeout — kill the process if it hangs
                 let deadline = Date().addingTimeInterval(self.extractorProcessTimeout)
                 while process.isRunning && Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.2)
@@ -1583,7 +1179,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if process.isRunning {
                     NSLog("runExtractor: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
                     process.terminate()
-                    // Give it a moment to die, then force kill
                     Thread.sleep(forTimeInterval: 1)
                     if process.isRunning { process.interrupt() }
                     process.waitUntilExit()
@@ -1601,29 +1196,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 try? FileManager.default.removeItem(at: errURL)
 
                 if process.terminationStatus == 0 {
-                    DispatchQueue.main.async {
-                        completion(.success(outData))
-                    }
+                    DispatchQueue.main.async { completion(.success(outData)) }
                 } else if process.terminationReason == .uncaughtSignal {
                     let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
                         NSLocalizedDescriptionKey: "Device query timed out — device may be busy recording"
                     ])
-                    DispatchQueue.main.async {
-                        completion(.failure(error))
-                    }
+                    DispatchQueue.main.async { completion(.failure(error)) }
                 } else {
                     let message = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? "Extractor failed"
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
                         NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines)
                     ])
-                    DispatchQueue.main.async {
-                        completion(.failure(error))
-                    }
+                    DispatchQueue.main.async { completion(.failure(error)) }
                 }
             } catch {
-                DispatchQueue.main.async {
-                    completion(.failure(error))
-                }
+                DispatchQueue.main.async { completion(.failure(error)) }
             }
         }
     }
@@ -1642,17 +1229,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.standardOutput = outPipe
             process.standardError = errPipe
 
-            // Collect stdout in background to avoid pipe buffer deadlock
             var outData = Data()
             let outQueue = DispatchQueue(label: "hidock.stdout")
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
-                if !chunk.isEmpty {
-                    outQueue.sync { outData.append(chunk) }
-                }
+                if !chunk.isEmpty { outQueue.sync { outData.append(chunk) } }
             }
 
-            // Read stderr in real-time for PROGRESS lines
             var stderrData = Data()
             let errQueue = DispatchQueue(label: "hidock.stderr")
             var lineBuffer = ""
@@ -1681,10 +1264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             do {
                 try process.run()
                 process.waitUntilExit()
-                // Allow handlers to drain
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
-                // Read any remaining data
                 let trailingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
                 let trailingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
                 outQueue.sync { outData.append(trailingOut) }
@@ -1712,39 +1293,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func updateSyncWindowState() {
-        let selectedRow = syncTableView?.selectedRow ?? -1
-        let entries = visibleSyncEntries
-        let hasSelection = !syncCheckedRecordings.isEmpty || (selectedRow >= 0 && selectedRow < entries.count)
-
-        syncRefreshButton?.isEnabled = !syncBusy
-        syncDownloadNewButton?.isEnabled = !syncBusy && syncPaired
-        syncDownloadNewButton?.isHidden = syncDownloading
-        syncDownloadSelectedButton?.isEnabled = !syncBusy && syncPaired && hasSelection
-        syncDownloadSelectedButton?.isHidden = syncDownloading
-        syncStopButton?.isHidden = !syncDownloading
-        syncPairButton?.isEnabled = !syncBusy
-        syncUnpairButton?.isEnabled = !syncBusy && syncPaired
-        syncTranscribeSelectedButton?.isEnabled = !transcriptionBusy && hasSelection
-        syncTranscribeAllButton?.isEnabled = !transcriptionBusy
-    }
+    // MARK: - Sync Actions
 
     private func renderSyncStatus(_ status: HiDockSyncStatusResponse, deviceProductId: Int, deviceName: String) {
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         syncDeviceConnected[deviceProductId] = status.connected
-        // Remove old entries for this device, then add new ones
         syncEntries.removeAll { $0.deviceProductId == deviceProductId }
         for recording in status.recordings {
             syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: deviceProductId, deviceName: deviceName))
         }
         let validNames = Set(syncEntries.map(\.recording.name))
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
-        syncTableView?.reloadData()
 
-        syncFolderLabel?.stringValue = "Output folder: \(status.outputDir)"
-        updateSyncSummary()
-        // Only update status label and menu if we're not mid-refresh (group.notify handles that)
         if !syncBusy {
             let devices = syncPairedDevices
             var parts: [String] = []
@@ -1753,18 +1314,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 parts.append("\(device.shortName) \(connected ? "✓" : "⚠")")
             }
             if parts.isEmpty {
-                syncStatusLabel?.stringValue = "Status: Not connected"
-                syncStatusLabel?.textColor = .secondaryLabelColor
+                viewModel.syncStatus = "Not connected"
+                viewModel.syncStatusLevel = .secondary
             } else {
-                syncStatusLabel?.stringValue = "Status: \(parts.joined(separator: " · "))"
-                syncStatusLabel?.textColor = syncDeviceConnected.values.contains(true) ? .systemGreen : .systemOrange
+                viewModel.syncStatus = parts.joined(separator: " · ")
+                viewModel.syncStatusLevel = syncDeviceConnected.values.contains(true) ? .success : .warning
             }
-            updateSyncWindowState()
             updateMenuSyncStatus(connected: status.connected)
         }
+        syncViewModelState()
     }
-
-    // syncErrorDescription is now a free function in Helpers.swift
 
     private func startSyncRefreshTimer() {
         syncRefreshStartDate = Date()
@@ -1772,7 +1331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self, let start = self.syncRefreshStartDate else { return }
             let elapsed = Int(Date().timeIntervalSince(start))
-            self.syncStatusLabel?.stringValue = "Status: Refreshing... \(elapsed)s"
+            self.viewModel.syncStatus = "Refreshing... \(elapsed)s"
         }
     }
 
@@ -1783,48 +1342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private var visibleSyncEntries: [HiDockSyncRecordingEntry] {
-        var entries = syncEntries
-        if let filterPid = syncFilterDeviceProductId {
-            entries = entries.filter { $0.deviceProductId == filterPid }
-        }
-        if syncHideDownloaded {
-            entries = entries.filter { !$0.recording.downloaded }
-        }
-        entries.sort { a, b in
-            let ar = a.recording, br = b.recording
-            let result: Bool
-            switch syncSortKey {
-            case "status":
-                let aStatus = ar.downloaded ? "Downloaded" : (ar.lastError == nil ? "On device" : "Failed")
-                let bStatus = br.downloaded ? "Downloaded" : (br.lastError == nil ? "On device" : "Failed")
-                result = aStatus.localizedCaseInsensitiveCompare(bStatus) == .orderedAscending
-            case "name":
-                result = ar.outputName.localizedCaseInsensitiveCompare(br.outputName) == .orderedAscending
-            case "created":
-                let aKey = "\(ar.createDate) \(ar.createTime)"
-                let bKey = "\(br.createDate) \(br.createTime)"
-                result = aKey < bKey
-            case "duration":
-                result = ar.duration < br.duration
-            case "size":
-                result = ar.length < br.length
-            case "path":
-                result = ar.outputPath.localizedCaseInsensitiveCompare(br.outputPath) == .orderedAscending
-            case "device":
-                result = a.deviceName.localizedCaseInsensitiveCompare(b.deviceName) == .orderedAscending
-            default:
-                result = ar.createDate < br.createDate
-            }
-            return syncSortAscending ? result : !result
-        }
-        return entries
-    }
-
-    private func selectedSyncEntry() -> HiDockSyncRecordingEntry? {
-        let row = syncTableView?.selectedRow ?? -1
-        let entries = visibleSyncEntries
-        guard row >= 0, row < entries.count else { return nil }
-        return entries[row]
+        viewModel.visibleEntries
     }
 
     private func selectedSyncEntries() -> [HiDockSyncRecordingEntry] {
@@ -1832,111 +1350,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !syncCheckedRecordings.isEmpty {
             return entries.filter { syncCheckedRecordings.contains($0.recording.name) }
         }
-        if let single = selectedSyncEntry() {
-            return [single]
-        }
         return []
     }
 
-    @objc private func toggleHideDownloaded(_ sender: NSButton) {
-        syncHideDownloaded = sender.state == .on
+    private func toggleHideDownloaded() {
+        syncHideDownloaded.toggle()
         UserDefaults.standard.set(syncHideDownloaded, forKey: syncHideDownloadedKey)
-        syncTableView?.reloadData()
-        updateSyncSummary()
-        updateSyncWindowState()
+        syncViewModelState()
     }
 
-    @objc private func toggleAutoDownload(_ sender: NSButton) {
-        syncAutoDownload = sender.state == .on
+    private func toggleAutoDownload() {
+        syncAutoDownload.toggle()
         UserDefaults.standard.set(syncAutoDownload, forKey: syncAutoDownloadKey)
+        syncViewModelState()
     }
 
-    @objc private func toggleSyncRecordingCheckbox(_ sender: NSButton) {
-        let entries = visibleSyncEntries
-        let clickedRow = sender.tag
-        guard clickedRow >= 0, clickedRow < entries.count else { return }
-
-        let event = NSApp.currentEvent
-        let shiftHeld = event?.modifierFlags.contains(.shift) == true
-        let cmdHeld = event?.modifierFlags.contains(.command) == true
-
-        if shiftHeld, let lastRow = syncLastCheckedRow {
-            // Shift-click: toggle range between last clicked and current
-            let rangeStart = min(lastRow, clickedRow)
-            let rangeEnd = max(lastRow, clickedRow)
-            let newState = sender.state == .on
-            for i in rangeStart...rangeEnd where i < entries.count {
-                if newState {
-                    syncCheckedRecordings.insert(entries[i].recording.name)
-                } else {
-                    syncCheckedRecordings.remove(entries[i].recording.name)
-                }
-            }
-            syncTableView?.reloadData()
+    private func toggleSyncRecordingCheckbox(_ name: String) {
+        if syncCheckedRecordings.contains(name) {
+            syncCheckedRecordings.remove(name)
         } else {
-            // Normal or Cmd-click: toggle single checkbox
-            let entry = entries[clickedRow]
-            if sender.state == .on {
-                syncCheckedRecordings.insert(entry.recording.name)
-            } else {
-                syncCheckedRecordings.remove(entry.recording.name)
-            }
+            syncCheckedRecordings.insert(name)
         }
-
-        syncLastCheckedRow = clickedRow
-        updateSyncWindowState()
-        updateSyncSummary()
+        syncViewModelState()
     }
 
-    @objc private func selectAllSyncRecordings() {
+    private func selectAllSyncRecordings() {
         for entry in visibleSyncEntries {
             syncCheckedRecordings.insert(entry.recording.name)
         }
-        syncTableView?.reloadData()
-        updateSyncWindowState()
-        updateSyncSummary()
+        syncViewModelState()
     }
 
-    @objc private func selectNoneSyncRecordings() {
+    private func selectNoneSyncRecordings() {
         syncCheckedRecordings.removeAll()
-        syncTableView?.reloadData()
-        updateSyncWindowState()
-        updateSyncSummary()
+        syncViewModelState()
     }
 
-    @objc private func selectNotDownloadedSyncRecordings() {
+    private func selectNotDownloadedSyncRecordings() {
         syncCheckedRecordings.removeAll()
         for entry in visibleSyncEntries where !entry.recording.downloaded {
             syncCheckedRecordings.insert(entry.recording.name)
         }
-        syncTableView?.reloadData()
-        updateSyncWindowState()
-        updateSyncSummary()
+        syncViewModelState()
     }
 
-    @objc private func filterSyncByDevice(_ sender: NSButton) {
-        let productId = sender.tag
-        syncFilterDeviceProductId = productId == 0 ? nil : productId
-        // Update button styling
-        for btn in syncDeviceFilterButtons {
-            let isActive = btn.tag == productId
-            btn.font = .systemFont(ofSize: 11, weight: isActive ? .semibold : .regular)
-        }
-        syncTableView?.reloadData()
-        updateSyncWindowState()
-        updateSyncSummary()
-    }
-
-    private func updateSyncSummary() {
-        let visible = visibleSyncEntries
-        let downloadedCount = syncEntries.filter(\.recording.downloaded).count
-        let selectedCount = syncCheckedRecordings.count
-        var parts = ["\(visible.count) shown", "\(syncEntries.count) total", "\(downloadedCount) downloaded"]
-        if selectedCount > 0 {
-            parts.append("\(selectedCount) selected")
-        }
-        syncSummaryLabel?.stringValue = parts.joined(separator: " · ")
-
+    private func filterSyncByDevice(_ productId: Int?) {
+        syncFilterDeviceProductId = productId
+        syncViewModelState()
     }
 
     private func scheduleAutoDownloadNewRecordings() {
@@ -1948,7 +1408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func refreshSyncStatus() {
+    private func refreshSyncStatus() {
         guard !syncBusy else {
             log("refreshSyncStatus: skipping, already busy")
             return
@@ -1956,17 +1416,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard ensureExtractorReady() else { return }
         let devices = syncPairedDevices
         guard !devices.isEmpty else {
-            syncStatusLabel?.stringValue = "Status: Not paired"
-            syncStatusLabel?.textColor = .secondaryLabelColor
-            updateSyncWindowState()
+            viewModel.syncStatus = "Not paired"
+            viewModel.syncStatusLevel = .secondary
+            syncViewModelState()
             return
         }
 
         syncBusy = true
-        syncStatusLabel?.stringValue = "Status: Refreshing..."
-        syncStatusLabel?.textColor = .secondaryLabelColor
+        viewModel.syncStatus = "Refreshing..."
+        viewModel.syncStatusLevel = .secondary
         startSyncRefreshTimer()
-        updateSyncWindowState()
+        syncViewModelState()
 
         let group = DispatchGroup()
         var anyConnected = false
@@ -2006,21 +1466,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.syncBusy = false
             self.stopSyncRefreshTimer()
             if anyConnected {
-                self.syncStatusLabel?.stringValue = "Status: Paired and connected (\(devices.count) device\(devices.count == 1 ? "" : "s"))"
-                self.syncStatusLabel?.textColor = .systemGreen
+                self.viewModel.syncStatus = "Paired and connected (\(devices.count) device\(devices.count == 1 ? "" : "s"))"
+                self.viewModel.syncStatusLevel = .success
             } else if let err = lastError {
                 let message = syncErrorDescription(err)
-                self.syncStatusLabel?.stringValue = "Status: \(message)"
-                self.syncStatusLabel?.textColor = .systemRed
+                self.viewModel.syncStatus = message
+                self.viewModel.syncStatusLevel = .error
             }
-            self.updateSyncSummary()
-            self.updateSyncWindowState()
             self.updateMenuSyncStatus(connected: anyConnected)
             self.refreshTranscriptionState()
+            self.syncViewModelState()
         }
     }
 
-    @objc private func chooseSyncOutputFolder() {
+    private func chooseSyncOutputFolder() {
         guard ensureExtractorReady() else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -2037,7 +1496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 switch result {
                 case .success:
                     self.syncOutputFolder = url.path
-                    self.syncFolderLabel?.stringValue = "Recordings folder: \(url.path)"
+                    self.viewModel.syncOutputFolder = url.path
                     UserDefaults.standard.set(url.path, forKey: self.syncOutputFolderKey)
                     self.refreshSyncStatus()
                 case .failure(let error):
@@ -2048,7 +1507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func chooseTranscriptOutputFolder() {
+    private func chooseTranscriptOutputFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -2060,15 +1519,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         if panel.runModal() == .OK, let url = panel.url {
             syncTranscriptFolder = url.path
-            syncTranscriptFolderLabel?.stringValue = "Transcript folder: \(url.path)"
+            viewModel.syncTranscriptFolder = url.path
             UserDefaults.standard.set(url.path, forKey: syncTranscriptFolderKey)
         }
     }
 
-    @objc private func pairSyncDock() {
+    private func pairSyncDock() {
         guard ensureExtractorReady() else { return }
-        syncStatusLabel?.stringValue = "Status: Searching for devices..."
-        syncStatusLabel?.textColor = .secondaryLabelColor
+        viewModel.syncStatus = "Searching for devices..."
+        viewModel.syncStatusLevel = .secondary
 
         runExtractor(arguments: ["list-devices"]) { [weak self] result in
             guard let self = self else { return }
@@ -2079,18 +1538,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 let devices = response.devices
-                // Filter out already-paired devices
                 let alreadyPaired = Set(self.syncPairedDevices.map(\.productId))
                 let unpaired = devices.filter { !alreadyPaired.contains($0.productId) }
                 if unpaired.isEmpty && devices.isEmpty {
-                    self.syncStatusLabel?.stringValue = "Status: No HiDock devices found"
-                    self.syncStatusLabel?.textColor = .systemRed
+                    self.viewModel.syncStatus = "No HiDock devices found"
+                    self.viewModel.syncStatusLevel = .error
                     self.showError("No HiDock devices found.\nConnect a HiDock via USB and try again.")
                     return
                 }
                 if unpaired.isEmpty {
-                    self.syncStatusLabel?.stringValue = "Status: All connected devices already paired"
-                    self.syncStatusLabel?.textColor = .secondaryLabelColor
+                    self.viewModel.syncStatus = "All connected devices already paired"
+                    self.viewModel.syncStatusLevel = .secondary
                     return
                 }
                 if unpaired.count == 1, let device = unpaired.first {
@@ -2099,8 +1557,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.showDevicePicker(unpaired)
             case .failure(let error):
-                self.syncStatusLabel?.stringValue = "Status: Device search failed"
-                self.syncStatusLabel?.textColor = .systemRed
+                self.viewModel.syncStatus = "Device search failed"
+                self.viewModel.syncStatusLevel = .error
                 self.showError("Failed to search for HiDock devices:\n\(error.localizedDescription)")
             }
         }
@@ -2142,10 +1600,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncPairedDevices = devices
         }
         log("Paired with \(device.displayName) (product ID: \(device.productId)) — \(devices.count) device(s) total")
+        syncViewModelState()
         refreshSyncStatus()
     }
 
-    @objc private func unpairSyncDock() {
+    private func unpairSyncDock() {
         let devices = syncPairedDevices
         if devices.count > 1 {
             let alert = NSAlert()
@@ -2160,7 +1619,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {
-                // Unpair all
                 syncPairedDevices = []
             } else {
                 let buttonIndex = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
@@ -2169,7 +1627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     updated.remove(at: buttonIndex - 1)
                     syncPairedDevices = updated
                 } else {
-                    return // Cancel
+                    return
                 }
             }
         } else {
@@ -2180,23 +1638,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncPairedDevices.contains(where: { $0.productId == entry.deviceProductId })
         }
         syncCheckedRecordings = syncCheckedRecordings.intersection(Set(syncEntries.map(\.recording.name)))
-        syncTableView?.reloadData()
         if syncPairedDevices.isEmpty {
-            syncStatusLabel?.stringValue = "Status: Unpaired"
-            syncStatusLabel?.textColor = .secondaryLabelColor
-            syncSummaryLabel?.stringValue = "No recordings loaded"
+            viewModel.syncStatus = "Unpaired"
+            viewModel.syncStatusLevel = .secondary
         }
-        updateSyncWindowState()
-
         updateMenuSyncStatus(connected: false)
+        syncViewModelState()
     }
 
-    @objc private func markSyncRecordingsAsDownloaded() {
+    private func markSyncRecordingsAsDownloaded() {
         let entries = selectedSyncEntries()
         let notDownloaded = entries.filter { !$0.recording.downloaded }
         guard !notDownloaded.isEmpty else { return }
 
-        // Group by device so product_id is stored correctly
         let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceProductId)
         let group = DispatchGroup()
         var anyError: String?
@@ -2221,21 +1675,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func revealSelectedSyncRecordingInFinder() {
-        let entries = selectedSyncEntries()
-        guard let entry = entries.first, entry.recording.downloaded else { return }
-        let url = URL(fileURLWithPath: entry.recording.outputPath)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    @objc private func revealSyncRecordingInFinder(_ sender: NSButton) {
-        let entries = visibleSyncEntries
-        guard sender.tag >= 0, sender.tag < entries.count else { return }
-        let url = URL(fileURLWithPath: entries[sender.tag].recording.outputPath)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    @objc private func stopSyncDownload() {
+    private func stopSyncDownload() {
         log("User requested stop download")
         syncDownloadStopping = true
         if let proc = syncExtractorProcess, proc.isRunning {
@@ -2245,9 +1685,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         stopDownloadTimer()
         syncBusy = false
         syncDownloading = false
-        syncStatusLabel?.stringValue = "Status: Download stopped"
-        syncStatusLabel?.textColor = .systemOrange
-        updateSyncWindowState()
+        viewModel.syncStatus = "Download stopped"
+        viewModel.syncStatusLevel = .warning
+        syncViewModelState()
     }
 
     private func startDownloadTimer() {
@@ -2259,7 +1699,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let mins = elapsed / 60
             let secs = elapsed % 60
             let timeStr = mins > 0 ? String(format: "%d:%02d", mins, secs) : "\(secs)s"
-            self.syncStopButton?.title = "Stop Download (\(timeStr))"
+            self.viewModel.syncDownloadProgress = "Downloading... \(timeStr)"
         }
     }
 
@@ -2267,10 +1707,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncDownloadTimer?.invalidate()
         syncDownloadTimer = nil
         syncDownloadStartDate = nil
-        syncStopButton?.title = "Stop Download"
+        viewModel.syncDownloadProgress = nil
     }
 
-    @objc private func downloadSelectedSyncRecording() {
+    private func downloadSelectedSyncRecording() {
         guard ensureExtractorReady() else { return }
         let entries = selectedSyncEntries()
         guard !entries.isEmpty else { return }
@@ -2279,12 +1719,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncDownloading = true
         startDownloadTimer()
         if entries.count == 1, let entry = entries.first {
-            syncStatusLabel?.stringValue = "Status: Downloading \(entry.recording.outputName)..."
+            viewModel.syncStatus = "Downloading \(entry.recording.outputName)..."
         } else {
-            syncStatusLabel?.stringValue = "Status: Downloading \(entries.count) recordings..."
+            viewModel.syncStatus = "Downloading \(entries.count) recordings..."
         }
-        syncStatusLabel?.textColor = .secondaryLabelColor
-        updateSyncWindowState()
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
 
         downloadSyncRecordings(entries, completed: []) { [weak self] result in
             guard let self = self else { return }
@@ -2304,13 +1744,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.syncCheckedRecordings.subtract(entries.map(\.recording.name))
                 self.refreshSyncStatus()
-                // Auto-transcribe downloaded recordings
                 let paths = downloaded.map { d in
                     entries.first(where: { $0.recording.outputName == d.filename.replacingOccurrences(of: ".hda", with: ".mp3") })?.recording.outputPath
                         ?? "\(self.syncOutputFolder ?? "")/\(d.filename.replacingOccurrences(of: ".hda", with: ".mp3"))"
                 }
                 if !paths.isEmpty, self.ensureTranscriptionReady() {
                     self.transcriptionBusy = true
+                    self.syncViewModelState()
                     self.transcribeSequentially(paths, index: 0)
                 }
             case .failure(let error):
@@ -2318,11 +1758,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.syncDownloadStopping = false
                     return
                 }
-                self.syncStatusLabel?.stringValue = "Status: Download failed"
-                self.syncStatusLabel?.textColor = .systemRed
+                self.viewModel.syncStatus = "Download failed"
+                self.viewModel.syncStatusLevel = .error
                 let label = entries.count == 1 ? entries[0].recording.name : "\(entries.count) recordings"
                 self.showError("Failed to download \(label):\n\(error.localizedDescription)")
-                self.updateSyncWindowState()
+                self.syncViewModelState()
             }
         }
     }
@@ -2341,7 +1781,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
-            self.syncStatusLabel?.stringValue = "Status: Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.syncStatus = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
         }) { [weak self] result in
             guard self != nil else { return }
             switch result {
@@ -2360,7 +1801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    @objc private func downloadNewSyncRecordings() {
+    private func downloadNewSyncRecordings() {
         guard ensureExtractorReady() else { return }
         let devices = syncPairedDevices
         guard !devices.isEmpty else { return }
@@ -2368,16 +1809,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncBusy = true
         syncDownloading = true
         startDownloadTimer()
-        syncStatusLabel?.stringValue = "Status: Downloading new recordings..."
-        syncStatusLabel?.textColor = .secondaryLabelColor
-        updateSyncWindowState()
+        viewModel.syncStatus = "Downloading new recordings..."
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
 
         downloadNewFromDevices(devices, totalDownloaded: 0)
     }
 
     private func downloadNewFromDevices(_ remaining: [HiDockPairedDevice], totalDownloaded: Int) {
         guard let device = remaining.first else {
-            // All devices done
             stopDownloadTimer()
             syncBusy = false
             syncDownloading = false
@@ -2387,12 +1827,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     : "\(totalDownloaded) new recordings were saved successfully."
                 postSyncDownloadNotification(title: "✅ HiDock Downloads Complete", body: body)
             }
-            syncStatusLabel?.stringValue = "Status: Downloaded \(totalDownloaded) new recordings"
-            syncStatusLabel?.textColor = .systemGreen
+            viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
+            viewModel.syncStatusLevel = .success
             refreshSyncStatus()
-            // Auto-transcribe newly downloaded recordings
             if totalDownloaded > 0, ensureTranscriptionReady(), !transcriptionBusy {
                 transcriptionBusy = true
+                syncViewModelState()
                 runTranscription(arguments: ["transcribe-batch"]) { [weak self] result in
                     guard let self = self else { return }
                     self.transcriptionBusy = false
@@ -2402,8 +1842,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.postNotification(title: "📝 Transcription Complete", body: "\(succeeded) new recording\(succeeded == 1 ? "" : "s") transcribed.")
                     }
                     self.refreshTranscriptionState()
+                    self.syncViewModelState()
                 }
             }
+            syncViewModelState()
             return
         }
 
@@ -2411,7 +1853,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
-            self.syncStatusLabel?.stringValue = "Status: Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
         }) { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -2430,129 +1873,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.stopDownloadTimer()
                     self.syncBusy = false
                     self.syncDownloading = false
+                    self.syncViewModelState()
                     return
                 }
                 self.log("download-new failed for \(device.cleanName): \(error.localizedDescription)")
-                // Continue to next device even on failure
                 self.downloadNewFromDevices(Array(remaining.dropFirst()), totalDownloaded: totalDownloaded)
             }
         }
-    }
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView == syncTableView {
-            return visibleSyncEntries.count
-        }
-        return 0
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        updateSyncWindowState()
-    }
-
-    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        guard tableView == syncTableView, let descriptor = tableView.sortDescriptors.first, let key = descriptor.key else { return }
-        syncSortKey = key
-        syncSortAscending = descriptor.ascending
-        syncTableView?.reloadData()
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let entries = visibleSyncEntries
-        guard tableView == syncTableView, row >= 0, row < entries.count, let tableColumn = tableColumn else {
-            return nil
-        }
-
-        let entry = entries[row]
-        let recording = entry.recording
-        let identifier = tableColumn.identifier
-        if identifier.rawValue == "selected" {
-            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSyncRecordingCheckbox(_:)))
-            button.tag = row
-            button.state = syncCheckedRecordings.contains(recording.name) ? .on : .off
-            return button
-        }
-
-        if identifier.rawValue == "reveal" {
-            guard recording.downloaded, recording.localExists else {
-                return NSView()
-            }
-            let button = NSButton(title: "MP3", target: self, action: #selector(revealSyncRecordingInFinder(_:)))
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            button.font = .systemFont(ofSize: 11)
-            button.tag = row
-            return button
-        }
-
-        if identifier.rawValue == "transcribed" {
-            if entry.transcribed {
-                let button = NSButton(title: "", target: self, action: #selector(revealTranscriptInFinder(_:)))
-                button.bezelStyle = .rounded
-                button.controlSize = .small
-                let greenTick = NSAttributedString(string: "✓", attributes: [
-                    .font: NSFont.systemFont(ofSize: 12, weight: .bold),
-                    .foregroundColor: NSColor.systemGreen,
-                ])
-                button.attributedTitle = greenTick
-                button.tag = row
-                return button
-            } else if transcriptionBusy && transcriptionCurrentFile == recording.outputName {
-                let label = NSTextField(labelWithString: "\(transcriptionProgress)%")
-                label.textColor = .systemOrange
-                label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-                label.alignment = .center
-                return label
-            } else {
-                let label = NSTextField(labelWithString: "-")
-                label.textColor = .tertiaryLabelColor
-                label.alignment = .center
-                return label
-            }
-        }
-
-        let text: String
-        switch identifier.rawValue {
-        case "device":
-            text = entry.deviceName
-        case "status":
-            if recording.downloaded && recording.localExists {
-                text = "Downloaded"
-            } else if recording.downloaded && !recording.localExists {
-                text = "Marked"
-            } else if recording.lastError != nil {
-                text = "Failed"
-            } else {
-                text = "On device"
-            }
-        case "name":
-            text = recording.outputName
-        case "created":
-            text = "\(recording.createDate) \(recording.createTime)"
-        case "duration":
-            text = formatRecordingDuration(recording.duration)
-        case "size":
-            text = recording.humanLength
-        case "path":
-            text = recording.downloaded ? recording.outputPath : "-"
-        default:
-            text = ""
-        }
-
-        let view = NSTextField(labelWithString: text)
-        view.lineBreakMode = .byTruncatingMiddle
-        if identifier.rawValue == "status" {
-            if recording.downloaded && recording.localExists {
-                view.textColor = .systemGreen
-            } else if recording.downloaded && !recording.localExists {
-                view.textColor = .systemBlue
-            } else if recording.lastError != nil {
-                view.textColor = .systemRed
-            } else {
-                view.textColor = .secondaryLabelColor
-            }
-        }
-        return view
     }
 
     // MARK: - Transcription
@@ -2583,7 +1910,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.standardOutput = outPipe
             process.standardError = errPipe
 
-            // Collect stdout
             var outData = Data()
             let outQueue = DispatchQueue(label: "hidock.transcription.stdout")
             outPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -2591,7 +1917,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if !chunk.isEmpty { outQueue.sync { outData.append(chunk) } }
             }
 
-            // Read stderr for PROGRESS lines
             var stderrData = Data()
             let errQueue = DispatchQueue(label: "hidock.transcription.stderr")
             var lineBuffer = ""
@@ -2610,9 +1935,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                             }
                         }
                     }
-                    // Check partial line (no newline yet)
                     if lineBuffer.hasPrefix("PROGRESS:") && lineBuffer.count < 15 {
-                        // might be complete without newline
                         let remainder = String(lineBuffer.dropFirst("PROGRESS:".count))
                         if let pct = Int(remainder) {
                             DispatchQueue.main.async { onProgress?(pct) }
@@ -2642,7 +1965,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
 
-                // Drain remaining data
                 let remainingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
                 if !remainingOut.isEmpty { outQueue.sync { outData.append(remainingOut) } }
 
@@ -2682,16 +2004,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         transcriptionProgress = 0
         transcriptionFileIndex = 0
         transcriptionFileCount = 1
-        syncStatusLabel?.stringValue = "Status: Transcribing \(filename)..."
-        syncStatusLabel?.textColor = .secondaryLabelColor
-        syncTableView?.reloadData()
+        viewModel.syncStatus = "Transcribing \(filename)..."
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
         log("Starting transcription for \(filename)")
 
         runTranscription(arguments: ["transcribe", mp3Path], onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionProgress = pct
-            self.syncStatusLabel?.stringValue = "Status: Transcribing \(filename) — \(pct)%"
-            self.syncTableView?.reloadData()
+            self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)%"
+            self.syncViewModelState()
         }) { [weak self] result in
             guard let self = self else { return }
             self.transcriptionBusy = false
@@ -2703,25 +2025,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                    let transcribed = json["transcribed"] as? Bool, transcribed {
                     let duration = json["duration_s"] as? Double ?? 0
                     self.postNotification(title: "📝 Transcription Complete", body: "\(filename) transcribed in \(Int(duration))s")
-                    self.syncStatusLabel?.stringValue = "Status: Transcription complete"
-                    self.syncStatusLabel?.textColor = .systemGreen
+                    self.viewModel.syncStatus = "Transcription complete"
+                    self.viewModel.syncStatusLevel = .success
                 } else {
                     let errorMsg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String ?? "Unknown error"
                     self.log("Transcription failed for \(filename): \(errorMsg)")
-                    self.syncStatusLabel?.stringValue = "Status: Transcription failed"
-                    self.syncStatusLabel?.textColor = .systemRed
+                    self.viewModel.syncStatus = "Transcription failed"
+                    self.viewModel.syncStatusLevel = .error
                 }
                 self.refreshTranscriptionState()
+                self.syncViewModelState()
             case .failure(let error):
                 self.log("Transcription process failed for \(filename): \(error.localizedDescription)")
-                self.syncStatusLabel?.stringValue = "Status: Transcription failed"
-                self.syncStatusLabel?.textColor = .systemRed
+                self.viewModel.syncStatus = "Transcription failed"
+                self.viewModel.syncStatusLevel = .error
                 self.refreshTranscriptionState()
+                self.syncViewModelState()
             }
         }
     }
 
-    @objc private func transcribeSelectedRecordings() {
+    private func transcribeSelectedRecordings() {
         guard ensureTranscriptionReady() else { return }
         let entries = selectedSyncEntries().filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
         guard !entries.isEmpty else { return }
@@ -2729,11 +2053,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if entries.count == 1 {
             transcribeFile(mp3Path: entries[0].recording.outputPath)
         } else {
-            // For multiple files, use batch approach — transcribe sequentially
             guard !transcriptionBusy else { return }
             transcriptionBusy = true
-            syncStatusLabel?.stringValue = "Status: Transcribing \(entries.count) recordings..."
-            syncStatusLabel?.textColor = .secondaryLabelColor
+            viewModel.syncStatus = "Transcribing \(entries.count) recordings..."
+            viewModel.syncStatusLevel = .secondary
+            syncViewModelState()
 
             let paths = entries.map(\.recording.outputPath)
             transcribeSequentially(paths, index: 0)
@@ -2747,9 +2071,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             transcriptionProgress = 0
             let body = "\(paths.count) recordings transcribed."
             postNotification(title: "📝 Transcription Complete", body: body)
-            syncStatusLabel?.stringValue = "Status: Batch transcription complete"
-            syncStatusLabel?.textColor = .systemGreen
+            viewModel.syncStatus = "Batch transcription complete"
+            viewModel.syncStatusLevel = .success
             refreshTranscriptionState()
+            syncViewModelState()
             return
         }
 
@@ -2758,49 +2083,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         transcriptionProgress = 0
         transcriptionFileIndex = index
         transcriptionFileCount = paths.count
-        syncStatusLabel?.stringValue = "Status: Transcribing \(filename) (\(index + 1)/\(paths.count))..."
-        syncStatusLabel?.textColor = .secondaryLabelColor
-        syncTableView?.reloadData()
+        viewModel.syncStatus = "Transcribing \(filename) (\(index + 1)/\(paths.count))..."
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
 
         runTranscription(arguments: ["transcribe", paths[index]], onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionProgress = pct
-            self.syncStatusLabel?.stringValue = "Status: Transcribing \(filename) — \(pct)% (\(index + 1)/\(paths.count))"
-            self.syncTableView?.reloadData()
+            self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)% (\(index + 1)/\(paths.count))"
+            self.syncViewModelState()
         }) { [weak self] _ in
             self?.refreshTranscriptionState()
             self?.transcribeSequentially(paths, index: index + 1)
         }
     }
 
-    @objc private func transcribeAllRecordings() {
+    private func transcribeAllRecordings() {
         guard ensureTranscriptionReady() else { return }
         guard !transcriptionBusy else { return }
 
-        // Gather un-transcribed downloaded recordings and use sequential transcription for progress
-        let paths = visibleSyncEntries
+        let paths = viewModel.visibleEntries
             .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
             .map(\.recording.outputPath)
 
         guard !paths.isEmpty else {
-            syncStatusLabel?.stringValue = "Status: All recordings already transcribed"
-            syncStatusLabel?.textColor = .systemGreen
+            viewModel.syncStatus = "All recordings already transcribed"
+            viewModel.syncStatusLevel = .success
             return
         }
 
         transcriptionBusy = true
+        syncViewModelState()
         transcribeSequentially(paths, index: 0)
     }
 
-    @objc private func revealTranscriptInFinder(_ sender: NSButton) {
-        let entries = visibleSyncEntries
-        guard sender.tag >= 0, sender.tag < entries.count,
-              let path = entries[sender.tag].transcriptPath else { return }
-        let url = URL(fileURLWithPath: path)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    /// Fetch transcription status and merge into syncEntries.
     private func refreshTranscriptionState() {
         guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
               FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else {
@@ -2841,8 +2157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].transcriptPath = nil
                     }
                 }
-                self.syncTableView?.reloadData()
-                self.updateSyncWindowState()
+                self.syncViewModelState()
             }
         }
     }
@@ -2854,7 +2169,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSLog("%@", message)
         guard let data = line.data(using: .utf8) else { return }
 
-        // Rotate if over 5 MB
         if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
            let size = attrs[.size] as? UInt64, size > 5 * 1024 * 1024 {
             let oldPath = logPath + ".old"
@@ -2885,9 +2199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let success = self.buildTriggerBinary()
-            DispatchQueue.main.async {
-                completion(success)
-            }
+            DispatchQueue.main.async { completion(success) }
         }
     }
 
