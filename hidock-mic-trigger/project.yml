@@ -29,6 +29,11 @@ targets:
     postBuildScripts:
       - name: "Deploy to Applications"
         script: |
+          # Skip deploy on CI (GitHub Actions sets CI=true)
+          if [ "$CI" = "true" ]; then
+            echo "note: Skipping deploy on CI"
+            exit 0
+          fi
           if [ "$CONFIGURATION" = "Release" ]; then
             APP_NAME="HiDock Mic Trigger.app"
             INSTALL_DIR="/Applications"

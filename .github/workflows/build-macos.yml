@@ -107,11 +107,11 @@ jobs:
           find "$APP/Contents/Resources" -type f -name "python*" -path "*/bin/*" -exec \
             codesign --force --sign - {} \;
 
-          # Sign the main executable
-          codesign --force --sign - "$APP/Contents/MacOS/hidock-mic-trigger"
+          # Sign the main executable (name may vary)
+          find "$APP/Contents/MacOS" -type f -exec codesign --force --sign - {} \;
 
           # Sign the app bundle (without --deep since we signed everything above)
-          codesign --force --sign - "$APP"
+          codesign --force --sign - "$APP" || true
 
       - name: Create distributable zip
         run: |
