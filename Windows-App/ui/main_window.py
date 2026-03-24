@@ -1002,35 +1002,113 @@ class MainWindow(QMainWindow):
             "Python/PyQt6 port of the macOS app."
         )
 
+    # User-friendly labels → technical mapping
+    _FEEDBACK_CATEGORIES = [
+        ("Something isn't working", "bug", "General"),
+        ("Recording & downloads", "usb-sync", "`Windows-Script/extractor.py`, `core/usb_sync.py`"),
+        ("Microphone detection", "mic-trigger", "`core/mic_trigger.py`"),
+        ("Transcription & speech-to-text", "transcription", "`core/transcription.py`, `transcribe_cpp.py`"),
+        ("App appearance or layout", "ui", "`ui/main_window.py`, `resources/theme.qss`"),
+        ("I have a suggestion", "enhancement", "General"),
+    ]
+    _FEEDBACK_SEVERITIES = [
+        ("It stops me from working", "priority-high"),
+        ("It's annoying but I can work around it", "priority-medium"),
+        ("It's a minor thing", "priority-low"),
+    ]
+
     def _send_feedback(self):
-        text, ok = QInputDialog.getMultiLineText(
-            self, "Send Feedback", "Describe the issue or suggestion.", "",
-        )
-        if not ok or not text.strip():
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QTextEdit
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Send Feedback")
+        dlg.setMinimumWidth(450)
+        layout = QFormLayout(dlg)
+
+        cat_combo = QComboBox()
+        for label, _, _ in self._FEEDBACK_CATEGORIES:
+            cat_combo.addItem(label)
+        layout.addRow("What's this about?", cat_combo)
+
+        sev_combo = QComboBox()
+        for label, _ in self._FEEDBACK_SEVERITIES:
+            sev_combo.addItem(label)
+        layout.addRow("How much does it affect you?", sev_combo)
+
+        desc_edit = QTextEdit()
+        desc_edit.setPlaceholderText("Describe what happened...")
+        desc_edit.setMaximumHeight(100)
+        layout.addRow("What happened?", desc_edit)
+
+        expected_edit = QTextEdit()
+        expected_edit.setPlaceholderText("What did you expect to happen instead?")
+        expected_edit.setMaximumHeight(60)
+        layout.addRow("What did you expect?", expected_edit)
+
+        from PyQt6.QtWidgets import QLineEdit
+        steps_edit = QLineEdit()
+        steps_edit.setPlaceholderText("e.g. Click Download, wait 30 seconds, app freezes")
+        layout.addRow("Steps (optional)", steps_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Send")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
+        description = desc_edit.toPlainText().strip()
+        if not description:
+            return
+
+        cat_label, cat_gh, cat_component = self._FEEDBACK_CATEGORIES[cat_combo.currentIndex()]
+        sev_label, sev_gh = self._FEEDBACK_SEVERITIES[sev_combo.currentIndex()]
+        expected = expected_edit.toPlainText().strip()
+        steps = steps_edit.text().strip()
+
+        # System info
         app_version = "1.0.0"
         win_version = platform.platform()
         py_version = sys.version.split()[0]
         device_status = "Connected" if self._last_extractor_ready else "Not connected"
+        trigger_status = "Running" if self.mic_trigger._running else "Stopped"
+        rec_count = len(self._entries)
+        dl_count = sum(1 for e in self._entries if e.recording.downloaded)
 
-        title = f"Feedback: {text.strip()[:60]}"
-        body = (
-            f"{text.strip()}\n\n---\n"
-            f"**Platform:** Windows {win_version}\n"
-            f"**App Version:** {app_version}\n"
-            f"**Python:** {py_version}\n"
-            f"**Devices:** {device_status}\n"
+        # Build structured issue
+        title = (f"Feature: {description[:60]}" if cat_gh == "enhancement"
+                 else f"{cat_label}: {description[:50]}")
+
+        body = f"## Description\n{description}\n"
+        if expected:
+            body += f"\n## Expected Behavior\n{expected}\n"
+        if steps:
+            body += f"\n## Steps to Reproduce\n{steps}\n"
+        body += f"\n## Component\n{cat_component}\n"
+        body += "\n## Platform\nWindows\n"
+        body += (
+            f"\n<details>\n<summary>System Information</summary>\n\n"
+            f"- **App Version:** {app_version}\n"
+            f"- **Windows:** {win_version}\n"
+            f"- **Python:** {py_version}\n"
+            f"- **Devices:** {device_status}\n"
+            f"- **Mic Trigger:** {trigger_status}\n"
+            f"- **Recordings:** {rec_count} synced, {dl_count} downloaded\n"
+            f"</details>\n"
         )
 
+        labels = [cat_gh, sev_gh, "feedback"]
         token = self._get_feedback_token()
         if token:
-            self._submit_github_issue(title, body, token)
+            self._submit_github_issue(title, body, token, labels)
         else:
             encoded_body = quote(body)
+            lbl = ",".join(labels)
             webbrowser.open(
                 "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new"
-                f"?title={quote(title)}&body={encoded_body}&labels=feedback"
+                f"?title={quote(title)}&body={encoded_body}&labels={lbl}"
             )
 
     def _get_feedback_token(self) -> str | None:
@@ -1044,7 +1122,7 @@ class MainWindow(QMainWindow):
             return token_path.read_text().strip()
         return None
 
-    def _submit_github_issue(self, title: str, body: str, token: str):
+    def _submit_github_issue(self, title: str, body: str, token: str, labels: list[str] | None = None):
         import json as _json
         self.statusBar().showMessage("Sending feedback...")
 
@@ -1056,7 +1134,7 @@ class MainWindow(QMainWindow):
             except ImportError:
                 ctx = ssl.create_default_context()
 
-            data = _json.dumps({"title": title, "body": body, "labels": ["feedback"]}).encode()
+            data = _json.dumps({"title": title, "body": body, "labels": labels or ["feedback"]}).encode()
             req = urllib.request.Request(
                 "https://api.github.com/repos/jw-gsl/HiDock-Mic-Trigger/issues",
                 data=data, method="POST",

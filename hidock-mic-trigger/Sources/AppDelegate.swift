@@ -1147,59 +1147,174 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return nil
     }
 
+    // User-friendly category labels → technical mapping
+    private struct FeedbackCategory {
+        let label: String          // shown to user
+        let gitHubLabel: String    // GitHub issue label
+        let component: String      // file paths for Copilot
+    }
+
+    private let feedbackCategories: [FeedbackCategory] = [
+        FeedbackCategory(label: "Something isn't working", gitHubLabel: "bug", component: "General"),
+        FeedbackCategory(label: "Recording & downloads", gitHubLabel: "usb-sync", component: "`usb-extractor/extractor.py`, `AppDelegate.swift` (sync section)"),
+        FeedbackCategory(label: "Microphone detection", gitHubLabel: "mic-trigger", component: "`mic-trigger/MicTrigger.swift`, `AppDelegate.swift` (trigger section)"),
+        FeedbackCategory(label: "Transcription & speech-to-text", gitHubLabel: "transcription", component: "`transcription-pipeline/transcribe_cpp.py`, `core/transcription.py`"),
+        FeedbackCategory(label: "App appearance or layout", gitHubLabel: "ui", component: "`Sources/Views/*.swift`, `ui/main_window.py`"),
+        FeedbackCategory(label: "I have a suggestion", gitHubLabel: "enhancement", component: "General"),
+    ]
+
+    private let feedbackSeverities: [(label: String, gitHubLabel: String)] = [
+        ("It stops me from working", "priority-high"),
+        ("It's annoying but I can work around it", "priority-medium"),
+        ("It's a minor thing", "priority-low"),
+    ]
+
     @objc private func sendFeedback() {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Send Feedback"
-        alert.informativeText = "Describe the issue or suggestion."
+        alert.informativeText = ""
         alert.addButton(withTitle: "Send")
         alert.addButton(withTitle: "Cancel")
 
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 150))
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 150))
-        textView.isEditable = true
-        textView.isSelectable = true
-        textView.isRichText = false
-        textView.font = NSFont.systemFont(ofSize: 13)
-        textView.autoresizingMask = [.width, .height]
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
-        scrollView.documentView = textView
-        alert.accessoryView = scrollView
-        alert.window.initialFirstResponder = textView
+        // Build the form
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 340))
+
+        // Category
+        let categoryLabel = NSTextField(labelWithString: "What's this about?")
+        categoryLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        categoryLabel.frame = NSRect(x: 0, y: 312, width: 420, height: 18)
+        container.addSubview(categoryLabel)
+
+        let categoryPopup = NSPopUpButton(frame: NSRect(x: 0, y: 284, width: 420, height: 26), pullsDown: false)
+        for cat in feedbackCategories {
+            categoryPopup.addItem(withTitle: cat.label)
+        }
+        container.addSubview(categoryPopup)
+
+        // Severity
+        let severityLabel = NSTextField(labelWithString: "How much does it affect you?")
+        severityLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        severityLabel.frame = NSRect(x: 0, y: 256, width: 420, height: 18)
+        container.addSubview(severityLabel)
+
+        let severityPopup = NSPopUpButton(frame: NSRect(x: 0, y: 228, width: 420, height: 26), pullsDown: false)
+        for sev in feedbackSeverities {
+            severityPopup.addItem(withTitle: sev.label)
+        }
+        container.addSubview(severityPopup)
+
+        // Description
+        let descLabel = NSTextField(labelWithString: "What happened?")
+        descLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        descLabel.frame = NSRect(x: 0, y: 200, width: 420, height: 18)
+        container.addSubview(descLabel)
+
+        let descScroll = NSScrollView(frame: NSRect(x: 0, y: 118, width: 420, height: 80))
+        descScroll.hasVerticalScroller = true
+        descScroll.borderType = .bezelBorder
+        let descText = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 80))
+        descText.isEditable = true; descText.isRichText = false
+        descText.font = .systemFont(ofSize: 13)
+        descText.autoresizingMask = [.width, .height]
+        descText.isVerticallyResizable = true
+        descText.textContainer?.widthTracksTextView = true
+        descScroll.documentView = descText
+        container.addSubview(descScroll)
+
+        // Expected behavior
+        let expectedLabel = NSTextField(labelWithString: "What did you expect to happen?")
+        expectedLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        expectedLabel.frame = NSRect(x: 0, y: 90, width: 420, height: 18)
+        container.addSubview(expectedLabel)
+
+        let expectedScroll = NSScrollView(frame: NSRect(x: 0, y: 40, width: 420, height: 48))
+        expectedScroll.hasVerticalScroller = true
+        expectedScroll.borderType = .bezelBorder
+        let expectedText = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 48))
+        expectedText.isEditable = true; expectedText.isRichText = false
+        expectedText.font = .systemFont(ofSize: 13)
+        expectedText.autoresizingMask = [.width, .height]
+        expectedText.isVerticallyResizable = true
+        expectedText.textContainer?.widthTracksTextView = true
+        expectedScroll.documentView = expectedText
+        container.addSubview(expectedScroll)
+
+        // Steps
+        let stepsLabel = NSTextField(labelWithString: "Steps to reproduce (optional)")
+        stepsLabel.font = .systemFont(ofSize: 11)
+        stepsLabel.textColor = .secondaryLabelColor
+        stepsLabel.frame = NSRect(x: 0, y: 16, width: 420, height: 16)
+        container.addSubview(stepsLabel)
+
+        let stepsField = NSTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 16))
+        stepsField.font = .systemFont(ofSize: 12)
+        stepsField.placeholderString = "e.g. Click Download, wait 30 seconds, app freezes"
+        container.addSubview(stepsField)
+
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = descText
 
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
 
-        let feedbackText = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !feedbackText.isEmpty else { return }
+        let description = descText.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty else { return }
 
+        let category = feedbackCategories[categoryPopup.indexOfSelectedItem]
+        let severity = feedbackSeverities[severityPopup.indexOfSelectedItem]
+        let expected = expectedText.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let steps = stepsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Gather system info
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let macOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
         let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
         let deviceStatus = connectedDevices.isEmpty ? "Not connected" : connectedDevices.map(\.shortName).joined(separator: ", ")
+        let triggerStatus = process != nil ? "Running (\(selectedMicName ?? "unknown mic"))" : "Stopped"
+        let recordingCount = syncEntries.count
+        let downloadedCount = syncEntries.filter(\.recording.downloaded).count
 
-        let body = """
-        \(feedbackText)
+        // Build structured issue body for Copilot
+        let title = category.gitHubLabel == "enhancement"
+            ? "Feature: \(String(description.prefix(60)))"
+            : "\(category.label): \(String(description.prefix(50)))"
 
-        ---
-        **Platform:** macOS \(macOSVersion)
-        **App Version:** \(appVersion)
-        **Devices:** \(deviceStatus)
+        var body = "## Description\n\(description)\n"
+
+        if !expected.isEmpty {
+            body += "\n## Expected Behavior\n\(expected)\n"
+        }
+        if !steps.isEmpty {
+            body += "\n## Steps to Reproduce\n\(steps)\n"
+        }
+
+        body += "\n## Component\n\(category.component)\n"
+        body += "\n## Platform\nmacOS\n"
+
+        body += """
+
+        <details>
+        <summary>System Information</summary>
+
+        - **App Version:** \(appVersion)
+        - **macOS:** \(macOSVersion)
+        - **Devices:** \(deviceStatus)
+        - **Mic Trigger:** \(triggerStatus)
+        - **Recordings:** \(recordingCount) synced, \(downloadedCount) downloaded
+        </details>
         """
 
-        submitGitHubIssue(title: "Feedback: \(String(feedbackText.prefix(60)))", body: body)
+        let labels = [category.gitHubLabel, severity.gitHubLabel, "feedback"]
+        submitGitHubIssue(title: title, body: body, labels: labels)
     }
 
-    private func submitGitHubIssue(title: String, body: String) {
+    private func submitGitHubIssue(title: String, body: String, labels: [String] = ["feedback"]) {
         guard let token = feedbackToken else {
-            // No token available — fall back to opening browser
             log("No feedback token, falling back to browser")
             guard let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                  let url = URL(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new?title=\(title)&body=\(encodedBody)&labels=feedback") else { return }
+                  let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new?title=\(encodedTitle)&body=\(encodedBody)&labels=\(labels.joined(separator: ","))") else { return }
             NSWorkspace.shared.open(url)
             return
         }
@@ -1214,7 +1329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let payload: [String: Any] = [
             "title": title,
             "body": body,
-            "labels": ["feedback"]
+            "labels": labels
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
 
