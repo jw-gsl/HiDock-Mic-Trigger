@@ -2399,14 +2399,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let delegate = ModelDownloadDelegate(
             destPath: destPath,
-            onProgress: { [weak self] bytesWritten, totalBytes in
+            onProgress: { [weak self] bytesWritten, totalBytes, speed in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     let fraction = totalBytes > 0 ? Double(bytesWritten) / Double(totalBytes) : 0
                     self.viewModel.modelDownloadProgress = fraction
                     let mbDone = Double(bytesWritten) / (1024 * 1024)
                     let mbTotal = Double(totalBytes) / (1024 * 1024)
-                    self.viewModel.modelDownloadStatus = String(format: "%.0f / %.0f MB", mbDone, mbTotal)
+                    var status = String(format: "%.0f / %.0f MB", mbDone, mbTotal)
+                    if !speed.isEmpty {
+                        status += " · \(speed)"
+                    }
+                    self.viewModel.modelDownloadStatus = status
                 }
             },
             onComplete: { [weak self] success, error in
@@ -2808,10 +2812,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
 final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate {
     private let destPath: String
-    private let onProgress: (Int64, Int64) -> Void
+    private let onProgress: (Int64, Int64, String) -> Void  // written, total, speed
     private let onComplete: (Bool, String?) -> Void
+    private var lastBytes: Int64 = 0
+    private var lastTime: Date = Date()
 
-    init(destPath: String, onProgress: @escaping (Int64, Int64) -> Void, onComplete: @escaping (Bool, String?) -> Void) {
+    init(destPath: String, onProgress: @escaping (Int64, Int64, String) -> Void, onComplete: @escaping (Bool, String?) -> Void) {
         self.destPath = destPath
         self.onProgress = onProgress
         self.onComplete = onComplete
@@ -2831,7 +2837,20 @@ final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate {
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        onProgress(totalBytesWritten, totalBytesExpectedToWrite)
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastTime)
+        var speed = ""
+        if elapsed > 0.5 {
+            let bytesPerSec = Double(totalBytesWritten - lastBytes) / elapsed
+            lastBytes = totalBytesWritten
+            lastTime = now
+            if bytesPerSec > 1_000_000 {
+                speed = String(format: "%.1f MB/s", bytesPerSec / 1_000_000)
+            } else {
+                speed = String(format: "%.0f KB/s", bytesPerSec / 1_000)
+            }
+        }
+        onProgress(totalBytesWritten, totalBytesExpectedToWrite, speed)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

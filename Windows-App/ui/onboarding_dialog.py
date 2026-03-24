@@ -264,7 +264,7 @@ class OnboardingDialog(QDialog):
         idx = self._current_index()
         total = self._stack.count()
 
-        self._back_btn.setVisible(idx > 0 and idx < total - 1)
+        self._back_btn.setVisible(idx > 0)
         self._skip_btn.setVisible(idx > 0 and idx < total - 1)
 
         if idx == 0:
@@ -325,8 +325,7 @@ class OnboardingDialog(QDialog):
                 def _on_progress(downloaded: int, total: int):
                     if total > 0:
                         pct = int(downloaded * 100 / total)
-                        # Use a timer to update UI on main thread
-                        QTimer.singleShot(0, lambda p=pct: self._update_model_progress(p))
+                        QTimer.singleShot(0, lambda p=pct, d=downloaded, t=total: self._update_model_progress(p, d, t))
 
                 def _on_complete():
                     QTimer.singleShot(0, self._on_model_complete)
@@ -344,9 +343,14 @@ class OnboardingDialog(QDialog):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _update_model_progress(self, pct: int):
+    def _update_model_progress(self, pct: int, downloaded: int = 0, total: int = 0):
         self._model_progress.setValue(pct)
-        self._download_btn.setText(f"Downloading... {pct}%")
+        if total > 0:
+            mb_done = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            self._download_btn.setText(f"{mb_done:.0f} / {mb_total:.0f} MB — {pct}%")
+        else:
+            self._download_btn.setText(f"Downloading... {pct}%")
 
     def _on_model_complete(self):
         self._model_downloading = False
