@@ -101,19 +101,81 @@ final class UpdateChecker {
 
     // MARK: - UI
 
+    /// Pending update to install on quit
+    private static var pendingRelease: GitHubRelease?
+    private static var pendingZipPath: URL?
+
     static func showUpdateAlert(title: String, body: String, release: GitHubRelease) {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = title
-        alert.informativeText = body + "\n\nThe app will download the update and restart automatically."
-        alert.addButton(withTitle: "Update Now")
-        alert.addButton(withTitle: "Later")
+        alert.informativeText = body
+        alert.addButton(withTitle: "Restart & Update")     // button 0 (1000)
+        alert.addButton(withTitle: "Update on Quit")        // button 1 (1001)
+        alert.addButton(withTitle: "Skip this version")      // button 2 (1002)
         alert.icon = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Update")
 
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            downloadAndInstall(release: release)
+            // Restart & Update — download, install, relaunch now
+            downloadAndInstall(release: release, relaunch: true)
+        } else if response == .alertSecondButtonReturn {
+            // Update on Quit — download now, install when app quits
+            downloadForLater(release: release)
         }
+    }
+
+    /// Install pending update if one was downloaded. Call from applicationWillTerminate.
+    static func installPendingUpdateIfNeeded() {
+        guard let zipPath = pendingZipPath else { return }
+        let appPath = Bundle.main.bundlePath
+        let tempDir = zipPath.deletingLastPathComponent()
+        let extractDir = tempDir.appendingPathComponent("extracted")
+
+        let script = """
+        #!/bin/bash
+        sleep 1
+        mkdir -p "\(extractDir.path)"
+        ditto -x -k "\(zipPath.path)" "\(extractDir.path)"
+        APP=$(find "\(extractDir.path)" -maxdepth 2 -name "*.app" -type d | head -1)
+        if [ -n "$APP" ]; then
+            rm -rf "\(appPath)"
+            cp -R "$APP" "\(appPath)"
+            codesign --force --sign - "\(appPath)/Contents/MacOS/hidock-mic-trigger" 2>/dev/null
+            codesign --force --sign - "\(appPath)" 2>/dev/null
+            open -a "\(appPath)"
+        fi
+        rm -rf "\(tempDir.path)"
+        """
+
+        let scriptPath = tempDir.appendingPathComponent("update-on-quit.sh")
+        try? script.write(to: scriptPath, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptPath.path]
+        process.standardOutput = nil
+        process.standardError = nil
+        try? process.run()
+    }
+
+    private static func downloadForLater(release: GitHubRelease) {
+        guard let asset = release.assets.first(where: { $0.name.contains("macOS") && $0.name.hasSuffix(".zip") }),
+              let downloadURL = URL(string: asset.browser_download_url) else { return }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("hidock-update-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let zipPath = tempDir.appendingPathComponent("update.zip")
+
+        // Download silently in background
+        URLSession.shared.downloadTask(with: downloadURL) { tempURL, response, error in
+            guard let tempURL = tempURL, error == nil else { return }
+            try? FileManager.default.moveItem(at: tempURL, to: zipPath)
+            pendingRelease = release
+            pendingZipPath = zipPath
+            NSLog("Update downloaded and ready to install on quit")
+        }.resume()
     }
 
     static func showUpToDateAlert() {
@@ -128,7 +190,7 @@ final class UpdateChecker {
 
     // MARK: - Auto-Update
 
-    private static func downloadAndInstall(release: GitHubRelease) {
+    private static func downloadAndInstall(release: GitHubRelease, relaunch: Bool = true) {
         // Find the macOS zip asset
         guard let asset = release.assets.first(where: { $0.name.contains("macOS") && $0.name.hasSuffix(".zip") }),
               let downloadURL = URL(string: asset.browser_download_url) else {

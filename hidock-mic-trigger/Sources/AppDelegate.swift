@@ -212,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         removeDeviceChangeListener()
         stoppingIntentionally = true
         stopTrigger()
+        UpdateChecker.installPendingUpdateIfNeeded()
     }
 
     // MARK: - NSWindowDelegate

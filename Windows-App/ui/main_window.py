@@ -95,6 +95,9 @@ class MainWindow(QMainWindow):
         self._usb_check_timer.start(10_000)
         self._last_extractor_ready = False
 
+        # Check for updates after 5 seconds
+        QTimer.singleShot(5000, self._check_for_updates_auto)
+
     # ── Menu Bar ────────────────────────────────────────────────────────────
 
     def _init_menu_bar(self):
@@ -139,6 +142,9 @@ class MainWindow(QMainWindow):
         feedback_act.triggered.connect(self._send_feedback)
         history_act = help_menu.addAction("My Feedback")
         history_act.triggered.connect(self._show_feedback_history)
+        help_menu.addSeparator()
+        update_act = help_menu.addAction("Check for Updates...")
+        update_act.triggered.connect(self._check_for_updates_manual)
 
     # ── UI Layout ───────────────────────────────────────────────────────────
 
@@ -968,6 +974,104 @@ class MainWindow(QMainWindow):
             self._refresh_status()
         self._last_extractor_ready = ready
 
+    # ── Update Checker ─────────────────────────────────────────────────
+
+    def _check_for_updates_auto(self):
+        """Auto-check on startup — only show dialog if update available."""
+        def _worker():
+            from core.update_checker import check_for_update
+            return check_for_update()
+
+        def _done(release):
+            if release:
+                self._show_update_dialog(release)
+
+        def _run():
+            release = _worker()
+            if release:
+                from PyQt6.QtCore import QTimer
+                # Must show dialog on main thread
+                self._pending_release = release
+                QTimer.singleShot(0, lambda: self._show_update_dialog(self._pending_release))
+
+        self._pending_release = None
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _check_for_updates_manual(self):
+        """Manual check — always show a result."""
+        self.statusBar().showMessage("Checking for updates...")
+
+        def _run():
+            from core.update_checker import check_for_update
+            release = check_for_update()
+            self._pending_release = release
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, self._show_manual_update_result)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _show_manual_update_result(self):
+        if self._pending_release:
+            self._show_update_dialog(self._pending_release)
+        else:
+            self.statusBar().showMessage("You're up to date!", 3000)
+            QMessageBox.information(self, "Up to Date", "HiDock 1.0.0 is the latest version.")
+
+    def _show_update_dialog(self, release):
+        if not release:
+            return
+        version = release.get("tag_name", "").lstrip("v")
+        name = release.get("name", version)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Update Available")
+        msg.setText(f"Version {version} is available (you have 1.0.0).")
+        msg.setInformativeText(f"{name}")
+        msg.setIcon(QMessageBox.Icon.Information)
+
+        restart_btn = msg.addButton("Restart && Update", QMessageBox.ButtonRole.AcceptRole)
+        quit_btn = msg.addButton("Update on Quit", QMessageBox.ButtonRole.ActionRole)
+        skip_btn = msg.addButton("Skip this version", QMessageBox.ButtonRole.RejectRole)
+
+        msg.exec()
+        clicked = msg.clickedButton()
+
+        if clicked == restart_btn:
+            self._download_and_install(release, restart=True)
+        elif clicked == quit_btn:
+            self._download_and_install(release, restart=False)
+
+    def _download_and_install(self, release, restart: bool):
+        from core.update_checker import find_windows_asset, download_update, install_and_restart, install_on_quit
+
+        asset = find_windows_asset(release)
+        if not asset:
+            QMessageBox.warning(self, "Update Failed", "No Windows download found in this release.")
+            return
+
+        asset_name, download_url = asset
+        self.statusBar().showMessage(f"Downloading {asset_name}...")
+
+        def _worker():
+            def _progress(dl, total):
+                if total > 0:
+                    mb = dl / (1024 * 1024)
+                    mb_total = total / (1024 * 1024)
+                    self._log_signal.emit(f"Downloading update: {mb:.0f}/{mb_total:.0f} MB")
+
+            return download_update(download_url, on_progress=_progress)
+
+        def _run():
+            exe_path = _worker()
+            if exe_path:
+                if restart:
+                    install_and_restart(exe_path)
+                else:
+                    install_on_quit(exe_path)
+                    self._log_signal.emit("Update downloaded — will install when you quit")
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── Window events ───────────────────────────────────────────────────
 
     def closeEvent(self, event):
@@ -993,6 +1097,9 @@ class MainWindow(QMainWindow):
         self.mic_trigger.stop()
         if self._tray_icon:
             self._tray_icon.hide()
+        # Install pending update if downloaded
+        from core.update_checker import apply_pending_update
+        apply_pending_update()
         QApplication.instance().quit()
 
     def _show_about(self):
