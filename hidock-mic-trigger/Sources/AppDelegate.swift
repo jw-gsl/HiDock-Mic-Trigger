@@ -193,8 +193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Check for updates after a short delay — show in-app dialog
         UpdateChecker.registerCategory()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-            UpdateChecker.checkForUpdate { title, body, url in
-                UpdateChecker.showUpdateAlert(title: title, body: body, url: url)
+            UpdateChecker.checkForUpdate { title, body, release in
+                UpdateChecker.showUpdateAlert(title: title, body: body, release: release)
             }
         }
     }
