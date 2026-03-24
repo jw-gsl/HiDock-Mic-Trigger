@@ -34,32 +34,35 @@ struct SyncHeaderSection: View {
                     .foregroundColor(.secondary)
             }
 
-            if let folder = viewModel.syncOutputFolder {
-                Label {
-                    Text(folder)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                } icon: {
-                    Image(systemName: "folder")
+            // Folder paths on same line
+            HStack(spacing: 16) {
+                if let folder = viewModel.syncOutputFolder {
+                    Label {
+                        Text(folder)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } icon: {
+                        Image(systemName: "folder")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 }
-                .font(.caption)
-                .foregroundColor(.secondary)
-            }
 
-            if let folder = viewModel.syncTranscriptFolder {
-                Label {
-                    Text(folder)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                } icon: {
-                    Image(systemName: "doc.text")
+                if let folder = viewModel.syncTranscriptFolder {
+                    Label {
+                        Text(folder)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } icon: {
+                        Image(systemName: "doc.text")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 }
-                .font(.caption)
-                .foregroundColor(.secondary)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
         .background(isConnected ? Color.green.opacity(0.04) : Color.clear)
     }
 }

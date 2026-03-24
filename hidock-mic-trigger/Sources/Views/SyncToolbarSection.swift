@@ -5,103 +5,90 @@ struct SyncToolbarSection: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            // Main action buttons
-            HStack(spacing: 20) {
-                // Device Management group
-                GroupBox(label: Label("Device", systemImage: "link").font(.caption2).foregroundColor(.secondary)) {
-                    HStack(spacing: 6) {
-                        Button {
-                            viewModel.onPairDock()
-                        } label: {
-                            Label("Pair", systemImage: "link.badge.plus")
-                        }
-                        .disabled(viewModel.syncBusy)
+            // All action buttons in one row
+            HStack(spacing: 6) {
+                // Device
+                Button {
+                    viewModel.onPairDock()
+                } label: {
+                    Label("Pair", systemImage: "link.badge.plus")
+                }
+                .disabled(viewModel.syncBusy)
 
-                        Button {
-                            viewModel.onUnpairDock()
-                        } label: {
-                            Label("Unpair", systemImage: "link")
-                        }
-                        .disabled(viewModel.syncBusy || !viewModel.syncPaired)
+                Button {
+                    viewModel.onUnpairDock()
+                } label: {
+                    Label("Unpair", systemImage: "minus.circle")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired)
 
-                        Divider().frame(height: 16)
+                Divider().frame(height: 16)
 
-                        Button {
-                            viewModel.onChooseRecordingsFolder()
-                        } label: {
-                            Label("Recordings", systemImage: "folder")
-                        }
-
-                        Button {
-                            viewModel.onChooseTranscriptFolder()
-                        } label: {
-                            Label("Transcripts", systemImage: "doc.text")
-                        }
-
-                        Divider().frame(height: 16)
-
-                        Button {
-                            viewModel.onRefreshSync()
-                        } label: {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .disabled(viewModel.syncBusy)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                // Folders
+                Button {
+                    viewModel.onChooseRecordingsFolder()
+                } label: {
+                    Label("Recordings", systemImage: "folder")
                 }
 
-                Spacer()
-
-                // Downloads group
-                GroupBox(label: Label("Downloads", systemImage: "arrow.down.circle").font(.caption2).foregroundColor(.secondary)) {
-                    HStack(spacing: 6) {
-                        Button {
-                            viewModel.onDownloadSelected()
-                        } label: {
-                            Label("Download Selected", systemImage: "arrow.down.circle")
-                        }
-                        .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
-
-                        Button {
-                            viewModel.onDownloadNew()
-                        } label: {
-                            Label("Download New", systemImage: "arrow.down.to.line")
-                        }
-                        .disabled(viewModel.syncBusy || !viewModel.syncPaired)
-
-                        Button {
-                            viewModel.onMarkDownloaded()
-                        } label: {
-                            Label("Mark Done", systemImage: "checkmark.circle")
-                        }
-                        .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                Button {
+                    viewModel.onChooseTranscriptFolder()
+                } label: {
+                    Label("Transcripts", systemImage: "doc.text")
                 }
 
-                // Transcription group
-                GroupBox(label: Label("Transcription", systemImage: "text.bubble").font(.caption2).foregroundColor(.secondary)) {
-                    HStack(spacing: 6) {
-                        Button {
-                            viewModel.onTranscribeSelected()
-                        } label: {
-                            Label("Transcribe Selected", systemImage: "text.bubble")
-                        }
-                        .disabled(viewModel.transcriptionBusy || !viewModel.hasSelection)
+                Divider().frame(height: 16)
 
-                        Button {
-                            viewModel.onTranscribeAll()
-                        } label: {
-                            Label("Transcribe All", systemImage: "text.bubble.fill")
-                        }
-                        .disabled(viewModel.transcriptionBusy)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                Button {
+                    viewModel.onRefreshSync()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .disabled(viewModel.syncBusy)
+
+                Divider().frame(height: 16)
+
+                // Downloads
+                Button {
+                    viewModel.onDownloadSelected()
+                } label: {
+                    Label("Download Selected", systemImage: "arrow.down.circle")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
+
+                Button {
+                    viewModel.onDownloadNew()
+                } label: {
+                    Label("Download New", systemImage: "arrow.down.to.line")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired)
+
+                Button {
+                    viewModel.onMarkDownloaded()
+                } label: {
+                    Label("Mark Done", systemImage: "checkmark.circle")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+
+                Divider().frame(height: 16)
+
+                // Transcription
+                Button {
+                    viewModel.onTranscribeSelected()
+                } label: {
+                    Label("Transcribe Selected", systemImage: "text.bubble")
+                }
+                .disabled(viewModel.transcriptionBusy || !viewModel.hasSelection)
+
+                Button {
+                    viewModel.onTranscribeAll()
+                } label: {
+                    Label("Transcribe All", systemImage: "text.bubble.fill")
+                }
+                .disabled(viewModel.transcriptionBusy)
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
 
             // Selection & filter row
             HStack(spacing: 8) {
@@ -145,9 +132,8 @@ struct SyncToolbarSection: View {
             .font(.caption)
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .padding(.top, 2)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
     }
 }
