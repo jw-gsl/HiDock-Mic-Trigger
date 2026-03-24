@@ -89,8 +89,48 @@ struct RecordingsTableView: View {
             }
             .width(36)
         }
-        .contextMenu(forSelectionType: HiDockSyncRecordingEntry.ID.self) { _ in
-            Button("Mark as Downloaded") { viewModel.onMarkDownloaded() }
+        .contextMenu(forSelectionType: HiDockSyncRecordingEntry.ID.self) { selection in
+            if let id = selection.first, let entry = viewModel.visibleEntries.first(where: { $0.id == id }) {
+                if !entry.recording.downloaded {
+                    Button {
+                        viewModel.onDownloadSelected()
+                    } label: {
+                        Label("Download", systemImage: "arrow.down.circle")
+                    }
+                }
+
+                Button {
+                    viewModel.onMarkDownloaded()
+                } label: {
+                    Label("Mark as Downloaded", systemImage: "checkmark.circle")
+                }
+
+                if entry.recording.downloaded && entry.recording.localExists && !entry.transcribed {
+                    Button {
+                        viewModel.onTranscribeSelected()
+                    } label: {
+                        Label("Transcribe", systemImage: "text.bubble")
+                    }
+                }
+
+                Divider()
+
+                if entry.recording.downloaded && entry.recording.localExists {
+                    Button {
+                        viewModel.onRevealRecording(entry.recording.outputPath)
+                    } label: {
+                        Label("Show in Finder", systemImage: "folder")
+                    }
+                }
+
+                if let path = entry.transcriptPath, !path.isEmpty {
+                    Button {
+                        viewModel.onRevealTranscript(path)
+                    } label: {
+                        Label("Open Transcript", systemImage: "doc.text")
+                    }
+                }
+            }
         }
         .padding(4)
         .overlay(

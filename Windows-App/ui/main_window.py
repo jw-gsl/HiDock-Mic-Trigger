@@ -1347,7 +1347,10 @@ class MainWindow(QMainWindow):
         self._feedback_history_path.write_text(_json.dumps(history, indent=2))
 
     def _show_feedback_history(self):
-        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QListWidget, QListWidgetItem
+        from PyQt6.QtWidgets import (
+            QDialog, QLineEdit, QListWidget, QListWidgetItem,
+            QSplitter, QTextEdit,
+        )
 
         history = self._load_feedback_history()
         if not history:
@@ -1356,40 +1359,143 @@ class MainWindow(QMainWindow):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("My Feedback")
-        dlg.setMinimumSize(550, 350)
-        layout = QVBoxLayout(dlg)
+        dlg.setMinimumSize(700, 450)
+        dlg_layout = QVBoxLayout(dlg)
 
-        layout.addWidget(QLabel("Click an item to open it on GitHub."))
+        # Filter row: All / Open / Closed + Sort + Search
+        filter_row = QHBoxLayout()
+        open_count = sum(1 for h in history if h.get("state") != "closed")
+        closed_count = sum(1 for h in history if h.get("state") == "closed")
+        filter_all_btn = QPushButton(f"All ({len(history)})")
+        filter_open_btn = QPushButton(f"Open ({open_count})")
+        filter_closed_btn = QPushButton(f"Closed ({closed_count})")
+        for btn in (filter_all_btn, filter_open_btn, filter_closed_btn):
+            btn.setCheckable(True)
+            btn.setMaximumHeight(26)
+            filter_row.addWidget(btn)
+        filter_all_btn.setChecked(True)
+        filter_row.addStretch()
+        sort_combo = QComboBox()
+        sort_combo.addItems(["Newest First", "Oldest First", "Issue Number"])
+        sort_combo.setMaximumWidth(140)
+        filter_row.addWidget(sort_combo)
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search feedback...")
+        search_edit.setMaximumWidth(200)
+        filter_row.addWidget(search_edit)
+        dlg_layout.addLayout(filter_row)
 
+        # Split view: list left, detail right
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         list_widget = QListWidget()
-        for item in history:
-            title = item.get("title", "Untitled")
-            number = item.get("number", 0)
-            state = item.get("state", "open")
-            date = item.get("date", "")
+        list_widget.setMinimumWidth(250)
+        splitter.addWidget(list_widget)
+        detail_text = QTextEdit()
+        detail_text.setReadOnly(True)
+        detail_text.setMinimumWidth(300)
+        splitter.addWidget(detail_text)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        dlg_layout.addWidget(splitter, stretch=1)
 
-            # Format date
+        # Bottom row
+        bottom_row = QHBoxLayout()
+        github_btn = QPushButton("View on GitHub")
+        github_btn.setEnabled(False)
+        bottom_row.addWidget(github_btn)
+        bottom_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.reject)
+        bottom_row.addWidget(close_btn)
+        dlg_layout.addLayout(bottom_row)
+
+        current_filter = ["all"]
+        current_url = [""]
+
+        def _fmt_date(d):
             try:
                 from datetime import datetime
-                d = datetime.fromisoformat(date)
-                short_date = d.strftime("%d %b %Y, %H:%M")
+                return datetime.fromisoformat(d).strftime("%d %b %Y, %H:%M")
             except Exception:
-                short_date = date
+                return d
 
-            icon = "✅" if state == "closed" else "🔵"
-            text = f"{icon} #{number} — {title}\n     {short_date}"
-            li = QListWidgetItem(text)
-            li.setData(Qt.ItemDataRole.UserRole, item.get("url", ""))
-            list_widget.addItem(li)
+        def _category(title):
+            if title.startswith("Feature:"):
+                return "Suggestion"
+            parts = title.split(":", 1)
+            return parts[0].strip() if len(parts) == 2 else "General"
 
-        list_widget.itemDoubleClicked.connect(lambda item: (
-            webbrowser.open(item.data(Qt.ItemDataRole.UserRole))
-            if item.data(Qt.ItemDataRole.UserRole) else None
-        ))
-        layout.addWidget(list_widget)
+        def _refresh():
+            list_widget.clear()
+            detail_text.clear()
+            github_btn.setEnabled(False)
+            current_url[0] = ""
+            query = search_edit.text().lower().strip()
+            items = history[:]
+            if current_filter[0] == "open":
+                items = [h for h in items if h.get("state") != "closed"]
+            elif current_filter[0] == "closed":
+                items = [h for h in items if h.get("state") == "closed"]
+            if query:
+                items = [h for h in items if (
+                    query in h.get("title", "").lower()
+                    or query in h.get("body", "").lower()
+                    or query in f"#{h.get('number', 0)}"
+                )]
+            si = sort_combo.currentIndex()
+            if si == 0:
+                items.sort(key=lambda h: h.get("date", ""), reverse=True)
+            elif si == 1:
+                items.sort(key=lambda h: h.get("date", ""))
+            else:
+                items.sort(key=lambda h: h.get("number", 0), reverse=True)
+            for item in items:
+                icon = "✅" if item.get("state") == "closed" else "🔵"
+                n = item.get("number", 0)
+                t = item.get("title", "Untitled")
+                d = _fmt_date(item.get("date", ""))
+                cat = _category(t)
+                li = QListWidgetItem(f"{icon} #{n} — {t}\n     {d}  [{cat}]")
+                li.setData(Qt.ItemDataRole.UserRole, item)
+                list_widget.addItem(li)
+            if items:
+                list_widget.setCurrentRow(0)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dlg.reject)
-        layout.addRow(buttons) if hasattr(layout, 'addRow') else layout.addWidget(buttons)
+        def _on_select():
+            cur = list_widget.currentItem()
+            if not cur:
+                detail_text.clear()
+                github_btn.setEnabled(False)
+                return
+            item = cur.data(Qt.ItemDataRole.UserRole)
+            n = item.get("number", 0)
+            t = item.get("title", "")
+            st = "Closed" if item.get("state") == "closed" else "Open"
+            d = _fmt_date(item.get("date", ""))
+            body = item.get("body", "")
+            url = item.get("url", "")
+            current_url[0] = url
+            github_btn.setEnabled(bool(url))
+            clean = (body
+                .replace("<details>", "").replace("</details>", "")
+                .replace("<summary>System Information</summary>", "System Information:")
+                .replace("## ", "").replace("- **", "  ").replace("**", "").strip())
+            detail_text.setText(f"#{n} — {t}\nStatus: {st}  |  {d}\n{'─' * 50}\n\n{clean}")
 
+        def _set_filter(f):
+            current_filter[0] = f
+            filter_all_btn.setChecked(f == "all")
+            filter_open_btn.setChecked(f == "open")
+            filter_closed_btn.setChecked(f == "closed")
+            _refresh()
+
+        filter_all_btn.clicked.connect(lambda: _set_filter("all"))
+        filter_open_btn.clicked.connect(lambda: _set_filter("open"))
+        filter_closed_btn.clicked.connect(lambda: _set_filter("closed"))
+        sort_combo.currentIndexChanged.connect(lambda _: _refresh())
+        search_edit.textChanged.connect(lambda _: _refresh())
+        list_widget.currentRowChanged.connect(lambda _: _on_select())
+        github_btn.clicked.connect(lambda: webbrowser.open(current_url[0]) if current_url[0] else None)
+
+        _refresh()
         dlg.exec()
