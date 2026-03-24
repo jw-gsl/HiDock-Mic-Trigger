@@ -775,6 +775,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
 
+        // Edit menu — required for standard keyboard shortcuts (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z) to work in text views
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        // Undo/Redo are informal protocols on NSResponder; string-based selectors are the standard approach here.
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -1183,79 +1197,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.addButton(withTitle: "Cancel")
 
         // Build the form
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 340))
+        // Layout uses NSView coordinate system (origin bottom-left).
+        // All three text boxes are the same height so the form looks balanced.
+        let textBoxHeight: CGFloat = 72
+        let labelHeight: CGFloat = 18
+        let controlHeight: CGFloat = 26
+        let gap: CGFloat = 6
+        let w: CGFloat = 420
 
-        // Category
-        let categoryLabel = NSTextField(labelWithString: "What's this about?")
-        categoryLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        categoryLabel.frame = NSRect(x: 0, y: 312, width: 420, height: 18)
-        container.addSubview(categoryLabel)
+        // Build layout bottom-up, calculating y positions
+        var y: CGFloat = 0
 
-        let categoryPopup = NSPopUpButton(frame: NSRect(x: 0, y: 284, width: 420, height: 26), pullsDown: false)
-        for cat in feedbackCategories {
-            categoryPopup.addItem(withTitle: cat.label)
-        }
-        container.addSubview(categoryPopup)
+        // Steps to reproduce (optional) — multi-line, same size as the others
+        let stepsScroll = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: textBoxHeight))
+        stepsScroll.hasVerticalScroller = true
+        stepsScroll.borderType = .bezelBorder
+        let stepsText = NSTextView(frame: NSRect(x: 0, y: 0, width: w, height: textBoxHeight))
+        stepsText.isEditable = true; stepsText.isRichText = false
+        stepsText.font = .systemFont(ofSize: 13)
+        stepsText.autoresizingMask = [.width, .height]
+        stepsText.isVerticallyResizable = true
+        stepsText.textContainer?.widthTracksTextView = true
+        stepsText.placeholderAttributedString = NSAttributedString(
+            string: "e.g.\n1. Open the app\n2. Click Download\n3. Wait 30 seconds\n4. App freezes",
+            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
+        )
+        stepsScroll.documentView = stepsText
 
-        // Severity
-        let severityLabel = NSTextField(labelWithString: "How much does it affect you?")
-        severityLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        severityLabel.frame = NSRect(x: 0, y: 256, width: 420, height: 18)
-        container.addSubview(severityLabel)
+        y += textBoxHeight + 4
+        let stepsLabel = NSTextField(labelWithString: "Steps to reproduce (optional)")
+        stepsLabel.font = .systemFont(ofSize: 11)
+        stepsLabel.textColor = .secondaryLabelColor
+        stepsLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
 
-        let severityPopup = NSPopUpButton(frame: NSRect(x: 0, y: 228, width: 420, height: 26), pullsDown: false)
-        for sev in feedbackSeverities {
-            severityPopup.addItem(withTitle: sev.label)
-        }
-        container.addSubview(severityPopup)
+        y += labelHeight + gap
 
-        // Description
-        let descLabel = NSTextField(labelWithString: "What happened?")
-        descLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        descLabel.frame = NSRect(x: 0, y: 200, width: 420, height: 18)
-        container.addSubview(descLabel)
-
-        let descScroll = NSScrollView(frame: NSRect(x: 0, y: 118, width: 420, height: 80))
-        descScroll.hasVerticalScroller = true
-        descScroll.borderType = .bezelBorder
-        let descText = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 80))
-        descText.isEditable = true; descText.isRichText = false
-        descText.font = .systemFont(ofSize: 13)
-        descText.autoresizingMask = [.width, .height]
-        descText.isVerticallyResizable = true
-        descText.textContainer?.widthTracksTextView = true
-        descScroll.documentView = descText
-        container.addSubview(descScroll)
-
-        // Expected behavior
-        let expectedLabel = NSTextField(labelWithString: "What did you expect to happen?")
-        expectedLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        expectedLabel.frame = NSRect(x: 0, y: 90, width: 420, height: 18)
-        container.addSubview(expectedLabel)
-
-        let expectedScroll = NSScrollView(frame: NSRect(x: 0, y: 40, width: 420, height: 48))
+        // What did you expect to happen?
+        let expectedScroll = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: textBoxHeight))
         expectedScroll.hasVerticalScroller = true
         expectedScroll.borderType = .bezelBorder
-        let expectedText = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 48))
+        let expectedText = NSTextView(frame: NSRect(x: 0, y: 0, width: w, height: textBoxHeight))
         expectedText.isEditable = true; expectedText.isRichText = false
         expectedText.font = .systemFont(ofSize: 13)
         expectedText.autoresizingMask = [.width, .height]
         expectedText.isVerticallyResizable = true
         expectedText.textContainer?.widthTracksTextView = true
+        expectedText.placeholderAttributedString = NSAttributedString(
+            string: "e.g. The download should complete and the recordings should appear in the list.",
+            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
+        )
         expectedScroll.documentView = expectedText
-        container.addSubview(expectedScroll)
 
-        // Steps
-        let stepsLabel = NSTextField(labelWithString: "Steps to reproduce (optional)")
-        stepsLabel.font = .systemFont(ofSize: 11)
-        stepsLabel.textColor = .secondaryLabelColor
-        stepsLabel.frame = NSRect(x: 0, y: 16, width: 420, height: 16)
-        container.addSubview(stepsLabel)
+        y += textBoxHeight + 4
+        let expectedLabel = NSTextField(labelWithString: "What did you expect to happen?")
+        expectedLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        expectedLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
 
-        let stepsField = NSTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 16))
-        stepsField.font = .systemFont(ofSize: 12)
-        stepsField.placeholderString = "e.g. Click Download, wait 30 seconds, app freezes"
-        container.addSubview(stepsField)
+        y += labelHeight + gap
+
+        // What happened?
+        let descScroll = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: textBoxHeight))
+        descScroll.hasVerticalScroller = true
+        descScroll.borderType = .bezelBorder
+        let descText = NSTextView(frame: NSRect(x: 0, y: 0, width: w, height: textBoxHeight))
+        descText.isEditable = true; descText.isRichText = false
+        descText.font = .systemFont(ofSize: 13)
+        descText.autoresizingMask = [.width, .height]
+        descText.isVerticallyResizable = true
+        descText.textContainer?.widthTracksTextView = true
+        descText.placeholderAttributedString = NSAttributedString(
+            string: "e.g. I clicked Download, waited 30 seconds, and the app froze.",
+            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
+        )
+        descScroll.documentView = descText
+
+        y += textBoxHeight + 4
+        let descLabel = NSTextField(labelWithString: "What happened?")
+        descLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        descLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        y += labelHeight + gap
+
+        // Severity
+        let severityPopup = NSPopUpButton(frame: NSRect(x: 0, y: y, width: w, height: controlHeight), pullsDown: false)
+        for sev in feedbackSeverities {
+            severityPopup.addItem(withTitle: sev.label)
+        }
+
+        y += controlHeight + 4
+        let severityLabel = NSTextField(labelWithString: "How much does it affect you?")
+        severityLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        severityLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        y += labelHeight + gap
+
+        // Category
+        let categoryPopup = NSPopUpButton(frame: NSRect(x: 0, y: y, width: w, height: controlHeight), pullsDown: false)
+        for cat in feedbackCategories {
+            categoryPopup.addItem(withTitle: cat.label)
+        }
+
+        y += controlHeight + 4
+        let categoryLabel = NSTextField(labelWithString: "What's this about?")
+        categoryLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        categoryLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        let containerHeight = y + labelHeight
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: containerHeight))
+        for sub in [stepsScroll, stepsLabel, expectedScroll, expectedLabel,
+                    descScroll, descLabel, severityPopup, severityLabel,
+                    categoryPopup, categoryLabel] as [NSView] {
+            container.addSubview(sub)
+        }
 
         alert.accessoryView = container
         alert.window.initialFirstResponder = descText
@@ -1269,7 +1322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let category = feedbackCategories[categoryPopup.indexOfSelectedItem]
         let severity = feedbackSeverities[severityPopup.indexOfSelectedItem]
         let expected = expectedText.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        let steps = stepsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let steps = stepsText.string.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Gather system info
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
