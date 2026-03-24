@@ -1547,6 +1547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                         self?.saveFeedbackToHistory(
                             title: title,
+                            body: body,
                             url: json["html_url"] as? String,
                             number: json["number"] as? Int,
                             state: json["state"] as? String ?? "open"
@@ -1575,17 +1576,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return items
     }
 
-    private func saveFeedbackToHistory(title: String, url: String?, number: Int?, state: String) {
+    private func saveFeedbackToHistory(title: String, body: String, url: String?, number: Int?, state: String) {
         var history = loadFeedbackHistory()
         let entry: [String: Any] = [
             "title": title,
+            "body": body,
             "url": url ?? "",
             "number": number ?? 0,
             "state": state,
             "date": ISO8601DateFormatter().string(from: Date()),
         ]
-        history.insert(entry, at: 0)  // newest first
-        // Keep last 50
+        history.insert(entry, at: 0)
         if history.count > 50 { history = Array(history.prefix(50)) }
 
         let dir = (feedbackHistoryPath as NSString).deletingLastPathComponent
@@ -1594,6 +1595,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? data.write(to: URL(fileURLWithPath: feedbackHistoryPath))
         }
     }
+
+    private var feedbackHistoryWindow: NSWindow?
 
     @objc private func showFeedbackHistory() {
         let history = loadFeedbackHistory()
@@ -1605,27 +1608,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "My Feedback"
-        alert.informativeText = "Click an issue to open it on GitHub."
-        alert.addButton(withTitle: "Close")
+        // Build a proper window with an outline view
+        if feedbackHistoryWindow == nil {
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 600, height: 450),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered, defer: false
+            )
+            win.center()
+            win.title = "My Feedback"
+            win.isReleasedWhenClosed = false
+            feedbackHistoryWindow = win
+        }
 
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 450))
 
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: max(300, CGFloat(history.count) * 44)))
-        var y = container.frame.height
+        // Left: list of issues
+        let listScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 250, height: 450))
+        listScroll.hasVerticalScroller = true
+        listScroll.borderType = .bezelBorder
+        listScroll.autoresizingMask = [.height]
 
-        for item in history {
-            y -= 44
+        let listContainer = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: max(450, CGFloat(history.count) * 52)))
+        var y = listContainer.frame.height
+        var detailViews: [NSView] = []
+
+        // Right: detail area
+        let detailScroll = NSScrollView(frame: NSRect(x: 254, y: 0, width: 346, height: 450))
+        detailScroll.hasVerticalScroller = true
+        detailScroll.borderType = .bezelBorder
+        detailScroll.autoresizingMask = [.width, .height]
+
+        let emptyLabel = NSTextField(labelWithString: "Select an item to see details")
+        emptyLabel.font = .systemFont(ofSize: 13)
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.frame = NSRect(x: 0, y: 200, width: 346, height: 20)
+        let emptyContainer = NSView(frame: NSRect(x: 0, y: 0, width: 346, height: 450))
+        emptyContainer.addSubview(emptyLabel)
+        detailScroll.documentView = emptyContainer
+
+        for (index, item) in history.enumerated() {
+            y -= 52
             let title = item["title"] as? String ?? "Untitled"
             let urlStr = item["url"] as? String ?? ""
             let number = item["number"] as? Int ?? 0
             let state = item["state"] as? String ?? "open"
             let date = item["date"] as? String ?? ""
+            let body = item["body"] as? String ?? ""
 
-            // Format date
             let shortDate: String
             if let d = ISO8601DateFormatter().date(from: date) {
                 let fmt = DateFormatter()
@@ -1636,42 +1667,110 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 shortDate = date
             }
 
+            // List row — clickable
             let stateIcon = state == "closed" ? "✅" : "🔵"
-            let label = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
-            label.font = .systemFont(ofSize: 12)
-            label.frame = NSRect(x: 8, y: y + 20, width: 484, height: 18)
-            label.lineBreakMode = .byTruncatingTail
-            container.addSubview(label)
+            let rowBtn = NSButton(frame: NSRect(x: 4, y: y, width: 242, height: 48))
+            rowBtn.title = ""
+            rowBtn.bezelStyle = .recessed
+            rowBtn.isBordered = false
+            rowBtn.tag = index
+            rowBtn.target = self
+            rowBtn.action = #selector(feedbackHistoryRowClicked(_:))
+            listContainer.addSubview(rowBtn)
+
+            let titleLabel = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
+            titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
+            titleLabel.frame = NSRect(x: 8, y: y + 28, width: 234, height: 16)
+            titleLabel.lineBreakMode = .byTruncatingTail
+            listContainer.addSubview(titleLabel)
 
             let dateLabel = NSTextField(labelWithString: shortDate)
             dateLabel.font = .systemFont(ofSize: 10)
             dateLabel.textColor = .secondaryLabelColor
-            dateLabel.frame = NSRect(x: 8, y: y + 2, width: 200, height: 16)
-            container.addSubview(dateLabel)
+            dateLabel.frame = NSRect(x: 8, y: y + 12, width: 234, height: 14)
+            listContainer.addSubview(dateLabel)
 
-            if !urlStr.isEmpty {
-                let linkBtn = NSButton(title: "View on GitHub", target: nil, action: nil)
-                linkBtn.bezelStyle = .rounded
-                linkBtn.controlSize = .small
-                linkBtn.font = .systemFont(ofSize: 10)
-                linkBtn.frame = NSRect(x: 400, y: y + 2, width: 92, height: 20)
-                linkBtn.tag = container.subviews.count  // unique tag
-                linkBtn.target = self
-                linkBtn.action = #selector(openFeedbackURL(_:))
-                // Store URL in accessibility identifier
-                linkBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
-                container.addSubview(linkBtn)
+            let sep = NSBox(frame: NSRect(x: 8, y: y + 2, width: 234, height: 1))
+            sep.boxType = .separator
+            listContainer.addSubview(sep)
+
+            // Build detail view for this item
+            let detail = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 600))
+
+            var dy: CGFloat = 570
+
+            // Title
+            let dTitle = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
+            dTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+            dTitle.frame = NSRect(x: 8, y: dy, width: 324, height: 20)
+            dTitle.lineBreakMode = .byWordWrapping
+            dTitle.maximumNumberOfLines = 3
+            detail.addSubview(dTitle)
+            dy -= 24
+
+            // Date + state
+            let stateText = state == "closed" ? "Closed" : "Open"
+            let dMeta = NSTextField(labelWithString: "\(shortDate) · \(stateText)")
+            dMeta.font = .systemFont(ofSize: 11)
+            dMeta.textColor = .secondaryLabelColor
+            dMeta.frame = NSRect(x: 8, y: dy, width: 324, height: 16)
+            detail.addSubview(dMeta)
+            dy -= 24
+
+            // Body content — strip markdown headers for readability
+            if !body.isEmpty {
+                let cleanBody = body
+                    .replacingOccurrences(of: "<details>", with: "")
+                    .replacingOccurrences(of: "</details>", with: "")
+                    .replacingOccurrences(of: "<summary>System Information</summary>", with: "System Information:")
+                    .replacingOccurrences(of: "## ", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let dBody = NSTextField(wrappingLabelWithString: cleanBody)
+                dBody.font = .systemFont(ofSize: 11)
+                dBody.textColor = .labelColor
+                dBody.frame = NSRect(x: 8, y: 40, width: 324, height: dy - 40)
+                dBody.isSelectable = true
+                detail.addSubview(dBody)
             }
 
-            // Separator
-            let sep = NSBox(frame: NSRect(x: 8, y: y, width: 484, height: 1))
-            sep.boxType = .separator
-            container.addSubview(sep)
+            // View on GitHub button at bottom
+            if !urlStr.isEmpty {
+                let linkBtn = NSButton(title: "View on GitHub", target: self, action: #selector(openFeedbackURL(_:)))
+                linkBtn.bezelStyle = .rounded
+                linkBtn.controlSize = .regular
+                linkBtn.frame = NSRect(x: 8, y: 8, width: 120, height: 24)
+                linkBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
+                detail.addSubview(linkBtn)
+            }
+
+            detailViews.append(detail)
         }
 
-        scrollView.documentView = container
-        alert.accessoryView = scrollView
-        alert.runModal()
+        listScroll.documentView = listContainer
+        contentView.addSubview(listScroll)
+        contentView.addSubview(detailScroll)
+
+        // Store detail views and scroll ref for row click handler
+        objc_setAssociatedObject(feedbackHistoryWindow!, "detailViews", detailViews, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(feedbackHistoryWindow!, "detailScroll", detailScroll, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        feedbackHistoryWindow?.contentView = contentView
+        feedbackHistoryWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func feedbackHistoryRowClicked(_ sender: NSButton) {
+        guard let win = feedbackHistoryWindow,
+              let detailViews = objc_getAssociatedObject(win, "detailViews") as? [NSView],
+              let detailScroll = objc_getAssociatedObject(win, "detailScroll") as? NSScrollView,
+              sender.tag >= 0, sender.tag < detailViews.count else { return }
+
+        detailScroll.documentView = detailViews[sender.tag]
+        // Scroll to top
+        if let docView = detailScroll.documentView {
+            docView.scroll(NSPoint(x: 0, y: docView.frame.height))
+        }
     }
 
     @objc private func openFeedbackURL(_ sender: NSButton) {
