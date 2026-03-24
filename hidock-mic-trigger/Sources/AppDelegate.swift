@@ -335,6 +335,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onDownloadModel = { [weak self] in
             self?.downloadWhisperModel()
         }
+        viewModel.onCancelModelDownload = { [weak self] in
+            self?.cancelModelDownload()
+        }
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
@@ -2379,49 +2382,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var whisperModelPath: String {
         "\(NSHomeDirectory())/HiDock/Speech-to-Text/ggml-large-v3-turbo-q5_0.bin"
     }
+    private var modelDownloadTask: URLSessionDownloadTask?
+    private var modelDownloadDelegate: ModelDownloadDelegate?
 
-    /// Download the whisper.cpp model natively via URLSession. Works in both dev and bundled builds.
     private func downloadWhisperModel() {
-        let destURL = URL(fileURLWithPath: whisperModelPath)
-        let dir = destURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let destPath = whisperModelPath
+        let dir = (destPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: nil)
 
         guard let url = URL(string: whisperModelURL) else { return }
         log("Downloading whisper model from \(whisperModelURL)")
-        viewModel.modelDownloadProgress = 0.01
 
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, response, error in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                if let tempURL = tempURL, error == nil {
-                    do {
-                        if FileManager.default.fileExists(atPath: self.whisperModelPath) {
-                            try FileManager.default.removeItem(atPath: self.whisperModelPath)
-                        }
-                        try FileManager.default.moveItem(at: tempURL, to: destURL)
+        viewModel.modelDownloading = true
+        viewModel.modelDownloadProgress = 0
+        viewModel.modelDownloadStatus = "Starting download..."
+
+        let delegate = ModelDownloadDelegate(
+            destPath: destPath,
+            onProgress: { [weak self] bytesWritten, totalBytes in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    let fraction = totalBytes > 0 ? Double(bytesWritten) / Double(totalBytes) : 0
+                    self.viewModel.modelDownloadProgress = fraction
+                    let mbDone = Double(bytesWritten) / (1024 * 1024)
+                    let mbTotal = Double(totalBytes) / (1024 * 1024)
+                    self.viewModel.modelDownloadStatus = String(format: "%.0f / %.0f MB", mbDone, mbTotal)
+                }
+            },
+            onComplete: { [weak self] success, error in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.viewModel.modelDownloading = false
+                    if success {
                         self.log("Whisper model downloaded successfully")
                         self.viewModel.modelReady = true
                         self.viewModel.modelDownloadProgress = 1.0
-                    } catch {
-                        self.log("Failed to save model: \(error)")
+                        self.viewModel.modelDownloadStatus = "Download complete"
+                    } else {
+                        self.log("Model download failed: \(error ?? "unknown")")
                         self.viewModel.modelDownloadProgress = 0
+                        self.viewModel.modelDownloadStatus = "Download failed: \(error ?? "unknown error")"
                     }
-                } else {
-                    self.log("Model download failed: \(error?.localizedDescription ?? "unknown")")
-                    self.viewModel.modelDownloadProgress = 0
+                    self.modelDownloadTask = nil
+                    self.modelDownloadDelegate = nil
                 }
             }
-        }
+        )
 
-        // Observe progress
-        let observation = task.progress.observe(\.fractionCompleted) { [weak self] progress, _ in
-            DispatchQueue.main.async {
-                self?.viewModel.modelDownloadProgress = progress.fractionCompleted
-            }
-        }
-        _ = observation
-
+        modelDownloadDelegate = delegate
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let task = session.downloadTask(with: url)
+        modelDownloadTask = task
         task.resume()
+    }
+
+    private func cancelModelDownload() {
+        modelDownloadTask?.cancel()
+        modelDownloadTask = nil
+        modelDownloadDelegate = nil
+        viewModel.modelDownloading = false
+        viewModel.modelDownloadProgress = 0
+        viewModel.modelDownloadStatus = ""
+        log("Model download cancelled")
     }
 
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
@@ -2779,5 +2801,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.messageText = "HiDock Mic Trigger"
         alert.informativeText = message
         alert.runModal()
+    }
+}
+
+// MARK: - Model Download Delegate
+
+final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    private let destPath: String
+    private let onProgress: (Int64, Int64) -> Void
+    private let onComplete: (Bool, String?) -> Void
+
+    init(destPath: String, onProgress: @escaping (Int64, Int64) -> Void, onComplete: @escaping (Bool, String?) -> Void) {
+        self.destPath = destPath
+        self.onProgress = onProgress
+        self.onComplete = onComplete
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        let dest = URL(fileURLWithPath: destPath)
+        do {
+            if FileManager.default.fileExists(atPath: destPath) {
+                try FileManager.default.removeItem(atPath: destPath)
+            }
+            try FileManager.default.moveItem(at: location, to: dest)
+            onComplete(true, nil)
+        } catch {
+            onComplete(false, error.localizedDescription)
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        onProgress(totalBytesWritten, totalBytesExpectedToWrite)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            let nsError = error as NSError
+            if nsError.code == NSURLErrorCancelled {
+                return // Cancelled by user, don't report as failure
+            }
+            onComplete(false, error.localizedDescription)
+        }
     }
 }

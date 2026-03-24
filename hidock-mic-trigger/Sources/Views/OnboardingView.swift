@@ -210,13 +210,13 @@ struct OnboardingView: View {
                 .fontWeight(.bold)
 
             if viewModel.modelReady {
-                Text("The speech recognition model is already downloaded and ready!")
+                Text("The speech recognition model is downloaded and ready!")
                     .font(.body)
                     .foregroundColor(.green)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 400)
-            } else if viewModel.modelDownloadProgress > 0 && viewModel.modelDownloadProgress < 1.0 {
-                Text("Downloading the speech recognition model. This is about 550 MB and only needs to happen once.")
+            } else if viewModel.modelDownloading {
+                Text("Downloading the speech recognition model...")
                     .font(.body)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -224,9 +224,19 @@ struct OnboardingView: View {
 
                 ProgressView(value: viewModel.modelDownloadProgress)
                     .frame(maxWidth: 300)
-                Text("\(Int(viewModel.modelDownloadProgress * 100))%")
-                    .font(.caption)
+
+                Text(viewModel.modelDownloadStatus.isEmpty
+                    ? "\(Int(viewModel.modelDownloadProgress * 100))%"
+                    : viewModel.modelDownloadStatus)
+                    .font(.caption.monospacedDigit())
                     .foregroundColor(.secondary)
+
+                Button("Cancel") {
+                    viewModel.onCancelModelDownload()
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.red)
+                .font(.caption)
             } else {
                 Text("To transcribe your recordings, HiDock Tools needs to download a speech recognition model. This is about 550 MB and only needs to happen once. You can skip this and do it later.")
                     .font(.body)

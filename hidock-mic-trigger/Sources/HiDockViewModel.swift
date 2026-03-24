@@ -121,7 +121,10 @@ final class HiDockViewModel: ObservableObject {
     @Published var showOnboarding = false
     @Published var modelReady = false
     @Published var modelDownloadProgress: Double = 0
+    @Published var modelDownloadStatus: String = ""
+    @Published var modelDownloading = false
     var onDownloadModel: () -> Void = {}
+    var onCancelModelDownload: () -> Void = {}
     var onCompleteOnboarding: () -> Void = {}
 
     // MARK: - Update Status
