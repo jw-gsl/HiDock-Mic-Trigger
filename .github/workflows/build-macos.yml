@@ -8,6 +8,11 @@ on:
       - 'usb-extractor/extractor.py'
       - 'transcription-pipeline/**'
       - '.github/workflows/build-macos.yml'
+  pull_request:
+    paths:
+      - 'hidock-mic-trigger/**'
+      - 'usb-extractor/extractor.py'
+      - 'transcription-pipeline/**'
   workflow_dispatch:
 
 env:

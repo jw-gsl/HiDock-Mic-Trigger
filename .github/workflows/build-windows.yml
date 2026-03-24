@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - 'Windows-App/**'
+  pull_request:
+    paths:
+      - 'Windows-App/**'
   workflow_dispatch:  # Manual trigger from GitHub UI
 
 jobs:
