@@ -10,6 +10,22 @@ struct MainWindowView: View {
             SyncToolbarSection(viewModel: viewModel)
             DownloadProgressBar(viewModel: viewModel)
             RecordingsTableView(viewModel: viewModel)
+
+            // Footer
+            HStack {
+                Spacer()
+                Button {
+                    viewModel.onSendFeedback()
+                } label: {
+                    Label("Send Feedback", systemImage: "bubble.left.and.text.bubble.right")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+            .padding(.top, 2)
         }
         .frame(minWidth: 980, minHeight: 510)
     }

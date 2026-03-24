@@ -306,6 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRevealTranscript = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
+        viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
