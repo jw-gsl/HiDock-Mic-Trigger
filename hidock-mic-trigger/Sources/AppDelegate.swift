@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let syncTranscriptFolderKey = "hidockSyncTranscriptFolder"
     private let syncHideDownloadedKey = "hidockSyncHideDownloaded"
     private let syncAutoDownloadKey = "hidockSyncAutoDownload"
+    private let hasCompletedOnboardingKey = "hasCompletedOnboarding"
 
     /// Repo root resolved from UserDefaults, falling back to the default home directory path.
     private var repoRoot: String {
@@ -185,6 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         showSyncWindow()
+
+        // Show onboarding wizard on first run
+        if !UserDefaults.standard.bool(forKey: hasCompletedOnboardingKey) {
+            viewModel.showOnboarding = true
+        }
+
         if autoStartOnLaunch {
             startTrigger()
         }
@@ -315,6 +322,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
+
+        // Onboarding
+        let modelPath = "\(NSHomeDirectory())/HiDock/Speech-to-Text/ggml-large-v3-turbo-q5_0.bin"
+        viewModel.modelReady = FileManager.default.fileExists(atPath: modelPath)
+
+        viewModel.onCompleteOnboarding = { [weak self] in
+            guard let self = self else { return }
+            UserDefaults.standard.set(true, forKey: self.hasCompletedOnboardingKey)
+            self.viewModel.showOnboarding = false
+        }
+
+        viewModel.onDownloadModel = { [weak self] in
+            guard let self = self else { return }
+            if self.bundledResourcesRoot != nil {
+                // Bundled app: run transcribe_cpp.py download-model
+                self.transcriptionQueue.async {
+                    self.runTranscriptionForModelDownload()
+                }
+            } else {
+                // Dev build: show message
+                DispatchQueue.main.async {
+                    self.viewModel.modelDownloadProgress = 0
+                    let alert = NSAlert()
+                    alert.messageText = "Model Download"
+                    alert.informativeText = "In development builds, run the transcription pipeline's download command manually:\n\ncd transcription-pipeline && python3 transcribe_cpp.py download-model"
+                    alert.alertStyle = .informational
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+            }
+        }
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
@@ -2353,6 +2391,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return false
         }
         return true
+    }
+
+    /// Download the speech recognition model via transcribe_cpp.py for onboarding.
+    private func runTranscriptionForModelDownload() {
+        log("runTranscriptionForModelDownload: starting")
+        let process = Process()
+        process.currentDirectoryURL = URL(fileURLWithPath: transcriptionRoot)
+        process.executableURL = URL(fileURLWithPath: transcriptionPythonPath)
+        process.arguments = [transcriptionScriptPath, "download-model"]
+
+        let errPipe = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = errPipe
+
+        var lineBuffer = ""
+        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
+            lineBuffer += text
+            while let range = lineBuffer.range(of: "\n") {
+                let line = String(lineBuffer[lineBuffer.startIndex..<range.lowerBound])
+                lineBuffer = String(lineBuffer[range.upperBound...])
+                if line.hasPrefix("PROGRESS:"), let pct = Int(line.dropFirst("PROGRESS:".count)) {
+                    DispatchQueue.main.async {
+                        self?.viewModel.modelDownloadProgress = Double(pct) / 100.0
+                    }
+                }
+            }
+        }
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            log("runTranscriptionForModelDownload error: \(error)")
+        }
+
+        let modelPath = "\(NSHomeDirectory())/HiDock/Speech-to-Text/ggml-large-v3-turbo-q5_0.bin"
+        let ready = FileManager.default.fileExists(atPath: modelPath)
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.modelReady = ready
+            if ready {
+                self?.viewModel.modelDownloadProgress = 1.0
+            }
+        }
     }
 
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {

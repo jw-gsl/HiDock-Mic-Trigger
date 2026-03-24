@@ -66,7 +66,12 @@ After building, you MUST complete these steps to avoid stale app copies running:
    codesign --force --sign - "/Applications/HiDock Mic Trigger.app"
    ```
 
-5. **Relaunch:**
+5. **Register with Launchpad:**
+   ```bash
+   /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "/Applications/HiDock Mic Trigger.app"
+   ```
+
+6. **Relaunch:**
    ```bash
    open -a "/Applications/HiDock Mic Trigger.app"
    ```

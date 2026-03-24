@@ -162,6 +162,8 @@ final class UpdateChecker {
             cp -R "$APP" "\(appPath)"
             codesign --force --sign - "\(appPath)/Contents/MacOS/hidock-mic-trigger" 2>/dev/null
             codesign --force --sign - "\(appPath)" 2>/dev/null
+            # Re-register with LaunchServices so Launchpad picks it up
+            /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "\(appPath)" 2>/dev/null
         fi
         rm -rf "\(tempDir.path)"
         """
@@ -358,6 +360,9 @@ final class UpdateChecker {
         # Re-sign
         codesign --force --sign - "\(appPath)/Contents/MacOS/hidock-mic-trigger" 2>/dev/null
         codesign --force --sign - "\(appPath)" 2>/dev/null
+
+        # Re-register with LaunchServices so Launchpad picks it up
+        /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "\(appPath)" 2>/dev/null
 
         # Relaunch
         open -a "\(appPath)"

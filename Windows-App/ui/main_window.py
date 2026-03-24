@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -86,6 +87,16 @@ class MainWindow(QMainWindow):
         self._load_settings()
         self._refresh_mic_list()
         self._restore_geometry()
+
+        # First-run onboarding wizard
+        if not self.settings.value("hasCompletedOnboarding", False, type=bool):
+            from ui.onboarding_dialog import OnboardingDialog
+            dlg = OnboardingDialog(self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self.settings.setValue("hasCompletedOnboarding", True)
+                if dlg.selected_mic:
+                    self.mic_combo.setCurrentText(dlg.selected_mic)
+                    self.settings.setValue("triggerMicName", dlg.selected_mic)
 
         # Uptime timer
         self._uptime_timer = QTimer(self)

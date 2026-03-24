@@ -58,6 +58,9 @@ struct MainWindowView: View {
             .padding(.top, 2)
         }
         .frame(minWidth: 980, minHeight: 510)
+        .sheet(isPresented: $viewModel.showOnboarding) {
+            OnboardingView(viewModel: viewModel)
+        }
     }
 }
 

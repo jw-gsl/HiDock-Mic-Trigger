@@ -13,6 +13,7 @@
 		332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */; };
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
 		7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */; };
+		7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */; };
 		8F4F17F9FC81801F1A855275 /* HiDockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */; };
 		9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */; };
 		9F88469E24E4E75401A1B681 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 651E9570959AB1B72306DFE9 /* MainWindowView.swift */; };
@@ -36,6 +37,7 @@
 /* Begin PBXFileReference section */
 		22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsTableView.swift; sourceTree = "<group>"; };
 		2588C13D72780DEF82479DD3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
+		2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		31F45B509F970DE308F947FD /* HelpersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpersTests.swift; sourceTree = "<group>"; };
 		3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncToolbarSection.swift; sourceTree = "<group>"; };
 		614034CD6D618507904C5FFA /* hidock-mic-trigger-tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "hidock-mic-trigger-tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -90,6 +92,7 @@
 			children = (
 				651E9570959AB1B72306DFE9 /* MainWindowView.swift */,
 				925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */,
+				2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */,
 				22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */,
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
 				FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */,
@@ -240,6 +243,7 @@
 				9F88469E24E4E75401A1B681 /* MainWindowView.swift in Sources */,
 				2FD3A01462FA0F2788F4C61A /* MicTriggerSection.swift in Sources */,
 				F86651607F00054F72662894 /* Models.swift in Sources */,
+				7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,
 				332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */,
 				7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */,
