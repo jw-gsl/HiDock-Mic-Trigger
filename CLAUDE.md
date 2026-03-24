@@ -1,5 +1,29 @@
 # HiDock Tools - Agent Instructions
 
+## Development Workflow — IMPORTANT
+
+**NEVER commit directly to `main`.** All changes must go through feature branches and pull requests.
+
+### For any code change:
+1. Create a feature branch: `git checkout -b feature/<short-description>`
+2. Make changes and commit to the feature branch
+3. Push and create a PR: `gh pr create`
+4. The user reviews and merges when ready
+
+### For testing on Mac:
+- Build with **Debug** configuration — deploys to `~/Applications/HiDock Mic Trigger Dev.app` (orange icon, "DEV" label)
+- Debug builds never touch the production app at `/Applications/`
+- The production app continues running while you test
+
+### For testing Windows changes:
+- Push the feature branch, then the user can build locally or wait for PR merge to trigger CI
+
+### CI/CD:
+- `build-macos.yml` — builds self-contained .app on push to `main`
+- `build-windows.yml` — builds HiDock.exe on push to `main`
+- `release.yml` — manual trigger to create a GitHub Release with both platform builds
+- `test.yml` — Python tests on push to `main` and PRs
+
 ## Build & Deploy (macOS Menu Bar App)
 
 The main app is `hidock-mic-trigger/` — a Swift menu bar app built with XcodeGen.
@@ -29,10 +53,17 @@ After building, you MUST complete these steps to avoid stale app copies running:
 
 3. **Install the fresh build to /Applications/ only:**
    ```bash
-   cp -R "/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app" "/Applications/HiDock Mic Trigger.app"
+   # Note: the build output may be named "hidock-mic-trigger.app" — rename it
+   cp -R "/tmp/hidock-build/Build/Products/Release/hidock-mic-trigger.app" "/Applications/HiDock Mic Trigger.app"
    ```
 
-4. **Relaunch:**
+4. **Re-sign the app:**
+   ```bash
+   codesign --force --sign - "/Applications/HiDock Mic Trigger.app/Contents/MacOS/hidock-mic-trigger"
+   codesign --force --sign - "/Applications/HiDock Mic Trigger.app"
+   ```
+
+5. **Relaunch:**
    ```bash
    open -a "/Applications/HiDock Mic Trigger.app"
    ```
