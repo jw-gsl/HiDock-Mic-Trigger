@@ -1004,10 +1004,7 @@ class MainWindow(QMainWindow):
 
     def _send_feedback(self):
         text, ok = QInputDialog.getMultiLineText(
-            self,
-            "Send Feedback",
-            "Describe the issue or suggestion.\nThis will create a GitHub issue.",
-            "",
+            self, "Send Feedback", "Describe the issue or suggestion.", "",
         )
         if not ok or not text.strip():
             return
@@ -1017,17 +1014,65 @@ class MainWindow(QMainWindow):
         py_version = sys.version.split()[0]
         device_status = "Connected" if self._last_extractor_ready else "Not connected"
 
+        title = f"Feedback: {text.strip()[:60]}"
         body = (
-            f"{text.strip()}\n\n"
-            f"---\n"
-            f"App Version: {app_version}\n"
-            f"Windows: {win_version}\n"
-            f"Python: {py_version}\n"
-            f"Device: {device_status}\n"
+            f"{text.strip()}\n\n---\n"
+            f"**Platform:** Windows {win_version}\n"
+            f"**App Version:** {app_version}\n"
+            f"**Python:** {py_version}\n"
+            f"**Devices:** {device_status}\n"
         )
-        encoded_body = quote(body)
-        url = (
-            "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new"
-            f"?title=Feedback&body={encoded_body}&labels=feedback"
-        )
-        webbrowser.open(url)
+
+        token = self._get_feedback_token()
+        if token:
+            self._submit_github_issue(title, body, token)
+        else:
+            encoded_body = quote(body)
+            webbrowser.open(
+                "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new"
+                f"?title={quote(title)}&body={encoded_body}&labels=feedback"
+            )
+
+    def _get_feedback_token(self) -> str | None:
+        try:
+            from core import feedback_token
+            return feedback_token.TOKEN.strip()
+        except (ImportError, AttributeError):
+            pass
+        token_path = Path(__file__).resolve().parent.parent / "feedback_token.txt"
+        if token_path.exists():
+            return token_path.read_text().strip()
+        return None
+
+    def _submit_github_issue(self, title: str, body: str, token: str):
+        import json as _json
+        self.statusBar().showMessage("Sending feedback...")
+
+        def _worker():
+            import urllib.request, ssl
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except ImportError:
+                ctx = ssl.create_default_context()
+
+            data = _json.dumps({"title": title, "body": body, "labels": ["feedback"]}).encode()
+            req = urllib.request.Request(
+                "https://api.github.com/repos/jw-gsl/HiDock-Mic-Trigger/issues",
+                data=data, method="POST",
+            )
+            req.add_header("Authorization", f"token {token}")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "HiDock/1.0")
+            try:
+                resp = urllib.request.urlopen(req, timeout=15, context=ctx)
+                return resp.status == 201
+            except Exception as e:
+                self._log_signal.emit(f"Feedback failed: {e}")
+                return False
+
+        def _run():
+            if _worker():
+                self._log_signal.emit("Feedback submitted")
+
+        threading.Thread(target=_run, daemon=True).start()

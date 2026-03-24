@@ -1131,11 +1131,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.runModal()
     }
 
+    /// Token injected at build time via CI. Read from bundle's embedded file.
+    private var feedbackToken: String? {
+        if let path = Bundle.main.path(forResource: "feedback_token", ofType: "txt"),
+           let token = try? String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            return token
+        }
+        // Fallback: check for file next to the app (dev builds)
+        let devPath = "\(repoRoot)/feedback_token.txt"
+        if let token = try? String(contentsOfFile: devPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            return token
+        }
+        return nil
+    }
+
     @objc private func sendFeedback() {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Send Feedback"
-        alert.informativeText = "Describe the issue or suggestion. This will create a GitHub issue."
+        alert.informativeText = "Describe the issue or suggestion."
         alert.addButton(withTitle: "Send")
         alert.addButton(withTitle: "Cancel")
 
@@ -1153,8 +1169,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         textView.textContainer?.widthTracksTextView = true
         scrollView.documentView = textView
         alert.accessoryView = scrollView
-
-        // Make the text view first responder
         alert.window.initialFirstResponder = textView
 
         let response = alert.runModal()
@@ -1163,25 +1177,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let feedbackText = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !feedbackText.isEmpty else { return }
 
-        // Gather system info
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let macOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        let deviceConnected = syncDeviceConnected.values.contains(true) ? "Connected" : "Not connected"
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let deviceStatus = connectedDevices.isEmpty ? "Not connected" : connectedDevices.map(\.shortName).joined(separator: ", ")
 
         let body = """
         \(feedbackText)
 
         ---
-        App Version: \(appVersion)
-        macOS: \(macOSVersion)
-        Device: \(deviceConnected)
+        **Platform:** macOS \(macOSVersion)
+        **App Version:** \(appVersion)
+        **Devices:** \(deviceStatus)
         """
 
-        guard let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new?title=Feedback&body=\(encodedBody)&labels=feedback") else {
+        submitGitHubIssue(title: "Feedback: \(String(feedbackText.prefix(60)))", body: body)
+    }
+
+    private func submitGitHubIssue(title: String, body: String) {
+        guard let token = feedbackToken else {
+            // No token available — fall back to opening browser
+            log("No feedback token, falling back to browser")
+            guard let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new?title=\(title)&body=\(encodedBody)&labels=feedback") else { return }
+            NSWorkspace.shared.open(url)
             return
         }
-        NSWorkspace.shared.open(url)
+
+        let url = URL(string: "https://api.github.com/repos/jw-gsl/HiDock-Mic-Trigger/issues")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("token \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("HiDock/1.0", forHTTPHeaderField: "User-Agent")
+
+        let payload: [String: Any] = [
+            "title": title,
+            "body": body,
+            "labels": ["feedback"]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        log("Submitting feedback issue...")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    self?.log("Feedback submission failed: \(error.localizedDescription)")
+                    self?.postNotification(title: "Feedback Failed", body: "Could not submit feedback. Please try again.")
+                    return
+                }
+                let httpResponse = response as? HTTPURLResponse
+                if httpResponse?.statusCode == 201 {
+                    self?.log("Feedback submitted successfully")
+                    self?.postNotification(title: "Feedback Sent", body: "Thank you! Your feedback has been submitted.")
+                } else {
+                    let statusCode = httpResponse?.statusCode ?? 0
+                    self?.log("Feedback submission returned status \(statusCode)")
+                    self?.postNotification(title: "Feedback Failed", body: "Server returned status \(statusCode). Please try again.")
+                }
+            }
+        }.resume()
     }
 
     @objc private func showSyncWindow() {

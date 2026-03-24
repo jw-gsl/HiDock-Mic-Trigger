@@ -64,6 +64,18 @@ jobs:
           echo "App bundle: $BUILD_DIR/$APP_NAME"
           ls "$BUILD_DIR/$APP_NAME/Contents/MacOS/"
 
+      - name: Inject feedback token
+        env:
+          FEEDBACK_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}
+        run: |
+          RES="$BUILD_DIR/$APP_NAME/Contents/Resources"
+          if [ -n "$FEEDBACK_TOKEN" ]; then
+            echo "$FEEDBACK_TOKEN" > "$RES/feedback_token.txt"
+            echo "Feedback token injected"
+          else
+            echo "Warning: FEEDBACK_TOKEN secret not set"
+          fi
+
       - name: Prepare bundle resources
         run: |
           RES="$BUILD_DIR/$APP_NAME/Contents/Resources"

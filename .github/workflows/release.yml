@@ -23,6 +23,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Inject feedback token
+        env:
+          FEEDBACK_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}
+        run: |
+          if ($env:FEEDBACK_TOKEN) {
+            Set-Content -Path "core/feedback_token.py" -Value "TOKEN = `"$env:FEEDBACK_TOKEN`""
+          }
       - name: Build HiDock.exe
         run: pyinstaller hidock.spec --noconfirm
       - uses: actions/upload-artifact@v4
@@ -53,6 +60,15 @@ jobs:
           FOUND=$(find /tmp/hidock-build/Build/Products/Release -maxdepth 1 -name "*.app" -type d | head -1)
           if [ "$(basename "$FOUND")" != "HiDock Mic Trigger.app" ]; then
             mv "$FOUND" "/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          fi
+      - name: Inject feedback token
+        env:
+          FEEDBACK_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          RES="$APP/Contents/Resources"
+          if [ -n "$FEEDBACK_TOKEN" ]; then
+            echo "$FEEDBACK_TOKEN" > "$RES/feedback_token.txt"
           fi
       - name: Bundle Python venvs
         run: |
