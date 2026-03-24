@@ -190,11 +190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         autoConnectSyncIfPaired()
 
-        // Check for updates after a short delay
+        // Check for updates after a short delay — show in-app dialog
         UpdateChecker.registerCategory()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
             UpdateChecker.checkForUpdate { title, body, url in
-                UpdateChecker.postUpdateNotification(title: title, body: body, url: url)
+                UpdateChecker.showUpdateAlert(title: title, body: body, url: url)
             }
         }
     }
@@ -308,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
+        viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
@@ -649,6 +650,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let historyItem = NSMenuItem(title: "My Feedback", action: #selector(showFeedbackHistory), keyEquivalent: "")
         historyItem.target = self
         menu.addItem(historyItem)
+        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManual), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -771,6 +775,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let appMenu = NSMenu()
         appMenu.addItem(NSMenuItem(title: "About HiDock Mic Trigger", action: #selector(showAbout), keyEquivalent: ""))
+        let checkUpdatesItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManual), keyEquivalent: "")
+        checkUpdatesItem.target = self
+        appMenu.addItem(checkUpdatesItem)
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
@@ -1142,11 +1149,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         showSyncWindow()
     }
 
+    @objc private func checkForUpdatesManual() {
+        UpdateChecker.manualCheck()
+    }
+
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "HiDock Mic Trigger"
-        alert.informativeText = "Menu bar app for controlling the HiDock mic trigger CLI.\nVersion 1.0.0"
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        alert.informativeText = "Menu bar app for controlling the HiDock mic trigger CLI.\nVersion \(version)"
         alert.runModal()
     }
 

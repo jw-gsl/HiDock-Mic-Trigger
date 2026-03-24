@@ -15,6 +15,15 @@ struct MainWindowView: View {
             HStack {
                 Spacer()
                 Button {
+                    viewModel.onCheckForUpdates()
+                } label: {
+                    Label("Check for Updates", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
                     viewModel.onShowFeedbackHistory()
                 } label: {
                     Label("My Feedback", systemImage: "list.bullet.clipboard")

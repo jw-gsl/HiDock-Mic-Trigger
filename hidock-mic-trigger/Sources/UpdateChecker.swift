@@ -90,7 +90,6 @@ final class UpdateChecker {
 
     /// Post a macOS notification with the "Download Update" action.
     static func postUpdateNotification(title: String, body: String, url: String) {
-        // Store the URL so the delegate can open it when the notification is tapped
         UserDefaults.standard.set(url, forKey: updateURLKey)
 
         let content = UNMutableNotificationContent()
@@ -105,5 +104,71 @@ final class UpdateChecker {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Show an in-app alert dialog for available updates.
+    static func showUpdateAlert(title: String, body: String, url: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = title
+        alert.informativeText = body
+        alert.addButton(withTitle: "Download Update")
+        alert.addButton(withTitle: "Later")
+        alert.icon = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Update")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn, let downloadURL = URL(string: url) {
+            NSWorkspace.shared.open(downloadURL)
+        }
+    }
+
+    /// Show an alert saying the app is up to date (for manual check).
+    static func showUpToDateAlert() {
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "You're up to date"
+        alert.informativeText = "HiDock Mic Trigger \(currentVersion) is the latest version."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    /// Manual check — always shows a result (either update dialog or "up to date").
+    static func manualCheck() {
+        guard let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else {
+            showUpToDateAlert()
+            return
+        }
+
+        let urlString = "https://api.github.com/repos/jw-gsl/HiDock-Mic-Trigger/releases/latest"
+        guard let url = URL(string: urlString) else { return }
+
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 15
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                guard let data = data, error == nil,
+                      let release = try? JSONDecoder().decode(GitHubRelease.self, from: data) else {
+                    showUpToDateAlert()
+                    return
+                }
+
+                let remoteVersion = release.tag_name.hasPrefix("v")
+                    ? String(release.tag_name.dropFirst())
+                    : release.tag_name
+
+                if isVersion(remoteVersion, newerThan: currentVersion) {
+                    showUpdateAlert(
+                        title: "Update Available: \(release.name)",
+                        body: "Version \(remoteVersion) is available (you have \(currentVersion)).\n\nWould you like to download it?",
+                        url: release.html_url
+                    )
+                } else {
+                    showUpToDateAlert()
+                }
+            }
+        }.resume()
     }
 }
