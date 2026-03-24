@@ -190,12 +190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         autoConnectSyncIfPaired()
 
-        // Wire update status to the sync status label
-        UpdateChecker.onStatusUpdate = { [weak self] text in
-            if !text.isEmpty {
-                self?.viewModel.syncStatus = text
-                self?.viewModel.syncStatusLevel = .info
-            }
+        // Wire update status to the footer bar
+        UpdateChecker.onStatusUpdate = { [weak self] (text: String) in
+            self?.viewModel.updateStatusText = text
         }
 
         // Check for updates after a short delay — show in-app dialog

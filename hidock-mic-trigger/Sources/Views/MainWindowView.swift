@@ -13,6 +13,18 @@ struct MainWindowView: View {
 
             // Footer
             HStack {
+                if !viewModel.updateStatusText.isEmpty {
+                    Label {
+                        Text(viewModel.updateStatusText)
+                            .font(.caption)
+                    } icon: {
+                        Image(systemName: "arrow.down.circle")
+                            .foregroundColor(.blue)
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+
                 Spacer()
                 Button {
                     viewModel.onCheckForUpdates()

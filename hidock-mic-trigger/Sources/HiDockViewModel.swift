@@ -116,4 +116,7 @@ final class HiDockViewModel: ObservableObject {
     var onSendFeedback: () -> Void = {}
     var onShowFeedbackHistory: () -> Void = {}
     var onCheckForUpdates: () -> Void = {}
+
+    // MARK: - Update Status
+    @Published var updateStatusText: String = ""
 }
