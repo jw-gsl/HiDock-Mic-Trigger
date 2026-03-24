@@ -76,7 +76,7 @@ struct OnboardingView: View {
         .frame(width: 540, height: 480)
         .onAppear {
             // Skip completed steps on appear
-            if viewModel.syncPaired {
+            if viewModel.syncDeviceConnected.values.contains(true) {
                 hidockConnected = true
             }
         }
@@ -142,7 +142,7 @@ struct OnboardingView: View {
         .padding(.horizontal, 32)
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             guard currentStep == 1 else { return }
-            if viewModel.syncPaired && !hidockConnected {
+            if viewModel.syncDeviceConnected.values.contains(true) && !hidockConnected {
                 hidockConnected = true
                 // Auto-advance after 1 second
                 if !autoAdvanceScheduled {
