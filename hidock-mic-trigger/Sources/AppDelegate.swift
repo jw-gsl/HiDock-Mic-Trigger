@@ -190,6 +190,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         autoConnectSyncIfPaired()
 
+        // Wire update status to the sync status label
+        UpdateChecker.onStatusUpdate = { [weak self] text in
+            if !text.isEmpty {
+                self?.viewModel.syncStatus = text
+                self?.viewModel.syncStatusLevel = .info
+            }
+        }
+
         // Check for updates after a short delay — show in-app dialog
         UpdateChecker.registerCategory()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
