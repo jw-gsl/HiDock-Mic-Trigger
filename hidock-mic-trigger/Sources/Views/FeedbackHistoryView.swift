@@ -71,53 +71,53 @@ struct FeedbackHistoryView: View {
 
             // Right: detail
             if let selected = items.first(where: { $0.id == selectedID }) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        // Header
-                        HStack(spacing: 8) {
-                            Image(systemName: selected.stateIcon)
-                                .foregroundColor(selected.stateColor)
-                            Text("#\(selected.number)")
-                                .font(.headline.monospacedDigit())
-                            Text(selected.state == "closed" ? "Closed" : "Open")
-                                .font(.caption)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 2)
-                                .background(selected.stateColor.opacity(0.15), in: Capsule())
-                        }
-
-                        Text(selected.title)
-                            .font(.title3.weight(.semibold))
-
+                VStack(spacing: 0) {
+                    // Top bar with title and GitHub button
+                    HStack(spacing: 8) {
+                        Image(systemName: selected.stateIcon)
+                            .foregroundColor(selected.stateColor)
+                        Text("#\(selected.number)")
+                            .font(.headline.monospacedDigit())
+                        Text(selected.state == "closed" ? "Closed" : "Open")
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(selected.stateColor.opacity(0.15), in: Capsule())
                         Text(selected.shortDate)
                             .font(.caption)
                             .foregroundColor(.secondary)
-
-                        Divider()
-
-                        // Body
-                        Text(selected.cleanBody)
-                            .font(.system(size: 12))
-                            .textSelection(.enabled)
-
                         Spacer()
-
-                        // View on GitHub
                         if !selected.url.isEmpty {
-                            HStack {
-                                Spacer()
-                                Button {
-                                    if let url = URL(string: selected.url) {
-                                        NSWorkspace.shared.open(url)
-                                    }
-                                } label: {
-                                    Label("View on GitHub", systemImage: "arrow.up.right.square")
+                            Button {
+                                if let url = URL(string: selected.url) {
+                                    NSWorkspace.shared.open(url)
                                 }
-                                .buttonStyle(.bordered)
+                            } label: {
+                                Label("View on GitHub", systemImage: "arrow.up.right.square")
                             }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
                     }
-                    .padding(16)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+
+                    Divider()
+
+                    // Scrollable body
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(selected.title)
+                                .font(.title3.weight(.semibold))
+
+                            Text(selected.cleanBody)
+                                .font(.system(size: 12))
+                                .textSelection(.enabled)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .frame(minWidth: 300)
             } else {
