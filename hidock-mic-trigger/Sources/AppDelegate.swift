@@ -1667,32 +1667,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 shortDate = date
             }
 
-            // List row — clickable
+            // List row — full-width clickable button with text
             let stateIcon = state == "closed" ? "✅" : "🔵"
             let rowBtn = NSButton(frame: NSRect(x: 4, y: y, width: 242, height: 48))
-            rowBtn.title = ""
-            rowBtn.bezelStyle = .recessed
-            rowBtn.isBordered = false
+            rowBtn.title = "\(stateIcon) #\(number) — \(title)\n\(shortDate)"
+            rowBtn.bezelStyle = .rounded
+            rowBtn.setButtonType(.momentaryLight)
+            rowBtn.alignment = .left
+            rowBtn.font = .systemFont(ofSize: 11)
+            rowBtn.lineBreakMode = .byTruncatingTail
             rowBtn.tag = index
             rowBtn.target = self
             rowBtn.action = #selector(feedbackHistoryRowClicked(_:))
             listContainer.addSubview(rowBtn)
-
-            let titleLabel = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
-            titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
-            titleLabel.frame = NSRect(x: 8, y: y + 28, width: 234, height: 16)
-            titleLabel.lineBreakMode = .byTruncatingTail
-            listContainer.addSubview(titleLabel)
-
-            let dateLabel = NSTextField(labelWithString: shortDate)
-            dateLabel.font = .systemFont(ofSize: 10)
-            dateLabel.textColor = .secondaryLabelColor
-            dateLabel.frame = NSRect(x: 8, y: y + 12, width: 234, height: 14)
-            listContainer.addSubview(dateLabel)
-
-            let sep = NSBox(frame: NSRect(x: 8, y: y + 2, width: 234, height: 1))
-            sep.boxType = .separator
-            listContainer.addSubview(sep)
 
             // Build detail view for this item
             let detail = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 600))
