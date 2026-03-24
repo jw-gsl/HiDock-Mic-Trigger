@@ -137,6 +137,8 @@ class MainWindow(QMainWindow):
         about_act.triggered.connect(self._show_about)
         feedback_act = help_menu.addAction("Send Feedback...")
         feedback_act.triggered.connect(self._send_feedback)
+        history_act = help_menu.addAction("My Feedback")
+        history_act.triggered.connect(self._show_feedback_history)
 
     # ── UI Layout ───────────────────────────────────────────────────────────
 
@@ -1144,13 +1146,98 @@ class MainWindow(QMainWindow):
             req.add_header("User-Agent", "HiDock/1.0")
             try:
                 resp = urllib.request.urlopen(req, timeout=15, context=ctx)
-                return resp.status == 201
+                if resp.status == 201:
+                    resp_data = _json.loads(resp.read())
+                    self._save_feedback_history(
+                        title=title,
+                        url=resp_data.get("html_url", ""),
+                        number=resp_data.get("number", 0),
+                        state=resp_data.get("state", "open"),
+                    )
+                    return True
             except Exception as e:
                 self._log_signal.emit(f"Feedback failed: {e}")
-                return False
+            return False
 
         def _run():
             if _worker():
                 self._log_signal.emit("Feedback submitted")
+                self.statusBar().showMessage("Feedback sent — thank you!", 3000)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    # ── Feedback History ──
+
+    @property
+    def _feedback_history_path(self) -> Path:
+        return HIDOCK_ROOT / "feedback_history.json"
+
+    def _load_feedback_history(self) -> list[dict]:
+        import json as _json
+        try:
+            return _json.loads(self._feedback_history_path.read_text())
+        except Exception:
+            return []
+
+    def _save_feedback_history(self, title: str, url: str, number: int, state: str):
+        import json as _json
+        from datetime import datetime, timezone
+        history = self._load_feedback_history()
+        history.insert(0, {
+            "title": title,
+            "url": url,
+            "number": number,
+            "state": state,
+            "date": datetime.now(timezone.utc).isoformat(),
+        })
+        history = history[:50]
+        self._feedback_history_path.parent.mkdir(parents=True, exist_ok=True)
+        self._feedback_history_path.write_text(_json.dumps(history, indent=2))
+
+    def _show_feedback_history(self):
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QListWidget, QListWidgetItem
+
+        history = self._load_feedback_history()
+        if not history:
+            QMessageBox.information(self, "My Feedback", "No feedback submitted yet.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("My Feedback")
+        dlg.setMinimumSize(550, 350)
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel("Click an item to open it on GitHub."))
+
+        list_widget = QListWidget()
+        for item in history:
+            title = item.get("title", "Untitled")
+            number = item.get("number", 0)
+            state = item.get("state", "open")
+            date = item.get("date", "")
+
+            # Format date
+            try:
+                from datetime import datetime
+                d = datetime.fromisoformat(date)
+                short_date = d.strftime("%d %b %Y, %H:%M")
+            except Exception:
+                short_date = date
+
+            icon = "✅" if state == "closed" else "🔵"
+            text = f"{icon} #{number} — {title}\n     {short_date}"
+            li = QListWidgetItem(text)
+            li.setData(Qt.ItemDataRole.UserRole, item.get("url", ""))
+            list_widget.addItem(li)
+
+        list_widget.itemDoubleClicked.connect(lambda item: (
+            webbrowser.open(item.data(Qt.ItemDataRole.UserRole))
+            if item.data(Qt.ItemDataRole.UserRole) else None
+        ))
+        layout.addWidget(list_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons) if hasattr(layout, 'addRow') else layout.addWidget(buttons)
+
+        dlg.exec()

@@ -15,6 +15,15 @@ struct MainWindowView: View {
             HStack {
                 Spacer()
                 Button {
+                    viewModel.onShowFeedbackHistory()
+                } label: {
+                    Label("My Feedback", systemImage: "list.bullet.clipboard")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
                     viewModel.onSendFeedback()
                 } label: {
                     Label("Send Feedback", systemImage: "bubble.left.and.text.bubble.right")

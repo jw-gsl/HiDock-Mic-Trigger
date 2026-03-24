@@ -114,4 +114,5 @@ final class HiDockViewModel: ObservableObject {
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
     var onSendFeedback: () -> Void = {}
+    var onShowFeedbackHistory: () -> Void = {}
 }

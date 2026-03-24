@@ -307,6 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
+        viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
@@ -645,6 +646,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
         feedbackItem.target = self
         menu.addItem(feedbackItem)
+        let historyItem = NSMenuItem(title: "My Feedback", action: #selector(showFeedbackHistory), keyEquivalent: "")
+        historyItem.target = self
+        menu.addItem(historyItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -1343,9 +1347,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 let httpResponse = response as? HTTPURLResponse
-                if httpResponse?.statusCode == 201 {
+                if httpResponse?.statusCode == 201, let data = data {
                     self?.log("Feedback submitted successfully")
                     self?.postNotification(title: "Feedback Sent", body: "Thank you! Your feedback has been submitted.")
+                    // Save to local history
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        self?.saveFeedbackToHistory(
+                            title: title,
+                            url: json["html_url"] as? String,
+                            number: json["number"] as? Int,
+                            state: json["state"] as? String ?? "open"
+                        )
+                    }
                 } else {
                     let statusCode = httpResponse?.statusCode ?? 0
                     self?.log("Feedback submission returned status \(statusCode)")
@@ -1353,6 +1366,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             }
         }.resume()
+    }
+
+    // MARK: - Feedback History
+
+    private var feedbackHistoryPath: String {
+        "\(NSHomeDirectory())/HiDock/feedback_history.json"
+    }
+
+    private func loadFeedbackHistory() -> [[String: Any]] {
+        guard let data = FileManager.default.contents(atPath: feedbackHistoryPath),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return items
+    }
+
+    private func saveFeedbackToHistory(title: String, url: String?, number: Int?, state: String) {
+        var history = loadFeedbackHistory()
+        let entry: [String: Any] = [
+            "title": title,
+            "url": url ?? "",
+            "number": number ?? 0,
+            "state": state,
+            "date": ISO8601DateFormatter().string(from: Date()),
+        ]
+        history.insert(entry, at: 0)  // newest first
+        // Keep last 50
+        if history.count > 50 { history = Array(history.prefix(50)) }
+
+        let dir = (feedbackHistoryPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: history, options: .prettyPrinted) {
+            try? data.write(to: URL(fileURLWithPath: feedbackHistoryPath))
+        }
+    }
+
+    @objc private func showFeedbackHistory() {
+        let history = loadFeedbackHistory()
+        if history.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "My Feedback"
+            alert.informativeText = "No feedback submitted yet."
+            alert.runModal()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "My Feedback"
+        alert.informativeText = "Click an issue to open it on GitHub."
+        alert.addButton(withTitle: "Close")
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: max(300, CGFloat(history.count) * 44)))
+        var y = container.frame.height
+
+        for item in history {
+            y -= 44
+            let title = item["title"] as? String ?? "Untitled"
+            let urlStr = item["url"] as? String ?? ""
+            let number = item["number"] as? Int ?? 0
+            let state = item["state"] as? String ?? "open"
+            let date = item["date"] as? String ?? ""
+
+            // Format date
+            let shortDate: String
+            if let d = ISO8601DateFormatter().date(from: date) {
+                let fmt = DateFormatter()
+                fmt.dateStyle = .medium
+                fmt.timeStyle = .short
+                shortDate = fmt.string(from: d)
+            } else {
+                shortDate = date
+            }
+
+            let stateIcon = state == "closed" ? "✅" : "🔵"
+            let label = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
+            label.font = .systemFont(ofSize: 12)
+            label.frame = NSRect(x: 8, y: y + 20, width: 484, height: 18)
+            label.lineBreakMode = .byTruncatingTail
+            container.addSubview(label)
+
+            let dateLabel = NSTextField(labelWithString: shortDate)
+            dateLabel.font = .systemFont(ofSize: 10)
+            dateLabel.textColor = .secondaryLabelColor
+            dateLabel.frame = NSRect(x: 8, y: y + 2, width: 200, height: 16)
+            container.addSubview(dateLabel)
+
+            if !urlStr.isEmpty {
+                let linkBtn = NSButton(title: "View on GitHub", target: nil, action: nil)
+                linkBtn.bezelStyle = .rounded
+                linkBtn.controlSize = .small
+                linkBtn.font = .systemFont(ofSize: 10)
+                linkBtn.frame = NSRect(x: 400, y: y + 2, width: 92, height: 20)
+                linkBtn.tag = container.subviews.count  // unique tag
+                linkBtn.target = self
+                linkBtn.action = #selector(openFeedbackURL(_:))
+                // Store URL in accessibility identifier
+                linkBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
+                container.addSubview(linkBtn)
+            }
+
+            // Separator
+            let sep = NSBox(frame: NSRect(x: 8, y: y, width: 484, height: 1))
+            sep.boxType = .separator
+            container.addSubview(sep)
+        }
+
+        scrollView.documentView = container
+        alert.accessoryView = scrollView
+        alert.runModal()
+    }
+
+    @objc private func openFeedbackURL(_ sender: NSButton) {
+        if let urlStr = sender.identifier?.rawValue, let url = URL(string: urlStr) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     @objc private func showSyncWindow() {
