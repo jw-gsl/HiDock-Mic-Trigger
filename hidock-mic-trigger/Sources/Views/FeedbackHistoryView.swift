@@ -9,8 +9,12 @@ struct FeedbackItem: Identifiable {
     let state: String
     let date: String
 
+    var parsedDate: Date? {
+        ISO8601DateFormatter().date(from: date)
+    }
+
     var shortDate: String {
-        if let d = ISO8601DateFormatter().date(from: date) {
+        if let d = parsedDate {
             let fmt = DateFormatter()
             fmt.dateStyle = .medium
             fmt.timeStyle = .short
@@ -27,6 +31,16 @@ struct FeedbackItem: Identifiable {
         state == "closed" ? .green : .blue
     }
 
+    /// Extract the category label from the title prefix (e.g. "Recording & downloads:")
+    var category: String {
+        if title.hasPrefix("Feature:") { return "Suggestion" }
+        let parts = title.split(separator: ":", maxSplits: 1)
+        if parts.count == 2 {
+            return String(parts[0]).trimmingCharacters(in: .whitespaces)
+        }
+        return "General"
+    }
+
     var cleanBody: String {
         body
             .replacingOccurrences(of: "<details>", with: "")
@@ -39,40 +53,171 @@ struct FeedbackItem: Identifiable {
     }
 }
 
+enum FeedbackFilter: String, CaseIterable {
+    case all = "All"
+    case open = "Open"
+    case closed = "Closed"
+}
+
+enum FeedbackSort: String, CaseIterable {
+    case newest = "Newest First"
+    case oldest = "Oldest First"
+    case issueNumber = "Issue Number"
+}
+
 struct FeedbackHistoryView: View {
     let items: [FeedbackItem]
     @State private var selectedID: Int?
+    @State private var filter: FeedbackFilter = .all
+    @State private var sort: FeedbackSort = .newest
+    @State private var searchText: String = ""
+
+    private var filteredItems: [FeedbackItem] {
+        var result = items
+
+        // Filter by state
+        switch filter {
+        case .all: break
+        case .open: result = result.filter { $0.state != "closed" }
+        case .closed: result = result.filter { $0.state == "closed" }
+        }
+
+        // Search
+        if !searchText.isEmpty {
+            let query = searchText.lowercased()
+            result = result.filter {
+                $0.title.lowercased().contains(query) ||
+                $0.body.lowercased().contains(query) ||
+                "#\($0.number)".contains(query)
+            }
+        }
+
+        // Sort
+        switch sort {
+        case .newest:
+            result.sort { ($0.parsedDate ?? .distantPast) > ($1.parsedDate ?? .distantPast) }
+        case .oldest:
+            result.sort { ($0.parsedDate ?? .distantPast) < ($1.parsedDate ?? .distantPast) }
+        case .issueNumber:
+            result.sort { $0.number > $1.number }
+        }
+
+        return result
+    }
+
+    private var openCount: Int { items.filter { $0.state != "closed" }.count }
+    private var closedCount: Int { items.filter { $0.state == "closed" }.count }
 
     var body: some View {
         HSplitView {
-            // Left: scrollable list
-            List(items, selection: $selectedID) { item in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Image(systemName: item.stateIcon)
-                            .foregroundColor(item.stateColor)
-                            .font(.caption)
-                        Text("#\(item.number)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundColor(.secondary)
-                        Text(item.title)
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(2)
+            // Left: filter bar + list
+            VStack(spacing: 0) {
+                // Filter/sort controls
+                VStack(spacing: 6) {
+                    // Status filter pills
+                    HStack(spacing: 4) {
+                        ForEach(FeedbackFilter.allCases, id: \.self) { f in
+                            Button {
+                                filter = f
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text(f.rawValue)
+                                    if f == .open {
+                                        Text("\(openCount)")
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.blue.opacity(0.2), in: Capsule())
+                                    } else if f == .closed {
+                                        Text("\(closedCount)")
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.green.opacity(0.2), in: Capsule())
+                                    }
+                                }
+                                .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(filter == f ? .accentColor : nil)
+                            .controlSize(.small)
+                        }
+                        Spacer()
+                        Picker("", selection: $sort) {
+                            ForEach(FeedbackSort.allCases, id: \.self) { s in
+                                Text(s.rawValue).tag(s)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 130)
+                        .controlSize(.small)
                     }
-                    Text(item.shortDate)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+
+                    // Search
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                        TextField("Search feedback...", text: $searchText)
+                            .textFieldStyle(.plain)
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
                 }
-                .padding(.vertical, 4)
-                .tag(item.id)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                // List
+                if filteredItems.isEmpty {
+                    VStack {
+                        Spacer()
+                        Text("No matching feedback")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                } else {
+                    List(filteredItems, selection: $selectedID) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Image(systemName: item.stateIcon)
+                                    .foregroundColor(item.stateColor)
+                                    .font(.caption)
+                                Text("#\(item.number)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundColor(.secondary)
+                                Text(item.title)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .lineLimit(2)
+                            }
+                            HStack(spacing: 8) {
+                                Text(item.shortDate)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Text(item.category)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .tag(item.id)
+                    }
+                    .listStyle(.sidebar)
+                }
             }
-            .listStyle(.sidebar)
-            .frame(minWidth: 220, idealWidth: 260)
+            .frame(minWidth: 240, idealWidth: 280)
 
             // Right: detail
-            if let selected = items.first(where: { $0.id == selectedID }) {
+            if let selected = filteredItems.first(where: { $0.id == selectedID }) {
                 VStack(spacing: 0) {
-                    // Top bar with title and GitHub button
+                    // Top bar
                     HStack(spacing: 8) {
                         Image(systemName: selected.stateIcon)
                             .foregroundColor(selected.stateColor)
@@ -105,11 +250,17 @@ struct FeedbackHistoryView: View {
 
                     Divider()
 
-                    // Scrollable body
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
                             Text(selected.title)
                                 .font(.title3.weight(.semibold))
+
+                            // Category badge
+                            Text(selected.category)
+                                .font(.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.secondary.opacity(0.12), in: Capsule())
 
                             Text(selected.cleanBody)
                                 .font(.system(size: 12))
@@ -134,9 +285,9 @@ struct FeedbackHistoryView: View {
                 .frame(minWidth: 300)
             }
         }
-        .frame(minWidth: 580, minHeight: 350)
+        .frame(minWidth: 600, minHeight: 380)
         .onAppear {
-            if selectedID == nil, let first = items.first {
+            if selectedID == nil, let first = filteredItems.first {
                 selectedID = first.id
             }
         }
