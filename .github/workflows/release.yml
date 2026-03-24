@@ -1,0 +1,134 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Windows-App
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Build HiDock.exe
+        run: pyinstaller hidock.spec --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: Windows-App/dist/HiDock.exe
+
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate and build
+        run: |
+          cd hidock-mic-trigger
+          xcodegen generate
+          xcodebuild -project hidock-mic-trigger.xcodeproj \
+            -scheme hidock-mic-trigger \
+            -configuration Release \
+            -derivedDataPath /tmp/hidock-build \
+            -arch arm64
+      - name: Locate app
+        run: |
+          FOUND=$(find /tmp/hidock-build/Build/Products/Release -maxdepth 1 -name "*.app" -type d | head -1)
+          if [ "$(basename "$FOUND")" != "HiDock Mic Trigger.app" ]; then
+            mv "$FOUND" "/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          fi
+      - name: Bundle Python venvs
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          RES="$APP/Contents/Resources"
+
+          mkdir -p "$RES/usb-extractor"
+          cp usb-extractor/extractor.py "$RES/usb-extractor/"
+
+          mkdir -p "$RES/transcription-pipeline"
+          cp transcription-pipeline/transcribe_cpp.py "$RES/transcription-pipeline/"
+          cp transcription-pipeline/transcribe.py "$RES/transcription-pipeline/"
+          cp transcription-pipeline/config.py "$RES/transcription-pipeline/"
+          cp transcription-pipeline/state.py "$RES/transcription-pipeline/"
+
+          python3.11 -m venv "$RES/usb-extractor/.venv"
+          "$RES/usb-extractor/.venv/bin/pip" install --upgrade pip
+          "$RES/usb-extractor/.venv/bin/pip" install pyusb libusb-package numpy
+
+          python3.11 -m venv "$RES/transcription-pipeline/.venv"
+          "$RES/transcription-pipeline/.venv/bin/pip" install --upgrade pip
+          "$RES/transcription-pipeline/.venv/bin/pip" install pywhispercpp certifi
+
+          PYTHON_BIN="$(python3.11 -c 'import sys; print(sys.executable)')"
+          for VENV_DIR in "$RES/usb-extractor/.venv" "$RES/transcription-pipeline/.venv"; do
+            rm -f "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python3.11" "$VENV_DIR/bin/python"
+            cp "$PYTHON_BIN" "$VENV_DIR/bin/python3"
+            ln -sf python3 "$VENV_DIR/bin/python"
+            sed -i '' "s|^home = .*|home = .|" "$VENV_DIR/pyvenv.cfg"
+            find "$VENV_DIR/bin" -type f -exec sed -i '' "1s|^#!.*python.*|#!/usr/bin/env python3|" {} \; 2>/dev/null || true
+          done
+      - name: Code sign and zip
+        run: |
+          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
+          find "$APP/Contents/Resources" -type f \( -name "*.dylib" -o -name "*.so" \) -exec codesign --force --sign - {} \;
+          find "$APP/Contents/Resources" -type f -name "python*" -path "*/bin/*" -exec codesign --force --sign - {} \;
+          find "$APP/Contents/MacOS" -type f -exec codesign --force --sign - {} \;
+          codesign --force --sign - "$APP"
+          cd "/tmp/hidock-build/Build/Products/Release"
+          ditto -c -k --sequesterRsrc --keepParent "HiDock Mic Trigger.app" "HiDock-Mic-Trigger-macOS.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-zip
+          path: /tmp/hidock-build/Build/Products/Release/HiDock-Mic-Trigger-macOS.zip
+
+  create-release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-zip
+          path: artifacts/
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: HiDock Tools ${{ github.event.inputs.version }}
+          body: |
+            ## Downloads
+
+            | Platform | File |
+            |----------|------|
+            | **Windows** | `HiDock.exe` — double-click to run, no setup needed |
+            | **macOS** | `HiDock-Mic-Trigger-macOS.zip` — extract and drag to Applications |
+
+            The speech recognition model (~550 MB) is downloaded within the app on first use.
+          files: |
+            artifacts/HiDock.exe
+            artifacts/HiDock-Mic-Trigger-macOS.zip
+          draft: false
+          prerelease: false

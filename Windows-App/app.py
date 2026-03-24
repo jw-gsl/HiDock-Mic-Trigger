@@ -61,6 +61,8 @@ def main():
     tray_menu.addSeparator()
     refresh_action = tray_menu.addAction("Refresh")
     tray_menu.addSeparator()
+    feedback_action = tray_menu.addAction("Send Feedback...")
+    tray_menu.addSeparator()
     quit_action = tray_menu.addAction("Quit")
 
     tray_icon.setContextMenu(tray_menu)
@@ -76,6 +78,7 @@ def main():
     start_action.triggered.connect(window._start_trigger)
     stop_action.triggered.connect(window._stop_trigger)
     refresh_action.triggered.connect(window._refresh_status)
+    feedback_action.triggered.connect(window._send_feedback)
 
     def _quit():
         window._force_quit = True

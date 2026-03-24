@@ -189,6 +189,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             startTrigger()
         }
         autoConnectSyncIfPaired()
+
+        // Check for updates after a short delay
+        UpdateChecker.registerCategory()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            UpdateChecker.checkForUpdate { title, body, url in
+                UpdateChecker.postUpdateNotification(title: title, body: body, url: url)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -234,6 +242,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if response.actionIdentifier == Self.micSwitchActionID {
             DispatchQueue.main.async { [weak self] in
                 self?.showSyncWindow()
+            }
+        } else if response.actionIdentifier == UpdateChecker.updateActionID ||
+                    response.notification.request.content.categoryIdentifier == UpdateChecker.updateCategoryID {
+            if let urlString = UserDefaults.standard.string(forKey: UpdateChecker.updateURLKey),
+               let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
             }
         }
         completionHandler()
@@ -626,6 +640,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(NSMenuItem.separator())
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
+        menu.addItem(NSMenuItem.separator())
+        let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
+        feedbackItem.target = self
+        menu.addItem(feedbackItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -1111,6 +1129,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.messageText = "HiDock Mic Trigger"
         alert.informativeText = "Menu bar app for controlling the HiDock mic trigger CLI.\nVersion 1.0.0"
         alert.runModal()
+    }
+
+    @objc private func sendFeedback() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Send Feedback"
+        alert.informativeText = "Describe the issue or suggestion. This will create a GitHub issue."
+        alert.addButton(withTitle: "Send")
+        alert.addButton(withTitle: "Cancel")
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 150))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 150))
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.font = NSFont.systemFont(ofSize: 13)
+        textView.autoresizingMask = [.width, .height]
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        scrollView.documentView = textView
+        alert.accessoryView = scrollView
+
+        // Make the text view first responder
+        alert.window.initialFirstResponder = textView
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        let feedbackText = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !feedbackText.isEmpty else { return }
+
+        // Gather system info
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        let macOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        let deviceConnected = syncDeviceConnected.values.contains(true) ? "Connected" : "Not connected"
+
+        let body = """
+        \(feedbackText)
+
+        ---
+        App Version: \(appVersion)
+        macOS: \(macOSVersion)
+        Device: \(deviceConnected)
+        """
+
+        guard let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new?title=Feedback&body=\(encodedBody)&labels=feedback") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func showSyncWindow() {

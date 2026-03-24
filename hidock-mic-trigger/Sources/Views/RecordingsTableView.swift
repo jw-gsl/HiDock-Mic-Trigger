@@ -92,5 +92,11 @@ struct RecordingsTableView: View {
         .contextMenu(forSelectionType: HiDockSyncRecordingEntry.ID.self) { _ in
             Button("Mark as Downloaded") { viewModel.onMarkDownloaded() }
         }
+        .padding(4)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
+        )
+        .padding(.horizontal, 4)
     }
 }

@@ -13,9 +13,12 @@ import json
 import os
 import platform
 import subprocess
+import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 from PyQt6.QtCore import QSettings, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QShortcut
@@ -27,6 +30,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -131,6 +135,8 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("Help")
         about_act = help_menu.addAction("About")
         about_act.triggered.connect(self._show_about)
+        feedback_act = help_menu.addAction("Send Feedback...")
+        feedback_act.triggered.connect(self._send_feedback)
 
     # ── UI Layout ───────────────────────────────────────────────────────────
 
@@ -995,3 +1001,33 @@ class MainWindow(QMainWindow):
             "USB sync, mic trigger, and transcription for HiDock.\n\n"
             "Python/PyQt6 port of the macOS app."
         )
+
+    def _send_feedback(self):
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "Send Feedback",
+            "Describe the issue or suggestion.\nThis will create a GitHub issue.",
+            "",
+        )
+        if not ok or not text.strip():
+            return
+
+        app_version = "1.0.0"
+        win_version = platform.platform()
+        py_version = sys.version.split()[0]
+        device_status = "Connected" if self._last_extractor_ready else "Not connected"
+
+        body = (
+            f"{text.strip()}\n\n"
+            f"---\n"
+            f"App Version: {app_version}\n"
+            f"Windows: {win_version}\n"
+            f"Python: {py_version}\n"
+            f"Device: {device_status}\n"
+        )
+        encoded_body = quote(body)
+        url = (
+            "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new"
+            f"?title=Feedback&body={encoded_body}&labels=feedback"
+        )
+        webbrowser.open(url)

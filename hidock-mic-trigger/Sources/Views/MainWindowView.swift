@@ -4,9 +4,8 @@ struct MainWindowView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 4) {
             MicTriggerSection(viewModel: viewModel)
-            Divider()
             SyncHeaderSection(viewModel: viewModel)
             SyncToolbarSection(viewModel: viewModel)
             DownloadProgressBar(viewModel: viewModel)
