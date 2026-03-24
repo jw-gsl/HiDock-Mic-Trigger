@@ -19,7 +19,8 @@ struct SyncHeaderSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            // Status row
             HStack {
                 HStack(spacing: 6) {
                     Circle()
@@ -34,8 +35,8 @@ struct SyncHeaderSection: View {
                     .foregroundColor(.secondary)
             }
 
-            // Folder paths on same line
-            HStack(spacing: 16) {
+            // Folder paths + download buttons on same row
+            HStack(spacing: 12) {
                 if let folder = viewModel.syncOutputFolder {
                     Label {
                         Text(folder)
@@ -59,6 +60,34 @@ struct SyncHeaderSection: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 }
+
+                Spacer()
+
+                // Download buttons on same row as paths
+                HStack(spacing: 6) {
+                    Button {
+                        viewModel.onDownloadSelected()
+                    } label: {
+                        Label("Download Selected", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
+
+                    Button {
+                        viewModel.onDownloadNew()
+                    } label: {
+                        Label("Download New", systemImage: "arrow.down.to.line")
+                    }
+                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
+
+                    Button {
+                        viewModel.onMarkDownloaded()
+                    } label: {
+                        Label("Mark Done", systemImage: "checkmark.circle")
+                    }
+                    .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .padding(.horizontal, 16)

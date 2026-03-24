@@ -4,10 +4,9 @@ struct SyncToolbarSection: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            // All action buttons in one row
+        VStack(spacing: 6) {
+            // Row: Pair/Unpair/Folders/Refresh on left, Transcribe on right
             HStack(spacing: 6) {
-                // Device
                 Button {
                     viewModel.onPairDock()
                 } label: {
@@ -22,9 +21,6 @@ struct SyncToolbarSection: View {
                 }
                 .disabled(viewModel.syncBusy || !viewModel.syncPaired)
 
-                Divider().frame(height: 16)
-
-                // Folders
                 Button {
                     viewModel.onChooseRecordingsFolder()
                 } label: {
@@ -37,8 +33,6 @@ struct SyncToolbarSection: View {
                     Label("Transcripts", systemImage: "doc.text")
                 }
 
-                Divider().frame(height: 16)
-
                 Button {
                     viewModel.onRefreshSync()
                 } label: {
@@ -46,33 +40,8 @@ struct SyncToolbarSection: View {
                 }
                 .disabled(viewModel.syncBusy)
 
-                Divider().frame(height: 16)
+                Spacer()
 
-                // Downloads
-                Button {
-                    viewModel.onDownloadSelected()
-                } label: {
-                    Label("Download Selected", systemImage: "arrow.down.circle")
-                }
-                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
-
-                Button {
-                    viewModel.onDownloadNew()
-                } label: {
-                    Label("Download New", systemImage: "arrow.down.to.line")
-                }
-                .disabled(viewModel.syncBusy || !viewModel.syncPaired)
-
-                Button {
-                    viewModel.onMarkDownloaded()
-                } label: {
-                    Label("Mark Done", systemImage: "checkmark.circle")
-                }
-                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-
-                Divider().frame(height: 16)
-
-                // Transcription
                 Button {
                     viewModel.onTranscribeSelected()
                 } label: {
@@ -134,6 +103,6 @@ struct SyncToolbarSection: View {
             .controlSize(.small)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
     }
 }
