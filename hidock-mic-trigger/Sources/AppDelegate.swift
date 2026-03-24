@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var process: Process?
 
     private var syncWindow: NSWindow?
+    private var feedbackWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -610,9 +611,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
+        let feedbackItem = NSMenuItem(title: "Send Feedback…", action: #selector(showFeedback), keyEquivalent: "")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
-        for item in [startItem, stopItem, autoStartItem, syncWindowItem, logsItem, statusInfoItem, quitItem] {
+        for item in [startItem, stopItem, autoStartItem, syncWindowItem, logsItem, statusInfoItem, feedbackItem, quitItem] {
             item?.target = self
         }
 
@@ -626,6 +628,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(NSMenuItem.separator())
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(feedbackItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -751,6 +755,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
+
+        // Edit menu — required for standard keyboard shortcuts (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z) to work in text views
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        // Undo/Redo are informal protocols on NSResponder; string-based selectors are the standard approach here.
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
 
         NSApp.mainMenu = mainMenu
     }
@@ -1144,6 +1162,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshSyncStatus()
+    }
+
+    @objc private func showFeedback() {
+        if feedbackWindow == nil {
+            let win = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 540, height: 460),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            win.title = "Send Feedback"
+            win.isReleasedWhenClosed = false
+            win.center()
+
+            let feedbackView = FeedbackView(
+                onSubmit: { [weak self, weak win] whatHappened, whatExpected, stepsToReproduce in
+                    self?.submitFeedback(whatHappened: whatHappened, whatExpected: whatExpected, stepsToReproduce: stepsToReproduce)
+                    win?.close()
+                },
+                onCancel: { [weak win] in
+                    win?.close()
+                }
+            )
+            win.contentView = NSHostingView(rootView: feedbackView)
+            feedbackWindow = win
+        }
+        NSApp.setActivationPolicy(.regular)
+        feedbackWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func submitFeedback(whatHappened: String, whatExpected: String, stepsToReproduce: String) {
+        var body = ""
+        body += "**What happened?**\n\(whatHappened)\n\n"
+        body += "**What did you expect to happen?**\n\(whatExpected)\n\n"
+        if !stepsToReproduce.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            body += "**Steps to reproduce**\n\(stepsToReproduce)\n\n"
+        }
+        body += "**Platform:** macOS"
+
+        var components = URLComponents(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new")
+        components?.queryItems = [
+            URLQueryItem(name: "title", value: "User feedback"),
+            URLQueryItem(name: "body", value: body)
+        ]
+        if let url = components?.url {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Extractor
