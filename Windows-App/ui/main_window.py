@@ -2,10 +2,13 @@
 
 Layout (top to bottom):
   1. Menu bar
-  2. Three card groups: Mic Trigger, USB Sync, Transcription
-  3. Recording table
-  4. Progress bar
-  5. Status bar
+  2. Mic Trigger strip (status + start/stop + mic dropdown + auto-start)
+  3. Status + folder paths + download buttons row
+  4. Device buttons + transcribe + model row
+  5. Select / filter / options row
+  6. Recording table
+  7. Progress bar
+  8. Footer (update status + check updates + feedback buttons)
 """
 from __future__ import annotations
 
@@ -157,160 +160,170 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(14, 10, 14, 6)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
-        # Top cards row
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(10)
+        # ── Row 1: Mic Trigger strip ────────────────────────────────────
+        mic_strip = QHBoxLayout()
+        mic_strip.setSpacing(8)
 
-        # ── Card 1: Mic Trigger ─────────────────────────────────────────
-        trigger_box = QGroupBox("Mic Trigger")
-        tl = QVBoxLayout(trigger_box)
-        tl.setContentsMargins(10, 10, 10, 10)
-        tl.setSpacing(6)
-
-        # Status row
-        status_row = QHBoxLayout()
         self.trigger_status_dot = QLabel("\u25cf")
         self.trigger_status_dot.setObjectName("statusDotStopped")
-        self.trigger_status_dot.setFixedWidth(20)
-        status_row.addWidget(self.trigger_status_dot)
+        self.trigger_status_dot.setFixedWidth(16)
+        mic_strip.addWidget(self.trigger_status_dot)
         self.trigger_status_label = QLabel("Stopped")
-        status_row.addWidget(self.trigger_status_label)
-        status_row.addStretch()
+        mic_strip.addWidget(self.trigger_status_label)
         self.trigger_uptime_label = QLabel("")
         self.trigger_uptime_label.setObjectName("secondaryLabel")
-        status_row.addWidget(self.trigger_uptime_label)
-        tl.addLayout(status_row)
+        mic_strip.addWidget(self.trigger_uptime_label)
 
-        # Buttons row
-        btn_row = QHBoxLayout()
+        mic_strip.addSpacing(12)
+
         self.start_btn = QPushButton("Start")
         self.start_btn.setObjectName("successButton")
         self.start_btn.clicked.connect(self._start_trigger)
-        btn_row.addWidget(self.start_btn)
+        mic_strip.addWidget(self.start_btn)
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setObjectName("dangerButton")
         self.stop_btn.clicked.connect(self._stop_trigger)
         self.stop_btn.setEnabled(False)
-        btn_row.addWidget(self.stop_btn)
-        tl.addLayout(btn_row)
+        mic_strip.addWidget(self.stop_btn)
 
-        # Mic combo
-        mic_row = QHBoxLayout()
-        mic_row.addWidget(QLabel("Trigger Mic:"))
+        mic_strip.addSpacing(12)
+
+        mic_strip.addWidget(QLabel("Mic:"))
         self.mic_combo = QComboBox()
         self.mic_combo.setMinimumWidth(180)
         self.mic_combo.currentTextChanged.connect(self._on_mic_changed)
-        mic_row.addWidget(self.mic_combo, stretch=1)
-        tl.addLayout(mic_row)
+        mic_strip.addWidget(self.mic_combo)
 
-        self.auto_start_check = QCheckBox("Auto-start on launch")
+        mic_strip.addSpacing(12)
+
+        self.auto_start_check = QCheckBox("Auto-start")
         self.auto_start_check.stateChanged.connect(self._on_auto_start_changed)
-        tl.addWidget(self.auto_start_check)
+        mic_strip.addWidget(self.auto_start_check)
 
-        cards_row.addWidget(trigger_box, stretch=1)
+        mic_strip.addStretch()
+        root.addLayout(mic_strip)
 
-        # ── Card 2: USB Sync ────────────────────────────────────────────
-        sync_box = QGroupBox("USB Sync")
-        sl = QVBoxLayout(sync_box)
-        sl.setContentsMargins(10, 10, 10, 10)
-        sl.setSpacing(6)
+        # ── Row 2: Status + Paths + Downloads ───────────────────────────
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
 
-        # Connection status row
-        conn_row = QHBoxLayout()
+        # Left: status dot + connection text
         self.sync_status_dot = QLabel("\u25cf")
         self.sync_status_dot.setObjectName("statusDotDisconnected")
-        self.sync_status_dot.setFixedWidth(20)
-        conn_row.addWidget(self.sync_status_dot)
+        self.sync_status_dot.setFixedWidth(16)
+        row2.addWidget(self.sync_status_dot)
         self.sync_status_label = QLabel("Not loaded")
-        conn_row.addWidget(self.sync_status_label)
-        conn_row.addStretch()
+        row2.addWidget(self.sync_status_label)
+
+        row2.addSpacing(8)
+
+        # Folder path labels
+        self.recordings_folder_label = QLabel("Recordings: Not set")
+        self.recordings_folder_label.setObjectName("secondaryLabel")
+        row2.addWidget(self.recordings_folder_label)
+
+        row2.addSpacing(6)
+
+        self.transcript_folder_label = QLabel(f"Transcripts: {RAW_TRANSCRIPTS_DIR}")
+        self.transcript_folder_label.setObjectName("secondaryLabel")
+        row2.addWidget(self.transcript_folder_label)
+
+        row2.addStretch()
+
+        # Right: summary + download buttons
         self.summary_label = QLabel("")
         self.summary_label.setObjectName("secondaryLabel")
-        conn_row.addWidget(self.summary_label)
-        sl.addLayout(conn_row)
+        row2.addWidget(self.summary_label)
 
-        # Button rows
-        sync_btn_row1 = QHBoxLayout()
+        row2.addSpacing(8)
+
+        self.download_selected_btn = QPushButton("Download Selected")
+        self.download_selected_btn.clicked.connect(self._download_selected)
+        row2.addWidget(self.download_selected_btn)
+        self.download_new_btn = QPushButton("Download New")
+        self.download_new_btn.clicked.connect(self._download_new)
+        row2.addWidget(self.download_new_btn)
+        mark_btn = QPushButton("Mark Done")
+        mark_btn.clicked.connect(self._mark_downloaded)
+        row2.addWidget(mark_btn)
+
+        root.addLayout(row2)
+
+        # ── Row 3: Device buttons + Transcribe ──────────────────────────
+        row3 = QHBoxLayout()
+        row3.setSpacing(8)
+
+        # Left: device management
         self.pair_btn = QPushButton("Pair")
         self.pair_btn.clicked.connect(self._pair_dock)
-        sync_btn_row1.addWidget(self.pair_btn)
+        row3.addWidget(self.pair_btn)
         self.unpair_btn = QPushButton("Unpair")
         self.unpair_btn.clicked.connect(self._unpair_dock)
-        sync_btn_row1.addWidget(self.unpair_btn)
+        row3.addWidget(self.unpair_btn)
+
+        rec_folder_btn = QPushButton("Recordings Folder")
+        rec_folder_btn.clicked.connect(self._choose_recordings_folder)
+        row3.addWidget(rec_folder_btn)
+        trans_folder_btn = QPushButton("Transcripts Folder")
+        trans_folder_btn.clicked.connect(self._choose_transcript_folder)
+        row3.addWidget(trans_folder_btn)
+
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setObjectName("accentButton")
         self.refresh_btn.clicked.connect(self._refresh_status)
-        sync_btn_row1.addWidget(self.refresh_btn)
-        sl.addLayout(sync_btn_row1)
+        row3.addWidget(self.refresh_btn)
 
-        sync_btn_row2 = QHBoxLayout()
-        self.download_selected_btn = QPushButton("Download Selected")
-        self.download_selected_btn.clicked.connect(self._download_selected)
-        sync_btn_row2.addWidget(self.download_selected_btn)
-        self.download_new_btn = QPushButton("Download New")
-        self.download_new_btn.clicked.connect(self._download_new)
-        sync_btn_row2.addWidget(self.download_new_btn)
-        mark_btn = QPushButton("Mark Downloaded")
-        mark_btn.clicked.connect(self._mark_downloaded)
-        sync_btn_row2.addWidget(mark_btn)
-        sl.addLayout(sync_btn_row2)
+        row3.addStretch()
 
-        # Folder info
-        self.recordings_folder_label = QLabel("Recordings: Not set")
-        self.recordings_folder_label.setObjectName("secondaryLabel")
-        sl.addWidget(self.recordings_folder_label)
-        self.transcript_folder_label = QLabel(f"Transcripts: {RAW_TRANSCRIPTS_DIR}")
-        self.transcript_folder_label.setObjectName("secondaryLabel")
-        sl.addWidget(self.transcript_folder_label)
-
-        # Checkboxes
-        checks_row = QHBoxLayout()
-        self.auto_download_check = QCheckBox("Auto-download new")
-        self.auto_download_check.stateChanged.connect(self._on_auto_download_changed)
-        checks_row.addWidget(self.auto_download_check)
-        self.hide_downloaded_check = QCheckBox("Hide downloaded")
-        self.hide_downloaded_check.stateChanged.connect(self._on_hide_downloaded_changed)
-        checks_row.addWidget(self.hide_downloaded_check)
-        checks_row.addStretch()
-        sl.addLayout(checks_row)
-
-        cards_row.addWidget(sync_box, stretch=2)
-
-        # ── Card 3: Transcription ───────────────────────────────────────
-        trans_box = QGroupBox("Transcription")
-        xl = QVBoxLayout(trans_box)
-        xl.setContentsMargins(10, 10, 10, 10)
-        xl.setSpacing(6)
-
-        # Model status
-        model_row = QHBoxLayout()
-        self.model_status_dot = QLabel("\u25cf")
-        model_row.addWidget(self.model_status_dot)
-        self.model_status_label = QLabel("")
-        model_row.addWidget(self.model_status_label)
-        model_row.addStretch()
-        xl.addLayout(model_row)
-
+        # Right: transcribe + model
         self.transcribe_selected_btn = QPushButton("Transcribe Selected")
         self.transcribe_selected_btn.clicked.connect(self._transcribe_selected)
-        xl.addWidget(self.transcribe_selected_btn)
-
+        row3.addWidget(self.transcribe_selected_btn)
         self.transcribe_all_btn = QPushButton("Transcribe All")
         self.transcribe_all_btn.clicked.connect(self._transcribe_all)
-        xl.addWidget(self.transcribe_all_btn)
+        row3.addWidget(self.transcribe_all_btn)
+
+        row3.addSpacing(8)
 
         self.download_model_btn = QPushButton("Download Model")
         self.download_model_btn.clicked.connect(self._download_model)
-        xl.addWidget(self.download_model_btn)
+        row3.addWidget(self.download_model_btn)
+        self.model_status_dot = QLabel("\u25cf")
+        row3.addWidget(self.model_status_dot)
+        self.model_status_label = QLabel("")
+        row3.addWidget(self.model_status_label)
 
-        xl.addStretch()
         self._update_model_button_state()
 
-        cards_row.addWidget(trans_box, stretch=1)
+        root.addLayout(row3)
 
-        root.addLayout(cards_row)
+        # ── Row 4: Select / Filter / Options ────────────────────────────
+        row4 = QHBoxLayout()
+        row4.setSpacing(8)
+
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(self._select_all_rows)
+        row4.addWidget(select_all_btn)
+        select_none_btn = QPushButton("Select None")
+        select_none_btn.clicked.connect(lambda: self.table_view.clearSelection())
+        row4.addWidget(select_none_btn)
+        select_new_btn = QPushButton("Select New")
+        select_new_btn.clicked.connect(self._select_new_rows)
+        row4.addWidget(select_new_btn)
+
+        row4.addStretch()
+
+        # Right: hide downloaded + auto-download
+        self.hide_downloaded_check = QCheckBox("Hide Downloaded")
+        self.hide_downloaded_check.stateChanged.connect(self._on_hide_downloaded_changed)
+        row4.addWidget(self.hide_downloaded_check)
+        self.auto_download_check = QCheckBox("Auto-download")
+        self.auto_download_check.stateChanged.connect(self._on_auto_download_changed)
+        row4.addWidget(self.auto_download_check)
+
+        root.addLayout(row4)
 
         # ── Recording table ─────────────────────────────────────────────
         self.table_model = RecordingTableModel()
@@ -344,6 +357,28 @@ class MainWindow(QMainWindow):
         self.progress_bar.setTextVisible(True)
         progress_row.addWidget(self.progress_bar, stretch=1)
         root.addLayout(progress_row)
+
+        # ── Footer row ──────────────────────────────────────────────────
+        footer_row = QHBoxLayout()
+        footer_row.setSpacing(8)
+
+        self.update_status_label = QLabel("")
+        self.update_status_label.setObjectName("secondaryLabel")
+        footer_row.addWidget(self.update_status_label)
+
+        footer_row.addStretch()
+
+        check_updates_btn = QPushButton("Check for Updates")
+        check_updates_btn.clicked.connect(self._check_for_updates_manual)
+        footer_row.addWidget(check_updates_btn)
+        my_feedback_btn = QPushButton("My Feedback")
+        my_feedback_btn.clicked.connect(self._show_feedback_history)
+        footer_row.addWidget(my_feedback_btn)
+        send_feedback_btn = QPushButton("Send Feedback")
+        send_feedback_btn.clicked.connect(self._send_feedback)
+        footer_row.addWidget(send_feedback_btn)
+
+        root.addLayout(footer_row)
 
         # Status bar
         self.statusBar().showMessage("Ready")
@@ -437,6 +472,16 @@ class MainWindow(QMainWindow):
     def _select_all_rows(self):
         if self.table_model.rowCount() > 0:
             self.table_view.selectAll()
+
+    def _select_new_rows(self):
+        """Select rows that have not been downloaded yet."""
+        sel = self.table_view.selectionModel()
+        sel.clearSelection()
+        entries = self.table_model.entries()
+        for i, entry in enumerate(entries):
+            if not entry.recording.downloaded:
+                idx = self.table_model.index(i, 0)
+                sel.select(idx, sel.SelectionFlag.Select | sel.SelectionFlag.Rows)
 
     # ── Signal connections ──────────────────────────────────────────────
 

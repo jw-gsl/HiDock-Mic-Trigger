@@ -10,6 +10,9 @@
 3. Push and create a PR: `gh pr create`
 4. The user reviews and merges when ready
 
+### BOTH PLATFORMS — ALWAYS
+**Every UI or feature change must be applied to BOTH the macOS app AND the Windows app at the same time.** Do not make changes to one platform without updating the other. The Windows app (`Windows-App/`) should always match the macOS app in layout, features, and behavior.
+
 ### For testing on Mac:
 - Build with **Debug** configuration — deploys to `~/Applications/HiDock Mic Trigger Dev.app` (orange icon, "DEV" label)
 - Debug builds never touch the production app at `/Applications/`
