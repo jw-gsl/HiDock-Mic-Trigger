@@ -13,9 +13,12 @@ import json
 import os
 import platform
 import subprocess
+import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 from PyQt6.QtCore import QSettings, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QShortcut
@@ -27,6 +30,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -131,6 +135,10 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("Help")
         about_act = help_menu.addAction("About")
         about_act.triggered.connect(self._show_about)
+        feedback_act = help_menu.addAction("Send Feedback...")
+        feedback_act.triggered.connect(self._send_feedback)
+        history_act = help_menu.addAction("My Feedback")
+        history_act.triggered.connect(self._show_feedback_history)
 
     # ── UI Layout ───────────────────────────────────────────────────────────
 
@@ -995,3 +1003,241 @@ class MainWindow(QMainWindow):
             "USB sync, mic trigger, and transcription for HiDock.\n\n"
             "Python/PyQt6 port of the macOS app."
         )
+
+    # User-friendly labels → technical mapping
+    _FEEDBACK_CATEGORIES = [
+        ("Something isn't working", "bug", "General"),
+        ("Recording & downloads", "usb-sync", "`Windows-Script/extractor.py`, `core/usb_sync.py`"),
+        ("Microphone detection", "mic-trigger", "`core/mic_trigger.py`"),
+        ("Transcription & speech-to-text", "transcription", "`core/transcription.py`, `transcribe_cpp.py`"),
+        ("App appearance or layout", "ui", "`ui/main_window.py`, `resources/theme.qss`"),
+        ("I have a suggestion", "enhancement", "General"),
+    ]
+    _FEEDBACK_SEVERITIES = [
+        ("It stops me from working", "priority-high"),
+        ("It's annoying but I can work around it", "priority-medium"),
+        ("It's a minor thing", "priority-low"),
+    ]
+
+    def _send_feedback(self):
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QTextEdit
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Send Feedback")
+        dlg.setMinimumWidth(450)
+        layout = QFormLayout(dlg)
+
+        cat_combo = QComboBox()
+        for label, _, _ in self._FEEDBACK_CATEGORIES:
+            cat_combo.addItem(label)
+        layout.addRow("What's this about?", cat_combo)
+
+        sev_combo = QComboBox()
+        for label, _ in self._FEEDBACK_SEVERITIES:
+            sev_combo.addItem(label)
+        layout.addRow("How much does it affect you?", sev_combo)
+
+        desc_edit = QTextEdit()
+        desc_edit.setPlaceholderText("Describe what happened...")
+        desc_edit.setMaximumHeight(100)
+        layout.addRow("What happened?", desc_edit)
+
+        expected_edit = QTextEdit()
+        expected_edit.setPlaceholderText("What did you expect to happen instead?")
+        expected_edit.setMaximumHeight(60)
+        layout.addRow("What did you expect?", expected_edit)
+
+        from PyQt6.QtWidgets import QLineEdit
+        steps_edit = QLineEdit()
+        steps_edit.setPlaceholderText("e.g. Click Download, wait 30 seconds, app freezes")
+        layout.addRow("Steps (optional)", steps_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Send")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        description = desc_edit.toPlainText().strip()
+        if not description:
+            return
+
+        cat_label, cat_gh, cat_component = self._FEEDBACK_CATEGORIES[cat_combo.currentIndex()]
+        sev_label, sev_gh = self._FEEDBACK_SEVERITIES[sev_combo.currentIndex()]
+        expected = expected_edit.toPlainText().strip()
+        steps = steps_edit.text().strip()
+
+        # System info
+        app_version = "1.0.0"
+        win_version = platform.platform()
+        py_version = sys.version.split()[0]
+        device_status = "Connected" if self._last_extractor_ready else "Not connected"
+        trigger_status = "Running" if self.mic_trigger._running else "Stopped"
+        rec_count = len(self._entries)
+        dl_count = sum(1 for e in self._entries if e.recording.downloaded)
+
+        # Build structured issue
+        title = (f"Feature: {description[:60]}" if cat_gh == "enhancement"
+                 else f"{cat_label}: {description[:50]}")
+
+        body = f"## Description\n{description}\n"
+        if expected:
+            body += f"\n## Expected Behavior\n{expected}\n"
+        if steps:
+            body += f"\n## Steps to Reproduce\n{steps}\n"
+        body += f"\n## Component\n{cat_component}\n"
+        body += "\n## Platform\nWindows\n"
+        body += (
+            f"\n<details>\n<summary>System Information</summary>\n\n"
+            f"- **App Version:** {app_version}\n"
+            f"- **Windows:** {win_version}\n"
+            f"- **Python:** {py_version}\n"
+            f"- **Devices:** {device_status}\n"
+            f"- **Mic Trigger:** {trigger_status}\n"
+            f"- **Recordings:** {rec_count} synced, {dl_count} downloaded\n"
+            f"</details>\n"
+        )
+
+        labels = [cat_gh, sev_gh, "feedback"]
+        token = self._get_feedback_token()
+        if token:
+            self._submit_github_issue(title, body, token, labels)
+        else:
+            encoded_body = quote(body)
+            lbl = ",".join(labels)
+            webbrowser.open(
+                "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new"
+                f"?title={quote(title)}&body={encoded_body}&labels={lbl}"
+            )
+
+    def _get_feedback_token(self) -> str | None:
+        try:
+            from core import feedback_token
+            return feedback_token.TOKEN.strip()
+        except (ImportError, AttributeError):
+            pass
+        token_path = Path(__file__).resolve().parent.parent / "feedback_token.txt"
+        if token_path.exists():
+            return token_path.read_text().strip()
+        return None
+
+    def _submit_github_issue(self, title: str, body: str, token: str, labels: list[str] | None = None):
+        import json as _json
+        self.statusBar().showMessage("Sending feedback...")
+
+        def _worker():
+            import urllib.request, ssl
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except ImportError:
+                ctx = ssl.create_default_context()
+
+            data = _json.dumps({"title": title, "body": body, "labels": labels or ["feedback"]}).encode()
+            req = urllib.request.Request(
+                "https://api.github.com/repos/jw-gsl/HiDock-Mic-Trigger/issues",
+                data=data, method="POST",
+            )
+            req.add_header("Authorization", f"token {token}")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "HiDock/1.0")
+            try:
+                resp = urllib.request.urlopen(req, timeout=15, context=ctx)
+                if resp.status == 201:
+                    resp_data = _json.loads(resp.read())
+                    self._save_feedback_history(
+                        title=title,
+                        url=resp_data.get("html_url", ""),
+                        number=resp_data.get("number", 0),
+                        state=resp_data.get("state", "open"),
+                    )
+                    return True
+            except Exception as e:
+                self._log_signal.emit(f"Feedback failed: {e}")
+            return False
+
+        def _run():
+            if _worker():
+                self._log_signal.emit("Feedback submitted")
+                self.statusBar().showMessage("Feedback sent — thank you!", 3000)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ── Feedback History ──
+
+    @property
+    def _feedback_history_path(self) -> Path:
+        return HIDOCK_ROOT / "feedback_history.json"
+
+    def _load_feedback_history(self) -> list[dict]:
+        import json as _json
+        try:
+            return _json.loads(self._feedback_history_path.read_text())
+        except Exception:
+            return []
+
+    def _save_feedback_history(self, title: str, url: str, number: int, state: str):
+        import json as _json
+        from datetime import datetime, timezone
+        history = self._load_feedback_history()
+        history.insert(0, {
+            "title": title,
+            "url": url,
+            "number": number,
+            "state": state,
+            "date": datetime.now(timezone.utc).isoformat(),
+        })
+        history = history[:50]
+        self._feedback_history_path.parent.mkdir(parents=True, exist_ok=True)
+        self._feedback_history_path.write_text(_json.dumps(history, indent=2))
+
+    def _show_feedback_history(self):
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QListWidget, QListWidgetItem
+
+        history = self._load_feedback_history()
+        if not history:
+            QMessageBox.information(self, "My Feedback", "No feedback submitted yet.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("My Feedback")
+        dlg.setMinimumSize(550, 350)
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel("Click an item to open it on GitHub."))
+
+        list_widget = QListWidget()
+        for item in history:
+            title = item.get("title", "Untitled")
+            number = item.get("number", 0)
+            state = item.get("state", "open")
+            date = item.get("date", "")
+
+            # Format date
+            try:
+                from datetime import datetime
+                d = datetime.fromisoformat(date)
+                short_date = d.strftime("%d %b %Y, %H:%M")
+            except Exception:
+                short_date = date
+
+            icon = "✅" if state == "closed" else "🔵"
+            text = f"{icon} #{number} — {title}\n     {short_date}"
+            li = QListWidgetItem(text)
+            li.setData(Qt.ItemDataRole.UserRole, item.get("url", ""))
+            list_widget.addItem(li)
+
+        list_widget.itemDoubleClicked.connect(lambda item: (
+            webbrowser.open(item.data(Qt.ItemDataRole.UserRole))
+            if item.data(Qt.ItemDataRole.UserRole) else None
+        ))
+        layout.addWidget(list_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons) if hasattr(layout, 'addRow') else layout.addWidget(buttons)
+
+        dlg.exec()

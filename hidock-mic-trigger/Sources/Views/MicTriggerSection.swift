@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MicTriggerSection: View {
     @ObservedObject var viewModel: HiDockViewModel
+    @State private var pulseAnimation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,7 +11,15 @@ struct MicTriggerSection: View {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(viewModel.triggerRunning ? Color.green : Color.gray)
-                        .frame(width: 8, height: 8)
+                        .frame(width: 10, height: 10)
+                        .shadow(color: viewModel.triggerRunning ? Color.green.opacity(pulseAnimation ? 0.6 : 0.0) : .clear, radius: pulseAnimation ? 6 : 0)
+                        .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulseAnimation)
+                        .onChange(of: viewModel.triggerRunning) { running in
+                            pulseAnimation = running
+                        }
+                        .onAppear {
+                            pulseAnimation = viewModel.triggerRunning
+                        }
                     Text("Mic Trigger")
                         .font(.headline)
                 }
@@ -45,8 +54,9 @@ struct MicTriggerSection: View {
                         Label("Start", systemImage: "play.fill")
                     }
                     .disabled(viewModel.triggerRunning)
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
                     .tint(.green)
+                    .opacity(viewModel.triggerRunning ? 0.6 : 1.0)
 
                     Button {
                         viewModel.onStopTrigger()
@@ -78,8 +88,14 @@ struct MicTriggerSection: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 14)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                    .frame(height: 1)
+                    .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+            }
         }
     }
 }
