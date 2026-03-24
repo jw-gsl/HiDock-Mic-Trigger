@@ -1596,8 +1596,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private var feedbackHistoryWindow: NSWindow?
-
     @objc private func showFeedbackHistory() {
         let history = loadFeedbackHistory()
         if history.isEmpty {
@@ -1608,156 +1606,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        // Build a proper window with an outline view
-        if feedbackHistoryWindow == nil {
-            let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 600, height: 450),
-                styleMask: [.titled, .closable, .resizable],
-                backing: .buffered, defer: false
-            )
-            win.center()
-            win.title = "My Feedback"
-            win.isReleasedWhenClosed = false
-            feedbackHistoryWindow = win
+        let alert = NSAlert()
+        alert.messageText = "My Feedback (\(history.count) item\(history.count == 1 ? "" : "s"))"
+        alert.informativeText = "Select an issue to see details, then click View on GitHub to track it."
+        alert.addButton(withTitle: "Close")
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 380))
+
+        // Issue selector dropdown
+        let selectorLabel = NSTextField(labelWithString: "Issue:")
+        selectorLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        selectorLabel.frame = NSRect(x: 0, y: 356, width: 50, height: 18)
+        container.addSubview(selectorLabel)
+
+        let selector = NSPopUpButton(frame: NSRect(x: 50, y: 352, width: 450, height: 26), pullsDown: false)
+        for item in history {
+            let title = item["title"] as? String ?? "Untitled"
+            let number = item["number"] as? Int ?? 0
+            let state = item["state"] as? String ?? "open"
+            let stateIcon = state == "closed" ? "✅" : "🔵"
+            selector.addItem(withTitle: "\(stateIcon) #\(number) — \(title)")
         }
+        container.addSubview(selector)
 
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 450))
-
-        // Left: list of issues
-        let listScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 250, height: 450))
-        listScroll.hasVerticalScroller = true
-        listScroll.borderType = .bezelBorder
-        listScroll.autoresizingMask = [.height]
-
-        let listContainer = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: max(450, CGFloat(history.count) * 52)))
-        var y = listContainer.frame.height
-        var detailViews: [NSView] = []
-
-        // Right: detail area
-        let detailScroll = NSScrollView(frame: NSRect(x: 254, y: 0, width: 346, height: 450))
+        // Detail text view (read-only, scrollable)
+        let detailScroll = NSScrollView(frame: NSRect(x: 0, y: 30, width: 500, height: 314))
         detailScroll.hasVerticalScroller = true
         detailScroll.borderType = .bezelBorder
-        detailScroll.autoresizingMask = [.width, .height]
+        let detailText = NSTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 314))
+        detailText.isEditable = false
+        detailText.isSelectable = true
+        detailText.font = .systemFont(ofSize: 12)
+        detailText.textContainerInset = NSSize(width: 8, height: 8)
+        detailText.autoresizingMask = [.width, .height]
+        detailText.isVerticallyResizable = true
+        detailText.textContainer?.widthTracksTextView = true
+        detailScroll.documentView = detailText
+        container.addSubview(detailScroll)
 
-        let emptyLabel = NSTextField(labelWithString: "Select an item to see details")
-        emptyLabel.font = .systemFont(ofSize: 13)
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.alignment = .center
-        emptyLabel.frame = NSRect(x: 0, y: 200, width: 346, height: 20)
-        let emptyContainer = NSView(frame: NSRect(x: 0, y: 0, width: 346, height: 450))
-        emptyContainer.addSubview(emptyLabel)
-        detailScroll.documentView = emptyContainer
+        // View on GitHub button
+        let githubBtn = NSButton(title: "View on GitHub", target: nil, action: nil)
+        githubBtn.bezelStyle = .rounded
+        githubBtn.frame = NSRect(x: 380, y: 0, width: 120, height: 24)
+        container.addSubview(githubBtn)
 
-        for (index, item) in history.enumerated() {
-            y -= 52
-            let title = item["title"] as? String ?? "Untitled"
-            let urlStr = item["url"] as? String ?? ""
+        // Update detail when selection changes
+        let updateDetail: () -> Void = {
+            let idx = selector.indexOfSelectedItem
+            guard idx >= 0, idx < history.count else { return }
+            let item = history[idx]
+            let title = item["title"] as? String ?? ""
             let number = item["number"] as? Int ?? 0
             let state = item["state"] as? String ?? "open"
             let date = item["date"] as? String ?? ""
-            let body = item["body"] as? String ?? ""
+            let body = item["body"] as? String ?? "(No details saved)"
+            let urlStr = item["url"] as? String ?? ""
 
             let shortDate: String
             if let d = ISO8601DateFormatter().date(from: date) {
                 let fmt = DateFormatter()
-                fmt.dateStyle = .medium
+                fmt.dateStyle = .long
                 fmt.timeStyle = .short
                 shortDate = fmt.string(from: d)
             } else {
                 shortDate = date
             }
 
-            // List row — full-width clickable button with text
-            let stateIcon = state == "closed" ? "✅" : "🔵"
-            let rowBtn = NSButton(frame: NSRect(x: 4, y: y, width: 242, height: 48))
-            rowBtn.title = "\(stateIcon) #\(number) — \(title)\n\(shortDate)"
-            rowBtn.bezelStyle = .rounded
-            rowBtn.setButtonType(.momentaryLight)
-            rowBtn.alignment = .left
-            rowBtn.font = .systemFont(ofSize: 11)
-            rowBtn.lineBreakMode = .byTruncatingTail
-            rowBtn.tag = index
-            rowBtn.target = self
-            rowBtn.action = #selector(feedbackHistoryRowClicked(_:))
-            listContainer.addSubview(rowBtn)
-
-            // Build detail view for this item
-            let detail = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 600))
-
-            var dy: CGFloat = 570
-
-            // Title
-            let dTitle = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
-            dTitle.font = .systemFont(ofSize: 13, weight: .semibold)
-            dTitle.frame = NSRect(x: 8, y: dy, width: 324, height: 20)
-            dTitle.lineBreakMode = .byWordWrapping
-            dTitle.maximumNumberOfLines = 3
-            detail.addSubview(dTitle)
-            dy -= 24
-
-            // Date + state
             let stateText = state == "closed" ? "Closed" : "Open"
-            let dMeta = NSTextField(labelWithString: "\(shortDate) · \(stateText)")
-            dMeta.font = .systemFont(ofSize: 11)
-            dMeta.textColor = .secondaryLabelColor
-            dMeta.frame = NSRect(x: 8, y: dy, width: 324, height: 16)
-            detail.addSubview(dMeta)
-            dy -= 24
+            let cleanBody = body
+                .replacingOccurrences(of: "<details>", with: "")
+                .replacingOccurrences(of: "</details>", with: "")
+                .replacingOccurrences(of: "<summary>System Information</summary>", with: "System Information:")
+                .replacingOccurrences(of: "## ", with: "\n")
+                .replacingOccurrences(of: "- **", with: "  ")
+                .replacingOccurrences(of: "**", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // Body content — strip markdown headers for readability
-            if !body.isEmpty {
-                let cleanBody = body
-                    .replacingOccurrences(of: "<details>", with: "")
-                    .replacingOccurrences(of: "</details>", with: "")
-                    .replacingOccurrences(of: "<summary>System Information</summary>", with: "System Information:")
-                    .replacingOccurrences(of: "## ", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            detailText.string = """
+            #\(number) — \(title)
+            Status: \(stateText)
+            Date: \(shortDate)
 
-                let dBody = NSTextField(wrappingLabelWithString: cleanBody)
-                dBody.font = .systemFont(ofSize: 11)
-                dBody.textColor = .labelColor
-                dBody.frame = NSRect(x: 8, y: 40, width: 324, height: dy - 40)
-                dBody.isSelectable = true
-                detail.addSubview(dBody)
+            \(cleanBody)
+            """
+
+            // Wire the GitHub button
+            githubBtn.target = nil
+            githubBtn.action = nil
+            if !urlStr.isEmpty, let url = URL(string: urlStr) {
+                githubBtn.isEnabled = true
+                githubBtn.tag = idx
+                // Use a simple approach — store URL in identifier
+                githubBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
+            } else {
+                githubBtn.isEnabled = false
             }
-
-            // View on GitHub button at bottom
-            if !urlStr.isEmpty {
-                let linkBtn = NSButton(title: "View on GitHub", target: self, action: #selector(openFeedbackURL(_:)))
-                linkBtn.bezelStyle = .rounded
-                linkBtn.controlSize = .regular
-                linkBtn.frame = NSRect(x: 8, y: 8, width: 120, height: 24)
-                linkBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
-                detail.addSubview(linkBtn)
-            }
-
-            detailViews.append(detail)
         }
 
-        listScroll.documentView = listContainer
-        contentView.addSubview(listScroll)
-        contentView.addSubview(detailScroll)
+        // Show first item immediately
+        updateDetail()
 
-        // Store detail views and scroll ref for row click handler
-        objc_setAssociatedObject(feedbackHistoryWindow!, "detailViews", detailViews, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(feedbackHistoryWindow!, "detailScroll", detailScroll, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-
-        feedbackHistoryWindow?.contentView = contentView
-        feedbackHistoryWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    @objc private func feedbackHistoryRowClicked(_ sender: NSButton) {
-        guard let win = feedbackHistoryWindow,
-              let detailViews = objc_getAssociatedObject(win, "detailViews") as? [NSView],
-              let detailScroll = objc_getAssociatedObject(win, "detailScroll") as? NSScrollView,
-              sender.tag >= 0, sender.tag < detailViews.count else { return }
-
-        detailScroll.documentView = detailViews[sender.tag]
-        // Scroll to top
-        if let docView = detailScroll.documentView {
-            docView.scroll(NSPoint(x: 0, y: docView.frame.height))
+        // Observe popup changes via timer (NSPopUpButton action doesn't work well in NSAlert)
+        var lastSelection = selector.indexOfSelectedItem
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            if selector.indexOfSelectedItem != lastSelection {
+                lastSelection = selector.indexOfSelectedItem
+                updateDetail()
+            }
         }
+
+        // Wire GitHub button
+        githubBtn.target = self
+        githubBtn.action = #selector(openFeedbackURL(_:))
+
+        alert.accessoryView = container
+        alert.runModal()
+        timer.invalidate()
     }
 
     @objc private func openFeedbackURL(_ sender: NSButton) {
