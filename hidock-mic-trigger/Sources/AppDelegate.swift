@@ -324,8 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
 
         // Onboarding
-        let modelPath = "\(NSHomeDirectory())/HiDock/Speech-to-Text/ggml-large-v3-turbo-q5_0.bin"
-        viewModel.modelReady = FileManager.default.fileExists(atPath: modelPath)
+        viewModel.modelReady = FileManager.default.fileExists(atPath: whisperModelPath)
 
         viewModel.onCompleteOnboarding = { [weak self] in
             guard let self = self else { return }
@@ -334,24 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         viewModel.onDownloadModel = { [weak self] in
-            guard let self = self else { return }
-            if self.bundledResourcesRoot != nil {
-                // Bundled app: run transcribe_cpp.py download-model
-                self.transcriptionQueue.async {
-                    self.runTranscriptionForModelDownload()
-                }
-            } else {
-                // Dev build: show message
-                DispatchQueue.main.async {
-                    self.viewModel.modelDownloadProgress = 0
-                    let alert = NSAlert()
-                    alert.messageText = "Model Download"
-                    alert.informativeText = "In development builds, run the transcription pipeline's download command manually:\n\ncd transcription-pipeline && python3 transcribe_cpp.py download-model"
-                    alert.alertStyle = .informational
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                }
-            }
+            self?.downloadWhisperModel()
         }
     }
 
@@ -2393,49 +2375,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    /// Download the speech recognition model via transcribe_cpp.py for onboarding.
-    private func runTranscriptionForModelDownload() {
-        log("runTranscriptionForModelDownload: starting")
-        let process = Process()
-        process.currentDirectoryURL = URL(fileURLWithPath: transcriptionRoot)
-        process.executableURL = URL(fileURLWithPath: transcriptionPythonPath)
-        process.arguments = [transcriptionScriptPath, "download-model"]
+    private let whisperModelURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
+    private var whisperModelPath: String {
+        "\(NSHomeDirectory())/HiDock/Speech-to-Text/ggml-large-v3-turbo-q5_0.bin"
+    }
 
-        let errPipe = Pipe()
-        process.standardOutput = Pipe()
-        process.standardError = errPipe
+    /// Download the whisper.cpp model natively via URLSession. Works in both dev and bundled builds.
+    private func downloadWhisperModel() {
+        let destURL = URL(fileURLWithPath: whisperModelPath)
+        let dir = destURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        var lineBuffer = ""
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            lineBuffer += text
-            while let range = lineBuffer.range(of: "\n") {
-                let line = String(lineBuffer[lineBuffer.startIndex..<range.lowerBound])
-                lineBuffer = String(lineBuffer[range.upperBound...])
-                if line.hasPrefix("PROGRESS:"), let pct = Int(line.dropFirst("PROGRESS:".count)) {
-                    DispatchQueue.main.async {
-                        self?.viewModel.modelDownloadProgress = Double(pct) / 100.0
+        guard let url = URL(string: whisperModelURL) else { return }
+        log("Downloading whisper model from \(whisperModelURL)")
+        viewModel.modelDownloadProgress = 0.01
+
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, response, error in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                if let tempURL = tempURL, error == nil {
+                    do {
+                        if FileManager.default.fileExists(atPath: self.whisperModelPath) {
+                            try FileManager.default.removeItem(atPath: self.whisperModelPath)
+                        }
+                        try FileManager.default.moveItem(at: tempURL, to: destURL)
+                        self.log("Whisper model downloaded successfully")
+                        self.viewModel.modelReady = true
+                        self.viewModel.modelDownloadProgress = 1.0
+                    } catch {
+                        self.log("Failed to save model: \(error)")
+                        self.viewModel.modelDownloadProgress = 0
                     }
+                } else {
+                    self.log("Model download failed: \(error?.localizedDescription ?? "unknown")")
+                    self.viewModel.modelDownloadProgress = 0
                 }
             }
         }
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            log("runTranscriptionForModelDownload error: \(error)")
-        }
-
-        let modelPath = "\(NSHomeDirectory())/HiDock/Speech-to-Text/ggml-large-v3-turbo-q5_0.bin"
-        let ready = FileManager.default.fileExists(atPath: modelPath)
-        DispatchQueue.main.async { [weak self] in
-            self?.viewModel.modelReady = ready
-            if ready {
-                self?.viewModel.modelDownloadProgress = 1.0
+        // Observe progress
+        let observation = task.progress.observe(\.fractionCompleted) { [weak self] progress, _ in
+            DispatchQueue.main.async {
+                self?.viewModel.modelDownloadProgress = progress.fractionCompleted
             }
         }
+        _ = observation
+
+        task.resume()
     }
 
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {

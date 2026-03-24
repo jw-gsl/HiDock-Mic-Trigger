@@ -34,7 +34,7 @@ struct OnboardingView: View {
 
             // Navigation bar
             HStack {
-                if currentStep > 0 && currentStep < totalSteps - 1 {
+                if currentStep > 0 {
                     Button("Back") {
                         withAnimation { currentStep -= 1 }
                     }
