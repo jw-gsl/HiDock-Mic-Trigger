@@ -168,14 +168,71 @@ final class UpdateChecker {
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         let zipPath = tempDir.appendingPathComponent("update.zip")
 
-        // Download silently in background
-        URLSession.shared.downloadTask(with: downloadURL) { tempURL, response, error in
-            guard let tempURL = tempURL, error == nil else { return }
-            try? FileManager.default.moveItem(at: tempURL, to: zipPath)
-            pendingRelease = release
-            pendingZipPath = zipPath
-            NSLog("Update downloaded and ready to install on quit")
-        }.resume()
+        // Show progress window
+        let progressWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 100),
+            styleMask: [.titled],
+            backing: .buffered, defer: false
+        )
+        progressWindow.center()
+        progressWindow.title = "Downloading Update"
+        progressWindow.isReleasedWhenClosed = false
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 100))
+        let label = NSTextField(labelWithString: "Downloading update...")
+        label.frame = NSRect(x: 20, y: 60, width: 340, height: 20)
+        label.font = .systemFont(ofSize: 13)
+        container.addSubview(label)
+
+        let progressBar = NSProgressIndicator(frame: NSRect(x: 20, y: 30, width: 340, height: 20))
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 100
+        container.addSubview(progressBar)
+
+        progressWindow.contentView = container
+        progressWindow.makeKeyAndOrderFront(nil)
+
+        let task = URLSession.shared.downloadTask(with: downloadURL) { tempURL, response, error in
+            DispatchQueue.main.async {
+                progressWindow.close()
+
+                guard let tempURL = tempURL, error == nil else {
+                    NSLog("Update download failed: \(error?.localizedDescription ?? "unknown")")
+                    return
+                }
+
+                do {
+                    try FileManager.default.moveItem(at: tempURL, to: zipPath)
+                    pendingRelease = release
+                    pendingZipPath = zipPath
+                    NSLog("Update downloaded and ready to install on quit")
+
+                    let alert = NSAlert()
+                    alert.messageText = "Update Ready"
+                    alert.informativeText = "The update has been downloaded. It will be installed the next time you quit the app."
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                } catch {
+                    NSLog("Failed to save update: \(error)")
+                }
+            }
+        }
+
+        let observation = task.progress.observe(\.fractionCompleted) { progress, _ in
+            DispatchQueue.main.async {
+                progressBar.doubleValue = progress.fractionCompleted * 100
+                let mb = Double(task.countOfBytesReceived) / (1024 * 1024)
+                let total = Double(task.countOfBytesExpectedToReceive) / (1024 * 1024)
+                if total > 0 {
+                    label.stringValue = String(format: "Downloading update... %.0f/%.0f MB", mb, total)
+                }
+            }
+        }
+        _ = observation
+
+        task.resume()
     }
 
     static func showUpToDateAlert() {
