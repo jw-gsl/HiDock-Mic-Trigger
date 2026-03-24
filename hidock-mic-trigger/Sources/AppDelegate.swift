@@ -1596,6 +1596,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    private var feedbackHistoryWindow: NSWindow?
+
     @objc private func showFeedbackHistory() {
         let history = loadFeedbackHistory()
         if history.isEmpty {
@@ -1606,128 +1608,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "My Feedback (\(history.count) item\(history.count == 1 ? "" : "s"))"
-        alert.informativeText = "Select an issue to see details, then click View on GitHub to track it."
-        alert.addButton(withTitle: "Close")
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 380))
-
-        // Issue selector dropdown
-        let selectorLabel = NSTextField(labelWithString: "Issue:")
-        selectorLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        selectorLabel.frame = NSRect(x: 0, y: 356, width: 50, height: 18)
-        container.addSubview(selectorLabel)
-
-        let selector = NSPopUpButton(frame: NSRect(x: 50, y: 352, width: 450, height: 26), pullsDown: false)
-        for item in history {
-            let title = item["title"] as? String ?? "Untitled"
-            let number = item["number"] as? Int ?? 0
-            let state = item["state"] as? String ?? "open"
-            let stateIcon = state == "closed" ? "✅" : "🔵"
-            selector.addItem(withTitle: "\(stateIcon) #\(number) — \(title)")
-        }
-        container.addSubview(selector)
-
-        // Detail text view (read-only, scrollable)
-        let detailScroll = NSScrollView(frame: NSRect(x: 0, y: 30, width: 500, height: 314))
-        detailScroll.hasVerticalScroller = true
-        detailScroll.borderType = .bezelBorder
-        let detailText = NSTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 314))
-        detailText.isEditable = false
-        detailText.isSelectable = true
-        detailText.font = .systemFont(ofSize: 12)
-        detailText.textContainerInset = NSSize(width: 8, height: 8)
-        detailText.autoresizingMask = [.width, .height]
-        detailText.isVerticallyResizable = true
-        detailText.textContainer?.widthTracksTextView = true
-        detailScroll.documentView = detailText
-        container.addSubview(detailScroll)
-
-        // View on GitHub button
-        let githubBtn = NSButton(title: "View on GitHub", target: nil, action: nil)
-        githubBtn.bezelStyle = .rounded
-        githubBtn.frame = NSRect(x: 380, y: 0, width: 120, height: 24)
-        container.addSubview(githubBtn)
-
-        // Update detail when selection changes
-        let updateDetail: () -> Void = {
-            let idx = selector.indexOfSelectedItem
-            guard idx >= 0, idx < history.count else { return }
-            let item = history[idx]
-            let title = item["title"] as? String ?? ""
-            let number = item["number"] as? Int ?? 0
-            let state = item["state"] as? String ?? "open"
-            let date = item["date"] as? String ?? ""
-            let body = item["body"] as? String ?? "(No details saved)"
-            let urlStr = item["url"] as? String ?? ""
-
-            let shortDate: String
-            if let d = ISO8601DateFormatter().date(from: date) {
-                let fmt = DateFormatter()
-                fmt.dateStyle = .long
-                fmt.timeStyle = .short
-                shortDate = fmt.string(from: d)
-            } else {
-                shortDate = date
-            }
-
-            let stateText = state == "closed" ? "Closed" : "Open"
-            let cleanBody = body
-                .replacingOccurrences(of: "<details>", with: "")
-                .replacingOccurrences(of: "</details>", with: "")
-                .replacingOccurrences(of: "<summary>System Information</summary>", with: "System Information:")
-                .replacingOccurrences(of: "## ", with: "\n")
-                .replacingOccurrences(of: "- **", with: "  ")
-                .replacingOccurrences(of: "**", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            detailText.string = """
-            #\(number) — \(title)
-            Status: \(stateText)
-            Date: \(shortDate)
-
-            \(cleanBody)
-            """
-
-            // Wire the GitHub button
-            githubBtn.target = nil
-            githubBtn.action = nil
-            if !urlStr.isEmpty, let url = URL(string: urlStr) {
-                githubBtn.isEnabled = true
-                githubBtn.tag = idx
-                // Use a simple approach — store URL in identifier
-                githubBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
-            } else {
-                githubBtn.isEnabled = false
-            }
+        let items = history.enumerated().map { (index, item) in
+            FeedbackItem(
+                id: index,
+                title: item["title"] as? String ?? "Untitled",
+                body: item["body"] as? String ?? "",
+                url: item["url"] as? String ?? "",
+                number: item["number"] as? Int ?? 0,
+                state: item["state"] as? String ?? "open",
+                date: item["date"] as? String ?? ""
+            )
         }
 
-        // Show first item immediately
-        updateDetail()
-
-        // Observe popup changes via timer (NSPopUpButton action doesn't work well in NSAlert)
-        var lastSelection = selector.indexOfSelectedItem
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
-            if selector.indexOfSelectedItem != lastSelection {
-                lastSelection = selector.indexOfSelectedItem
-                updateDetail()
-            }
+        if feedbackHistoryWindow == nil {
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+                styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                backing: .buffered, defer: false
+            )
+            win.center()
+            win.title = "My Feedback"
+            win.isReleasedWhenClosed = false
+            win.minSize = NSSize(width: 500, height: 300)
+            feedbackHistoryWindow = win
         }
 
-        // Wire GitHub button
-        githubBtn.target = self
-        githubBtn.action = #selector(openFeedbackURL(_:))
-
-        alert.accessoryView = container
-        alert.runModal()
-        timer.invalidate()
-    }
-
-    @objc private func openFeedbackURL(_ sender: NSButton) {
-        if let urlStr = sender.identifier?.rawValue, let url = URL(string: urlStr) {
-            NSWorkspace.shared.open(url)
-        }
+        let hostingView = NSHostingView(rootView: FeedbackHistoryView(items: items))
+        feedbackHistoryWindow?.contentView = hostingView
+        feedbackHistoryWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func showSyncWindow() {
