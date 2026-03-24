@@ -6,9 +6,9 @@ struct SyncToolbarSection: View {
     var body: some View {
         VStack(spacing: 8) {
             // Main action buttons
-            HStack(spacing: 16) {
+            HStack(spacing: 20) {
                 // Device Management group
-                GroupBox {
+                GroupBox(label: Label("Device", systemImage: "link").font(.caption2).foregroundColor(.secondary)) {
                     HStack(spacing: 6) {
                         Button {
                             viewModel.onPairDock()
@@ -54,7 +54,7 @@ struct SyncToolbarSection: View {
                 Spacer()
 
                 // Downloads group
-                GroupBox {
+                GroupBox(label: Label("Downloads", systemImage: "arrow.down.circle").font(.caption2).foregroundColor(.secondary)) {
                     HStack(spacing: 6) {
                         Button {
                             viewModel.onDownloadSelected()
@@ -82,7 +82,7 @@ struct SyncToolbarSection: View {
                 }
 
                 // Transcription group
-                GroupBox {
+                GroupBox(label: Label("Transcription", systemImage: "text.bubble").font(.caption2).foregroundColor(.secondary)) {
                     HStack(spacing: 6) {
                         Button {
                             viewModel.onTranscribeSelected()
@@ -145,8 +145,9 @@ struct SyncToolbarSection: View {
             .font(.caption)
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .padding(.top, 2)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+        .padding(.vertical, 10)
     }
 }

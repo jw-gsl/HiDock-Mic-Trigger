@@ -19,6 +19,7 @@
 		A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */; };
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
+		E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */; };
 		F86651607F00054F72662894 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED5594D4170BD809E24E4CAC /* Models.swift */; };
 /* End PBXBuildFile section */
 
@@ -44,6 +45,7 @@
 		8CDAD4DE368D4BD1A70444DB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicTriggerSection.swift; sourceTree = "<group>"; };
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
+		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED5594D4170BD809E24E4CAC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -77,6 +79,7 @@
 				9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */,
 				8CDAD4DE368D4BD1A70444DB /* main.swift */,
 				ED5594D4170BD809E24E4CAC /* Models.swift */,
+				A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */,
 				F0F0DB81B248109A976C783F /* Views */,
 			);
 			path = Sources;
@@ -222,7 +225,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"$CONFIGURATION\" = \"Release\" ]; then\n  APP_NAME=\"HiDock Mic Trigger.app\"\n  INSTALL_DIR=\"/Applications\"\n  BUILT_APP=\"$BUILT_PRODUCTS_DIR/$APP_NAME\"\n\n  if [ -d \"$BUILT_APP\" ]; then\n    # Kill running instance\n    pkill -f \"hidock-mic-trigger\" 2>/dev/null || true\n    sleep 1\n\n    # Remove any stale copies\n    rm -rf \"$INSTALL_DIR/$APP_NAME\"\n    rm -rf \"$INSTALL_DIR/hidock-mic-trigger.app\"\n    rm -rf \"$HOME/Applications/$APP_NAME\"\n\n    # Install fresh build and re-sign\n    cp -R \"$BUILT_APP\" \"$INSTALL_DIR/$APP_NAME\"\n    codesign --force --sign - \"$INSTALL_DIR/$APP_NAME\"\n\n    # Relaunch\n    open -a \"$INSTALL_DIR/$APP_NAME\"\n    echo \"Deployed $APP_NAME to $INSTALL_DIR\"\n  else\n    echo \"warning: Built app not found at $BUILT_APP\"\n  fi\nelif [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  # Debug builds deploy to ~/Applications as a separate dev app\n  DEV_NAME=\"HiDock Mic Trigger Dev.app\"\n  DEV_DIR=\"$HOME/Applications\"\n  # Find the .app in the build output (name varies by config)\n  BUILT_APP=$(find \"$BUILT_PRODUCTS_DIR\" -maxdepth 1 -name \"*.app\" -type d | head -1)\n\n  if [ -n \"$BUILT_APP\" ] && [ -d \"$BUILT_APP\" ]; then\n    mkdir -p \"$DEV_DIR\"\n    # Kill dev instance only (match by Dev.app path)\n    pkill -f \"HiDock Mic Trigger Dev.app\" 2>/dev/null || true\n    sleep 1\n\n    rm -rf \"$DEV_DIR/$DEV_NAME\"\n    cp -R \"$BUILT_APP\" \"$DEV_DIR/$DEV_NAME\"\n    codesign --force --sign - \"$DEV_DIR/$DEV_NAME\"\n\n    open -a \"$DEV_DIR/$DEV_NAME\"\n    echo \"Deployed dev build to $DEV_DIR/$DEV_NAME\"\n  else\n    echo \"warning: Built app not found at $BUILT_APP\"\n  fi\nfi\n";
+			shellScript = "# Skip deploy on CI (GitHub Actions sets CI=true)\nif [ \"$CI\" = \"true\" ]; then\n  echo \"note: Skipping deploy on CI\"\n  exit 0\nfi\nif [ \"$CONFIGURATION\" = \"Release\" ]; then\n  APP_NAME=\"HiDock Mic Trigger.app\"\n  INSTALL_DIR=\"/Applications\"\n  BUILT_APP=\"$BUILT_PRODUCTS_DIR/$APP_NAME\"\n\n  if [ -d \"$BUILT_APP\" ]; then\n    # Kill running instance\n    pkill -f \"hidock-mic-trigger\" 2>/dev/null || true\n    sleep 1\n\n    # Remove any stale copies\n    rm -rf \"$INSTALL_DIR/$APP_NAME\"\n    rm -rf \"$INSTALL_DIR/hidock-mic-trigger.app\"\n    rm -rf \"$HOME/Applications/$APP_NAME\"\n\n    # Install fresh build and re-sign\n    cp -R \"$BUILT_APP\" \"$INSTALL_DIR/$APP_NAME\"\n    codesign --force --sign - \"$INSTALL_DIR/$APP_NAME\"\n\n    # Relaunch\n    open -a \"$INSTALL_DIR/$APP_NAME\"\n    echo \"Deployed $APP_NAME to $INSTALL_DIR\"\n  else\n    echo \"warning: Built app not found at $BUILT_APP\"\n  fi\nelif [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  # Debug builds deploy to ~/Applications as a separate dev app\n  DEV_NAME=\"HiDock Mic Trigger Dev.app\"\n  DEV_DIR=\"$HOME/Applications\"\n  # Find the .app in the build output (name varies by config)\n  BUILT_APP=$(find \"$BUILT_PRODUCTS_DIR\" -maxdepth 1 -name \"*.app\" -type d | head -1)\n\n  if [ -n \"$BUILT_APP\" ] && [ -d \"$BUILT_APP\" ]; then\n    mkdir -p \"$DEV_DIR\"\n    # Kill dev instance only (match by Dev.app path)\n    pkill -f \"HiDock Mic Trigger Dev.app\" 2>/dev/null || true\n    sleep 1\n\n    rm -rf \"$DEV_DIR/$DEV_NAME\"\n    cp -R \"$BUILT_APP\" \"$DEV_DIR/$DEV_NAME\"\n    codesign --force --deep --sign - \"$DEV_DIR/$DEV_NAME\"\n\n    open -a \"$DEV_DIR/$DEV_NAME\"\n    echo \"Deployed dev build to $DEV_DIR/$DEV_NAME\"\n  else\n    echo \"warning: Built app not found at $BUILT_APP\"\n  fi\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -241,6 +244,7 @@
 				332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */,
 				7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */,
 				9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */,
+				E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */,
 				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

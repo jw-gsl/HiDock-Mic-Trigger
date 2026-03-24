@@ -15,7 +15,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var process: Process?
 
     private var syncWindow: NSWindow?
-    private var feedbackWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -190,6 +189,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             startTrigger()
         }
         autoConnectSyncIfPaired()
+
+        // Check for updates after a short delay
+        UpdateChecker.registerCategory()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            UpdateChecker.checkForUpdate { title, body, url in
+                UpdateChecker.postUpdateNotification(title: title, body: body, url: url)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -235,6 +242,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if response.actionIdentifier == Self.micSwitchActionID {
             DispatchQueue.main.async { [weak self] in
                 self?.showSyncWindow()
+            }
+        } else if response.actionIdentifier == UpdateChecker.updateActionID ||
+                    response.notification.request.content.categoryIdentifier == UpdateChecker.updateCategoryID {
+            if let urlString = UserDefaults.standard.string(forKey: UpdateChecker.updateURLKey),
+               let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
             }
         }
         completionHandler()
@@ -293,6 +306,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRevealTranscript = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
+        viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
+        viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
@@ -611,10 +626,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
-        let feedbackItem = NSMenuItem(title: "Send Feedback…", action: #selector(showFeedback), keyEquivalent: "")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
-        for item in [startItem, stopItem, autoStartItem, syncWindowItem, logsItem, statusInfoItem, feedbackItem, quitItem] {
+        for item in [startItem, stopItem, autoStartItem, syncWindowItem, logsItem, statusInfoItem, quitItem] {
             item?.target = self
         }
 
@@ -629,7 +643,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
         menu.addItem(NSMenuItem.separator())
+        let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
+        feedbackItem.target = self
         menu.addItem(feedbackItem)
+        let historyItem = NSMenuItem(title: "My Feedback", action: #selector(showFeedbackHistory), keyEquivalent: "")
+        historyItem.target = self
+        menu.addItem(historyItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -1131,6 +1150,396 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.runModal()
     }
 
+    /// Token injected at build time via CI. Read from bundle's embedded file.
+    private var feedbackToken: String? {
+        if let path = Bundle.main.path(forResource: "feedback_token", ofType: "txt"),
+           let token = try? String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            return token
+        }
+        // Fallback: check for file next to the app (dev builds)
+        let devPath = "\(repoRoot)/feedback_token.txt"
+        if let token = try? String(contentsOfFile: devPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            return token
+        }
+        return nil
+    }
+
+    // User-friendly category labels → technical mapping
+    private struct FeedbackCategory {
+        let label: String          // shown to user
+        let gitHubLabel: String    // GitHub issue label
+        let component: String      // file paths for Copilot
+    }
+
+    private let feedbackCategories: [FeedbackCategory] = [
+        FeedbackCategory(label: "Something isn't working", gitHubLabel: "bug", component: "General"),
+        FeedbackCategory(label: "Recording & downloads", gitHubLabel: "usb-sync", component: "`usb-extractor/extractor.py`, `AppDelegate.swift` (sync section)"),
+        FeedbackCategory(label: "Microphone detection", gitHubLabel: "mic-trigger", component: "`mic-trigger/MicTrigger.swift`, `AppDelegate.swift` (trigger section)"),
+        FeedbackCategory(label: "Transcription & speech-to-text", gitHubLabel: "transcription", component: "`transcription-pipeline/transcribe_cpp.py`, `core/transcription.py`"),
+        FeedbackCategory(label: "App appearance or layout", gitHubLabel: "ui", component: "`Sources/Views/*.swift`, `ui/main_window.py`"),
+        FeedbackCategory(label: "I have a suggestion", gitHubLabel: "enhancement", component: "General"),
+    ]
+
+    private let feedbackSeverities: [(label: String, gitHubLabel: String)] = [
+        ("It stops me from working", "priority-high"),
+        ("It's annoying but I can work around it", "priority-medium"),
+        ("It's a minor thing", "priority-low"),
+    ]
+
+    @objc private func sendFeedback() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Send Feedback"
+        alert.informativeText = ""
+        alert.addButton(withTitle: "Send")
+        alert.addButton(withTitle: "Cancel")
+
+        // Build the form
+        // Layout uses NSView coordinate system (origin bottom-left).
+        // All three text boxes are the same height so the form looks balanced.
+        let textBoxHeight: CGFloat = 72
+        let labelHeight: CGFloat = 18
+        let controlHeight: CGFloat = 26
+        let gap: CGFloat = 6
+        let w: CGFloat = 420
+
+        // Build layout bottom-up, calculating y positions
+        var y: CGFloat = 0
+
+        // Steps to reproduce (optional) — multi-line, same size as the others
+        let stepsScroll = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: textBoxHeight))
+        stepsScroll.hasVerticalScroller = true
+        stepsScroll.borderType = .bezelBorder
+        let stepsText = NSTextView(frame: NSRect(x: 0, y: 0, width: w, height: textBoxHeight))
+        stepsText.isEditable = true; stepsText.isRichText = false
+        stepsText.font = .systemFont(ofSize: 13)
+        stepsText.autoresizingMask = [.width, .height]
+        stepsText.isVerticallyResizable = true
+        stepsText.textContainer?.widthTracksTextView = true
+        stepsText.placeholderAttributedString = NSAttributedString(
+            string: "e.g.\n1. Open the app\n2. Click Download\n3. Wait 30 seconds\n4. App freezes",
+            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
+        )
+        stepsScroll.documentView = stepsText
+
+        y += textBoxHeight + 4
+        let stepsLabel = NSTextField(labelWithString: "Steps to reproduce (optional)")
+        stepsLabel.font = .systemFont(ofSize: 11)
+        stepsLabel.textColor = .secondaryLabelColor
+        stepsLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        y += labelHeight + gap
+
+        // What did you expect to happen?
+        let expectedScroll = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: textBoxHeight))
+        expectedScroll.hasVerticalScroller = true
+        expectedScroll.borderType = .bezelBorder
+        let expectedText = NSTextView(frame: NSRect(x: 0, y: 0, width: w, height: textBoxHeight))
+        expectedText.isEditable = true; expectedText.isRichText = false
+        expectedText.font = .systemFont(ofSize: 13)
+        expectedText.autoresizingMask = [.width, .height]
+        expectedText.isVerticallyResizable = true
+        expectedText.textContainer?.widthTracksTextView = true
+        expectedText.placeholderAttributedString = NSAttributedString(
+            string: "e.g. The download should complete and the recordings should appear in the list.",
+            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
+        )
+        expectedScroll.documentView = expectedText
+
+        y += textBoxHeight + 4
+        let expectedLabel = NSTextField(labelWithString: "What did you expect to happen?")
+        expectedLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        expectedLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        y += labelHeight + gap
+
+        // What happened?
+        let descScroll = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: textBoxHeight))
+        descScroll.hasVerticalScroller = true
+        descScroll.borderType = .bezelBorder
+        let descText = NSTextView(frame: NSRect(x: 0, y: 0, width: w, height: textBoxHeight))
+        descText.isEditable = true; descText.isRichText = false
+        descText.font = .systemFont(ofSize: 13)
+        descText.autoresizingMask = [.width, .height]
+        descText.isVerticallyResizable = true
+        descText.textContainer?.widthTracksTextView = true
+        descText.placeholderAttributedString = NSAttributedString(
+            string: "e.g. I clicked Download, waited 30 seconds, and the app froze.",
+            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
+        )
+        descScroll.documentView = descText
+
+        y += textBoxHeight + 4
+        let descLabel = NSTextField(labelWithString: "What happened?")
+        descLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        descLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        y += labelHeight + gap
+
+        // Severity
+        let severityPopup = NSPopUpButton(frame: NSRect(x: 0, y: y, width: w, height: controlHeight), pullsDown: false)
+        for sev in feedbackSeverities {
+            severityPopup.addItem(withTitle: sev.label)
+        }
+
+        y += controlHeight + 4
+        let severityLabel = NSTextField(labelWithString: "How much does it affect you?")
+        severityLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        severityLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        y += labelHeight + gap
+
+        // Category
+        let categoryPopup = NSPopUpButton(frame: NSRect(x: 0, y: y, width: w, height: controlHeight), pullsDown: false)
+        for cat in feedbackCategories {
+            categoryPopup.addItem(withTitle: cat.label)
+        }
+
+        y += controlHeight + 4
+        let categoryLabel = NSTextField(labelWithString: "What's this about?")
+        categoryLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        categoryLabel.frame = NSRect(x: 0, y: y, width: w, height: labelHeight)
+
+        let containerHeight = y + labelHeight
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: containerHeight))
+        for sub in [stepsScroll, stepsLabel, expectedScroll, expectedLabel,
+                    descScroll, descLabel, severityPopup, severityLabel,
+                    categoryPopup, categoryLabel] as [NSView] {
+            container.addSubview(sub)
+        }
+
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = descText
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        let description = descText.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty else { return }
+
+        let category = feedbackCategories[categoryPopup.indexOfSelectedItem]
+        let severity = feedbackSeverities[severityPopup.indexOfSelectedItem]
+        let expected = expectedText.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let steps = stepsText.string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Gather system info
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        let macOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let deviceStatus = connectedDevices.isEmpty ? "Not connected" : connectedDevices.map(\.shortName).joined(separator: ", ")
+        let triggerStatus = process != nil ? "Running (\(selectedMicName ?? "unknown mic"))" : "Stopped"
+        let recordingCount = syncEntries.count
+        let downloadedCount = syncEntries.filter(\.recording.downloaded).count
+
+        // Build structured issue body for Copilot
+        let title = category.gitHubLabel == "enhancement"
+            ? "Feature: \(String(description.prefix(60)))"
+            : "\(category.label): \(String(description.prefix(50)))"
+
+        var body = "## Description\n\(description)\n"
+
+        if !expected.isEmpty {
+            body += "\n## Expected Behavior\n\(expected)\n"
+        }
+        if !steps.isEmpty {
+            body += "\n## Steps to Reproduce\n\(steps)\n"
+        }
+
+        body += "\n## Component\n\(category.component)\n"
+        body += "\n## Platform\nmacOS\n"
+
+        body += """
+
+        <details>
+        <summary>System Information</summary>
+
+        - **App Version:** \(appVersion)
+        - **macOS:** \(macOSVersion)
+        - **Devices:** \(deviceStatus)
+        - **Mic Trigger:** \(triggerStatus)
+        - **Recordings:** \(recordingCount) synced, \(downloadedCount) downloaded
+        </details>
+        """
+
+        let labels = [category.gitHubLabel, severity.gitHubLabel, "feedback"]
+        submitGitHubIssue(title: title, body: body, labels: labels)
+    }
+
+    private func submitGitHubIssue(title: String, body: String, labels: [String] = ["feedback"]) {
+        guard let token = feedbackToken else {
+            log("No feedback token, falling back to browser")
+            guard let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new?title=\(encodedTitle)&body=\(encodedBody)&labels=\(labels.joined(separator: ","))") else { return }
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        let url = URL(string: "https://api.github.com/repos/jw-gsl/HiDock-Mic-Trigger/issues")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("token \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("HiDock/1.0", forHTTPHeaderField: "User-Agent")
+
+        let payload: [String: Any] = [
+            "title": title,
+            "body": body,
+            "labels": labels
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        log("Submitting feedback issue...")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    self?.log("Feedback submission failed: \(error.localizedDescription)")
+                    self?.postNotification(title: "Feedback Failed", body: "Could not submit feedback. Please try again.")
+                    return
+                }
+                let httpResponse = response as? HTTPURLResponse
+                if httpResponse?.statusCode == 201, let data = data {
+                    self?.log("Feedback submitted successfully")
+                    self?.postNotification(title: "Feedback Sent", body: "Thank you! Your feedback has been submitted.")
+                    // Save to local history
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        self?.saveFeedbackToHistory(
+                            title: title,
+                            url: json["html_url"] as? String,
+                            number: json["number"] as? Int,
+                            state: json["state"] as? String ?? "open"
+                        )
+                    }
+                } else {
+                    let statusCode = httpResponse?.statusCode ?? 0
+                    self?.log("Feedback submission returned status \(statusCode)")
+                    self?.postNotification(title: "Feedback Failed", body: "Server returned status \(statusCode). Please try again.")
+                }
+            }
+        }.resume()
+    }
+
+    // MARK: - Feedback History
+
+    private var feedbackHistoryPath: String {
+        "\(NSHomeDirectory())/HiDock/feedback_history.json"
+    }
+
+    private func loadFeedbackHistory() -> [[String: Any]] {
+        guard let data = FileManager.default.contents(atPath: feedbackHistoryPath),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return items
+    }
+
+    private func saveFeedbackToHistory(title: String, url: String?, number: Int?, state: String) {
+        var history = loadFeedbackHistory()
+        let entry: [String: Any] = [
+            "title": title,
+            "url": url ?? "",
+            "number": number ?? 0,
+            "state": state,
+            "date": ISO8601DateFormatter().string(from: Date()),
+        ]
+        history.insert(entry, at: 0)  // newest first
+        // Keep last 50
+        if history.count > 50 { history = Array(history.prefix(50)) }
+
+        let dir = (feedbackHistoryPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: history, options: .prettyPrinted) {
+            try? data.write(to: URL(fileURLWithPath: feedbackHistoryPath))
+        }
+    }
+
+    @objc private func showFeedbackHistory() {
+        let history = loadFeedbackHistory()
+        if history.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "My Feedback"
+            alert.informativeText = "No feedback submitted yet."
+            alert.runModal()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "My Feedback"
+        alert.informativeText = "Click an issue to open it on GitHub."
+        alert.addButton(withTitle: "Close")
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: max(300, CGFloat(history.count) * 44)))
+        var y = container.frame.height
+
+        for item in history {
+            y -= 44
+            let title = item["title"] as? String ?? "Untitled"
+            let urlStr = item["url"] as? String ?? ""
+            let number = item["number"] as? Int ?? 0
+            let state = item["state"] as? String ?? "open"
+            let date = item["date"] as? String ?? ""
+
+            // Format date
+            let shortDate: String
+            if let d = ISO8601DateFormatter().date(from: date) {
+                let fmt = DateFormatter()
+                fmt.dateStyle = .medium
+                fmt.timeStyle = .short
+                shortDate = fmt.string(from: d)
+            } else {
+                shortDate = date
+            }
+
+            let stateIcon = state == "closed" ? "✅" : "🔵"
+            let label = NSTextField(labelWithString: "\(stateIcon) #\(number) — \(title)")
+            label.font = .systemFont(ofSize: 12)
+            label.frame = NSRect(x: 8, y: y + 20, width: 484, height: 18)
+            label.lineBreakMode = .byTruncatingTail
+            container.addSubview(label)
+
+            let dateLabel = NSTextField(labelWithString: shortDate)
+            dateLabel.font = .systemFont(ofSize: 10)
+            dateLabel.textColor = .secondaryLabelColor
+            dateLabel.frame = NSRect(x: 8, y: y + 2, width: 200, height: 16)
+            container.addSubview(dateLabel)
+
+            if !urlStr.isEmpty {
+                let linkBtn = NSButton(title: "View on GitHub", target: nil, action: nil)
+                linkBtn.bezelStyle = .rounded
+                linkBtn.controlSize = .small
+                linkBtn.font = .systemFont(ofSize: 10)
+                linkBtn.frame = NSRect(x: 400, y: y + 2, width: 92, height: 20)
+                linkBtn.tag = container.subviews.count  // unique tag
+                linkBtn.target = self
+                linkBtn.action = #selector(openFeedbackURL(_:))
+                // Store URL in accessibility identifier
+                linkBtn.identifier = NSUserInterfaceItemIdentifier(urlStr)
+                container.addSubview(linkBtn)
+            }
+
+            // Separator
+            let sep = NSBox(frame: NSRect(x: 8, y: y, width: 484, height: 1))
+            sep.boxType = .separator
+            container.addSubview(sep)
+        }
+
+        scrollView.documentView = container
+        alert.accessoryView = scrollView
+        alert.runModal()
+    }
+
+    @objc private func openFeedbackURL(_ sender: NSButton) {
+        if let urlStr = sender.identifier?.rawValue, let url = URL(string: urlStr) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func showSyncWindow() {
         if syncWindow == nil {
             // Size window to fit all columns, capped to 90% of screen
@@ -1162,54 +1571,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshSyncStatus()
-    }
-
-    @objc private func showFeedback() {
-        if feedbackWindow == nil {
-            let win = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 540, height: 460),
-                styleMask: [.titled, .closable],
-                backing: .buffered,
-                defer: false
-            )
-            win.title = "Send Feedback"
-            win.isReleasedWhenClosed = false
-            win.center()
-
-            let feedbackView = FeedbackView(
-                onSubmit: { [weak self, weak win] whatHappened, whatExpected, stepsToReproduce in
-                    self?.submitFeedback(whatHappened: whatHappened, whatExpected: whatExpected, stepsToReproduce: stepsToReproduce)
-                    win?.close()
-                },
-                onCancel: { [weak win] in
-                    win?.close()
-                }
-            )
-            win.contentView = NSHostingView(rootView: feedbackView)
-            feedbackWindow = win
-        }
-        NSApp.setActivationPolicy(.regular)
-        feedbackWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func submitFeedback(whatHappened: String, whatExpected: String, stepsToReproduce: String) {
-        var body = ""
-        body += "**What happened?**\n\(whatHappened)\n\n"
-        body += "**What did you expect to happen?**\n\(whatExpected)\n\n"
-        if !stepsToReproduce.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            body += "**Steps to reproduce**\n\(stepsToReproduce)\n\n"
-        }
-        body += "**Platform:** macOS"
-
-        var components = URLComponents(string: "https://github.com/jw-gsl/HiDock-Mic-Trigger/issues/new")
-        components?.queryItems = [
-            URLQueryItem(name: "title", value: "User feedback"),
-            URLQueryItem(name: "body", value: body)
-        ]
-        if let url = components?.url {
-            NSWorkspace.shared.open(url)
-        }
     }
 
     // MARK: - Extractor

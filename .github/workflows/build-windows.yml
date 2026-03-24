@@ -26,6 +26,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Inject feedback token
+        env:
+          FEEDBACK_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}
+        run: |
+          if ($env:FEEDBACK_TOKEN) {
+            Set-Content -Path "core/feedback_token.py" -Value "TOKEN = `"$env:FEEDBACK_TOKEN`""
+            Write-Host "Feedback token injected"
+          } else {
+            Write-Host "Warning: FEEDBACK_TOKEN secret not set"
+          }
+
       - name: Run tests
         run: python -m pytest tests/ -v
         continue-on-error: true

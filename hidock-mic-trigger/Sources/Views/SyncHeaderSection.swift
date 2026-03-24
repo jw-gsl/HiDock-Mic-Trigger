@@ -14,6 +14,10 @@ struct SyncHeaderSection: View {
         }
     }
 
+    private var isConnected: Bool {
+        viewModel.syncStatusLevel == .success
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -22,7 +26,7 @@ struct SyncHeaderSection: View {
                         .fill(statusColor)
                         .frame(width: 8, height: 8)
                     Text(viewModel.syncStatus)
-                        .font(.subheadline.weight(.medium))
+                        .font(.body.weight(.medium))
                 }
                 Spacer()
                 Text(viewModel.syncSummary)
@@ -55,6 +59,7 @@ struct SyncHeaderSection: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
+        .background(isConnected ? Color.green.opacity(0.04) : Color.clear)
     }
 }
