@@ -1218,10 +1218,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         stepsText.autoresizingMask = [.width, .height]
         stepsText.isVerticallyResizable = true
         stepsText.textContainer?.widthTracksTextView = true
-        stepsText.placeholderAttributedString = NSAttributedString(
-            string: "e.g.\n1. Open the app\n2. Click Download\n3. Wait 30 seconds\n4. App freezes",
-            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
-        )
         stepsScroll.documentView = stepsText
 
         y += textBoxHeight + 4
@@ -1242,10 +1238,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         expectedText.autoresizingMask = [.width, .height]
         expectedText.isVerticallyResizable = true
         expectedText.textContainer?.widthTracksTextView = true
-        expectedText.placeholderAttributedString = NSAttributedString(
-            string: "e.g. The download should complete and the recordings should appear in the list.",
-            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
-        )
         expectedScroll.documentView = expectedText
 
         y += textBoxHeight + 4
@@ -1265,10 +1257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         descText.autoresizingMask = [.width, .height]
         descText.isVerticallyResizable = true
         descText.textContainer?.widthTracksTextView = true
-        descText.placeholderAttributedString = NSAttributedString(
-            string: "e.g. I clicked Download, waited 30 seconds, and the app froze.",
-            attributes: [.foregroundColor: NSColor.placeholderTextColor, .font: NSFont.systemFont(ofSize: 13)]
-        )
         descScroll.documentView = descText
 
         y += textBoxHeight + 4
