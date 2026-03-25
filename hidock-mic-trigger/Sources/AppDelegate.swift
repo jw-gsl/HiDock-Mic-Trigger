@@ -326,6 +326,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
 
+        // Appearance
+        let currentMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
+        viewModel.appearanceMode = currentMode
+        viewModel.onCycleAppearance = { [weak self] in
+            guard let self = self else { return }
+            let modes = ["auto", "dark", "light"]
+            let current = self.viewModel.appearanceMode
+            let nextIndex = ((modes.firstIndex(of: current) ?? 0) + 1) % modes.count
+            let next = modes[nextIndex]
+            UserDefaults.standard.set(next, forKey: "appearanceMode")
+            self.viewModel.appearanceMode = next
+            self.applyAppearanceMode()
+        }
+
         // Onboarding
         viewModel.modelReady = FileManager.default.fileExists(atPath: whisperModelPath)
 

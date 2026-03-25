@@ -26,6 +26,17 @@ struct MainWindowView: View {
                 }
 
                 Spacer()
+
+                Button {
+                    viewModel.onCycleAppearance()
+                } label: {
+                    Label(viewModel.appearanceLabel, systemImage: viewModel.appearanceIcon)
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Switch between Dark, Light, and Auto appearance")
+
                 Button {
                     viewModel.onCheckForUpdates()
                 } label: {

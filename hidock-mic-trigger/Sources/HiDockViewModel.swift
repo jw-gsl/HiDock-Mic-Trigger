@@ -129,4 +129,26 @@ final class HiDockViewModel: ObservableObject {
 
     // MARK: - Update Status
     @Published var updateStatusText: String = ""
+
+    // MARK: - Appearance
+    @Published var appearanceMode: String = "auto"  // "dark", "light", "auto"
+    var onCycleAppearance: () -> Void = {}
+}
+
+extension HiDockViewModel {
+    var appearanceIcon: String {
+        switch appearanceMode {
+        case "dark": return "moon.fill"
+        case "light": return "sun.max.fill"
+        default: return "circle.lefthalf.filled"
+        }
+    }
+
+    var appearanceLabel: String {
+        switch appearanceMode {
+        case "dark": return "Dark"
+        case "light": return "Light"
+        default: return "Auto"
+        }
+    }
 }
