@@ -132,7 +132,7 @@ final class HiDockViewModel: ObservableObject {
 
     // MARK: - Appearance
     @Published var appearanceMode: String = "auto"  // "dark", "light", "auto"
-    var onCycleAppearance: () -> Void = {}
+    var onSetAppearance: (String) -> Void = { _ in }
 }
 
 extension HiDockViewModel {

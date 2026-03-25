@@ -27,15 +27,29 @@ struct MainWindowView: View {
 
                 Spacer()
 
-                Button {
-                    viewModel.onCycleAppearance()
+                Menu {
+                    Button {
+                        viewModel.onSetAppearance("auto")
+                    } label: {
+                        Label("Auto (System)", systemImage: "circle.lefthalf.filled")
+                    }
+                    Button {
+                        viewModel.onSetAppearance("dark")
+                    } label: {
+                        Label("Dark", systemImage: "moon.fill")
+                    }
+                    Button {
+                        viewModel.onSetAppearance("light")
+                    } label: {
+                        Label("Light", systemImage: "sun.max.fill")
+                    }
                 } label: {
                     Label(viewModel.appearanceLabel, systemImage: viewModel.appearanceIcon)
                         .font(.caption)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Switch between Dark, Light, and Auto appearance")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Change appearance")
 
                 Button {
                     viewModel.onCheckForUpdates()

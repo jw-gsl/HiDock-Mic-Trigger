@@ -329,14 +329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Appearance
         let currentMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
         viewModel.appearanceMode = currentMode
-        viewModel.onCycleAppearance = { [weak self] in
+        viewModel.onSetAppearance = { [weak self] mode in
             guard let self = self else { return }
-            let modes = ["auto", "dark", "light"]
-            let current = self.viewModel.appearanceMode
-            let nextIndex = ((modes.firstIndex(of: current) ?? 0) + 1) % modes.count
-            let next = modes[nextIndex]
-            UserDefaults.standard.set(next, forKey: "appearanceMode")
-            self.viewModel.appearanceMode = next
+            UserDefaults.standard.set(mode, forKey: "appearanceMode")
+            self.viewModel.appearanceMode = mode
             self.applyAppearanceMode()
         }
 
