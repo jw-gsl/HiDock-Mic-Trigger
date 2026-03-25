@@ -6,6 +6,11 @@ struct OnboardingView: View {
     @State private var currentStep: Int = 0
     @State private var hidockConnected = false
     @State private var autoAdvanceScheduled = false
+    @State private var stepStatus: [Int: StepStatus] = [:]  // track each step
+
+    enum StepStatus {
+        case completed, skipped
+    }
 
     private let totalSteps = 5
 
@@ -22,12 +27,26 @@ struct OnboardingView: View {
             .tabViewStyle(.automatic)
             .frame(minHeight: 360)
 
-            // Step indicator dots
-            HStack(spacing: 8) {
+            // Step indicator dots with status
+            HStack(spacing: 10) {
                 ForEach(0..<totalSteps, id: \.self) { i in
-                    Circle()
-                        .fill(i == currentStep ? Color.accentColor : Color.secondary.opacity(0.3))
-                        .frame(width: 8, height: 8)
+                    if i == currentStep {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 10, height: 10)
+                    } else if stepStatus[i] == .completed {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 12))
+                    } else if stepStatus[i] == .skipped {
+                        Image(systemName: "forward.circle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+                    } else {
+                        Circle()
+                            .fill(Color.secondary.opacity(0.3))
+                            .frame(width: 8, height: 8)
+                    }
                 }
             }
             .padding(.bottom, 16)
@@ -45,6 +64,7 @@ struct OnboardingView: View {
 
                 if currentStep > 0 && currentStep < totalSteps - 1 {
                     Button("Skip") {
+                        stepStatus[currentStep] = .skipped
                         withAnimation { currentStep += 1 }
                     }
                     .buttonStyle(.plain)
@@ -53,12 +73,14 @@ struct OnboardingView: View {
 
                 if currentStep == 0 {
                     Button("Get Started") {
+                        stepStatus[0] = .completed
                         withAnimation { currentStep = 1 }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                 } else if currentStep < totalSteps - 1 {
                     Button("Next") {
+                        stepStatus[currentStep] = .completed
                         withAnimation { currentStep += 1 }
                     }
                     .buttonStyle(.borderedProminent)
@@ -144,6 +166,7 @@ struct OnboardingView: View {
             guard currentStep == 1 else { return }
             if viewModel.syncDeviceConnected.values.contains(true) && !hidockConnected {
                 hidockConnected = true
+                stepStatus[1] = .completed
                 // Auto-advance after 1 second
                 if !autoAdvanceScheduled {
                     autoAdvanceScheduled = true

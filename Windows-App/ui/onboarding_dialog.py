@@ -30,6 +30,7 @@ class OnboardingDialog(QDialog):
         self.completed: bool = False
         self._hidock_connected = False
         self._model_downloading = False
+        self._step_status: dict[int, str] = {}  # "completed" or "skipped"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -67,7 +68,7 @@ class OnboardingDialog(QDialog):
         nav.addStretch()
 
         self._skip_btn = QPushButton("Skip")
-        self._skip_btn.clicked.connect(self._go_next)
+        self._skip_btn.clicked.connect(lambda: self._go_next(skipped=True))
         nav.addWidget(self._skip_btn)
 
         nav.addStretch()
@@ -236,15 +237,12 @@ class OnboardingDialog(QDialog):
             self._stack.setCurrentIndex(idx - 1)
             self._update_nav()
 
-    def _go_next(self):
+    def _go_next(self, skipped: bool = False):
         idx = self._current_index()
         if idx < self._stack.count() - 1:
+            self._step_status[idx] = "skipped" if skipped else "completed"
             if idx == 2:
-                # Save mic selection from step 3
                 self.selected_mic = self._mic_combo.currentText()
-            if idx == 3:
-                # Moving past model page — update done page
-                pass
             self._stack.setCurrentIndex(idx + 1)
             if idx + 1 == 4:
                 self._update_done_page()
@@ -274,11 +272,19 @@ class OnboardingDialog(QDialog):
         else:
             self._next_btn.setText("Next")
 
-        # Update dots
+        # Update dots with status
         for i, dot in enumerate(self._dots):
             if i == idx:
+                dot.setText("\u25cf")
                 dot.setStyleSheet("color: #89b4fa; font-size: 14px;")
+            elif self._step_status.get(i) == "completed":
+                dot.setText("\u2713")
+                dot.setStyleSheet("color: #a6e3a1; font-size: 14px; font-weight: bold;")
+            elif self._step_status.get(i) == "skipped":
+                dot.setText("\u23e9")
+                dot.setStyleSheet("color: #f9e2af; font-size: 12px;")
             else:
+                dot.setText("\u25cf")
                 dot.setStyleSheet("color: #444; font-size: 14px;")
 
     # ── HiDock polling ─────────────────────────────────────────────────
