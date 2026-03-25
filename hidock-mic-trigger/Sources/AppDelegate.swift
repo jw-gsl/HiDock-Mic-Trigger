@@ -192,6 +192,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.showOnboarding = true
         }
 
+        // Apply saved appearance mode
+        applyAppearanceMode()
+
         if autoStartOnLaunch {
             startTrigger()
         }
@@ -808,6 +811,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         checkUpdatesItem.target = self
         appMenu.addItem(checkUpdatesItem)
         appMenu.addItem(NSMenuItem.separator())
+
+        // Appearance submenu
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceSubmenu = NSMenu(title: "Appearance")
+        let currentMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
+
+        let darkItem = NSMenuItem(title: "Dark", action: #selector(setAppearanceDark), keyEquivalent: "")
+        darkItem.target = self
+        darkItem.state = currentMode == "dark" ? .on : .off
+        appearanceSubmenu.addItem(darkItem)
+
+        let lightItem = NSMenuItem(title: "Light", action: #selector(setAppearanceLight), keyEquivalent: "")
+        lightItem.target = self
+        lightItem.state = currentMode == "light" ? .on : .off
+        appearanceSubmenu.addItem(lightItem)
+
+        let autoItem = NSMenuItem(title: "Auto (System)", action: #selector(setAppearanceAuto), keyEquivalent: "")
+        autoItem.target = self
+        autoItem.state = (currentMode != "dark" && currentMode != "light") ? .on : .off
+        appearanceSubmenu.addItem(autoItem)
+
+        appearanceItem.submenu = appearanceSubmenu
+        appMenu.addItem(appearanceItem)
+
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
 
@@ -826,6 +854,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         editMenuItem.submenu = editMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    // MARK: - Appearance
+
+    private func applyAppearanceMode() {
+        let mode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
+        switch mode {
+        case "dark":
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light":
+            NSApp.appearance = NSAppearance(named: .aqua)
+        default:
+            NSApp.appearance = nil  // follow system
+        }
+    }
+
+    private func setAppearanceAndRebuildMenu(_ mode: String) {
+        UserDefaults.standard.set(mode, forKey: "appearanceMode")
+        applyAppearanceMode()
+        // Rebuild menu so the checkmarks update
+        setupMainMenu()
+    }
+
+    @objc private func setAppearanceDark() {
+        setAppearanceAndRebuildMenu("dark")
+    }
+
+    @objc private func setAppearanceLight() {
+        setAppearanceAndRebuildMenu("light")
+    }
+
+    @objc private func setAppearanceAuto() {
+        setAppearanceAndRebuildMenu("auto")
     }
 
     private func statusImage(running: Bool) -> NSImage? {

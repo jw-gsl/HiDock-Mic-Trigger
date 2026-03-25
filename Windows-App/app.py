@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 
+from PyQt6.QtCore import QSettings
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -24,9 +25,37 @@ def _resource_path(relative: str) -> str:
     return str(base / relative)
 
 
+def _is_windows_dark_mode() -> bool:
+    """Check the Windows registry to determine if dark mode is active."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return value == 0
+    except Exception:
+        return True  # fall back to dark
+
+
+def _resolve_theme(setting: str) -> str:
+    """Resolve a theme setting ('dark', 'light', 'auto') to 'dark' or 'light'."""
+    if setting == "dark":
+        return "dark"
+    if setting == "light":
+        return "light"
+    # auto — detect from OS
+    return "dark" if _is_windows_dark_mode() else "light"
+
+
 def _load_stylesheet() -> str:
-    """Load the QSS theme file."""
-    qss_path = _resource_path(os.path.join("resources", "theme.qss"))
+    """Load the QSS theme file based on the user's theme preference."""
+    settings = QSettings("HiDock", "HiDockTools")
+    theme_setting = settings.value("theme", "auto")
+    resolved = _resolve_theme(theme_setting)
+    qss_path = _resource_path(os.path.join("resources", f"theme_{resolved}.qss"))
     try:
         with open(qss_path, encoding="utf-8") as f:
             return f.read()
@@ -45,7 +74,7 @@ def main():
     app_icon = QIcon(icon_path)
     app.setWindowIcon(app_icon)
 
-    # Dark theme
+    # Theme (dark / light / auto)
     stylesheet = _load_stylesheet()
     if stylesheet:
         app.setStyleSheet(stylesheet)

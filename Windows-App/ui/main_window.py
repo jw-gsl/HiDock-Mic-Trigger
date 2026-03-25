@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from PyQt6.QtCore import QSettings, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -156,6 +156,33 @@ class MainWindow(QMainWindow):
         feedback_act.triggered.connect(self._send_feedback)
         history_act = help_menu.addAction("My Feedback")
         history_act.triggered.connect(self._show_feedback_history)
+        help_menu.addSeparator()
+
+        # Appearance submenu
+        appearance_menu = help_menu.addMenu("Appearance")
+        appearance_group = QActionGroup(self)
+        appearance_group.setExclusive(True)
+
+        current_theme = self.settings.value("theme", "auto")
+
+        dark_act = QAction("Dark", self, checkable=True)
+        dark_act.setChecked(current_theme == "dark")
+        dark_act.triggered.connect(lambda: self._set_theme("dark"))
+        appearance_group.addAction(dark_act)
+        appearance_menu.addAction(dark_act)
+
+        light_act = QAction("Light", self, checkable=True)
+        light_act.setChecked(current_theme == "light")
+        light_act.triggered.connect(lambda: self._set_theme("light"))
+        appearance_group.addAction(light_act)
+        appearance_menu.addAction(light_act)
+
+        auto_act = QAction("Auto (System)", self, checkable=True)
+        auto_act.setChecked(current_theme not in ("dark", "light"))
+        auto_act.triggered.connect(lambda: self._set_theme("auto"))
+        appearance_group.addAction(auto_act)
+        appearance_menu.addAction(auto_act)
+
         help_menu.addSeparator()
         update_act = help_menu.addAction("Check for Updates...")
         update_act.triggered.connect(self._check_for_updates_manual)
@@ -584,6 +611,15 @@ class MainWindow(QMainWindow):
 
     def _on_mic_log(self, msg: str):
         self._log_signal.emit(msg)
+
+    def _set_theme(self, theme: str):
+        """Save the chosen theme and inform the user a restart is needed."""
+        self.settings.setValue("theme", theme)
+        QMessageBox.information(
+            self,
+            "Theme Changed",
+            f"Theme set to '{theme}'. Please restart the application for the change to take effect.",
+        )
 
     def _on_mic_changed(self, name: str):
         self.settings.setValue("triggerMicName", name)
