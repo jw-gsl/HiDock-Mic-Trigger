@@ -5,10 +5,17 @@ whisper.cpp backend. Same model accuracy, ~50MB binary vs ~2GB.
 """
 from __future__ import annotations
 
+import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+# Add the repo root to sys.path so shared modules are importable
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from core.config import (
     MODELS_DIR,
@@ -45,6 +52,7 @@ def transcribe_file(
     mp3_path: Path,
     model=None,
     on_progress: Callable[[int], None] | None = None,
+    diarize: bool = False,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict."""
     mp3_path = mp3_path.resolve()
@@ -82,9 +90,83 @@ def transcribe_file(
         if on_progress:
             on_progress(85)
 
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        # Convert pywhispercpp segments to dicts for diarization
+        whisper_dicts = []
+        for seg in segments:
+            whisper_dicts.append({
+                "start": seg.t0 / 100.0 if hasattr(seg, "t0") else 0.0,
+                "end": seg.t1 / 100.0 if hasattr(seg, "t1") else 0.0,
+                "text": seg.text.strip(),
+            })
 
         RAW_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Diarization pass
+        diarized_result = None
+        if diarize:
+            try:
+                from shared.diarize_lite import diarize as run_diarize
+                from shared.voice_library_lite import identify_speakers
+                from shared.audio_utils import load_audio, extract_embedding, segment_audio
+
+                diarized_result = run_diarize(mp3_path, whisper_dicts)
+
+                # Try to identify speakers from voice library
+                audio = load_audio(mp3_path, sr=16000)
+                speaker_segments = {}
+                for seg in diarized_result["segments"]:
+                    spk = seg["speaker"]
+                    if spk not in speaker_segments:
+                        speaker_segments[spk] = []
+                    speaker_segments[spk].append((seg["start"], seg["end"]))
+
+                speaker_embeddings = {}
+                for spk, segs in speaker_segments.items():
+                    chunks = segment_audio(audio, 16000, segs)
+                    if chunks:
+                        import numpy as np
+                        combined = np.concatenate(chunks)
+                        speaker_embeddings[spk] = extract_embedding(combined, sr=16000)
+
+                if speaker_embeddings:
+                    import numpy as np
+                    emb_list = list(speaker_embeddings.values())
+                    spk_list = list(speaker_embeddings.keys())
+                    ids = identify_speakers(emb_list)
+                    for i, spk in enumerate(spk_list):
+                        name, conf = ids[i]
+                        if name is not None:
+                            diarized_result["speaker_names"][spk] = name
+
+                # Write diarized JSON
+                diarized_path = RAW_TRANSCRIPTS_DIR / f"{basename}_diarized.json"
+                diarized_path.write_text(
+                    json.dumps(diarized_result, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                print(f"Diarization failed (non-fatal): {e}", file=sys.stderr)
+                diarized_result = None
+
+        # Write transcript
+        if diarized_result:
+            lines = []
+            current_speaker = None
+            for seg in diarized_result["segments"]:
+                display_name = diarized_result["speaker_names"].get(
+                    seg["speaker"], seg["speaker"]
+                )
+                if display_name != current_speaker:
+                    if lines:
+                        lines.append("")
+                    lines.append(f"**{display_name}:** {seg['text']}")
+                    current_speaker = display_name
+                else:
+                    lines.append(seg["text"])
+            text = "\n".join(lines)
+        else:
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+
         transcript_path.write_text(text + "\n", encoding="utf-8")
 
         if on_progress:

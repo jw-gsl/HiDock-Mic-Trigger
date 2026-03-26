@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var process: Process?
 
     private var syncWindow: NSWindow?
+    private var transcriptViewerWindow: NSWindow?
+    private var voiceLibraryWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -319,9 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRevealRecording = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
-        viewModel.onRevealTranscript = { path in
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        viewModel.onRevealTranscript = { [weak self] path in
+            self?.openTranscriptViewer(transcriptMdPath: path)
         }
+        viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
@@ -686,6 +689,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(logsItem)
         menu.addItem(statusInfoItem)
         menu.addItem(NSMenuItem.separator())
+        let voiceLibraryItem = NSMenuItem(title: "Voice Library...", action: #selector(openVoiceLibraryMenu), keyEquivalent: "")
+        voiceLibraryItem.target = self
+        menu.addItem(voiceLibraryItem)
         let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
         feedbackItem.target = self
         menu.addItem(feedbackItem)
@@ -1671,6 +1677,235 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshSyncStatus()
+    }
+
+    // MARK: - Transcript Viewer
+
+    private func openTranscriptViewer(transcriptMdPath: String) {
+        // Derive _diarized.json path from the .md path
+        let mdURL = URL(fileURLWithPath: transcriptMdPath)
+        let baseName = mdURL.deletingPathExtension().lastPathComponent
+        let dirURL = mdURL.deletingLastPathComponent()
+        let diarizedPath = dirURL.appendingPathComponent(baseName + "_diarized.json").path
+
+        guard FileManager.default.fileExists(atPath: diarizedPath) else {
+            // No diarized JSON — fall back to revealing the .md in Finder
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: transcriptMdPath)])
+            return
+        }
+
+        // Load the diarized transcript
+        guard let data = FileManager.default.contents(atPath: diarizedPath),
+              let transcript = try? JSONDecoder().decode(DiarizedTranscript.self, from: data) else {
+            log("Failed to decode diarized transcript at \(diarizedPath)")
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: transcriptMdPath)])
+            return
+        }
+
+        // Derive audio path from the transcript's audioFile field
+        let audioPath: String
+        if transcript.audioFile.hasPrefix("/") {
+            audioPath = transcript.audioFile
+        } else {
+            audioPath = dirURL.appendingPathComponent(transcript.audioFile).path
+        }
+
+        let viewer = TranscriptViewerView(
+            transcript: transcript,
+            filePath: diarizedPath,
+            audioPath: audioPath,
+            onEnrollSpeaker: { [weak self] name, audio, start, end in
+                self?.enrollSpeakerInVoiceLibrary(name: name, audioPath: audio, start: start, end: end)
+            }
+        )
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Transcript — \(transcript.audioFile)"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 600, height: 400)
+        win.contentView = NSHostingView(rootView: viewer)
+
+        transcriptViewerWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Voice Library
+
+    @objc private func openVoiceLibraryMenu() {
+        openVoiceLibrary()
+    }
+
+    private func openVoiceLibrary() {
+        // Shell out to voice_library_lite.py list to get speakers
+        let sharedDir: String
+        if let root = bundledResourcesRoot {
+            sharedDir = "\(root)/shared"
+        } else {
+            sharedDir = "\(repoRoot)/shared"
+        }
+
+        let scriptPath = "\(sharedDir)/voice_library_lite.py"
+        let pythonPath: String
+        if FileManager.default.isExecutableFile(atPath: "\(sharedDir)/../transcription-pipeline/.venv/bin/python3") {
+            pythonPath = "\(sharedDir)/../transcription-pipeline/.venv/bin/python3"
+        } else if FileManager.default.isExecutableFile(atPath: "\(sharedDir)/../usb-extractor/.venv/bin/python3") {
+            pythonPath = "\(sharedDir)/../usb-extractor/.venv/bin/python3"
+        } else {
+            pythonPath = "/usr/bin/python3"
+        }
+
+        var speakers: [VoiceLibrarySpeaker] = []
+
+        if FileManager.default.fileExists(atPath: scriptPath) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "list"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    speakers = parsed.compactMap { dict in
+                        guard let name = dict["name"] as? String else { return nil }
+                        return VoiceLibrarySpeaker(
+                            id: name,
+                            name: name,
+                            sampleCount: dict["sample_count"] as? Int ?? 0,
+                            lastUpdated: dict["last_updated"] as? String ?? ""
+                        )
+                    }
+                }
+            } catch {
+                log("Failed to list voice library: \(error)")
+            }
+        }
+
+        let libraryView = VoiceLibraryView(
+            speakers: speakers,
+            onDelete: { [weak self] name in
+                self?.deleteVoiceLibrarySpeaker(name: name)
+            },
+            onRename: { [weak self] oldName, newName in
+                self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
+            }
+        )
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Voice Library"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 400, height: 300)
+        win.contentView = NSHostingView(rootView: libraryView)
+
+        voiceLibraryWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func voiceLibraryPythonPath() -> String {
+        let sharedDir: String
+        if let root = bundledResourcesRoot {
+            sharedDir = "\(root)/shared"
+        } else {
+            sharedDir = "\(repoRoot)/shared"
+        }
+        if FileManager.default.isExecutableFile(atPath: "\(sharedDir)/../transcription-pipeline/.venv/bin/python3") {
+            return "\(sharedDir)/../transcription-pipeline/.venv/bin/python3"
+        } else if FileManager.default.isExecutableFile(atPath: "\(sharedDir)/../usb-extractor/.venv/bin/python3") {
+            return "\(sharedDir)/../usb-extractor/.venv/bin/python3"
+        }
+        return "/usr/bin/python3"
+    }
+
+    private func voiceLibraryScriptPath() -> String {
+        let sharedDir: String
+        if let root = bundledResourcesRoot {
+            sharedDir = "\(root)/shared"
+        } else {
+            sharedDir = "\(repoRoot)/shared"
+        }
+        return "\(sharedDir)/voice_library_lite.py"
+    }
+
+    private func enrollSpeakerInVoiceLibrary(name: String, audioPath: String, start: Double, end: Double) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            process.arguments = [
+                scriptPath, "enroll",
+                "--name", name,
+                "--audio", audioPath,
+                "--start", String(start),
+                "--end", String(end)
+            ]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                DispatchQueue.main.async {
+                    self?.log("Enrolled speaker '\(name)' in voice library")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.log("Failed to enroll speaker '\(name)': \(error)")
+                }
+            }
+        }
+    }
+
+    private func deleteVoiceLibrarySpeaker(name: String) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        process.arguments = [scriptPath, "delete", "--name", name]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            log("Deleted speaker '\(name)' from voice library")
+        } catch {
+            log("Failed to delete speaker '\(name)': \(error)")
+        }
+    }
+
+    private func renameVoiceLibrarySpeaker(oldName: String, newName: String) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        process.arguments = [scriptPath, "rename", "--old", oldName, "--new", newName]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            log("Renamed speaker '\(oldName)' to '\(newName)' in voice library")
+        } catch {
+            log("Failed to rename speaker '\(oldName)': \(error)")
+        }
     }
 
     // MARK: - Extractor

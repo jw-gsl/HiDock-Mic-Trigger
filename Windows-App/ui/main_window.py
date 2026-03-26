@@ -139,6 +139,9 @@ class MainWindow(QMainWindow):
         trans_all_act.triggered.connect(self._transcribe_all)
         dl_model_act = actions_menu.addAction("Download Model")
         dl_model_act.triggered.connect(self._download_model)
+        actions_menu.addSeparator()
+        voice_lib_act = actions_menu.addAction("Voice Library...")
+        voice_lib_act.triggered.connect(self._show_voice_library)
 
         # Trigger menu
         trigger_menu = menubar.addMenu("Trigger")
@@ -406,6 +409,9 @@ class MainWindow(QMainWindow):
 
         footer_row.addStretch()
 
+        voice_lib_btn = QPushButton("Voice Library")
+        voice_lib_btn.clicked.connect(self._show_voice_library)
+        footer_row.addWidget(voice_lib_btn)
         check_updates_btn = QPushButton("Check for Updates")
         check_updates_btn.clicked.connect(self._check_for_updates_manual)
         footer_row.addWidget(check_updates_btn)
@@ -453,6 +459,13 @@ class MainWindow(QMainWindow):
             open_loc_act.triggered.connect(lambda: self._open_file_location(rec.output_path))
 
         if rec.transcript_path and os.path.exists(rec.transcript_path):
+            # Check for diarized JSON to open transcript viewer
+            diarized_path = self._diarized_json_path(rec.transcript_path)
+            if diarized_path and os.path.exists(diarized_path):
+                view_trans_act = menu.addAction("View Transcript (Speaker View)")
+                view_trans_act.triggered.connect(
+                    lambda: self._open_transcript_viewer(diarized_path, rec.output_path or "")
+                )
             open_trans_act = menu.addAction("Open Transcript")
             open_trans_act.triggered.connect(lambda: self._open_file(rec.transcript_path))
 
@@ -1545,4 +1558,26 @@ class MainWindow(QMainWindow):
         github_btn.clicked.connect(lambda: webbrowser.open(current_url[0]) if current_url[0] else None)
 
         _refresh()
+        dlg.exec()
+
+    # ── Voice Library ──────────────────────────────────────────────────
+
+    def _show_voice_library(self):
+        from ui.voice_library_dialog import VoiceLibraryDialog
+        dlg = VoiceLibraryDialog(self)
+        dlg.exec()
+
+    # ── Transcript Viewer ──────────────────────────────────────────────
+
+    @staticmethod
+    def _diarized_json_path(transcript_path: str) -> str | None:
+        """Derive _diarized.json path from a .md transcript path."""
+        p = Path(transcript_path)
+        base = p.stem  # e.g. "recording" from "recording.md"
+        diarized = p.parent / f"{base}_diarized.json"
+        return str(diarized) if diarized.exists() else None
+
+    def _open_transcript_viewer(self, json_path: str, audio_path: str):
+        from ui.transcript_viewer import TranscriptViewerDialog
+        dlg = TranscriptViewerDialog(json_path, audio_path, parent=self)
         dlg.exec()

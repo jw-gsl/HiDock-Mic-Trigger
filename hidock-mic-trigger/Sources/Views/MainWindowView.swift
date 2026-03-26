@@ -61,6 +61,15 @@ struct MainWindowView: View {
                 .controlSize(.small)
 
                 Button {
+                    viewModel.onShowVoiceLibrary()
+                } label: {
+                    Label("Voice Library", systemImage: "person.2")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
                     viewModel.onShowFeedbackHistory()
                 } label: {
                     Label("My Feedback", systemImage: "list.bullet.clipboard")

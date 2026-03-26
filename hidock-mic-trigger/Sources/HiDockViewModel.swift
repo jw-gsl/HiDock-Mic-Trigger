@@ -116,6 +116,7 @@ final class HiDockViewModel: ObservableObject {
     var onSendFeedback: () -> Void = {}
     var onShowFeedbackHistory: () -> Void = {}
     var onCheckForUpdates: () -> Void = {}
+    var onShowVoiceLibrary: () -> Void = {}
 
     // MARK: - Onboarding State
     @Published var showOnboarding = false
