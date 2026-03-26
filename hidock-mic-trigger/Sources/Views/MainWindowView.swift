@@ -9,6 +9,7 @@ struct MainWindowView: View {
             SyncHeaderSection(viewModel: viewModel)
             SyncToolbarSection(viewModel: viewModel)
             DownloadProgressBar(viewModel: viewModel)
+            TranscriptionProgressBar(viewModel: viewModel)
             RecordingsTableView(viewModel: viewModel)
 
             // Footer
@@ -123,6 +124,48 @@ struct DownloadProgressBar: View {
                     viewModel.onStopDownload()
                 } label: {
                     Label("Stop", systemImage: "stop.fill")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+        }
+    }
+}
+
+struct TranscriptionProgressBar: View {
+    @ObservedObject var viewModel: HiDockViewModel
+
+    var body: some View {
+        if viewModel.transcriptionBusy {
+            HStack(spacing: 8) {
+                ProgressView(value: Double(viewModel.transcriptionProgress), total: 100)
+                    .frame(width: 120)
+
+                if !viewModel.transcriptionStatus.isEmpty {
+                    Text(viewModel.transcriptionStatus)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                } else if viewModel.transcriptionFileCount > 1 {
+                    Text("Transcribing \(viewModel.transcriptionFileIndex + 1)/\(viewModel.transcriptionFileCount) — \(viewModel.transcriptionProgress)%")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Transcribing... \(viewModel.transcriptionProgress)%")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    viewModel.onCancelTranscription()
+                } label: {
+                    Label("Cancel", systemImage: "xmark.circle")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)

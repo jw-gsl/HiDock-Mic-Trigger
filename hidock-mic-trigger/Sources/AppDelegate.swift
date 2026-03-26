@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // Transcription
     private let transcriptionQueue = DispatchQueue(label: "hidock.transcription", qos: .background)
     private var transcriptionBusy = false
+    private var transcriptionCancelled = false
     private var transcriptionCurrentFile: String? = nil
     private var transcriptionProgress: Int = 0
     private var transcriptionFileIndex: Int = 0
@@ -326,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.openTranscriptViewer(transcriptMdPath: path)
         }
         viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
+        viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
@@ -3090,6 +3092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func transcribeSelectedRecordings() {
         guard ensureTranscriptionReady() else { return }
+        transcriptionCancelled = false
         let entries = selectedSyncEntries().filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
         guard !entries.isEmpty else { return }
 
@@ -3107,8 +3110,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    private func cancelTranscription() {
+        log("Transcription cancelled by user")
+        transcriptionCancelled = true
+        transcriptionBusy = false
+        transcriptionCurrentFile = nil
+        transcriptionProgress = 0
+        viewModel.syncStatus = "Transcription cancelled"
+        viewModel.syncStatusLevel = .warning
+        syncViewModelState()
+    }
+
     private func transcribeSequentially(_ paths: [String], index: Int) {
-        guard index < paths.count else {
+        guard !transcriptionCancelled, index < paths.count else {
             transcriptionBusy = false
             transcriptionCurrentFile = nil
             transcriptionProgress = 0

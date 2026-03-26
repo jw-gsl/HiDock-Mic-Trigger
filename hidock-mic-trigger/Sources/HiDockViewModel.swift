@@ -35,6 +35,8 @@ final class HiDockViewModel: ObservableObject {
     @Published var transcriptionProgress: Int = 0
     @Published var transcriptionFileIndex: Int = 0
     @Published var transcriptionFileCount: Int = 0
+    @Published var transcriptionStatus: String = ""
+    var onCancelTranscription: () -> Void = {}
 
     // MARK: - Computed
     var visibleEntries: [HiDockSyncRecordingEntry] {
