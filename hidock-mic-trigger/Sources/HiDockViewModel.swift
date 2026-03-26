@@ -30,6 +30,7 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncPaired = false
 
     // MARK: - Transcription State
+    @Published var diarizeEnabled = false
     @Published var transcriptionBusy = false
     @Published var transcriptionCurrentFile: String?
     @Published var transcriptionProgress: Int = 0
@@ -113,6 +114,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleAutoDownload: () -> Void = {}
     var onTranscribeSelected: () -> Void = {}
     var onTranscribeAll: () -> Void = {}
+    var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
     var onSendFeedback: () -> Void = {}

@@ -878,9 +878,18 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         status = "downloaded" if downloaded else "on_device"
         if stored.get("last_error") and not downloaded:
             status = "failed"
+        duration = recording.get("duration", 0.0)
+        if local_exists:
+            try:
+                from mutagen.mp3 import MP3
+                audio = MP3(str(output_path))
+                duration = audio.info.length
+            except Exception:
+                pass  # keep the estimated duration
         items.append(
             {
                 **recording,
+                "duration": duration,
                 "outputPath": str(output_path),
                 "outputName": output_name_for(name),
                 "downloaded": downloaded,
@@ -909,13 +918,21 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
             output_path = stored_path or expected_path
         local_exists = output_path.exists()
         length = int(stored.get("length", 0))
+        duration = 0.0
+        if local_exists:
+            try:
+                from mutagen.mp3 import MP3
+                audio = MP3(str(output_path))
+                duration = audio.info.length
+            except Exception:
+                duration = max(length / 8000.0, 0.0)
         items.append(
             {
                 "name": name,
                 "createDate": "",
                 "createTime": "",
                 "length": length,
-                "duration": 0.0,
+                "duration": duration,
                 "version": 0,
                 "mode": "unknown",
                 "signature": stored.get("signature", md5_hex(name)),

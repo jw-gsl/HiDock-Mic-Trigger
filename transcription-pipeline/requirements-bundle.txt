@@ -1,2 +1,3 @@
 pywhispercpp>=1.2
 certifi
+mutagen>=1.47

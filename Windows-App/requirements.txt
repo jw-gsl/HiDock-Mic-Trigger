@@ -8,6 +8,7 @@ libusb-package>=1.0
 # Transcription (whisper.cpp — no PyTorch needed)
 pywhispercpp>=1.2
 certifi
+mutagen>=1.47
 
 # Mic trigger (Windows audio session API)
 pycaw>=20240210

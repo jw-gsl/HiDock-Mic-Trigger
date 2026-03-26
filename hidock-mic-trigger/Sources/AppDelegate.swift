@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncCheckedRecordings: Set<String> = []
     private var syncHideDownloaded = false
     private var syncAutoDownload = false
+    private var diarizeEnabled = false
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceProductId: Int? = nil
@@ -285,6 +286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncHideDownloaded = viewModel.syncHideDownloaded
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
+        diarizeEnabled = UserDefaults.standard.bool(forKey: "diarizeEnabled")
+        viewModel.diarizeEnabled = diarizeEnabled
 
         if let savedFolder = UserDefaults.standard.string(forKey: syncOutputFolderKey), !savedFolder.isEmpty {
             syncOutputFolder = savedFolder
@@ -320,6 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onTranscribeAll = { [weak self] in self?.transcribeAllRecordings() }
+        viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
         viewModel.onRevealRecording = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
@@ -378,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncCheckedRecordings = syncCheckedRecordings
         viewModel.syncHideDownloaded = syncHideDownloaded
         viewModel.syncAutoDownload = syncAutoDownload
+        viewModel.diarizeEnabled = diarizeEnabled
         viewModel.syncFilterDeviceProductId = syncFilterDeviceProductId
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
@@ -2332,6 +2337,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    private func toggleDiarize() {
+        diarizeEnabled.toggle()
+        UserDefaults.standard.set(diarizeEnabled, forKey: "diarizeEnabled")
+        syncViewModelState()
+    }
+
     private func toggleSyncRecordingCheckbox(_ name: String) {
         if syncCheckedRecordings.contains(name) {
             syncCheckedRecordings.remove(name)
@@ -2806,7 +2817,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if totalDownloaded > 0, ensureTranscriptionReady(), !transcriptionBusy {
                 transcriptionBusy = true
                 syncViewModelState()
-                runTranscription(arguments: ["transcribe-batch"]) { [weak self] result in
+                var batchArgs = ["transcribe-batch"]
+                if diarizeEnabled { batchArgs.append("--diarize") }
+                runTranscription(arguments: batchArgs) { [weak self] result in
                     guard let self = self else { return }
                     self.transcriptionBusy = false
                     if case .success(let data) = result,
@@ -3054,7 +3067,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
         log("Starting transcription for \(filename)")
 
-        runTranscription(arguments: ["transcribe", mp3Path], onProgress: { [weak self] pct in
+        var transcribeArgs = ["transcribe", mp3Path]
+        if diarizeEnabled { transcribeArgs.append("--diarize") }
+        runTranscription(arguments: transcribeArgs, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionProgress = pct
             self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)%"
@@ -3144,7 +3159,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
 
-        runTranscription(arguments: ["transcribe", paths[index]], onProgress: { [weak self] pct in
+        var seqArgs = ["transcribe", paths[index]]
+        if diarizeEnabled { seqArgs.append("--diarize") }
+        runTranscription(arguments: seqArgs, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionProgress = pct
             self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)% (\(index + 1)/\(paths.count))"

@@ -60,11 +60,9 @@ def _load_speaker_embed_model():
         return _speaker_embed_session
 
     try:
-        from shared.models import MODELS_DIR, SPEAKER_EMBED_FILENAME
+        from shared.models import ensure_speaker_embed
 
-        model_path = MODELS_DIR / SPEAKER_EMBED_FILENAME
-        if not model_path.exists():
-            return None
+        model_path = ensure_speaker_embed()
 
         import onnxruntime as ort
 

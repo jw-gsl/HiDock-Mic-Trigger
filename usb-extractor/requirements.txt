@@ -1,2 +1,3 @@
 pyusb>=1.2.1,<2
+mutagen>=1.47
 pytest>=7,<9

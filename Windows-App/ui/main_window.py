@@ -328,6 +328,11 @@ class MainWindow(QMainWindow):
         self.transcribe_all_btn.clicked.connect(self._transcribe_all)
         row3.addWidget(self.transcribe_all_btn)
 
+        self.diarize_check = QCheckBox("Speaker Labels")
+        self.diarize_check.setToolTip("Enable speaker diarization (identifies who is speaking)")
+        self.diarize_check.stateChanged.connect(self._on_diarize_changed)
+        row3.addWidget(self.diarize_check)
+
         row3.addSpacing(8)
 
         self.download_model_btn = QPushButton("Download Model")
@@ -399,6 +404,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
         progress_row.addWidget(self.progress_bar, stretch=1)
+        self.cancel_transcription_btn = QPushButton("Cancel")
+        self.cancel_transcription_btn.setObjectName("dangerButton")
+        self.cancel_transcription_btn.setVisible(False)
+        self.cancel_transcription_btn.clicked.connect(self._cancel_transcription)
+        progress_row.addWidget(self.cancel_transcription_btn)
         root.addLayout(progress_row)
 
         # ── Footer row ──────────────────────────────────────────────────
@@ -567,6 +577,9 @@ class MainWindow(QMainWindow):
         )
         self.auto_download_check.setChecked(
             self.settings.value("autoDownload", False, type=bool)
+        )
+        self.diarize_check.setChecked(
+            self.settings.value("diarizeEnabled", False, type=bool)
         )
 
         if auto_start:
@@ -893,21 +906,32 @@ class MainWindow(QMainWindow):
             return
         from core.transcription import transcribe_file
 
+        self._transcription_cancelled = False
         self.transcribe_selected_btn.setEnabled(False)
         self.transcribe_all_btn.setEnabled(False)
+        self.cancel_transcription_btn.setVisible(True)
         self.statusBar().showMessage(f"Transcribing {len(targets)} file(s)...")
+
+        diarize = self.diarize_check.isChecked()
 
         def _worker():
             model = None
             results = []
             for i, mp3_path in enumerate(targets):
+                if self._transcription_cancelled:
+                    break
                 try:
                     def _progress(pct, _i=i):
                         total_pct = int((_i * 100 + pct) / len(targets))
-                        self._progress_signal.emit(total_pct, 100, f"Transcribing {_i+1}/{len(targets)}")
-                        self._log_signal.emit(f"Transcribing {_i+1}/{len(targets)}: {total_pct}%")
+                        self._progress_signal.emit(
+                            total_pct, 100,
+                            f"Transcribing {_i+1}/{len(targets)} — {total_pct}%"
+                        )
 
-                    result = transcribe_file(mp3_path, model=model, on_progress=_progress)
+                    result = transcribe_file(
+                        mp3_path, model=model, on_progress=_progress,
+                        diarize=diarize,
+                    )
                     results.append(result)
                 except Exception as e:
                     self._log_signal.emit(f"Error transcribing {mp3_path.name}: {e}")
@@ -920,11 +944,19 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _cancel_transcription(self):
+        """Cancel the current transcription batch."""
+        self._transcription_cancelled = True
+        self.cancel_transcription_btn.setVisible(False)
+        self.statusBar().showMessage("Transcription cancelled", 5000)
+        self._hide_progress()
+
     @pyqtSlot(object, object)
     def _on_transcription_done(self, data, error):
         """Handle transcription batch completion (routed through _on_sync_complete)."""
         self.transcribe_selected_btn.setEnabled(True)
         self.transcribe_all_btn.setEnabled(True)
+        self.cancel_transcription_btn.setVisible(False)
         succeeded = data.get("succeeded", 0)
         total = data.get("total", 0)
         self.statusBar().showMessage(f"Transcribed {succeeded}/{total} files", 5000)
@@ -946,6 +978,9 @@ class MainWindow(QMainWindow):
 
     def _on_auto_download_changed(self, state):
         self.settings.setValue("autoDownload", state == Qt.CheckState.Checked.value)
+
+    def _on_diarize_changed(self, state):
+        self.settings.setValue("diarizeEnabled", state == Qt.CheckState.Checked.value)
 
     def _on_row_double_click(self, index):
         entries = self.table_model.entries()

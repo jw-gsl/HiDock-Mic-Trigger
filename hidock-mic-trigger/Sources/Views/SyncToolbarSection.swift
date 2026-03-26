@@ -55,6 +55,12 @@ struct SyncToolbarSection: View {
                     Label("Transcribe All", systemImage: "text.bubble.fill")
                 }
                 .disabled(viewModel.transcriptionBusy)
+
+                Toggle("Speaker Labels", isOn: Binding(
+                    get: { viewModel.diarizeEnabled },
+                    set: { _ in viewModel.onToggleDiarize() }
+                ))
+                .toggleStyle(.checkbox)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
