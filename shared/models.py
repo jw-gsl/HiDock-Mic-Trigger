@@ -44,7 +44,7 @@ MODEL_REGISTRY = {
         "url": "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
         "size_mb": 2,
         "required": False,
-        "description": "Detects speech segments. Required for speaker labels.",
+        "description": "Industry-leading voice activity detection. Identifies speech segments with high accuracy.",
     },
     "speaker_embed": {
         "name": "Speaker Recognition (TitaNet)",
@@ -52,7 +52,7 @@ MODEL_REGISTRY = {
         "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx",
         "size_mb": 10,
         "required": False,
-        "description": "Identifies speakers by voice. Required for speaker labels.",
+        "description": "Neural speaker recognition trained on thousands of voices. Identifies who is speaking across recordings.",
     },
 }
 
@@ -131,9 +131,13 @@ def ensure_silero_vad() -> Path:
     return download_model_if_needed(SILERO_VAD_URL, SILERO_VAD_FILENAME)
 
 
-def ensure_speaker_embedding_model() -> Path:
+def ensure_speaker_embed() -> Path:
     """Ensure the TitaNet speaker embedding ONNX model is available locally."""
     return download_model_if_needed(SPEAKER_EMBED_URL, SPEAKER_EMBED_FILENAME)
+
+
+# Backward-compatible alias
+ensure_speaker_embedding_model = ensure_speaker_embed
 
 
 # ── Model Status & Management ───────────────────────────────────────────────
