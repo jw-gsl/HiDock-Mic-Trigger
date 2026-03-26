@@ -1,8 +1,8 @@
-"""Voice library management using MFCC-based speaker embeddings.
+"""Voice library management using speaker embeddings.
 
 Stores enrolled speaker embeddings as JSON for quick identification.
 Uses cosine similarity for matching and running-average merging for
-incremental enrollment.
+incremental enrollment. Supports both neural (TitaNet) and MFCC embeddings.
 """
 from __future__ import annotations
 
@@ -19,6 +19,35 @@ EMBEDDINGS_FILE = VOICE_LIBRARY_DIR / "embeddings.json"
 
 _EMBEDDING_DIM = 40
 _MODEL_VERSION = "mfcc-v1"
+
+# Neural embedding constants
+_NEURAL_EMBEDDING_DIM = 192
+_NEURAL_MODEL_VERSION = "titanet-small"
+
+
+def _get_speaker_embed_session():
+    """Try to load the TitaNet speaker embedding ONNX model.
+
+    Returns:
+        onnxruntime.InferenceSession or None if not available.
+    """
+    try:
+        from shared.models import MODELS_DIR, SPEAKER_EMBED_FILENAME
+
+        model_path = MODELS_DIR / SPEAKER_EMBED_FILENAME
+        if not model_path.exists():
+            return None
+
+        import onnxruntime as ort
+
+        return ort.InferenceSession(
+            str(model_path),
+            providers=["CPUExecutionProvider"],
+        )
+    except ImportError:
+        return None
+    except Exception:
+        return None
 
 
 def cosine_similarity(a: np.ndarray | list, b: np.ndarray | list) -> float:
@@ -78,8 +107,13 @@ def enroll_speaker(
 ) -> dict:
     """Enroll or update a speaker in the voice library.
 
-    If the speaker already exists, the new embedding is merged using a
-    running average weighted by sample count.
+    Uses neural TitaNet embeddings when the model is available,
+    otherwise falls back to MFCC. If the speaker already exists, the
+    new embedding is merged using a running average weighted by sample count.
+
+    Note: When upgrading from MFCC to neural embeddings, existing MFCC
+    entries are preserved but new enrollments will use the neural model.
+    The speaker will need to be re-enrolled to fully upgrade.
 
     Args:
         name: Speaker name.
@@ -98,25 +132,49 @@ def enroll_speaker(
         e = int((segment_end or len(audio) / sr) * sr)
         audio = audio[max(0, s) : min(len(audio), e)]
 
-    embedding = extract_embedding(audio, sr=16000, n_mfcc=_EMBEDDING_DIM)
+    # Try neural embeddings first
+    session = _get_speaker_embed_session()
+    if session is not None:
+        embedding = extract_embedding(audio, sr=16000, onnx_session=session)
+        embed_dim = len(embedding)
+        model_version = _NEURAL_MODEL_VERSION
+    else:
+        embedding = extract_embedding(audio, sr=16000, n_mfcc=_EMBEDDING_DIM)
+        embed_dim = _EMBEDDING_DIM
+        model_version = _MODEL_VERSION
 
     lib = load_library()
     now = datetime.now(timezone.utc).isoformat()
 
     if name in lib["speakers"]:
-        # Running average merge
         existing = lib["speakers"][name]
-        old_emb = np.array(existing["embedding"], dtype=np.float64)
-        old_count = existing.get("sample_count", 1)
-        new_emb = (old_emb * old_count + embedding.astype(np.float64)) / (old_count + 1)
-        existing["embedding"] = new_emb.tolist()
-        existing["sample_count"] = old_count + 1
-        existing["last_updated"] = now
+        old_model = existing.get("model", _MODEL_VERSION)
+
+        # If upgrading from MFCC to neural, replace the embedding entirely
+        if old_model != model_version:
+            existing["embedding"] = embedding.tolist()
+            existing["embedding_dim"] = embed_dim
+            existing["model"] = model_version
+            existing["sample_count"] = 1
+            existing["last_updated"] = now
+        else:
+            # Running average merge (same model type)
+            old_emb = np.array(existing["embedding"], dtype=np.float64)
+            old_count = existing.get("sample_count", 1)
+            new_emb = (old_emb * old_count + embedding.astype(np.float64)) / (old_count + 1)
+            # Re-normalize for neural embeddings
+            if model_version == _NEURAL_MODEL_VERSION:
+                norm = np.linalg.norm(new_emb)
+                if norm > 1e-10:
+                    new_emb = new_emb / norm
+            existing["embedding"] = new_emb.tolist()
+            existing["sample_count"] = old_count + 1
+            existing["last_updated"] = now
     else:
         lib["speakers"][name] = {
             "embedding": embedding.tolist(),
-            "embedding_dim": _EMBEDDING_DIM,
-            "model": _MODEL_VERSION,
+            "embedding_dim": embed_dim,
+            "model": model_version,
             "sample_count": 1,
             "enrolled_at": now,
             "last_updated": now,
@@ -132,6 +190,9 @@ def identify_speaker(
 ) -> tuple[str | None, float]:
     """Identify a speaker from the voice library by embedding similarity.
 
+    Only compares against speakers whose embeddings have the same dimension
+    (to avoid comparing neural vs MFCC embeddings).
+
     Args:
         embedding: Speaker embedding vector.
         threshold: Minimum cosine similarity to accept a match.
@@ -143,10 +204,17 @@ def identify_speaker(
     if not lib["speakers"]:
         return (None, 0.0)
 
+    embedding = np.asarray(embedding)
+    embed_dim = len(embedding)
+
     best_name = None
     best_score = -1.0
 
     for name, data in lib["speakers"].items():
+        stored_dim = data.get("embedding_dim", len(data["embedding"]))
+        # Only compare embeddings of the same dimension
+        if stored_dim != embed_dim:
+            continue
         score = cosine_similarity(embedding, data["embedding"])
         if score > best_score:
             best_score = score

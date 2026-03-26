@@ -1,11 +1,12 @@
-"""Lightweight speaker diarization using Silero VAD + MFCC embeddings.
+"""Lightweight speaker diarization using Silero VAD + speaker embeddings.
 
-Detects speech segments via Silero VAD (ONNX), extracts MFCC-based speaker
-embeddings, and clusters them with agglomerative clustering to assign
-speaker labels to whisper transcript segments.
+Detects speech segments via Silero VAD (ONNX), extracts speaker embeddings
+(neural TitaNet when available, MFCC fallback otherwise), and clusters them
+with agglomerative clustering to assign speaker labels to whisper transcript
+segments.
 
-No large neural embedding model required -- works with zero additional
-downloads beyond the ~2MB Silero VAD model.
+Neural embeddings require the TitaNet ONNX model (~10MB download).
+Falls back to MFCC automatically if the model is not available.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ _VAD_SR = 16000
 _VAD_WINDOW_SIZE = 512  # 32ms at 16kHz
 
 _vad_session = None
+_speaker_embed_session = None
 
 
 def load_vad_model():
@@ -45,6 +47,37 @@ def load_vad_model():
         providers=["CPUExecutionProvider"],
     )
     return _vad_session
+
+
+def _load_speaker_embed_model():
+    """Load the TitaNet speaker embedding ONNX model (cached after first call).
+
+    Returns:
+        onnxruntime.InferenceSession or None if not available.
+    """
+    global _speaker_embed_session
+    if _speaker_embed_session is not None:
+        return _speaker_embed_session
+
+    try:
+        from shared.models import MODELS_DIR, SPEAKER_EMBED_FILENAME
+
+        model_path = MODELS_DIR / SPEAKER_EMBED_FILENAME
+        if not model_path.exists():
+            return None
+
+        import onnxruntime as ort
+
+        _speaker_embed_session = ort.InferenceSession(
+            str(model_path),
+            providers=["CPUExecutionProvider"],
+        )
+        return _speaker_embed_session
+    except ImportError:
+        return None
+    except Exception as e:
+        print(f"Failed to load speaker embedding model: {e}", file=sys.stderr)
+        return None
 
 
 def detect_speech_segments(
@@ -144,7 +177,10 @@ def extract_speaker_embeddings(
     sr: int,
     segments: list[tuple[float, float]],
 ) -> np.ndarray:
-    """Extract MFCC-based speaker embeddings for each segment.
+    """Extract speaker embeddings for each segment.
+
+    Uses neural TitaNet embeddings when the model is available,
+    otherwise falls back to MFCC-based embeddings.
 
     Args:
         audio: Full audio array.
@@ -154,10 +190,17 @@ def extract_speaker_embeddings(
     Returns:
         Numpy array of shape (N, embedding_dim) where N = len(segments).
     """
+    # Try to load neural embedding model
+    speaker_session = _load_speaker_embed_model()
+    if speaker_session is not None:
+        print("  Using neural speaker embeddings (TitaNet)", file=sys.stderr)
+    else:
+        print("  Using MFCC speaker embeddings (fallback)", file=sys.stderr)
+
     chunks = segment_audio(audio, sr, segments)
     embeddings = []
     for chunk in chunks:
-        emb = extract_embedding(chunk, sr=sr)
+        emb = extract_embedding(chunk, sr=sr, onnx_session=speaker_session)
         embeddings.append(emb)
     return np.array(embeddings, dtype=np.float32)
 
@@ -184,6 +227,12 @@ def cluster_speakers(
         return []
     if n == 1:
         return [0]
+
+    # Adjust threshold for neural embeddings (unit-normalized, tighter clusters)
+    embed_dim = embeddings.shape[1]
+    if embed_dim >= 128 and distance_threshold == 1.2:
+        # Neural embeddings use cosine distance; tighter threshold works better
+        distance_threshold = 0.5
 
     # Compute linkage using cosine distance
     Z = linkage(embeddings, method="average", metric="cosine")

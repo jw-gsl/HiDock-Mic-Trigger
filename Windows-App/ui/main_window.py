@@ -142,6 +142,8 @@ class MainWindow(QMainWindow):
         actions_menu.addSeparator()
         voice_lib_act = actions_menu.addAction("Voice Library...")
         voice_lib_act.triggered.connect(self._show_voice_library)
+        model_mgr_act = actions_menu.addAction("Models...")
+        model_mgr_act.triggered.connect(self._show_model_manager)
 
         # Trigger menu
         trigger_menu = menubar.addMenu("Trigger")
@@ -409,6 +411,9 @@ class MainWindow(QMainWindow):
 
         footer_row.addStretch()
 
+        models_btn = QPushButton("Models")
+        models_btn.clicked.connect(self._show_model_manager)
+        footer_row.addWidget(models_btn)
         voice_lib_btn = QPushButton("Voice Library")
         voice_lib_btn.clicked.connect(self._show_voice_library)
         footer_row.addWidget(voice_lib_btn)
@@ -1565,6 +1570,11 @@ class MainWindow(QMainWindow):
     def _show_voice_library(self):
         from ui.voice_library_dialog import VoiceLibraryDialog
         dlg = VoiceLibraryDialog(self)
+        dlg.exec()
+
+    def _show_model_manager(self):
+        from ui.model_manager_dialog import ModelManagerDialog
+        dlg = ModelManagerDialog(self)
         dlg.exec()
 
     # ── Transcript Viewer ──────────────────────────────────────────────

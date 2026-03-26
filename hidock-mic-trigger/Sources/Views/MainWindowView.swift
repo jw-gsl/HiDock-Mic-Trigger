@@ -61,6 +61,15 @@ struct MainWindowView: View {
                 .controlSize(.small)
 
                 Button {
+                    viewModel.onShowModelManager()
+                } label: {
+                    Label("Models", systemImage: "square.and.arrow.down")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
                     viewModel.onShowVoiceLibrary()
                 } label: {
                     Label("Voice Library", systemImage: "person.2")

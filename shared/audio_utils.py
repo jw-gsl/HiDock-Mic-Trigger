@@ -1,7 +1,8 @@
-"""Audio loading and MFCC feature extraction.
+"""Audio loading, MFCC feature extraction, and neural speaker embeddings.
 
 Uses soundfile for audio I/O and a pure numpy/scipy MFCC implementation
-(no librosa dependency). Designed for speaker embedding extraction.
+(no librosa dependency). Optionally uses ONNX Runtime with the TitaNet
+model for high-quality neural speaker embeddings.
 """
 from __future__ import annotations
 
@@ -148,21 +149,72 @@ def extract_mfcc(
     return mfccs.T
 
 
-def extract_embedding(audio: np.ndarray, sr: int = 16000, n_mfcc: int = 40) -> np.ndarray:
+def extract_neural_embedding(
+    audio: np.ndarray,
+    sr: int,
+    session,  # onnxruntime.InferenceSession
+) -> np.ndarray:
+    """Extract a neural speaker embedding using the TitaNet ONNX model.
+
+    Args:
+        audio: 1-D float32 audio array at the given sample rate.
+        sr: Sample rate (should be 16000).
+        session: ONNX Runtime InferenceSession for the TitaNet model.
+
+    Returns:
+        1-D unit-normalized embedding vector (192-dim for TitaNet Small).
+    """
+    if len(audio) < 1600:
+        # Too short — pad to at least 100ms
+        audio = np.pad(audio, (0, 1600 - len(audio)))
+
+    # TitaNet expects: "audio_signal" shape (batch, samples) float32
+    audio_input = audio[np.newaxis, :].astype(np.float32)
+
+    # Get input/output names from the model
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+
+    outputs = session.run([output_name], {input_name: audio_input})
+    embedding = outputs[0].flatten().astype(np.float32)
+
+    # Normalize to unit length
+    norm = np.linalg.norm(embedding)
+    if norm > 1e-10:
+        embedding = embedding / norm
+
+    return embedding
+
+
+def extract_embedding(
+    audio: np.ndarray,
+    sr: int = 16000,
+    n_mfcc: int = 40,
+    onnx_session=None,
+) -> np.ndarray:
     """Extract a fixed-size speaker embedding from an audio segment.
 
-    Computes MFCCs and averages them across time to produce a single
-    embedding vector. Also appends the standard deviation for each
-    coefficient to capture speaker dynamics.
+    If an ONNX session is provided, uses the neural TitaNet model for
+    high-quality embeddings. Otherwise falls back to MFCC-based embeddings.
 
     Args:
         audio: 1-D float32 audio array.
         sr: Sample rate.
-        n_mfcc: Number of MFCC coefficients.
+        n_mfcc: Number of MFCC coefficients (used only for MFCC fallback).
+        onnx_session: Optional ONNX Runtime InferenceSession for neural embeddings.
 
     Returns:
-        1-D embedding vector of length n_mfcc (mean only, for compact storage).
+        1-D embedding vector. Dimension depends on the method used:
+        - Neural (TitaNet): 192-dim
+        - MFCC fallback: n_mfcc-dim (default 40)
     """
+    if onnx_session is not None:
+        try:
+            return extract_neural_embedding(audio, sr, onnx_session)
+        except Exception:
+            # Fall back to MFCC if neural inference fails
+            pass
+
     if len(audio) < 400:
         # Too short for meaningful features
         return np.zeros(n_mfcc, dtype=np.float32)

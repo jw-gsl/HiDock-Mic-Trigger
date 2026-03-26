@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04DBDCEC87C45FE3A518819A /* ModelManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95B0A8C5446AA42C053B684F /* ModelManagerView.swift */; };
 		0F10797C46358815E38F5F11 /* HelpersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31F45B509F970DE308F947FD /* HelpersTests.swift */; };
 		2DD3DE44A7801C45E36FFC37 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */; };
 		2FD3A01462FA0F2788F4C61A /* MicTriggerSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */; };
@@ -50,6 +51,7 @@
 		820C64D02A011DC869B43307 /* TranscriptViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptViewerView.swift; sourceTree = "<group>"; };
 		8CDAD4DE368D4BD1A70444DB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicTriggerSection.swift; sourceTree = "<group>"; };
+		95B0A8C5446AA42C053B684F /* ModelManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManagerView.swift; sourceTree = "<group>"; };
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
 		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -96,6 +98,7 @@
 			children = (
 				651E9570959AB1B72306DFE9 /* MainWindowView.swift */,
 				925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */,
+				95B0A8C5446AA42C053B684F /* ModelManagerView.swift */,
 				2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */,
 				22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */,
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
@@ -248,6 +251,7 @@
 				8F4F17F9FC81801F1A855275 /* HiDockViewModel.swift in Sources */,
 				9F88469E24E4E75401A1B681 /* MainWindowView.swift in Sources */,
 				2FD3A01462FA0F2788F4C61A /* MicTriggerSection.swift in Sources */,
+				04DBDCEC87C45FE3A518819A /* ModelManagerView.swift in Sources */,
 				F86651607F00054F72662894 /* Models.swift in Sources */,
 				7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,

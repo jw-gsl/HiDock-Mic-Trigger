@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncWindow: NSWindow?
     private var transcriptViewerWindow: NSWindow?
     private var voiceLibraryWindow: NSWindow?
+    private var modelManagerWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -325,6 +326,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.openTranscriptViewer(transcriptMdPath: path)
         }
         viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
+        viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
+        viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
+        viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
+        viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
@@ -692,6 +697,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let voiceLibraryItem = NSMenuItem(title: "Voice Library...", action: #selector(openVoiceLibraryMenu), keyEquivalent: "")
         voiceLibraryItem.target = self
         menu.addItem(voiceLibraryItem)
+        let modelManagerItem = NSMenuItem(title: "Models...", action: #selector(openModelManagerMenu), keyEquivalent: "")
+        modelManagerItem.target = self
+        menu.addItem(modelManagerItem)
         let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
         feedbackItem.target = self
         menu.addItem(feedbackItem)
@@ -1905,6 +1913,182 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log("Renamed speaker '\(oldName)' to '\(newName)' in voice library")
         } catch {
             log("Failed to rename speaker '\(oldName)': \(error)")
+        }
+    }
+
+    // MARK: - Model Manager
+
+    @objc private func openModelManagerMenu() {
+        openModelManager()
+    }
+
+    private func openModelManager() {
+        refreshModelStatuses()
+
+        let managerView = ModelManagerView(viewModel: viewModel)
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Models"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 480, height: 300)
+        win.contentView = NSHostingView(rootView: managerView)
+
+        modelManagerWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func modelsScriptPath() -> String {
+        let sharedDir: String
+        if let root = bundledResourcesRoot {
+            sharedDir = "\(root)/shared"
+        } else {
+            sharedDir = "\(repoRoot)/shared"
+        }
+        return "\(sharedDir)/models.py"
+    }
+
+    private func modelsPythonPath() -> String {
+        // Reuse the same Python discovery as voice library
+        return voiceLibraryPythonPath()
+    }
+
+    private func refreshModelStatuses() {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+
+        guard FileManager.default.fileExists(atPath: scriptPath) else {
+            log("Models script not found at \(scriptPath)")
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "status"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        var statuses: [String: ModelStatus] = [:]
+                        for (key, info) in parsed {
+                            statuses[key] = ModelStatus(
+                                id: key,
+                                name: info["name"] as? String ?? key,
+                                description: info["description"] as? String ?? "",
+                                sizeMB: info["size_mb"] as? Int ?? 0,
+                                installed: info["installed"] as? Bool ?? false
+                            )
+                        }
+                        self.viewModel.modelStatuses = statuses
+                    }
+                }
+            } catch {
+                self?.log("Failed to get model statuses: \(error)")
+            }
+        }
+    }
+
+    private func downloadModelByKey(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+
+        // Mark as downloading
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.modelStatuses[key]?.downloading = true
+            self?.viewModel.modelStatuses[key]?.progress = 0
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "download", key]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+
+            // Read stderr for progress updates
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
+                // Parse percentage from lines like "  42%"
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let pctStr = trimmed.components(separatedBy: "%").first?.trimmingCharacters(in: .whitespaces),
+                   let pct = Double(pctStr) {
+                    DispatchQueue.main.async {
+                        self?.viewModel.modelStatuses[key]?.progress = pct / 100.0
+                    }
+                }
+            }
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                errPipe.fileHandleForReading.readabilityHandler = nil
+
+                DispatchQueue.main.async {
+                    self?.viewModel.modelStatuses[key]?.downloading = false
+                    if process.terminationStatus == 0 {
+                        self?.viewModel.modelStatuses[key]?.installed = true
+                        self?.viewModel.modelStatuses[key]?.progress = 1.0
+                        // Also update modelReady if whisper was downloaded
+                        if key == "whisper" {
+                            self?.viewModel.modelReady = true
+                        }
+                    }
+                    self?.refreshModelStatuses()
+                }
+            } catch {
+                self?.log("Failed to download model \(key): \(error)")
+                DispatchQueue.main.async {
+                    self?.viewModel.modelStatuses[key]?.downloading = false
+                }
+            }
+        }
+    }
+
+    private func deleteModelByKey(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "delete", key]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                DispatchQueue.main.async {
+                    self?.viewModel.modelStatuses[key]?.installed = false
+                    if key == "whisper" {
+                        self?.viewModel.modelReady = false
+                    }
+                    self?.refreshModelStatuses()
+                }
+            } catch {
+                self?.log("Failed to delete model \(key): \(error)")
+            }
         }
     }
 

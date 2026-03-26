@@ -128,6 +128,13 @@ final class HiDockViewModel: ObservableObject {
     var onCancelModelDownload: () -> Void = {}
     var onCompleteOnboarding: () -> Void = {}
 
+    // MARK: - Model Manager
+    @Published var modelStatuses: [String: ModelStatus] = [:]
+    var onDownloadModelByKey: (String) -> Void = { _ in }
+    var onDeleteModelByKey: (String) -> Void = { _ in }
+    var onRefreshModelStatuses: () -> Void = {}
+    var onShowModelManager: () -> Void = {}
+
     // MARK: - Update Status
     @Published var updateStatusText: String = ""
 
