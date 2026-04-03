@@ -4,7 +4,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from shared.audio_utils import extract_embedding, extract_mfcc, load_audio, segment_audio
 

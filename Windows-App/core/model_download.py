@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import ssl
 import urllib.request
-from pathlib import Path
 from typing import Callable
 
-from core.config import MODELS_DIR, WHISPER_MODEL_FILENAME, WHISPER_MODEL_URL, whisper_model_path
+from core.config import MODELS_DIR, WHISPER_MODEL_URL, whisper_model_path
 
 
 def _create_ssl_context() -> ssl.SSLContext:

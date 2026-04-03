@@ -114,8 +114,7 @@ class MicTrigger:
         indicates the mic is capturing audio.
         """
         try:
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+            from pycaw.pycaw import AudioUtilities
 
             devices = AudioUtilities.GetAllDevices()
             for device in devices:

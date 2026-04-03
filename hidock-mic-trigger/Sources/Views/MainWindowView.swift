@@ -30,6 +30,39 @@ struct MainWindowView: View {
 
                 Menu {
                     Button {
+                        viewModel.onToggleNotifyTranscription()
+                    } label: {
+                        Label(
+                            "Transcription Complete",
+                            systemImage: viewModel.notifyTranscriptionComplete ? "checkmark.circle.fill" : "circle"
+                        )
+                    }
+                    Button {
+                        viewModel.onToggleNotifyDownload()
+                    } label: {
+                        Label(
+                            "Download Complete",
+                            systemImage: viewModel.notifyDownloadComplete ? "checkmark.circle.fill" : "circle"
+                        )
+                    }
+                    Button {
+                        viewModel.onToggleNotifyMicChanges()
+                    } label: {
+                        Label(
+                            "Mic Changes",
+                            systemImage: viewModel.notifyMicChanges ? "checkmark.circle.fill" : "circle"
+                        )
+                    }
+                } label: {
+                    Label("Notifications", systemImage: "bell")
+                        .font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Notification preferences")
+
+                Menu {
+                    Button {
                         viewModel.onSetAppearance("auto")
                     } label: {
                         Label("Auto (System)", systemImage: "circle.lefthalf.filled")

@@ -146,6 +146,14 @@ final class HiDockViewModel: ObservableObject {
     var onRefreshModelStatuses: () -> Void = {}
     var onShowModelManager: () -> Void = {}
 
+    // MARK: - Notification Preferences
+    @Published var notifyTranscriptionComplete: Bool = true
+    @Published var notifyDownloadComplete: Bool = true
+    @Published var notifyMicChanges: Bool = true
+    var onToggleNotifyTranscription: () -> Void = {}
+    var onToggleNotifyDownload: () -> Void = {}
+    var onToggleNotifyMicChanges: () -> Void = {}
+
     // MARK: - Update Status
     @Published var updateStatusText: String = ""
 

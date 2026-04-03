@@ -17,19 +17,16 @@ after the fact.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import logging.handlers
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Import everything we need from the extractor module in the same directory.
 from extractor import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_STATE_PATH,
-    HiDockProtocolError,
     download_one,
     find_device,
     load_config,
@@ -39,7 +36,6 @@ from extractor import (
     query_file_list,
     release_device,
     resolved_output_dir,
-    save_state,
 )
 
 BASE_DIR = Path(__file__).resolve().parent

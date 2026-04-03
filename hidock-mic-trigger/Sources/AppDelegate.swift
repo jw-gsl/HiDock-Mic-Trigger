@@ -70,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let syncHideDownloadedKey = "hidockSyncHideDownloaded"
     private let syncAutoDownloadKey = "hidockSyncAutoDownload"
     private let hasCompletedOnboardingKey = "hasCompletedOnboarding"
+    private let notifyTranscriptionKey = "notifyTranscriptionComplete"
+    private let notifyDownloadKey = "notifyDownloadComplete"
+    private let notifyMicChangesKey = "notifyMicChanges"
 
     /// Repo root resolved from UserDefaults, falling back to the default home directory path.
     private var repoRoot: String {
@@ -263,12 +266,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
+        let userInfo = response.notification.request.content.userInfo
+        let categoryId = response.notification.request.content.categoryIdentifier
+
         if response.actionIdentifier == Self.micSwitchActionID {
             DispatchQueue.main.async { [weak self] in
                 self?.showSyncWindow()
             }
+        } else if response.actionIdentifier == Self.openTranscriptActionID {
+            if let path = userInfo["transcriptPath"] as? String {
+                DispatchQueue.main.async { [weak self] in
+                    self?.openTranscriptViewer(transcriptMdPath: path)
+                }
+            }
+        } else if response.actionIdentifier == Self.revealTranscriptActionID {
+            if let path = userInfo["transcriptPath"] as? String {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
+        } else if categoryId == Self.transcriptionCategoryID && response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            // Clicking the notification body opens the transcript
+            if let path = userInfo["transcriptPath"] as? String {
+                DispatchQueue.main.async { [weak self] in
+                    self?.openTranscriptViewer(transcriptMdPath: path)
+                }
+            }
         } else if response.actionIdentifier == UpdateChecker.updateActionID ||
-                    response.notification.request.content.categoryIdentifier == UpdateChecker.updateCategoryID {
+                    categoryId == UpdateChecker.updateCategoryID {
             if let urlString = UserDefaults.standard.string(forKey: UpdateChecker.updateURLKey),
                let url = URL(string: urlString) {
                 NSWorkspace.shared.open(url)
@@ -355,6 +378,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
 
+        // Notification preferences (default to true if not set)
+        viewModel.notifyTranscriptionComplete = UserDefaults.standard.object(forKey: notifyTranscriptionKey) == nil || UserDefaults.standard.bool(forKey: notifyTranscriptionKey)
+        viewModel.notifyDownloadComplete = UserDefaults.standard.object(forKey: notifyDownloadKey) == nil || UserDefaults.standard.bool(forKey: notifyDownloadKey)
+        viewModel.notifyMicChanges = UserDefaults.standard.object(forKey: notifyMicChangesKey) == nil || UserDefaults.standard.bool(forKey: notifyMicChangesKey)
+        viewModel.onToggleNotifyTranscription = { [weak self] in
+            guard let self = self else { return }
+            let newVal = !self.viewModel.notifyTranscriptionComplete
+            UserDefaults.standard.set(newVal, forKey: self.notifyTranscriptionKey)
+            self.viewModel.notifyTranscriptionComplete = newVal
+        }
+        viewModel.onToggleNotifyDownload = { [weak self] in
+            guard let self = self else { return }
+            let newVal = !self.viewModel.notifyDownloadComplete
+            UserDefaults.standard.set(newVal, forKey: self.notifyDownloadKey)
+            self.viewModel.notifyDownloadComplete = newVal
+        }
+        viewModel.onToggleNotifyMicChanges = { [weak self] in
+            guard let self = self else { return }
+            let newVal = !self.viewModel.notifyMicChanges
+            UserDefaults.standard.set(newVal, forKey: self.notifyMicChangesKey)
+            self.viewModel.notifyMicChanges = newVal
+        }
+
         // Appearance
         let currentMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
         viewModel.appearanceMode = currentMode
@@ -435,7 +481,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func postSyncDownloadNotification(title: String, body: String) {
+        guard UserDefaults.standard.object(forKey: notifyDownloadKey) == nil || UserDefaults.standard.bool(forKey: notifyDownloadKey) else { return }
         postNotification(title: title, body: body)
+    }
+
+    private func postTranscriptionNotification(title: String, body: String, transcriptPath: String? = nil) {
+        guard UserDefaults.standard.object(forKey: notifyTranscriptionKey) == nil || UserDefaults.standard.bool(forKey: notifyTranscriptionKey) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = Self.transcriptionCategoryID
+        if let path = transcriptPath {
+            content.userInfo["transcriptPath"] = path
+        }
+        let request = UNNotificationRequest(identifier: "transcription-\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - CLI output monitoring
@@ -648,14 +709,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private static let micSwitchCategoryID = "MIC_SWITCH"
     private static let micSwitchActionID = "OPEN_MIC_MENU"
+    private static let transcriptionCategoryID = "TRANSCRIPTION_COMPLETE"
+    private static let openTranscriptActionID = "OPEN_TRANSCRIPT"
+    private static let revealTranscriptActionID = "REVEAL_TRANSCRIPT"
 
     private func registerNotificationCategories() {
-        let openAction = UNNotificationAction(identifier: Self.micSwitchActionID, title: "Open Mic Settings", options: .foreground)
-        let category = UNNotificationCategory(identifier: Self.micSwitchCategoryID, actions: [openAction], intentIdentifiers: [])
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+        let openMicAction = UNNotificationAction(identifier: Self.micSwitchActionID, title: "Open Mic Settings", options: .foreground)
+        let micCategory = UNNotificationCategory(identifier: Self.micSwitchCategoryID, actions: [openMicAction], intentIdentifiers: [])
+
+        let openTranscriptAction = UNNotificationAction(identifier: Self.openTranscriptActionID, title: "Open Transcript", options: .foreground)
+        let revealTranscriptAction = UNNotificationAction(identifier: Self.revealTranscriptActionID, title: "Show in Finder", options: .foreground)
+        let transcriptionCategory = UNNotificationCategory(identifier: Self.transcriptionCategoryID, actions: [openTranscriptAction, revealTranscriptAction], intentIdentifiers: [])
+
+        UNUserNotificationCenter.current().setNotificationCategories([micCategory, transcriptionCategory])
     }
 
     private func postMicChangeNotification(title: String, body: String, micName: String) {
+        guard UserDefaults.standard.object(forKey: notifyMicChangesKey) == nil || UserDefaults.standard.bool(forKey: notifyMicChangesKey) else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -2868,7 +2938,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if case .success(let data) = result,
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let succeeded = json["succeeded"] as? Int, succeeded > 0 {
-                        self.postNotification(title: "📝 Transcription Complete", body: "\(succeeded) new recording\(succeeded == 1 ? "" : "s") transcribed.")
+                        let transcriptFolder = self.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+                        self.postTranscriptionNotification(
+                            title: "📝 Transcription Complete",
+                            body: "\(succeeded) new recording\(succeeded == 1 ? "" : "s") transcribed.",
+                            transcriptPath: transcriptFolder
+                        )
                     }
                     self.refreshTranscriptionState()
                     self.syncViewModelState()
@@ -3143,7 +3218,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let transcribed = json["transcribed"] as? Bool, transcribed {
                     let duration = json["duration_s"] as? Double ?? 0
-                    self.postNotification(title: "📝 Transcription Complete", body: "\(filename) transcribed in \(Int(duration))s")
+                    let transcriptPath = json["transcript_path"] as? String
+                    self.postTranscriptionNotification(
+                        title: "📝 Transcription Complete",
+                        body: "\(filename) transcribed in \(Int(duration))s",
+                        transcriptPath: transcriptPath
+                    )
                     self.viewModel.syncStatus = "Transcription complete"
                     self.viewModel.syncStatusLevel = .success
                 } else {
@@ -3260,7 +3340,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             transcriptionCurrentFile = nil
             transcriptionProgress = 0
             let body = "\(paths.count) recordings transcribed."
-            postNotification(title: "📝 Transcription Complete", body: body)
+            // For batch, point to the transcript folder
+            let transcriptFolder = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+            postTranscriptionNotification(title: "📝 Transcription Complete", body: body, transcriptPath: transcriptFolder)
             viewModel.syncStatus = "Batch transcription complete"
             viewModel.syncStatusLevel = .success
             refreshTranscriptionState()

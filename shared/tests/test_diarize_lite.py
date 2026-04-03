@@ -1,10 +1,9 @@
 """Tests for shared.diarize_lite — clustering and diarization output format."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
-import pytest
 
 from shared.diarize_lite import (
     _assign_speakers_to_whisper_segments,

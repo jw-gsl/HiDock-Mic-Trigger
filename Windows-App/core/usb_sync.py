@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.config import EXTRACTOR_DIR, EXTRACTOR_PYTHON, EXTRACTOR_SCRIPT

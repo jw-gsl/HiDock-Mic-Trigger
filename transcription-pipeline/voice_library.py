@@ -231,7 +231,7 @@ def main():
     p_identify = sub.add_parser("identify", help="Identify a speaker")
     p_identify.add_argument("audio", help="Path to audio segment")
 
-    p_list = sub.add_parser("list", help="List enrolled speakers")
+    sub.add_parser("list", help="List enrolled speakers")
 
     args = parser.parse_args()
 

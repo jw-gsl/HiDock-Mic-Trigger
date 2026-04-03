@@ -12,7 +12,6 @@ Layout (top to bottom):
 """
 from __future__ import annotations
 
-import json
 import os
 import platform
 import subprocess
@@ -24,17 +23,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 from PyQt6.QtCore import QSettings, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
-    QHeaderView,
-    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -79,6 +75,7 @@ class MainWindow(QMainWindow):
         self._sync_busy = False
         self._transcribe_after_download = False
         self._trigger_start_time: float | None = None
+        self._last_transcript_path: str | None = None
 
         self._init_menu_bar()
         self._init_ui()
@@ -162,6 +159,37 @@ class MainWindow(QMainWindow):
         feedback_act.triggered.connect(self._send_feedback)
         history_act = help_menu.addAction("My Feedback")
         history_act.triggered.connect(self._show_feedback_history)
+        help_menu.addSeparator()
+
+        # Notifications submenu
+        notif_menu = help_menu.addMenu("Notifications")
+        self._notif_transcription_act = QAction("Transcription Complete", self, checkable=True)
+        self._notif_transcription_act.setChecked(
+            self.settings.value("notifyTranscription", True, type=bool)
+        )
+        self._notif_transcription_act.triggered.connect(
+            lambda checked: self.settings.setValue("notifyTranscription", checked)
+        )
+        notif_menu.addAction(self._notif_transcription_act)
+
+        self._notif_download_act = QAction("Download Complete", self, checkable=True)
+        self._notif_download_act.setChecked(
+            self.settings.value("notifyDownload", True, type=bool)
+        )
+        self._notif_download_act.triggered.connect(
+            lambda checked: self.settings.setValue("notifyDownload", checked)
+        )
+        notif_menu.addAction(self._notif_download_act)
+
+        self._notif_mic_act = QAction("Mic Changes", self, checkable=True)
+        self._notif_mic_act.setChecked(
+            self.settings.value("notifyMicChanges", True, type=bool)
+        )
+        self._notif_mic_act.triggered.connect(
+            lambda checked: self.settings.setValue("notifyMicChanges", checked)
+        )
+        notif_menu.addAction(self._notif_mic_act)
+
         help_menu.addSeparator()
 
         # Appearance submenu
@@ -564,7 +592,6 @@ class MainWindow(QMainWindow):
     # ── Settings ────────────────────────────────────────────────────────
 
     def _load_settings(self):
-        mic = self.settings.value("triggerMicName", "")
         auto_start = self.settings.value("autoStartTrigger", False, type=bool)
         self.auto_start_check.setChecked(auto_start)
 
@@ -964,8 +991,14 @@ class MainWindow(QMainWindow):
                     self._log_signal.emit(f"Error transcribing {mp3_path.name}: {e}")
 
             succeeded = sum(1 for r in results if r.get("transcribed"))
+            transcript_paths = [r["transcript_path"] for r in results if r.get("transcribed") and r.get("transcript_path")]
             self._sync_complete_signal.emit(
-                {"_transcription_done": True, "succeeded": succeeded, "total": len(targets)},
+                {
+                    "_transcription_done": True,
+                    "succeeded": succeeded,
+                    "total": len(targets),
+                    "transcript_paths": transcript_paths,
+                },
                 None,
             )
 
@@ -986,18 +1019,43 @@ class MainWindow(QMainWindow):
         self.cancel_transcription_btn.setVisible(False)
         succeeded = data.get("succeeded", 0)
         total = data.get("total", 0)
+        transcript_paths = data.get("transcript_paths", [])
         self.statusBar().showMessage(f"Transcribed {succeeded}/{total} files", 5000)
         self._hide_progress()
         self._refresh_transcription_state()
         self._update_table()
-        # Tray notification
-        if self._tray_icon:
+
+        # Store last transcript path for click-to-open from tray notification
+        if transcript_paths:
+            self._last_transcript_path = transcript_paths[-1]
+        elif str(RAW_TRANSCRIPTS_DIR) and RAW_TRANSCRIPTS_DIR.exists():
+            self._last_transcript_path = str(RAW_TRANSCRIPTS_DIR)
+
+        # Tray notification (respects user preference)
+        if self._tray_icon and self.settings.value("notifyTranscription", True, type=bool):
+            body = f"Transcribed {succeeded}/{total} files"
+            if succeeded == 1 and transcript_paths:
+                body += "\nClick to open transcript"
+            elif succeeded > 1:
+                body += "\nClick to open transcript folder"
             self._tray_icon.showMessage(
                 "Transcription Complete",
-                f"Transcribed {succeeded}/{total} files",
+                body,
                 QSystemTrayIcon.MessageIcon.Information,
-                3000,
+                5000,
             )
+
+    def _on_tray_notification_clicked(self):
+        """Handle click on tray notification — opens the last completed transcript."""
+        path = self._last_transcript_path
+        if not path:
+            return
+        if os.path.isfile(path) or os.path.isdir(path):
+            if platform.system() == "Windows":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+        self._last_transcript_path = None
 
     def _on_hide_downloaded_changed(self, state):
         self.settings.setValue("hideDownloaded", state == Qt.CheckState.Checked.value)
@@ -1205,7 +1263,7 @@ class MainWindow(QMainWindow):
 
         restart_btn = msg.addButton("Restart && Update", QMessageBox.ButtonRole.AcceptRole)
         quit_btn = msg.addButton("Update on Quit", QMessageBox.ButtonRole.ActionRole)
-        skip_btn = msg.addButton("Skip this version", QMessageBox.ButtonRole.RejectRole)
+        msg.addButton("Skip this version", QMessageBox.ButtonRole.RejectRole)
 
         msg.exec()
         clicked = msg.clickedButton()
@@ -1410,7 +1468,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Sending feedback...")
 
         def _worker():
-            import urllib.request, ssl
+            import urllib.request
+            import ssl
             try:
                 import certifi
                 ctx = ssl.create_default_context(cafile=certifi.where())
@@ -1478,7 +1537,7 @@ class MainWindow(QMainWindow):
     def _show_feedback_history(self):
         from PyQt6.QtWidgets import (
             QDialog, QLineEdit, QListWidget, QListWidgetItem,
-            QSplitter, QTextEdit,
+            QTextEdit,
         )
 
         history = self._load_feedback_history()
