@@ -88,7 +88,7 @@ Windows-App/
 
 | macOS (primary) | Windows (this port) |
 |-----------------|---------------------|
-| `hidock-mic-trigger/` — Swift/AppKit menu bar app | `Windows-App/` — Python/PyQt6 desktop app |
+| `hidock-mic-trigger/` — Swift/AppKit desktop app | `Windows-App/` — Python/PyQt6 desktop app |
 | `usb-extractor/` — Python USB extractor | `Windows-Script/` — Windows-adapted USB extractor |
 | `transcription-pipeline/` — whisper.cpp via `transcribe_cpp.py` | `core/transcription.py` — whisper.cpp via pywhispercpp |
 | `mic-trigger/` — Swift CLI, CoreAudio | `core/mic_trigger.py` — Python, WASAPI |

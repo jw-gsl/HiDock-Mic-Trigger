@@ -15,11 +15,11 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 
 | Folder | Platform | Description |
 |---|---|---|
-| `hidock-mic-trigger/` | macOS | Menu bar app — unified UI for mic trigger, USB sync, and transcription |
+| `hidock-mic-trigger/` | macOS | Desktop app (Swift/AppKit) — unified UI for mic trigger, USB sync, and transcription |
 | `mic-trigger/` | macOS | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
 | `usb-extractor/` | macOS | Python USB extractor that downloads recordings directly from HiDock over USB |
 | `transcription-pipeline/` | macOS | Transcription pipeline — whisper.cpp (bundled) or OpenAI Whisper on MPS (dev) |
-| `Windows-App/` | Windows | PyQt6 desktop app — Windows port of the macOS menu bar app |
+| `Windows-App/` | Windows | Desktop app (PyQt6) — Windows port of the macOS app |
 | `Windows-Script/` | Windows | Python USB extractor and background watcher for Windows |
 
 > **macOS is the primary development platform.** The Windows app is a secondary port. See [Windows-App/PORTING.md](Windows-App/PORTING.md) for the porting workflow.
@@ -30,7 +30,7 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 2. **USB Sync** — pairs with one or more HiDock devices over USB and downloads recordings as MP3 files to a local folder.
 3. **Transcription** — runs Whisper `large-v3-turbo` (via whisper.cpp) to transcribe downloaded recordings to Markdown files. The ~550 MB model is downloaded on first use.
 
-All three are controlled from a single menu bar app with a unified window.
+All three are controlled from a single desktop app with menu bar integration (macOS) or system tray (Windows).
 
 ## Prerequisites
 
@@ -44,7 +44,7 @@ All three are controlled from a single menu bar app with a unified window.
 
 ## Quick start
 
-### 1. Build the menu bar app
+### 1. Build the macOS app
 
 ```bash
 cd hidock-mic-trigger
