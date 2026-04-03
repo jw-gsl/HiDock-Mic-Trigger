@@ -11,12 +11,10 @@ Falls back to MFCC automatically if the model is not available.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.spatial.distance import cosine
 
 from shared.audio_utils import extract_embedding, load_audio, segment_audio
 from shared.models import ensure_silero_vad
@@ -245,7 +243,7 @@ def cluster_speakers(
             labels = fcluster(Z, t=max_speakers, criterion="maxclust")
 
     # Convert to 0-indexed
-    labels = [int(l) - 1 for l in labels]
+    labels = [int(lbl) - 1 for lbl in labels]
     return labels
 
 

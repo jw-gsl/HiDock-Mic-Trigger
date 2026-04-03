@@ -1,7 +1,5 @@
 """Tests for pure functions in voice_library.py — cosine_similarity and embeddings I/O."""
-import json
 
-import numpy as np
 
 
 class TestCosineSimilarity:
@@ -23,7 +21,7 @@ class TestCosineSimilarity:
 
 class TestEmbeddingsIO:
     def test_load_missing_returns_empty(self, monkeypatch):
-        from voice_library import _load_embeddings, EMBEDDINGS_PATH
+        from voice_library import _load_embeddings
         # EMBEDDINGS_PATH won't exist in tmp_path → should return {}
         assert _load_embeddings() == {}
 
@@ -47,4 +45,4 @@ class TestEmbeddingsIO:
         assert vl._load_embeddings() == {}
 
 
-import pytest
+import pytest  # noqa: E402

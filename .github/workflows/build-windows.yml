@@ -42,7 +42,6 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v
-        continue-on-error: true
 
       - name: Build HiDock.exe
         run: pyinstaller hidock.spec --noconfirm

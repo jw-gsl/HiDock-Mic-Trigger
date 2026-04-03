@@ -1,7 +1,6 @@
 """Unit tests for extractor.py pure functions."""
 from __future__ import annotations
 
-import json
 import struct
 from pathlib import Path
 

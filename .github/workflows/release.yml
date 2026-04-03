@@ -9,7 +9,11 @@ on:
         type: string
 
 jobs:
+  run-tests:
+    uses: ./.github/workflows/test.yml
+
   build-windows:
+    needs: [run-tests]
     runs-on: windows-latest
     defaults:
       run:
@@ -38,6 +42,7 @@ jobs:
           path: Windows-App/dist/HiDock.exe
 
   build-macos:
+    needs: [run-tests]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

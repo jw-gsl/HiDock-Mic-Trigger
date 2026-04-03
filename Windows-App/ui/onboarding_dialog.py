@@ -344,8 +344,9 @@ class OnboardingDialog(QDialog):
                     on_complete=_on_complete,
                     on_error=_on_error,
                 )
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_model_error(str(e)))
+            except Exception as exc:
+                err_msg = str(exc)
+                QTimer.singleShot(0, lambda: self._on_model_error(err_msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 

@@ -1,8 +1,6 @@
 """Tests for transcribe.py — CLI argument parsing and progress protocol."""
 import argparse
-import sys
 
-import config
 
 
 class TestCliParsing:

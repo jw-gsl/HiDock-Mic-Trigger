@@ -122,6 +122,9 @@ def main():
         lambda reason: window.show() if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None
     )
 
+    # Click on tray notification opens the last transcript
+    tray_icon.messageClicked.connect(window._on_tray_notification_clicked)
+
     sys.exit(app.exec())
 
 

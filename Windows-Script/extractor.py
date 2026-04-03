@@ -611,7 +611,6 @@ def transfer_file_stream(
     request_id: int = 6,
     timeout_ms: int = 5000,
 ) -> bytes:
-    payload = build_name_only_payload(filename)
     out_path = Path(tempfile.gettempdir()) / output_name_for(filename)
     written = transfer_file_stream_to_path(
         dev,

@@ -17,15 +17,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from core.config import (
-    MODELS_DIR,
+from core.config import (  # noqa: E402
     RAW_TRANSCRIPTS_DIR,
     WHISPER_LANGUAGE,
     WHISPER_MODEL,
     whisper_model_path,
     whisper_model_ready,
 )
-from core.state import load_state, save_state
+from core.state import load_state, save_state  # noqa: E402
 
 # Cached model instance
 _model = None

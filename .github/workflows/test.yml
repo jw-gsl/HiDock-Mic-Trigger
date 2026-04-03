@@ -1,12 +1,13 @@
-name: Python Tests
+name: Tests
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 jobs:
-  usb-extractor:
+  python-usb-extractor:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,7 +20,7 @@ jobs:
       - run: pip install pytest numpy
       - run: python -m pytest tests/ -v
 
-  transcription-pipeline:
+  python-transcription-pipeline:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,7 +33,7 @@ jobs:
       - run: pip install pytest numpy
       - run: python -m pytest tests/ -v
 
-  windows-app-core:
+  python-windows-app:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -44,3 +45,45 @@ jobs:
           python-version: "3.11"
       - run: pip install pytest numpy
       - run: python -m pytest tests/ -v
+
+  python-shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest numpy scipy soundfile mutagen
+      - run: python -m pytest shared/tests/ -v
+
+  swift-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: |
+          cd hidock-mic-trigger
+          xcodegen generate
+      - name: Run Swift tests
+        run: |
+          cd hidock-mic-trigger
+          xcodebuild test \
+            -project hidock-mic-trigger.xcodeproj \
+            -scheme hidock-mic-trigger \
+            -configuration Debug \
+            -derivedDataPath /tmp/hidock-test \
+            -arch arm64 \
+            -destination 'platform=macOS'
+
+  lint-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - name: Lint Python code
+        run: ruff check --select E,F,W --ignore E501 .
