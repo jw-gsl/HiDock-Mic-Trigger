@@ -25,11 +25,11 @@
 - `build-macos.yml` — builds self-contained .app on push to `main`
 - `build-windows.yml` — builds HiDock.exe on push to `main`
 - `release.yml` — manual trigger to create a GitHub Release with both platform builds
-- `test.yml` — Python tests on push to `main` and PRs
+- `test.yml` — Python tests, Swift tests, and linting on push to `main` and PRs
 
-## Build & Deploy (macOS Menu Bar App)
+## Build & Deploy (macOS App)
 
-The main app is `hidock-mic-trigger/` — a Swift menu bar app built with XcodeGen.
+The main app is `hidock-mic-trigger/` — a Swift desktop app with menu bar integration, built with XcodeGen.
 
 ### Build
 
@@ -80,7 +80,7 @@ After building, you MUST complete these steps to avoid stale app copies running:
 
 ## Project Structure
 
-- `hidock-mic-trigger/` — macOS menu bar app (Swift, Xcode). Unified UI for mic trigger, USB sync, transcription.
+- `hidock-mic-trigger/` — macOS desktop app (Swift, Xcode) with menu bar presence. Unified UI for mic trigger, USB sync, transcription.
 - `mic-trigger/` — Swift CLI that watches USB mic and keeps HiDock input open via ffmpeg.
 - `usb-extractor/` — Python USB extractor for downloading recordings from HiDock.
 - `transcription-pipeline/` — Python transcription pipeline using OpenAI Whisper with Apple MPS acceleration.

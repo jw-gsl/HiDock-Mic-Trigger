@@ -1,6 +1,6 @@
 """HiDock Tools — Windows desktop application.
 
-This is a Python/PyQt6 port of the macOS hidock-mic-trigger menu bar app.
+Python/PyQt6 port of the macOS hidock-mic-trigger app.
 See README.md for setup and PORTING.md for the macOS -> Windows workflow.
 """
 from __future__ import annotations

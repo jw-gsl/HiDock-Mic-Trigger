@@ -1368,7 +1368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.alertStyle = .informational
         alert.messageText = "HiDock Mic Trigger"
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        alert.informativeText = "Menu bar app for controlling the HiDock mic trigger CLI.\nVersion \(version)"
+        alert.informativeText = "Desktop app for HiDock USB docking stations.\nMic trigger, USB sync, and transcription.\nVersion \(version)"
         alert.runModal()
     }
 

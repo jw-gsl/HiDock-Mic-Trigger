@@ -113,7 +113,7 @@ Plain text transcript saved as `<recording-name>.md`.
 
 ## Integration
 
-The menu bar app (`hidock-mic-trigger`) calls this pipeline via subprocess:
+The desktop app (`hidock-mic-trigger`) calls this pipeline via subprocess:
 - `transcribe.py transcribe <path>` (dev) or `transcribe_cpp.py transcribe <path>` (bundled)
 - `transcribe.py transcribe-batch` for batch processing
 - `transcribe.py status` to refresh the UI table

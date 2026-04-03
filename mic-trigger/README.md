@@ -39,5 +39,5 @@ swiftc MicTrigger.swift -o hidock-mic-trigger
 
 ## Notes
 
-- Output is line-buffered (`setlinebuf(stdout)`) for reliable piping to the menu bar app
-- The CLI is typically launched and managed by the `hidock-mic-trigger` menu bar app rather than run standalone
+- Output is line-buffered (`setlinebuf(stdout)`) for reliable piping to the desktop app
+- The CLI is typically launched and managed by the `hidock-mic-trigger` desktop app rather than run standalone

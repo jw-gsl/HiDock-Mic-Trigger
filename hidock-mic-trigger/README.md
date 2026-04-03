@@ -1,6 +1,6 @@
-# HiDock Mic Trigger — Menu Bar App
+# HiDock Mic Trigger — macOS App
 
-macOS menu bar app that provides a unified interface for the HiDock mic trigger, USB sync, and transcription pipeline.
+macOS desktop app that provides a unified interface for the HiDock mic trigger, USB sync, and transcription pipeline. Lives in the menu bar for quick access, with a full-featured window for managing recordings, transcriptions, and device settings.
 
 ## Downloads
 
@@ -17,10 +17,13 @@ macOS menu bar app that provides a unified interface for the HiDock mic trigger,
 - **Transcription** — Transcribe recordings using whisper.cpp, real-time progress in the table
 - **Device detection** — Shows which app holds the HiDock if unavailable (e.g. "Device held by Microsoft Edge")
 - **Device icons** — H1 (dock) and P1 (recorder) shown with distinct icons in the window
-- **Notifications** — macOS notifications when recording starts/stops and transcription completes
+- **Speaker diarization** — Identify speakers in recordings with voice library support
+- **Notification preferences** — Configurable notifications for transcription, downloads, and mic changes with click-to-open actions
+- **Onboarding wizard** — First-run setup guides device pairing and model download
+- **Dark/Light/Auto appearance** — Follows system or user preference
 - **Auto-restart** — CLI auto-restarts on crash (up to 3 retries)
 - **Auto-start** — Configurable via LaunchAgent to start at login
-- **Single window** — All controls in one unified window accessed from the menu bar
+- **Menu bar presence** — Status item shows trigger state and connected devices; full window for all controls
 
 ## Build
 
@@ -57,12 +60,14 @@ The bundled app uses `transcribe_cpp.py` (whisper.cpp) instead of PyTorch for tr
 
 ## Window layout
 
-The unified window contains:
+The app window contains:
 
 1. **Mic Trigger strip** (top) — status dot, Start/Stop, trigger mic dropdown, auto-start checkbox
-2. **Sync status** — connection status with device icons, output folder, recording summary
+2. **Sync status** — connection status with device icons, folder paths, recording summary
 3. **Toolbar rows** — Pair/Unpair, Choose Folder, Refresh, Download, Transcribe buttons
-4. **Recording table** — columns for device, status, transcribed, recording name, created date, length, size, output path, and reveal in Finder
+4. **Download / Transcription progress bars** — real-time progress with cancel support
+5. **Recording table** — columns for device, status, transcribed, recording name, created date, length, size, output path, and reveal in Finder
+6. **Footer bar** — Notifications menu, appearance toggle, update checker, Models, Voice Library, Feedback
 
 ## Configuration
 

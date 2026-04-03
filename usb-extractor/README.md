@@ -13,7 +13,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-The extractor is primarily called by the menu bar app, but can be used standalone:
+The extractor is primarily called by the desktop app, but can be used standalone:
 
 ### List connected devices
 

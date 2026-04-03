@@ -1,4 +1,4 @@
-"""Unified main window — mirrors the macOS hidock-mic-trigger app.
+"""Main window — mirrors the macOS hidock-mic-trigger desktop app.
 
 Layout (top to bottom):
   1. Menu bar
