@@ -62,10 +62,12 @@ def mcp_env(tmp_path):
 
     # Patch the server's knowledge graph
     server._kg = kg
+    server._intel = None
     yield kg, transcripts_dir
 
     kg.close()
     server._kg = None
+    server._intel = None
 
 
 class TestProtocol:
@@ -253,3 +255,69 @@ class TestResources:
             "params": {"uri": "unknown://thing"},
         })
         assert "error" in response
+
+
+class TestIntelligenceTools:
+    def test_research_topic(self, mcp_env):
+        response = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": {"name": "research_topic", "arguments": {"topic": "hiring"}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "Budget Review" in text
+        assert "Increase headcount" in text
+
+    def test_research_topic_no_results(self, mcp_env):
+        response = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {"name": "research_topic", "arguments": {"topic": "xyznonexistent"}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "No meetings" in text
+
+    def test_consistency_report(self, mcp_env):
+        response = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {"name": "consistency_report", "arguments": {}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "Consistency Report" in text
+
+    def test_relationship_map(self, mcp_env):
+        response = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {"name": "relationship_map", "arguments": {}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "Relationship Map" in text
+        assert "Alice" in text
+
+    def test_topic_trends(self, mcp_env):
+        response = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 34,
+            "method": "tools/call",
+            "params": {"name": "topic_trends", "arguments": {}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "Topic Trends" in text
+
+    def test_new_tools_in_list(self):
+        response = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 35,
+            "method": "tools/list",
+        })
+        names = [t["name"] for t in response["result"]["tools"]]
+        assert "research_topic" in names
+        assert "consistency_report" in names
+        assert "relationship_map" in names
+        assert "topic_trends" in names

@@ -33,14 +33,16 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from shared.knowledge import KnowledgeGraph
+from shared.intelligence import MeetingIntelligence
 from shared.transcript_writer import parse_frontmatter
 
 # Server metadata
 SERVER_NAME = "meetings"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 
-# Lazy-initialized knowledge graph
+# Lazy-initialized knowledge graph and intelligence
 _kg: KnowledgeGraph | None = None
+_intel: MeetingIntelligence | None = None
 
 
 def _get_kg() -> KnowledgeGraph:
@@ -50,6 +52,13 @@ def _get_kg() -> KnowledgeGraph:
         # Auto-rebuild on first access
         _kg.rebuild()
     return _kg
+
+
+def _get_intel() -> MeetingIntelligence:
+    global _intel
+    if _intel is None:
+        _intel = MeetingIntelligence(_get_kg())
+    return _intel
 
 
 # ── Tool Definitions ────────────────────────────────────────────────────────
@@ -190,6 +199,55 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "research_topic",
+        "description": "Deep cross-meeting research on a topic. Aggregates all decisions, action items, key points, and people related to the topic across every meeting.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "Topic to research (searched in tags, decisions, and full-text)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max meetings to include (default 20)",
+                    "default": 20,
+                },
+            },
+            "required": ["topic"],
+        },
+    },
+    {
+        "name": "consistency_report",
+        "description": "Detect decision conflicts, stale commitments, and people you're losing touch with across all meetings.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "relationship_map",
+        "description": "Compute relationship scores for all known people based on meeting frequency, recency, and topic depth. Flags people you may be losing touch with.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "topic_trends",
+        "description": "Analyze topic frequency and recency across all meetings. Shows which topics are trending and how often they appear.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max topics to return (default 20)",
+                    "default": 20,
+                },
+            },
         },
     },
 ]
@@ -353,10 +411,122 @@ def handle_get_stats(args: dict) -> str:
 
 
 def handle_rebuild_index(args: dict) -> str:
-    global _kg
+    global _kg, _intel
     _kg = KnowledgeGraph()
     count = _kg.rebuild()
+    _intel = None  # Reset intelligence so it picks up new data
     return f"Index rebuilt. {count} transcripts indexed."
+
+
+def handle_research_topic(args: dict) -> str:
+    intel = _get_intel()
+    result = intel.research_topic(args["topic"], limit=args.get("limit", 20))
+
+    if not result["meetings"]:
+        return f"No meetings found related to '{args['topic']}'."
+
+    lines = [f"# Research: {args['topic']}", ""]
+
+    lines.append(f"**{len(result['meetings'])} meetings found:**")
+    for m in result["meetings"]:
+        duration = f" ({m['duration']:.0f}s)" if m.get("duration") else ""
+        lines.append(f"- **{m['title']}** — {m['date']}{duration}")
+
+    if result["decisions"]:
+        lines.append(f"\n**Decisions ({len(result['decisions'])}):**")
+        for d in result["decisions"]:
+            lines.append(f"- {d['text']} (from {d['meeting_title']}, {d['date']})")
+
+    if result["action_items"]:
+        lines.append(f"\n**Action Items ({len(result['action_items'])}):**")
+        for a in result["action_items"]:
+            assignee = f" @{a['assignee']}" if a.get("assignee") else ""
+            status = f" [{a['status']}]" if a.get("status") != "open" else ""
+            lines.append(f"- {a['task']}{assignee}{status}")
+
+    if result["key_points"]:
+        lines.append(f"\n**Key Points ({len(result['key_points'])}):**")
+        for kp in result["key_points"]:
+            lines.append(f"- {kp['text']} (from {kp['meeting_title']})")
+
+    if result["people"]:
+        lines.append(f"\n**People involved ({len(result['people'])}):**")
+        for p in result["people"]:
+            lines.append(f"- {p['name']} ({p['involvement']} meetings)")
+
+    return "\n".join(lines)
+
+
+def handle_consistency_report(args: dict) -> str:
+    intel = _get_intel()
+    report = intel.consistency_report()
+    summary = report["summary"]
+
+    lines = ["# Consistency Report", ""]
+    lines.append(f"**Stale actions:** {summary['stale_count']} | "
+                 f"**Conflicts:** {summary['conflict_count']} | "
+                 f"**Losing touch:** {summary['losing_touch_count']}")
+
+    if report["stale_actions"]:
+        lines.append("\n## Stale Action Items")
+        for a in report["stale_actions"]:
+            assignee = f" @{a['assignee']}" if a.get("assignee") else ""
+            lines.append(f"- {a['task']}{assignee} — from {a['meeting_title']} ({a['meeting_date']})")
+
+    if report["potential_conflicts"]:
+        lines.append("\n## Potential Decision Conflicts")
+        for c in report["potential_conflicts"]:
+            lines.append(f"\n**Topic: {c['topic']}** ({c['count']} decisions)")
+            for d in c["decisions"]:
+                lines.append(f"  - \"{d['text']}\" — {d['meeting_title']} ({d['date']})")
+
+    if report["people_losing_touch"]:
+        lines.append("\n## People Losing Touch")
+        for p in report["people_losing_touch"]:
+            lines.append(f"- **{p['name']}** — {p['meeting_count']} meetings, "
+                         f"last {p['days_since']:.0f} days ago")
+
+    return "\n".join(lines)
+
+
+def handle_relationship_map(args: dict) -> str:
+    intel = _get_intel()
+    rel_map = intel.relationship_map()
+
+    if not rel_map:
+        return "No people found in the knowledge base."
+
+    lines = ["# Relationship Map", ""]
+    for p in rel_map:
+        flag = " ⚠️ losing touch" if p["losing_touch"] else ""
+        actions = f" ({p['open_actions']} open actions)" if p["open_actions"] else ""
+        topics = ", ".join(t["tag"] for t in p["topics"][:3]) if p["topics"] else "—"
+        lines.append(
+            f"- **{p['name']}** — score: {p['score']}, "
+            f"{p['meeting_count']} meetings, "
+            f"last {p['days_since']:.0f}d ago, "
+            f"topics: {topics}{actions}{flag}"
+        )
+
+    return "\n".join(lines)
+
+
+def handle_topic_trends(args: dict) -> str:
+    intel = _get_intel()
+    trends = intel.topic_trends(limit=args.get("limit", 20))
+
+    if not trends:
+        return "No topics found in the knowledge base."
+
+    lines = ["# Topic Trends", ""]
+    for t in trends:
+        trending = " 🔥 trending" if t["trending"] else ""
+        lines.append(
+            f"- **{t['tag']}** — {t['meeting_count']} meetings, "
+            f"last seen: {t['last_seen']}{trending}"
+        )
+
+    return "\n".join(lines)
 
 
 _TOOL_HANDLERS = {
@@ -370,6 +540,10 @@ _TOOL_HANDLERS = {
     "search_by_tag": handle_search_by_tag,
     "get_stats": handle_get_stats,
     "rebuild_index": handle_rebuild_index,
+    "research_topic": handle_research_topic,
+    "consistency_report": handle_consistency_report,
+    "relationship_map": handle_relationship_map,
+    "topic_trends": handle_topic_trends,
 }
 
 # ── MCP Protocol Handler ───────────────────────────────────────────────────
