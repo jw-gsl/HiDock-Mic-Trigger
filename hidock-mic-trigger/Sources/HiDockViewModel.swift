@@ -24,9 +24,9 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncDownloadProgress: String?
     @Published var syncSortKey: String = "created"
     @Published var syncSortAscending: Bool = false
-    @Published var syncFilterDeviceProductId: Int?
+    @Published var syncFilterDeviceId: String?
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
-    @Published var syncDeviceConnected: [Int: Bool] = [:]
+    @Published var syncDeviceConnected: [String: Bool] = [:]
     @Published var syncPaired = false
 
     // MARK: - Transcription State
@@ -42,8 +42,8 @@ final class HiDockViewModel: ObservableObject {
     // MARK: - Computed
     var visibleEntries: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
-        if let filterPid = syncFilterDeviceProductId {
-            entries = entries.filter { $0.deviceProductId == filterPid }
+        if let filterDeviceId = syncFilterDeviceId {
+            entries = entries.filter { $0.deviceId == filterDeviceId }
         }
         if syncHideDownloaded {
             entries = entries.filter { !$0.recording.downloaded }
@@ -112,7 +112,7 @@ final class HiDockViewModel: ObservableObject {
     var onSelectAll: () -> Void = {}
     var onSelectNone: () -> Void = {}
     var onSelectNotDownloaded: () -> Void = {}
-    var onFilterByDevice: (Int?) -> Void = { _ in }
+    var onFilterByDevice: (String?) -> Void = { _ in }
     var onToggleChecked: (String) -> Void = { _ in }
     var onToggleHideDownloaded: () -> Void = {}
     var onToggleAutoDownload: () -> Void = {}

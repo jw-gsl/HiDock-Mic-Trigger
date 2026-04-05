@@ -31,8 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var diarizeEnabled = false
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
-    private var syncFilterDeviceProductId: Int? = nil
-    private var syncDeviceConnected: [Int: Bool] = [:]
+    private var syncFilterDeviceId: String? = nil
+    private var syncDeviceConnected: [String: Bool] = [:]
     private var syncBusy = false
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
@@ -344,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onSelectAll = { [weak self] in self?.selectAllSyncRecordings() }
         viewModel.onSelectNone = { [weak self] in self?.selectNoneSyncRecordings() }
         viewModel.onSelectNotDownloaded = { [weak self] in self?.selectNotDownloadedSyncRecordings() }
-        viewModel.onFilterByDevice = { [weak self] pid in self?.filterSyncByDevice(pid) }
+        viewModel.onFilterByDevice = { [weak self] deviceId in self?.filterSyncByDevice(deviceId) }
         viewModel.onToggleChecked = { [weak self] name in self?.toggleSyncRecordingCheckbox(name) }
         viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
@@ -448,7 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncHideDownloaded = syncHideDownloaded
         viewModel.syncAutoDownload = syncAutoDownload
         viewModel.diarizeEnabled = diarizeEnabled
-        viewModel.syncFilterDeviceProductId = syncFilterDeviceProductId
+        viewModel.syncFilterDeviceId = syncFilterDeviceId
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
         viewModel.syncDeviceConnected = syncDeviceConnected
@@ -1047,7 +1047,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         var title = "HiDock"
         #endif
         // Only show connected devices in the menu bar
-        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.deviceId] == true }
         if !connectedDevices.isEmpty {
             let deviceParts = connectedDevices.map { "\($0.shortName) ✓" }
             title += " · \(deviceParts.joined(separator: " · "))"
@@ -1285,7 +1285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     switch result {
                     case .success(let data):
                         if let status = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) {
-                            self.renderSyncStatus(status, deviceProductId: device.productId, deviceName: device.cleanName)
+                            self.renderSyncStatus(status, device: device)
                             if status.connected {
                                 anyConnected = true
                                 self.log("Auto-connect: \(device.cleanName) connected (\(status.recordings.count) recordings)")
@@ -1331,7 +1331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncWindowItem?.title = "Show Window..."
             return
         }
-        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.deviceId] == true }
         if connectedDevices.isEmpty {
             syncWindowItem?.title = "Show Window..."
         } else {
@@ -1541,7 +1541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Gather system info
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let macOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.deviceId] == true }
         let deviceStatus = connectedDevices.isEmpty ? "Not connected" : connectedDevices.map(\.shortName).joined(separator: ", ")
         let triggerStatus = process != nil ? "Running (\(selectedMicName ?? "unknown mic"))" : "Stopped"
         let recordingCount = syncEntries.count
@@ -2072,7 +2072,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         var devices = syncPairedDevices
         devices.removeAll { $0.deviceId == device.deviceId }
         syncPairedDevices = devices
-        syncDeviceConnected.removeValue(forKey: device.productId)
+        syncDeviceConnected.removeValue(forKey: device.deviceId)
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncDeviceConnected = syncDeviceConnected
         viewModel.syncPaired = !syncPairedDevices.isEmpty
@@ -2080,7 +2080,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateMenuSyncStatus(connected: syncDeviceConnected.values.contains(true))
 
         // Remove entries from this device
-        viewModel.syncEntries.removeAll { $0.deviceProductId == device.productId }
+        syncEntries.removeAll { $0.deviceId == device.deviceId }
+        viewModel.syncEntries = syncEntries
     }
 
     private func pairVolume(volumeName: String, subpath: String?) {
@@ -2447,21 +2448,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Sync Actions
 
-    private func renderSyncStatus(_ status: HiDockSyncStatusResponse, deviceProductId: Int, deviceName: String) {
+    private func renderSyncStatus(_ status: HiDockSyncStatusResponse, device: HiDockPairedDevice) {
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
-        syncDeviceConnected[deviceProductId] = status.connected
-        syncEntries.removeAll { $0.deviceProductId == deviceProductId }
+        syncDeviceConnected[device.deviceId] = status.connected
+        syncEntries.removeAll { $0.deviceId == device.deviceId }
         for recording in status.recordings {
-            syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: deviceProductId, deviceName: deviceName))
+            syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: device.productId, deviceId: device.deviceId, deviceName: device.cleanName))
         }
         let validNames = Set(syncEntries.map(\.recording.name))
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
 
         if !syncBusy {
             let connectedNames = syncPairedDevices
-                .filter { syncDeviceConnected[$0.productId] == true }
-                .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+                .filter { syncDeviceConnected[$0.deviceId] == true }
+                .map { "\(hidockDeviceEmoji($0.shortName, deviceType: $0.deviceType)) \($0.shortName)" }
             if connectedNames.isEmpty {
                 viewModel.syncStatus = "Not connected"
                 viewModel.syncStatusLevel = .secondary
@@ -2549,8 +2550,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
-    private func filterSyncByDevice(_ productId: Int?) {
-        syncFilterDeviceProductId = productId
+    private func filterSyncByDevice(_ deviceId: String?) {
+        syncFilterDeviceId = deviceId
         syncViewModelState()
     }
 
@@ -2595,7 +2596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 case .success(let data):
                     do {
                         let payload = try JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data)
-                        self.renderSyncStatus(payload, deviceProductId: device.productId, deviceName: device.cleanName)
+                        self.renderSyncStatus(payload, device: device)
                         if payload.connected {
                             anyConnected = true
                         } else if let err = payload.error {
@@ -2622,8 +2623,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.stopSyncRefreshTimer()
             if anyConnected {
                 let connectedNames = self.syncPairedDevices
-                    .filter { self.syncDeviceConnected[$0.productId] == true }
-                    .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+                    .filter { self.syncDeviceConnected[$0.deviceId] == true }
+                    .map { "\(hidockDeviceEmoji($0.shortName, deviceType: $0.deviceType)) \($0.shortName)" }
                 let deviceList = connectedNames.joined(separator: " · ")
                 self.viewModel.syncStatus = "Connected — \(deviceList)"
                 self.viewModel.syncStatusLevel = .success
@@ -2796,7 +2797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         syncEntries = syncEntries.filter { entry in
-            syncPairedDevices.contains(where: { $0.productId == entry.deviceProductId })
+            syncPairedDevices.contains(where: { $0.deviceId == entry.deviceId })
         }
         syncCheckedRecordings = syncCheckedRecordings.intersection(Set(syncEntries.map(\.recording.name)))
         if syncPairedDevices.isEmpty {

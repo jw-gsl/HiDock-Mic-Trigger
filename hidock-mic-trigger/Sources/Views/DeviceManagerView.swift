@@ -87,7 +87,7 @@ struct DeviceManagerView: View {
                         ForEach(filteredDevices, id: \.deviceId) { device in
                             DeviceRowView(
                                 device: device,
-                                isConnected: viewModel.syncDeviceConnected[device.productId] ?? false,
+                                isConnected: viewModel.syncDeviceConnected[device.deviceId] ?? false,
                                 onForget: { viewModel.onForgetDevice(device) }
                             )
                             Divider()
@@ -236,10 +236,7 @@ struct DeviceRowView: View {
     }
 
     private var deviceIcon: String {
-        if device.deviceType == .volume {
-            return "externaldrive"
-        }
-        return hidockDeviceIcon(device.shortName)
+        return hidockDeviceIcon(device.shortName, deviceType: device.deviceType)
     }
 
     private static let isoFormatter = ISO8601DateFormatter()

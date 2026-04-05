@@ -86,14 +86,14 @@ struct SyncToolbarSection: View {
                     viewModel.onFilterByDevice(nil)
                 }
                 .buttonStyle(.bordered)
-                .tint(viewModel.syncFilterDeviceProductId == nil ? .accentColor : nil)
+                .tint(viewModel.syncFilterDeviceId == nil ? .accentColor : nil)
 
-                ForEach(viewModel.syncPairedDevices, id: \.productId) { device in
+                ForEach(viewModel.syncPairedDevices, id: \.deviceId) { device in
                     Button(device.shortName) {
-                        viewModel.onFilterByDevice(device.productId)
+                        viewModel.onFilterByDevice(device.deviceId)
                     }
                     .buttonStyle(.bordered)
-                    .tint(viewModel.syncFilterDeviceProductId == device.productId ? .accentColor : nil)
+                    .tint(viewModel.syncFilterDeviceId == device.deviceId ? .accentColor : nil)
                 }
 
                 Spacer()
