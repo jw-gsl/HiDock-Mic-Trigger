@@ -146,6 +146,11 @@ final class HiDockViewModel: ObservableObject {
     var onRefreshModelStatuses: () -> Void = {}
     var onShowModelManager: () -> Void = {}
 
+    // MARK: - Device Manager
+    var onShowDeviceManager: () -> Void = {}
+    var onForgetDevice: (HiDockPairedDevice) -> Void = { _ in }
+    var onPairVolume: (String, String?) -> Void = { _, _ in } // volumeName, subpath
+
     // MARK: - Notification Preferences
     @Published var notifyTranscriptionComplete: Bool = true
     @Published var notifyDownloadComplete: Bool = true

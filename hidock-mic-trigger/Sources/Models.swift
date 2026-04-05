@@ -74,9 +74,19 @@ struct HiDockDeviceListResponse: Codable {
     let devices: [HiDockDevice]
 }
 
+/// The kind of device: HiDock proprietary USB or generic mass-storage volume.
+enum DeviceType: String, Codable {
+    case hidock = "hidock"
+    case volume = "volume"
+}
+
 struct HiDockPairedDevice: Codable, Equatable {
     let productId: Int
     let displayName: String
+    var deviceType: DeviceType
+    var volumeName: String?     // For volume devices: mount name / drive letter
+    var subpath: String?        // Optional subfolder to scan on volume
+    var pairedAt: String?       // ISO-8601 timestamp
 
     var cleanName: String {
         sanitizeDeviceName(displayName)
@@ -90,9 +100,48 @@ struct HiDockPairedDevice: Codable, Equatable {
         return name
     }
 
-    static func == (lhs: HiDockPairedDevice, rhs: HiDockPairedDevice) -> Bool {
-        lhs.productId == rhs.productId
+    /// Unique string identity used for state keys and filtering.
+    var deviceId: String {
+        switch deviceType {
+        case .hidock:
+            return "hidock:\(productId)"
+        case .volume:
+            return "volume:\(volumeName ?? String(productId))"
+        }
     }
+
+    static func == (lhs: HiDockPairedDevice, rhs: HiDockPairedDevice) -> Bool {
+        lhs.deviceId == rhs.deviceId
+    }
+
+    /// Backwards-compatible init for existing HiDock pairing code.
+    init(productId: Int, displayName: String) {
+        self.productId = productId
+        self.displayName = displayName
+        self.deviceType = .hidock
+        self.volumeName = nil
+        self.subpath = nil
+        self.pairedAt = ISO8601DateFormatter().string(from: Date())
+    }
+
+    /// Full init for volume devices.
+    init(volumeName: String, displayName: String, subpath: String? = nil) {
+        self.productId = volumeName.hashValue
+        self.displayName = displayName
+        self.deviceType = .volume
+        self.volumeName = volumeName
+        self.subpath = subpath
+        self.pairedAt = ISO8601DateFormatter().string(from: Date())
+    }
+}
+
+/// Volume scan result from the extractor `scan-volumes` command.
+struct VolumeScanResult: Codable {
+    let volumeName: String
+    let mountPoint: String
+    let audioFileCount: Int
+    let totalSizeBytes: Int
+    let audioExtensions: [String]
 }
 
 struct HiDockSyncRecordingEntry: Identifiable {

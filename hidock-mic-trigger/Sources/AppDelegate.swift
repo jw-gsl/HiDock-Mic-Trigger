@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var voiceLibraryWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
     private var coworkPromptWindow: NSWindow?
+    private var deviceManagerWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -371,6 +372,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
+        viewModel.onShowDeviceManager = { [weak self] in self?.openDeviceManager() }
+        viewModel.onForgetDevice = { [weak self] device in self?.forgetDevice(device) }
+        viewModel.onPairVolume = { [weak self] volumeName, subpath in self?.pairVolume(volumeName: volumeName, subpath: subpath) }
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
@@ -2034,6 +2038,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } catch {
             log("Failed to rename speaker '\(oldName)': \(error)")
         }
+    }
+
+    // MARK: - Device Manager
+
+    private func openDeviceManager() {
+        if let existing = deviceManagerWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let managerView = DeviceManagerView(viewModel: viewModel)
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 480),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Device Manager"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 560, height: 400)
+        win.contentView = NSHostingView(rootView: managerView)
+
+        deviceManagerWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func forgetDevice(_ device: HiDockPairedDevice) {
+        var devices = syncPairedDevices
+        devices.removeAll { $0.deviceId == device.deviceId }
+        syncPairedDevices = devices
+        syncDeviceConnected.removeValue(forKey: device.productId)
+        viewModel.syncPairedDevices = syncPairedDevices
+        viewModel.syncDeviceConnected = syncDeviceConnected
+        viewModel.syncPaired = !syncPairedDevices.isEmpty
+        log("Forgot device: \(device.cleanName) (\(device.deviceId))")
+        updateMenuSyncStatus(connected: syncDeviceConnected.values.contains(true))
+
+        // Remove entries from this device
+        viewModel.syncEntries.removeAll { $0.deviceProductId == device.productId }
+    }
+
+    private func pairVolume(volumeName: String, subpath: String?) {
+        let device = HiDockPairedDevice(volumeName: volumeName, displayName: volumeName, subpath: subpath)
+
+        // Check for duplicate
+        if syncPairedDevices.contains(where: { $0.deviceId == device.deviceId }) {
+            log("Volume '\(volumeName)' is already paired")
+            return
+        }
+
+        var devices = syncPairedDevices
+        devices.append(device)
+        syncPairedDevices = devices
+        viewModel.syncPairedDevices = syncPairedDevices
+        viewModel.syncPaired = true
+        log("Paired volume: \(volumeName) (subpath: \(subpath ?? "none"))")
     }
 
     // MARK: - Model Manager
