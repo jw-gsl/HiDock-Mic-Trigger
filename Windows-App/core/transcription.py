@@ -53,8 +53,11 @@ def transcribe_file(
     model=None,
     on_progress: Callable[[int], None] | None = None,
     diarize: bool = False,
+    summarize: bool = False,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict."""
+    from shared.transcript_writer import write_transcript, format_diarized_transcript
+
     mp3_path = mp3_path.resolve()
     basename = mp3_path.stem
     transcript_path = RAW_TRANSCRIPTS_DIR / f"{basename}.md"
@@ -138,7 +141,7 @@ def transcribe_file(
                         if name is not None:
                             diarized_result["speaker_names"][spk] = name
 
-                # Write diarized JSON
+                # Write diarized JSON sidecar
                 diarized_path = RAW_TRANSCRIPTS_DIR / f"{basename}_diarized.json"
                 diarized_path.write_text(
                     json.dumps(diarized_result, indent=2, ensure_ascii=False) + "\n",
@@ -148,26 +151,32 @@ def transcribe_file(
                 print(f"Diarization failed (non-fatal): {e}", file=sys.stderr)
                 diarized_result = None
 
-        # Write transcript
+        # Build plain text for summarization input
         if diarized_result:
-            lines = []
-            current_speaker = None
-            for seg in diarized_result["segments"]:
-                display_name = diarized_result["speaker_names"].get(
-                    seg["speaker"], seg["speaker"]
-                )
-                if display_name != current_speaker:
-                    if lines:
-                        lines.append("")
-                    lines.append(f"**{display_name}:** {seg['text']}")
-                    current_speaker = display_name
-                else:
-                    lines.append(seg["text"])
-            text = "\n".join(lines)
+            text = format_diarized_transcript(diarized_result)
         else:
             text = " ".join(seg.text.strip() for seg in segments).strip()
 
-        transcript_path.write_text(text + "\n", encoding="utf-8")
+        # Optionally run LLM summarization
+        summary = None
+        if summarize:
+            try:
+                from shared.summarize import summarize as run_summarize
+                if on_progress:
+                    on_progress(90)
+                summary = run_summarize(text)
+            except Exception as e:
+                print(f"Summarization failed (non-fatal): {e}", file=sys.stderr)
+
+        # Write transcript with frontmatter
+        write_transcript(
+            transcript_path,
+            text,
+            source_path=mp3_path,
+            model=WHISPER_MODEL,
+            diarized_result=diarized_result,
+            summary=summary,
+        )
 
         if on_progress:
             on_progress(95)
@@ -195,6 +204,7 @@ def transcribe_file(
             "duration_s": duration_s,
             "status": "completed",
             "transcribed": True,
+            "summarized": summary is not None,
         }
 
     except Exception as e:

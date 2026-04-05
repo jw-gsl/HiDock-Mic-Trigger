@@ -19,6 +19,11 @@ from pathlib import Path
 import config
 from state import load_state, save_state
 
+# Add the repo root to sys.path so shared modules are importable
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
 
 
@@ -47,8 +52,12 @@ def load_whisper_model():
     return model
 
 
-def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
+def transcribe_file(
+    mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
+) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
+    from shared.transcript_writer import write_transcript
+
     mp3_path = mp3_path.resolve()
     basename = mp3_path.stem
     transcript_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}.md"
@@ -85,6 +94,7 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
         text = result["text"].strip()
 
         # Optionally run diarization
+        diarized_result = None
         if diarize:
             try:
                 from diarize import diarize as run_diarize
@@ -94,9 +104,25 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
             except Exception as e:
                 print(f"Diarization failed: {e}", file=sys.stderr)
 
-        # Write transcript
-        config.RAW_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-        transcript_path.write_text(text + "\n", encoding="utf-8")
+        # Optionally run LLM summarization
+        summary = None
+        if summarize:
+            try:
+                from shared.summarize import summarize as run_summarize
+                progress(90)
+                summary = run_summarize(text)
+            except Exception as e:
+                print(f"Summarization failed (non-fatal): {e}", file=sys.stderr)
+
+        # Write transcript with frontmatter
+        write_transcript(
+            transcript_path,
+            text,
+            source_path=mp3_path,
+            model=config.WHISPER_MODEL,
+            diarized_result=diarized_result,
+            summary=summary,
+        )
         progress(95)
 
         duration_s = round(time.monotonic() - start_time, 1)
@@ -122,6 +148,7 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
             "duration_s": duration_s,
             "status": "completed",
             "transcribed": True,
+            "summarized": summary is not None,
         }
 
     except Exception as e:
@@ -176,7 +203,9 @@ def cmd_transcribe(args):
 
     lock = acquire_lock()
     try:
-        result = transcribe_file(mp3_path, diarize=args.diarize)
+        result = transcribe_file(
+            mp3_path, diarize=args.diarize, summarize=args.summarize,
+        )
     finally:
         release_lock(lock)
 
@@ -214,7 +243,9 @@ def cmd_transcribe_batch(args):
         for i, mp3_path in enumerate(audio_files):
             pct_base = 10 + int(85 * i / len(audio_files))
             progress(pct_base)
-            result = transcribe_file(mp3_path, model=model, diarize=args.diarize)
+            result = transcribe_file(
+                mp3_path, model=model, diarize=args.diarize, summarize=args.summarize,
+            )
             results.append(result)
     finally:
         release_lock(lock)
@@ -275,10 +306,12 @@ def main():
     p_transcribe = sub.add_parser("transcribe", help="Transcribe a single audio file")
     p_transcribe.add_argument("mp3_path", help="Path to audio file")
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
     p_batch.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    p_batch.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_batch.set_defaults(func=cmd_transcribe_batch)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")

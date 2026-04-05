@@ -32,6 +32,16 @@ jobs:
       - run: pip install pytest numpy
       - run: python -m pytest tests/ -v
 
+  shared-modules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest numpy scipy
+      - run: python -m pytest shared/tests/ -v
+
   windows-app-core:
     runs-on: ubuntu-latest
     defaults:

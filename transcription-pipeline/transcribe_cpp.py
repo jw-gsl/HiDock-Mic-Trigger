@@ -114,8 +114,12 @@ def load_whisper_model():
     return _model
 
 
-def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
+def transcribe_file(
+    mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
+) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
+    from shared.transcript_writer import write_transcript
+
     mp3_path = mp3_path.resolve()
     basename = mp3_path.stem
     transcript_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}.md"
@@ -167,7 +171,6 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
 
                 # Try to identify speakers from voice library
                 audio = load_audio(mp3_path, sr=16000)
-                # Group segments by speaker, compute per-speaker embedding
                 speaker_segments = {}
                 for seg in diarized_result["segments"]:
                     spk = seg["speaker"]
@@ -193,7 +196,7 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
                         if name is not None:
                             diarized_result["speaker_names"][spk] = name
 
-                # Write diarized JSON
+                # Write diarized JSON sidecar
                 diarized_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}_diarized.json"
                 diarized_path.write_text(
                     json.dumps(diarized_result, indent=2, ensure_ascii=False) + "\n",
@@ -203,27 +206,32 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
                 print(f"Diarization failed (non-fatal): {e}", file=sys.stderr)
                 diarized_result = None
 
-        # Write transcript
+        # Build plain text for summarization input
         if diarized_result:
-            # Write transcript with speaker labels
-            lines = []
-            current_speaker = None
-            for seg in diarized_result["segments"]:
-                display_name = diarized_result["speaker_names"].get(
-                    seg["speaker"], seg["speaker"]
-                )
-                if display_name != current_speaker:
-                    if lines:
-                        lines.append("")
-                    lines.append(f"**{display_name}:** {seg['text']}")
-                    current_speaker = display_name
-                else:
-                    lines.append(seg["text"])
-            text = "\n".join(lines)
+            from shared.transcript_writer import format_diarized_transcript
+            text = format_diarized_transcript(diarized_result)
         else:
             text = " ".join(seg.text.strip() for seg in segments).strip()
 
-        transcript_path.write_text(text + "\n", encoding="utf-8")
+        # Optionally run LLM summarization
+        summary = None
+        if summarize:
+            try:
+                from shared.summarize import summarize as run_summarize
+                progress(90)
+                summary = run_summarize(text)
+            except Exception as e:
+                print(f"Summarization failed (non-fatal): {e}", file=sys.stderr)
+
+        # Write transcript with frontmatter
+        write_transcript(
+            transcript_path,
+            text,
+            source_path=mp3_path,
+            model=config.WHISPER_MODEL,
+            diarized_result=diarized_result,
+            summary=summary,
+        )
         progress(95)
 
         duration_s = round(time.monotonic() - start_time, 1)
@@ -248,6 +256,7 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
             "duration_s": duration_s,
             "status": "completed",
             "transcribed": True,
+            "summarized": summary is not None,
         }
 
     except Exception as e:
@@ -299,7 +308,11 @@ def cmd_transcribe(args):
 
     lock = acquire_lock()
     try:
-        result = transcribe_file(mp3_path, diarize=getattr(args, "diarize", False))
+        result = transcribe_file(
+            mp3_path,
+            diarize=getattr(args, "diarize", False),
+            summarize=getattr(args, "summarize", False),
+        )
     finally:
         release_lock(lock)
 
@@ -336,7 +349,10 @@ def cmd_transcribe_batch(args):
             pct_base = 10 + int(85 * i / len(audio_files))
             progress(pct_base)
             result = transcribe_file(
-                mp3_path, model=model, diarize=getattr(args, "diarize", False)
+                mp3_path,
+                model=model,
+                diarize=getattr(args, "diarize", False),
+                summarize=getattr(args, "summarize", False),
             )
             results.append(result)
     finally:
@@ -392,10 +408,12 @@ def main():
     p_transcribe = sub.add_parser("transcribe", help="Transcribe a single audio file")
     p_transcribe.add_argument("mp3_path", help="Path to audio file")
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
     p_batch.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    p_batch.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_batch.set_defaults(func=cmd_transcribe_batch)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
