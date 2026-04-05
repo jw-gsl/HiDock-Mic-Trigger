@@ -27,6 +27,26 @@ if str(_REPO_ROOT) not in sys.path:
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
 
 
+# ── Safe event logging (non-fatal) ───────────────────────────────────────────
+
+def _log(event_type, **kwargs):
+    """Log an event, silently ignoring failures."""
+    try:
+        from shared.event_log import log_event
+        log_event(event_type, **kwargs)
+    except Exception:
+        pass  # Never let logging break the pipeline
+
+
+def _ET(name: str):
+    """Get an EventType by name, or fall back to the string."""
+    try:
+        from shared.event_log import EventType
+        return getattr(EventType, name)
+    except Exception:
+        return name
+
+
 def progress(pct: int) -> None:
     """Emit a PROGRESS line on stderr (matches extractor protocol)."""
     print(f"PROGRESS:{pct}", file=sys.stderr, flush=True)
@@ -80,9 +100,8 @@ def transcribe_file(
 
     start_time = time.monotonic()
     try:
-        from shared.event_log import log_event, EventType
-        log_event(EventType.TRANSCRIPTION_STARTED, file_path=str(mp3_path),
-                  metadata={"model": config.WHISPER_MODEL})
+        _log(_ET("TRANSCRIPTION_STARTED"), file_path=str(mp3_path),
+             metadata={"model": config.WHISPER_MODEL})
 
         if model is None:
             model = load_whisper_model()
@@ -102,10 +121,10 @@ def transcribe_file(
         text, guard_stats = clean_transcript(text, language=config.WHISPER_LANGUAGE or "en")
         if guard_stats.filters_triggered:
             print(f"Whisper-Guard: filters triggered: {guard_stats.filters_triggered}", file=sys.stderr)
-            log_event(EventType.WHISPER_GUARD_FILTERED, file_path=str(mp3_path),
-                      metadata={"filters": guard_stats.filters_triggered,
-                                "original_lines": guard_stats.original_lines,
-                                "final_word_count": guard_stats.final_word_count})
+            _log(_ET("WHISPER_GUARD_FILTERED"), file_path=str(mp3_path),
+                 metadata={"filters": guard_stats.filters_triggered,
+                           "original_lines": guard_stats.original_lines,
+                           "final_word_count": guard_stats.final_word_count})
         if guard_stats.is_likely_hallucination:
             print(f"Whisper-Guard: transcript flagged as likely hallucination "
                   f"({guard_stats.final_word_count} words)", file=sys.stderr)
@@ -131,15 +150,15 @@ def transcribe_file(
             try:
                 from shared.summarize import summarize as run_summarize
                 progress(90)
-                log_event(EventType.SUMMARIZATION_STARTED, file_path=str(mp3_path))
+                _log(_ET("SUMMARIZATION_STARTED"), file_path=str(mp3_path))
                 summ_start = time.monotonic()
                 summary = run_summarize(text)
-                log_event(EventType.SUMMARIZATION_COMPLETED, file_path=str(mp3_path),
-                          duration_s=round(time.monotonic() - summ_start, 1))
+                _log(_ET("SUMMARIZATION_COMPLETED"), file_path=str(mp3_path),
+                     duration_s=round(time.monotonic() - summ_start, 1))
             except Exception as e:
                 print(f"Summarization failed (non-fatal): {e}", file=sys.stderr)
-                log_event(EventType.SUMMARIZATION_FAILED, file_path=str(mp3_path),
-                          status="error", error=str(e))
+                _log(_ET("SUMMARIZATION_FAILED"), file_path=str(mp3_path),
+                     status="error", error=str(e))
 
         # Write transcript with frontmatter
         write_transcript(
@@ -168,9 +187,9 @@ def transcribe_file(
         }
         save_state(state)
 
-        log_event(EventType.TRANSCRIPTION_COMPLETED, file_path=str(mp3_path),
-                  duration_s=duration_s, metadata={"model": config.WHISPER_MODEL,
-                  "transcript_path": str(transcript_path), "summarized": summary is not None})
+        _log(_ET("TRANSCRIPTION_COMPLETED"), file_path=str(mp3_path),
+             duration_s=duration_s, metadata={"model": config.WHISPER_MODEL,
+             "transcript_path": str(transcript_path), "summarized": summary is not None})
 
         # Run post-transcription hooks (non-fatal)
         try:
@@ -179,15 +198,15 @@ def transcribe_file(
             for hook_name, hook_ok in hook_results.items():
                 if hook_ok is not None:
                     if hook_ok:
-                        log_event(EventType.HOOK_EXECUTED, file_path=str(transcript_path),
-                                  metadata={"hook": hook_name})
+                        _log(_ET("HOOK_EXECUTED"), file_path=str(transcript_path),
+                             metadata={"hook": hook_name})
                     else:
-                        log_event(EventType.HOOK_FAILED, file_path=str(transcript_path),
-                                  status="error", metadata={"hook": hook_name})
+                        _log(_ET("HOOK_FAILED"), file_path=str(transcript_path),
+                             status="error", metadata={"hook": hook_name})
         except Exception as e:
             print(f"Hooks failed (non-fatal): {e}", file=sys.stderr)
-            log_event(EventType.HOOK_FAILED, file_path=str(transcript_path),
-                      status="error", error=str(e))
+            _log(_ET("HOOK_FAILED"), file_path=str(transcript_path),
+                 status="error", error=str(e))
 
         progress(100)
 
@@ -202,11 +221,8 @@ def transcribe_file(
 
     except Exception as e:
         duration_s = round(time.monotonic() - start_time, 1)
-        try:
-            log_event(EventType.TRANSCRIPTION_FAILED, file_path=str(mp3_path),
-                      status="error", duration_s=duration_s, error=str(e))
-        except Exception:
-            pass  # Don't let logging failure mask the real error
+        _log(_ET("TRANSCRIPTION_FAILED"), file_path=str(mp3_path),
+             status="error", duration_s=duration_s, error=str(e))
         state = load_state()
         state["transcriptions"][entry_key] = {
             "status": "failed",
