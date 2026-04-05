@@ -1729,7 +1729,10 @@ class MainWindow(QMainWindow):
 
         dlg.deviceForgotten.connect(_on_forget)
         dlg.volumePaired.connect(_on_pair_volume)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     # ── Transcript Viewer ──────────────────────────────────────────────
 

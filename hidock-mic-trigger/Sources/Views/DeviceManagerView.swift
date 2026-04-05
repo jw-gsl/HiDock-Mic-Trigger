@@ -3,7 +3,7 @@ import SwiftUI
 struct DeviceManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
     @State private var sortOrder: DeviceSortKey = .name
-    @State private var filterType: DeviceType? = nil
+    @State private var filterType: String = "all" // "all", "hidock", "volume"
     @State private var searchText = ""
 
     var body: some View {
@@ -40,9 +40,9 @@ struct DeviceManagerView: View {
 
                 Text("Type:").font(.caption.weight(.medium))
                 Picker("", selection: $filterType) {
-                    Text("All").tag(DeviceType?.none)
-                    Text("HiDock").tag(DeviceType?.some(.hidock))
-                    Text("Volume").tag(DeviceType?.some(.volume))
+                    Text("All").tag("all")
+                    Text("HiDock").tag("hidock")
+                    Text("Volume").tag("volume")
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 180)
@@ -117,8 +117,10 @@ struct DeviceManagerView: View {
     private var filteredDevices: [HiDockPairedDevice] {
         var devices = viewModel.syncPairedDevices
 
-        if let typeFilter = filterType {
-            devices = devices.filter { $0.deviceType == typeFilter }
+        if filterType == "hidock" {
+            devices = devices.filter { $0.deviceType == .hidock }
+        } else if filterType == "volume" {
+            devices = devices.filter { $0.deviceType == .volume }
         }
 
         if !searchText.isEmpty {
@@ -240,12 +242,16 @@ struct DeviceRowView: View {
         return hidockDeviceIcon(device.shortName)
     }
 
+    private static let isoFormatter = ISO8601DateFormatter()
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
     private func formatPairedDate(_ iso: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: iso) else { return iso }
-        let relative = RelativeDateTimeFormatter()
-        relative.unitsStyle = .abbreviated
-        return relative.localizedString(for: date, relativeTo: Date())
+        guard let date = Self.isoFormatter.date(from: iso) else { return iso }
+        return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
 
