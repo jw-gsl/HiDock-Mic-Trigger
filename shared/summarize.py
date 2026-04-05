@@ -185,7 +185,10 @@ def _summarize_map_reduce(text: str, engine: LLMEngine, timeout: int) -> dict:
             if isinstance(d, dict) and d.get("text"):
                 sections_text += f"Decision: {d['text']}\n"
         for kp in cs.get("key_points", []):
-            if isinstance(kp, str):
+            if isinstance(kp, dict) and kp.get("text"):
+                conf = f" [{kp.get('confidence', 'medium')}]" if kp.get("confidence") else ""
+                sections_text += f"Key point{conf}: {kp['text']}\n"
+            elif isinstance(kp, str):
                 sections_text += f"Key point: {kp}\n"
         tags = cs.get("tags", [])
         if tags:

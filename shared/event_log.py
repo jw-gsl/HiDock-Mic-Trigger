@@ -233,11 +233,14 @@ def event_counts(days: int = 30, db_path: Path | None = None) -> dict[str, int]:
 def errors_since(hours: int = 24, db_path: Path | None = None) -> list[Event]:
     """Get error events from the last N hours."""
     conn = _get_conn(db_path)
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     rows = conn.execute(
         """SELECT * FROM event_log
-           WHERE status = 'error'
+           WHERE status = 'error' AND timestamp >= ?
            ORDER BY timestamp DESC
            LIMIT 100""",
+        (cutoff,),
     ).fetchall()
     return [Event(**dict(r)) for r in rows]
 

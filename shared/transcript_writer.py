@@ -95,7 +95,7 @@ def build_frontmatter(
     model: str = "",
     action_items: list[dict] | None = None,
     decisions: list[dict] | None = None,
-    key_points: list[str] | None = None,
+    key_points: list[str] | list[dict] | None = None,
     tags: list[str] | None = None,
 ) -> str:
     """Build YAML frontmatter string.
@@ -121,7 +121,14 @@ def build_frontmatter(
         lines.append(f"model: {_yaml_escape(model)}")
     lines.append(f"action_items: {_format_action_items(action_items or [])}")
     lines.append(f"decisions: {_format_decisions(decisions or [])}")
-    lines.append(f"key_points: {_yaml_list(key_points or [])}")
+    # key_points can be list[str] or list[dict] — normalize to strings for YAML
+    kp_raw = key_points or []
+    kp_strings = [
+        kp["text"] if isinstance(kp, dict) else str(kp)
+        for kp in kp_raw
+        if (isinstance(kp, dict) and kp.get("text")) or (isinstance(kp, str) and kp.strip())
+    ]
+    lines.append(f"key_points: {_yaml_list(kp_strings)}")
     lines.append(f"tags: {_yaml_list(tags or [])}")
     lines.append("---")
     return "\n".join(lines)

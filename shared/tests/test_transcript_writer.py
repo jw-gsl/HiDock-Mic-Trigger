@@ -74,6 +74,33 @@ class TestBuildFrontmatter:
         assert "Review PR" in fm
         assert "Alice" in fm
 
+    def test_dict_key_points(self):
+        """key_points can be list[dict] with text+confidence — should serialize to YAML strings."""
+        fm = build_frontmatter(
+            title="Test",
+            key_points=[
+                {"text": "Budget approved", "confidence": "high"},
+                {"text": "New hire starting", "confidence": "medium"},
+            ],
+        )
+        assert "Budget approved" in fm
+        assert "New hire starting" in fm
+        # Should NOT contain Python dict repr
+        assert "'text'" not in fm
+        assert "'confidence'" not in fm
+
+    def test_mixed_key_points(self):
+        """key_points can be a mix of strings and dicts."""
+        fm = build_frontmatter(
+            title="Test",
+            key_points=[
+                "Plain string point",
+                {"text": "Dict point", "confidence": "low"},
+            ],
+        )
+        assert "Plain string point" in fm
+        assert "Dict point" in fm
+
     def test_special_chars_escaped(self):
         fm = build_frontmatter(title='Meeting: "Q2 Planning" & Review')
         assert "---" in fm

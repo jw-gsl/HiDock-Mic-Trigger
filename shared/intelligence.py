@@ -132,7 +132,7 @@ class MeetingIntelligence:
 
         # Find stale action items
         stale_actions = conn.execute("""
-            SELECT a.id, a.task, a.assignee, a.due, a.status,
+            SELECT a.id, a.task, a.assignee, a.due, a.status, a.confidence,
                    m.title as meeting_title, m.date as meeting_date, m.file_path
             FROM action_items a
             JOIN meetings m ON m.id = a.meeting_id
@@ -143,7 +143,7 @@ class MeetingIntelligence:
 
         # Find potential decision conflicts (same topic, different meetings)
         topic_decisions = conn.execute("""
-            SELECT d.text, d.topic, m.title as meeting_title, m.date, m.file_path
+            SELECT d.text, d.topic, d.confidence, m.title as meeting_title, m.date, m.file_path
             FROM decisions d
             JOIN meetings m ON m.id = d.meeting_id
             WHERE d.topic != ''
@@ -297,7 +297,7 @@ class MeetingIntelligence:
 
         # Gather decisions from these meetings
         decisions = conn.execute(f"""
-            SELECT d.text, d.topic, m.title as meeting_title, m.date
+            SELECT d.text, d.topic, d.confidence, m.title as meeting_title, m.date
             FROM decisions d
             JOIN meetings m ON m.id = d.meeting_id
             WHERE d.meeting_id IN ({placeholders})
@@ -306,7 +306,7 @@ class MeetingIntelligence:
 
         # Gather action items
         action_items = conn.execute(f"""
-            SELECT a.task, a.assignee, a.due, a.status,
+            SELECT a.task, a.assignee, a.due, a.status, a.confidence,
                    m.title as meeting_title, m.date as meeting_date
             FROM action_items a
             JOIN meetings m ON m.id = a.meeting_id
@@ -316,7 +316,7 @@ class MeetingIntelligence:
 
         # Gather key points
         key_points = conn.execute(f"""
-            SELECT k.text, m.title as meeting_title, m.date
+            SELECT k.text, k.confidence, m.title as meeting_title, m.date
             FROM key_points k
             JOIN meetings m ON m.id = k.meeting_id
             WHERE k.meeting_id IN ({placeholders})

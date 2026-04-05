@@ -206,8 +206,8 @@ def _check_orphans(root: Path) -> list[CheckResult]:
 
     if untranscribed:
         results.append(CheckResult(
-            "untranscribed_audio", "warning" if len(untranscribed) <= 5 else "ok",
-            f"{len(untranscribed)} audio files without transcripts",
+            "untranscribed_audio", "warning",
+            f"{len(untranscribed)} audio file(s) without transcripts",
             {"count": len(untranscribed), "files": sorted(untranscribed)[:10]},
         ))
     else:

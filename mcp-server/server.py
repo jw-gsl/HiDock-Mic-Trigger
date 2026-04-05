@@ -404,7 +404,8 @@ def handle_list_action_items(args: dict) -> str:
         due = f" [due: {item['due']}]" if item.get("due") else ""
         meeting = f" — from {item['meeting_title']}" if item.get("meeting_title") else ""
         status = f" [{item['status']}]" if item.get("status") != "open" else ""
-        lines.append(f"- {item['task']}{assignee}{due}{status}{meeting}")
+        conf = f" ({item['confidence']})" if item.get("confidence") and item["confidence"] != "high" else ""
+        lines.append(f"- {item['task']}{assignee}{due}{status}{conf}{meeting}")
     return "\n".join(lines)
 
 
@@ -466,19 +467,22 @@ def handle_research_topic(args: dict) -> str:
     if result["decisions"]:
         lines.append(f"\n**Decisions ({len(result['decisions'])}):**")
         for d in result["decisions"]:
-            lines.append(f"- {d['text']} (from {d['meeting_title']}, {d['date']})")
+            conf = f" [{d['confidence']}]" if d.get("confidence") and d["confidence"] != "high" else ""
+            lines.append(f"- {d['text']}{conf} (from {d['meeting_title']}, {d['date']})")
 
     if result["action_items"]:
         lines.append(f"\n**Action Items ({len(result['action_items'])}):**")
         for a in result["action_items"]:
             assignee = f" @{a['assignee']}" if a.get("assignee") else ""
             status = f" [{a['status']}]" if a.get("status") != "open" else ""
-            lines.append(f"- {a['task']}{assignee}{status}")
+            conf = f" ({a['confidence']})" if a.get("confidence") and a["confidence"] != "high" else ""
+            lines.append(f"- {a['task']}{assignee}{status}{conf}")
 
     if result["key_points"]:
         lines.append(f"\n**Key Points ({len(result['key_points'])}):**")
         for kp in result["key_points"]:
-            lines.append(f"- {kp['text']} (from {kp['meeting_title']})")
+            conf = f" [{kp['confidence']}]" if kp.get("confidence") and kp["confidence"] != "high" else ""
+            lines.append(f"- {kp['text']}{conf} (from {kp['meeting_title']})")
 
     if result["people"]:
         lines.append(f"\n**People involved ({len(result['people'])}):**")

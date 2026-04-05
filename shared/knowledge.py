@@ -526,7 +526,7 @@ class KnowledgeGraph:
         """
         conn = self._get_conn()
         query = """
-            SELECT a.id, a.task, a.assignee, a.due, a.status,
+            SELECT a.id, a.task, a.assignee, a.due, a.status, a.confidence,
                    m.title as meeting_title, m.date as meeting_date, m.file_path
             FROM action_items a
             JOIN meetings m ON m.id = a.meeting_id
