@@ -130,6 +130,18 @@ python extractor.py set-output C:\Users\username\HiDock-Recordings
 
 This persists the output directory to `config.json`.
 
+### Volume device commands (generic USB recorders, SD cards)
+
+```cmd
+python extractor.py scan-volumes
+python extractor.py volume-status --volume-name ZOOM_H1
+python extractor.py volume-import recording.wav --volume-name ZOOM_H1
+python extractor.py volume-import-new --volume-name ZOOM_H1
+python extractor.py mark-downloaded --volume-name ZOOM_H1 recording.wav
+```
+
+The `--volume-name` flag is required for all volume commands. Optional `--subpath` scopes scanning to a subfolder. The `mark-downloaded` command prefixes state keys with `vol:<name>/` to avoid collisions with HiDock recordings.
+
 ## Background Watcher (Recommended for always-docked setups)
 
 If the HiDock is always plugged in, the watcher is the best approach. It polls safely and avoids interfering with live recordings.
