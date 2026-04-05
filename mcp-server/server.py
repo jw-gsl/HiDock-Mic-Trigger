@@ -226,10 +226,10 @@ def handle_get_meeting(args: dict) -> str:
     kg = _get_kg()
     identifier = args["identifier"]
 
-    # Try direct file match first
+    # Try direct file match first (validate path stays within transcripts_dir)
     transcripts_dir = kg.transcripts_dir
-    direct = transcripts_dir / identifier
-    if direct.exists():
+    direct = (transcripts_dir / identifier).resolve()
+    if direct.exists() and str(direct).startswith(str(transcripts_dir.resolve())):
         return direct.read_text(encoding="utf-8")
 
     # Search by title
@@ -394,8 +394,8 @@ def handle_request(request: dict) -> dict:
             },
         })
 
-    elif method == "notifications/initialized":
-        # No response needed for notifications
+    elif method.startswith("notifications/"):
+        # No response needed for any notifications
         return None
 
     elif method == "tools/list":

@@ -35,7 +35,7 @@ def _yaml_escape(value: str) -> str:
     """Escape a string for YAML output (quote if it contains special chars)."""
     if not value:
         return '""'
-    needs_quoting = any(c in value for c in ':{}[]&*?|>!%@`#,') or value.startswith(('-', ' '))
+    needs_quoting = any(c in value for c in ':{}[]&*?|>!%@`#,\'') or value.startswith(('-', ' '))
     if needs_quoting or '\n' in value:
         escaped = value.replace('\\', '\\\\').replace('"', '\\"')
         return f'"{escaped}"'
@@ -378,9 +378,13 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
                 meta[key] = ""
             elif value.strip('"'):
                 clean = value.strip('"')
-                try:
-                    meta[key] = float(clean) if "." in clean else int(clean)
-                except ValueError:
+                # Only parse as number if the original value was NOT quoted
+                if not (value.startswith('"') and value.endswith('"')):
+                    try:
+                        meta[key] = float(clean) if "." in clean else int(clean)
+                    except ValueError:
+                        meta[key] = clean
+                else:
                     meta[key] = clean
             else:
                 meta[key] = ""

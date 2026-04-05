@@ -204,7 +204,7 @@ class KnowledgeGraph:
                         (meeting_id, person_id),
                     )
 
-        # Index action items
+        # Index action items (and their assignees as people)
         for item in meta.get("action_items", []):
             if isinstance(item, dict) and item.get("task"):
                 conn.execute(
@@ -212,6 +212,14 @@ class KnowledgeGraph:
                     (meeting_id, item["task"], item.get("assignee", ""),
                      item.get("due", ""), item.get("status", "open")),
                 )
+                # Also index assignee as a person linked to this meeting
+                assignee = item.get("assignee", "").strip()
+                if assignee:
+                    person_id = self._get_or_create_person(assignee)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO meeting_people (meeting_id, person_id) VALUES (?, ?)",
+                        (meeting_id, person_id),
+                    )
 
         # Index decisions
         for item in meta.get("decisions", []):
@@ -315,17 +323,23 @@ class KnowledgeGraph:
             List of dicts with: file_path, title, date, snippet.
         """
         conn = self._get_conn()
-        rows = conn.execute(
-            """SELECT f.file_path, f.title,
-                      snippet(transcript_fts, 2, '<b>', '</b>', '...', 40) as snippet,
-                      m.date
-               FROM transcript_fts f
-               JOIN meetings m ON m.file_path = f.file_path
-               WHERE transcript_fts MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (query, limit),
-        ).fetchall()
+        # Wrap query in quotes to prevent FTS5 operator injection
+        # (user searching for "NOT" or "OR" would be misinterpreted)
+        safe_query = '"' + query.replace('"', '""') + '"'
+        try:
+            rows = conn.execute(
+                """SELECT f.file_path, f.title,
+                          snippet(transcript_fts, 2, '<b>', '</b>', '...', 40) as snippet,
+                          m.date
+                   FROM transcript_fts f
+                   JOIN meetings m ON m.file_path = f.file_path
+                   WHERE transcript_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (safe_query, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
 
         return [
             {

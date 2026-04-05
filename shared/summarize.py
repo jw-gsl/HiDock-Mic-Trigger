@@ -73,7 +73,9 @@ def summarize(
     if len(text) > _MAX_TRANSCRIPT_CHARS:
         text = text[:_MAX_TRANSCRIPT_CHARS] + "\n\n[... transcript truncated ...]"
 
-    prompt = _SUMMARIZE_PROMPT.format(transcript=text)
+    # Use string concatenation instead of .format() to avoid crashes
+    # when transcript text contains { or } characters (code, JSON, math)
+    prompt = _SUMMARIZE_PROMPT.replace("{transcript}", text)
 
     print(f"Summarizing with {engine.name}...", file=sys.stderr)
     result = query_json(prompt, engine=engine, timeout=timeout)

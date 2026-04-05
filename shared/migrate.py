@@ -122,7 +122,11 @@ def add_frontmatter_to_file(
         source_file=source_file,
     )
 
-    new_content = f"{frontmatter}\n\n## Transcript\n\n{text}"
+    # Avoid duplicate ## Transcript heading if the original already has one
+    if text.lstrip().startswith("## Transcript"):
+        new_content = f"{frontmatter}\n\n{text}"
+    else:
+        new_content = f"{frontmatter}\n\n## Transcript\n\n{text}"
 
     if not dry_run:
         md_path.write_text(new_content, encoding="utf-8")

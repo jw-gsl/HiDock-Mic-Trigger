@@ -103,11 +103,19 @@ def _parse_toml(text: str) -> dict[str, Any]:
 
             # Remove inline comments (only outside quotes)
             if value.startswith('"') and '"' in value[1:]:
-                # Find closing quote, strip comment after it
-                close_idx = value.index('"', 1)
-                after = value[close_idx + 1:]
-                if " #" in after:
-                    value = value[:close_idx + 1]
+                # Find closing quote, handling escaped quotes
+                i = 1
+                while i < len(value):
+                    if value[i] == '\\' and i + 1 < len(value):
+                        i += 2  # skip escaped char
+                        continue
+                    if value[i] == '"':
+                        break
+                    i += 1
+                if i < len(value):
+                    after = value[i + 1:]
+                    if " #" in after:
+                        value = value[:i + 1]
             elif " #" in value:
                 value = value[:value.index(" #")].strip()
 
@@ -128,7 +136,7 @@ def _parse_value(value: str) -> Any:
     if (value.startswith('"') and value.endswith('"')) or \
        (value.startswith("'") and value.endswith("'")):
         inner = value[1:-1]
-        return inner.replace('\\"', '"').replace('\\\\', '\\')
+        return inner.replace('\\\\', '\\').replace('\\"', '"')
 
     # Integer
     try:

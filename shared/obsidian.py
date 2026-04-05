@@ -210,7 +210,11 @@ class VaultSync:
             if not profile:
                 continue
 
-            note_path = self.people_dir / f"{name}.md"
+            # Sanitize name to prevent path traversal
+            safe_name = re.sub(r'[<>:"/\\|?*\.\.]', '_', name).strip('_. ')
+            if not safe_name:
+                continue
+            note_path = self.people_dir / f"{safe_name}.md"
             content = self._build_person_note(profile)
             note_path.write_text(content, encoding="utf-8")
             generated.append(note_path)

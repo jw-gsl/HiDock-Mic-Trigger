@@ -98,7 +98,11 @@ def transcribe_file(
         if diarize:
             try:
                 from diarize import diarize as run_diarize
-                text = run_diarize(str(mp3_path), text, result.get("segments", []))
+                diarized_result = run_diarize(str(mp3_path), text, result.get("segments", []))
+                # If diarize returns a string (legacy), convert to plain text
+                if isinstance(diarized_result, str):
+                    text = diarized_result
+                    diarized_result = None
             except ImportError:
                 print("diarize module not available, skipping diarization", file=sys.stderr)
             except Exception as e:
