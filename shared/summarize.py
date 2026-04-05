@@ -32,12 +32,12 @@ The JSON must have exactly these keys:
 {{
   "title": "A concise 3-8 word title for this meeting/recording",
   "action_items": [
-    {{"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open"}}
+    {{"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open", "confidence": "high"}}
   ],
   "decisions": [
-    {{"text": "what was decided", "topic": "topic area or empty string"}}
+    {{"text": "what was decided", "topic": "topic area or empty string", "confidence": "high"}}
   ],
-  "key_points": ["important point 1", "important point 2"],
+  "key_points": [{{"text": "important point", "confidence": "high"}}],
   "tags": ["topic1", "topic2"],
   "summary_text": "A 2-4 sentence summary of the meeting/recording"
 }}
@@ -49,6 +49,7 @@ Rules:
 - key_points: 3-7 most important points discussed. Empty list for very short recordings.
 - tags: 2-5 topic tags (lowercase, no spaces). Empty list if unclear.
 - summary_text: Brief overview of what was discussed/recorded.
+- confidence: "high" = explicitly stated, "medium" = clearly implied, "low" = inferred/ambiguous.
 - If the transcript is a solo voice memo or dictation, adapt accordingly (fewer action items, simpler structure).
 - Respond with ONLY the JSON object.
 
@@ -62,16 +63,17 @@ Extract structured information from this SECTION of a longer meeting transcript.
 The JSON must have these keys:
 {{
   "action_items": [
-    {{"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open"}}
+    {{"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open", "confidence": "high"}}
   ],
   "decisions": [
-    {{"text": "what was decided", "topic": "topic area or empty string"}}
+    {{"text": "what was decided", "topic": "topic area or empty string", "confidence": "high"}}
   ],
-  "key_points": ["important point from this section"],
+  "key_points": [{{"text": "important point from this section", "confidence": "high"}}],
   "tags": ["topic1"],
   "summary_text": "2-3 sentence summary of THIS section"
 }}
 
+confidence: "high" = explicitly stated, "medium" = clearly implied, "low" = inferred/ambiguous.
 Only extract items clearly present in this section. Respond with ONLY the JSON object.
 
 TRANSCRIPT SECTION:
@@ -84,9 +86,9 @@ You are synthesizing summaries from {total_chunks} sections of a meeting transcr
 The JSON must have exactly these keys:
 {{
   "title": "A concise 3-8 word title for the full meeting",
-  "action_items": [combined and deduplicated action items from all sections],
-  "decisions": [combined and deduplicated decisions from all sections],
-  "key_points": ["3-7 most important points across the full meeting"],
+  "action_items": [combined and deduplicated action items from all sections, preserving confidence levels],
+  "decisions": [combined and deduplicated decisions from all sections, preserving confidence levels],
+  "key_points": [combined key points as {{"text": "...", "confidence": "high/medium/low"}}],
   "tags": ["2-5 topic tags covering the full meeting"],
   "summary_text": "A 2-4 sentence summary of the full meeting"
 }}
@@ -261,16 +263,23 @@ def _merge_chunk_summaries(summaries: list[dict]) -> dict:
                     "assignee": str(ai.get("assignee", "")),
                     "due": str(ai.get("due", "")),
                     "status": str(ai.get("status", "open")),
+                    "confidence": _norm_confidence(ai.get("confidence", "medium")),
                 })
         for d in cs.get("decisions", []):
             if isinstance(d, dict) and d.get("text"):
                 result["decisions"].append({
                     "text": str(d["text"]),
                     "topic": str(d.get("topic", "")),
+                    "confidence": _norm_confidence(d.get("confidence", "medium")),
                 })
         for kp in cs.get("key_points", []):
-            if isinstance(kp, str) and kp.strip():
-                result["key_points"].append(kp.strip())
+            if isinstance(kp, dict) and kp.get("text"):
+                result["key_points"].append({
+                    "text": str(kp["text"]).strip(),
+                    "confidence": _norm_confidence(kp.get("confidence", "medium")),
+                })
+            elif isinstance(kp, str) and kp.strip():
+                result["key_points"].append({"text": kp.strip(), "confidence": "medium"})
         for tag in cs.get("tags", []):
             if isinstance(tag, str) and tag.strip():
                 t = tag.strip().lower()
@@ -302,6 +311,15 @@ def _empty_summary() -> dict:
     }
 
 
+_VALID_CONFIDENCE = {"high", "medium", "low"}
+
+
+def _norm_confidence(val: str) -> str:
+    """Normalize a confidence value, defaulting to 'medium'."""
+    v = str(val).lower().strip()
+    return v if v in _VALID_CONFIDENCE else "medium"
+
+
 def _normalize_summary(raw: dict) -> dict:
     """Normalize and validate a raw LLM summary response."""
     result = _empty_summary()
@@ -317,6 +335,7 @@ def _normalize_summary(raw: dict) -> dict:
                 "assignee": str(item.get("assignee", "")),
                 "due": str(item.get("due", "")),
                 "status": str(item.get("status", "open")),
+                "confidence": _norm_confidence(item.get("confidence", "medium")),
             })
 
     # Normalize decisions
@@ -325,12 +344,21 @@ def _normalize_summary(raw: dict) -> dict:
             result["decisions"].append({
                 "text": str(item["text"]),
                 "topic": str(item.get("topic", "")),
+                "confidence": _norm_confidence(item.get("confidence", "medium")),
             })
 
-    # Normalize key points
+    # Normalize key points — accept both strings and dicts for backwards compat
     for item in raw.get("key_points", []):
-        if isinstance(item, str) and item.strip():
-            result["key_points"].append(item.strip())
+        if isinstance(item, dict) and item.get("text"):
+            result["key_points"].append({
+                "text": str(item["text"]).strip(),
+                "confidence": _norm_confidence(item.get("confidence", "medium")),
+            })
+        elif isinstance(item, str) and item.strip():
+            result["key_points"].append({
+                "text": item.strip(),
+                "confidence": "medium",
+            })
 
     # Normalize tags
     for item in raw.get("tags", []):

@@ -36,8 +36,14 @@ class TestNormalizeSummary:
         assert len(result["action_items"]) == 1
         assert result["action_items"][0]["task"] == "Review PR"
         assert len(result["decisions"]) == 1
-        assert result["key_points"] == ["Budget approved", "New hire starting Monday"]
+        assert len(result["key_points"]) == 2
+        assert result["key_points"][0]["text"] == "Budget approved"
+        assert result["key_points"][0]["confidence"] == "medium"
+        assert result["key_points"][1]["text"] == "New hire starting Monday"
         assert result["tags"] == ["engineering", "planning"]  # lowercased
+        # Check confidence on action items and decisions
+        assert result["action_items"][0]["confidence"] == "medium"
+        assert result["decisions"][0]["confidence"] == "medium"
 
     def test_empty_response(self):
         result = _normalize_summary({})
@@ -58,7 +64,9 @@ class TestNormalizeSummary:
     def test_filters_empty_key_points(self):
         raw = {"key_points": ["Valid point", "", "  ", "Another point"]}
         result = _normalize_summary(raw)
-        assert result["key_points"] == ["Valid point", "Another point"]
+        assert len(result["key_points"]) == 2
+        assert result["key_points"][0]["text"] == "Valid point"
+        assert result["key_points"][1]["text"] == "Another point"
 
     def test_title_truncation(self):
         raw = {"title": "A" * 200}

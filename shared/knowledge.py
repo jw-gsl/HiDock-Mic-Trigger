@@ -96,20 +96,23 @@ class KnowledgeGraph:
                 task TEXT NOT NULL,
                 assignee TEXT DEFAULT '',
                 due TEXT DEFAULT '',
-                status TEXT DEFAULT 'open'
+                status TEXT DEFAULT 'open',
+                confidence TEXT DEFAULT 'medium'
             );
 
             CREATE TABLE IF NOT EXISTS decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
                 text TEXT NOT NULL,
-                topic TEXT DEFAULT ''
+                topic TEXT DEFAULT '',
+                confidence TEXT DEFAULT 'medium'
             );
 
             CREATE TABLE IF NOT EXISTS key_points (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-                text TEXT NOT NULL
+                text TEXT NOT NULL,
+                confidence TEXT DEFAULT 'medium'
             );
 
             CREATE TABLE IF NOT EXISTS tags (
@@ -126,6 +129,38 @@ class KnowledgeGraph:
                 speakers,
                 tokenize='porter unicode61'
             );
+        """)
+        conn.commit()
+
+        # ── Schema migrations ─────────────────────────────────────────────
+        # Add confidence columns if missing (added in v0.2.0)
+        for table in ("action_items", "decisions", "key_points"):
+            try:
+                conn.execute(f"SELECT confidence FROM {table} LIMIT 0")
+            except sqlite3.OperationalError:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN confidence TEXT DEFAULT 'medium'")
+                conn.commit()
+
+        # Add event_log table (added in v0.2.0)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                file_path TEXT DEFAULT '',
+                status TEXT DEFAULT 'ok',
+                duration_s REAL,
+                error TEXT DEFAULT '',
+                metadata_json TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_event_log_type
+            ON event_log (event_type)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_event_log_timestamp
+            ON event_log (timestamp DESC)
         """)
         conn.commit()
 
@@ -208,9 +243,10 @@ class KnowledgeGraph:
         for item in meta.get("action_items", []):
             if isinstance(item, dict) and item.get("task"):
                 conn.execute(
-                    "INSERT INTO action_items (meeting_id, task, assignee, due, status) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO action_items (meeting_id, task, assignee, due, status, confidence) VALUES (?, ?, ?, ?, ?, ?)",
                     (meeting_id, item["task"], item.get("assignee", ""),
-                     item.get("due", ""), item.get("status", "open")),
+                     item.get("due", ""), item.get("status", "open"),
+                     item.get("confidence", "medium")),
                 )
                 # Also index assignee as a person linked to this meeting
                 assignee = item.get("assignee", "").strip()
@@ -225,16 +261,22 @@ class KnowledgeGraph:
         for item in meta.get("decisions", []):
             if isinstance(item, dict) and item.get("text"):
                 conn.execute(
-                    "INSERT INTO decisions (meeting_id, text, topic) VALUES (?, ?, ?)",
-                    (meeting_id, item["text"], item.get("topic", "")),
+                    "INSERT INTO decisions (meeting_id, text, topic, confidence) VALUES (?, ?, ?, ?)",
+                    (meeting_id, item["text"], item.get("topic", ""),
+                     item.get("confidence", "medium")),
                 )
 
-        # Index key points
+        # Index key points — accept both strings and dicts
         for item in meta.get("key_points", []):
-            if isinstance(item, str) and item.strip():
+            if isinstance(item, dict) and item.get("text"):
                 conn.execute(
-                    "INSERT INTO key_points (meeting_id, text) VALUES (?, ?)",
-                    (meeting_id, item.strip()),
+                    "INSERT INTO key_points (meeting_id, text, confidence) VALUES (?, ?, ?)",
+                    (meeting_id, item["text"].strip(), item.get("confidence", "medium")),
+                )
+            elif isinstance(item, str) and item.strip():
+                conn.execute(
+                    "INSERT INTO key_points (meeting_id, text, confidence) VALUES (?, ?, ?)",
+                    (meeting_id, item.strip(), "medium"),
                 )
 
         # Index tags

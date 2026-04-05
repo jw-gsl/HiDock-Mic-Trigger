@@ -237,6 +237,32 @@ TOOLS = [
         },
     },
     {
+        "name": "health_check",
+        "description": "Run a system health check — verifies directories, database, models, engines, and recent errors.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "recent_events",
+        "description": "View recent system events from the event log (transcriptions, errors, etc.).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max events to return (default 20)",
+                    "default": 20,
+                },
+                "event_type": {
+                    "type": "string",
+                    "description": "Filter by event type (e.g. 'transcription_completed', 'error')",
+                },
+            },
+        },
+    },
+    {
         "name": "topic_trends",
         "description": "Analyze topic frequency and recency across all meetings. Shows which topics are trending and how often they appear.",
         "inputSchema": {
@@ -412,9 +438,14 @@ def handle_get_stats(args: dict) -> str:
 
 def handle_rebuild_index(args: dict) -> str:
     global _kg, _intel
+    import time as _time
+    from shared.event_log import log_event, EventType
+    start = _time.monotonic()
     _kg = KnowledgeGraph()
     count = _kg.rebuild()
     _intel = None  # Reset intelligence so it picks up new data
+    log_event(EventType.INDEX_REBUILD, duration_s=round(_time.monotonic() - start, 1),
+              metadata={"count": count})
     return f"Index rebuilt. {count} transcripts indexed."
 
 
@@ -511,6 +542,42 @@ def handle_relationship_map(args: dict) -> str:
     return "\n".join(lines)
 
 
+def handle_health_check(args: dict) -> str:
+    from shared.health_check import run_health_check
+    report = run_health_check()
+
+    status_icons = {"ok": "+", "warning": "!", "error": "X"}
+    lines = [f"# Health Check: {report['overall'].upper()}", ""]
+    lines.append(f"**{report['summary']['ok']}** ok, "
+                 f"**{report['summary']['warnings']}** warnings, "
+                 f"**{report['summary']['errors']}** errors\n")
+
+    for check in report["checks"]:
+        icon = status_icons.get(check["status"], "?")
+        lines.append(f"[{icon}] **{check['name']}**: {check['message']}")
+
+    return "\n".join(lines)
+
+
+def handle_recent_events(args: dict) -> str:
+    from shared.event_log import recent_events as get_events
+    events = get_events(
+        limit=args.get("limit", 20),
+        event_type=args.get("event_type"),
+    )
+    if not events:
+        return "No events recorded yet."
+
+    lines = ["# Recent Events", ""]
+    for ev in events:
+        err = f" **ERROR**: {ev.error}" if ev.error else ""
+        dur = f" ({ev.duration_s:.1f}s)" if ev.duration_s else ""
+        fp = f" — {ev.file_path}" if ev.file_path else ""
+        lines.append(f"- `{ev.timestamp}` **{ev.event_type}**{fp}{dur}{err}")
+
+    return "\n".join(lines)
+
+
 def handle_topic_trends(args: dict) -> str:
     intel = _get_intel()
     trends = intel.topic_trends(limit=args.get("limit", 20))
@@ -544,6 +611,8 @@ _TOOL_HANDLERS = {
     "consistency_report": handle_consistency_report,
     "relationship_map": handle_relationship_map,
     "topic_trends": handle_topic_trends,
+    "health_check": handle_health_check,
+    "recent_events": handle_recent_events,
 }
 
 # ── MCP Protocol Handler ───────────────────────────────────────────────────
