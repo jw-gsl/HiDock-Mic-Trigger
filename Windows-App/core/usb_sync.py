@@ -62,6 +62,7 @@ class SyncRecording:
 class SyncRecordingEntry:
     recording: SyncRecording
     device_product_id: int = 0
+    device_id: str = ""
     device_name: str = ""
 
 

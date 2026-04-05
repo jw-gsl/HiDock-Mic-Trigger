@@ -1449,6 +1449,10 @@ def main() -> int:
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
 
+    mark_dl = sub.add_parser("mark-downloaded", help="Mark recordings as already downloaded without transferring")
+    mark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to mark")
+    mark_dl.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
+
     pull = sub.add_parser("pull", help="Pull one known device-side .hda file")
     pull.add_argument("filename", help="Device-side filename, e.g. 2026Feb26-160117-Rec35.hda")
     pull.add_argument("--out", default="out", help="Output directory")
@@ -1527,6 +1531,27 @@ def main() -> int:
         return 0
     if args.command == "download-new":
         print(json.dumps(download_new(timeout_ms=args.timeout_ms), indent=2))
+        return 0
+    if args.command == "mark-downloaded":
+        state = load_state()
+        downloads = state["downloads"]
+        marked = []
+        vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
+        for filename in args.filenames:
+            state_key = f"{vol_prefix}{filename}"
+            record = {
+                **downloads.get(state_key, {}),
+                "downloaded": True,
+                "downloaded_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+                "last_error": None,
+            }
+            if args.product_id is not None:
+                record["product_id"] = args.product_id
+            downloads[state_key] = record
+            marked.append(filename)
+        save_state(state)
+        print(json.dumps({"marked": marked}, indent=2))
         return 0
 
     if args.command == "pull":
