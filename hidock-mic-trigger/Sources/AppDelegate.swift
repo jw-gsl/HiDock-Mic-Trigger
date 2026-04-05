@@ -2966,12 +2966,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case .success(let downloaded):
                 if let payload = downloaded.first, entries.count == 1 {
                     let body = "\(payload.filename.replacingOccurrences(of: ".hda", with: ".mp3")) saved successfully."
-                    self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
+                    self.postSyncDownloadNotification(title: "✅ Download Complete", body: body)
                 } else {
                     let body = entries.count == 1
                         ? "\(entries[0].recording.outputName) saved successfully."
                         : "\(entries.count) recordings were saved successfully."
-                    self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
+                    self.postSyncDownloadNotification(title: "✅ Download Complete", body: body)
                 }
                 self.syncCheckedRecordings.subtract(entries.map(\.recording.name))
                 self.refreshSyncStatus()
@@ -3072,7 +3072,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let body = totalDownloaded == 1
                     ? "1 new recording was saved successfully."
                     : "\(totalDownloaded) new recordings were saved successfully."
-                postSyncDownloadNotification(title: "✅ HiDock Downloads Complete", body: body)
+                postSyncDownloadNotification(title: "✅ Downloads Complete", body: body)
             }
             viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
             viewModel.syncStatusLevel = .success
