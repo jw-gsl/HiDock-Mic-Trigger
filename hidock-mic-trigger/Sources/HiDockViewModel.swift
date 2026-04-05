@@ -150,6 +150,7 @@ final class HiDockViewModel: ObservableObject {
     var onShowDeviceManager: () -> Void = {}
     var onForgetDevice: (HiDockPairedDevice) -> Void = { _ in }
     var onPairVolume: (String, String?) -> Void = { _, _ in } // volumeName, subpath
+    var onScanVolumes: (@escaping ([VolumeScanResult]) -> Void) -> Void = { $0([]) }
 
     // MARK: - Notification Preferences
     @Published var notifyTranscriptionComplete: Bool = true

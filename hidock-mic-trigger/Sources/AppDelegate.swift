@@ -375,6 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowDeviceManager = { [weak self] in self?.openDeviceManager() }
         viewModel.onForgetDevice = { [weak self] device in self?.forgetDevice(device) }
         viewModel.onPairVolume = { [weak self] volumeName, subpath in self?.pairVolume(volumeName: volumeName, subpath: subpath) }
+        viewModel.onScanVolumes = { [weak self] completion in self?.scanVolumes(completion: completion) }
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
@@ -2111,6 +2112,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = true
         log("Paired volume: \(volumeName) (subpath: \(subpath ?? "none"))")
+    }
+
+    private func scanVolumes(completion: @escaping ([VolumeScanResult]) -> Void) {
+        guard ensureExtractorReady() else {
+            completion([])
+            return
+        }
+        runExtractor(arguments: ["scan-volumes"]) { [weak self] result in
+            guard self != nil else { completion([]); return }
+            switch result {
+            case .success(let data):
+                if let response = try? JSONDecoder().decode(VolumeScanResponse.self, from: data) {
+                    completion(response.volumes)
+                } else {
+                    completion([])
+                }
+            case .failure:
+                completion([])
+            }
+        }
     }
 
     // MARK: - Model Manager

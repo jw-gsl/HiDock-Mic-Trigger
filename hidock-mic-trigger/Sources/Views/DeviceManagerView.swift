@@ -259,27 +259,84 @@ struct PairVolumeButton: View {
     @State private var showPopover = false
     @State private var volumeName = ""
     @State private var subpath = ""
+    @State private var scannedVolumes: [VolumeScanResult] = []
+    @State private var scanning = false
 
     var body: some View {
         Button {
             showPopover.toggle()
+            if showPopover {
+                scanForVolumes()
+            }
         } label: {
             Label("Pair Volume", systemImage: "externaldrive.badge.plus")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
         .popover(isPresented: $showPopover) {
-            VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text("Pair USB Volume")
                     .font(.headline)
 
+                // Discovered volumes
+                if scanning {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Scanning volumes...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else if !scannedVolumes.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Discovered volumes:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ForEach(scannedVolumes, id: \.volumeName) { vol in
+                            Button {
+                                volumeName = vol.volumeName
+                            } label: {
+                                HStack {
+                                    Image(systemName: "externaldrive")
+                                        .foregroundColor(.accentColor)
+                                    VStack(alignment: .leading) {
+                                        Text(vol.volumeName)
+                                            .font(.callout.weight(.medium))
+                                        Text("\(vol.audioFileCount) audio file\(vol.audioFileCount == 1 ? "" : "s")")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    if volumeName == vol.volumeName {
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(.accentColor)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 2)
+                        }
+                    }
+                    .frame(maxWidth: 280)
+
+                    Divider()
+                }
+
+                if scannedVolumes.isEmpty && !scanning {
+                    Button("Scan for Volumes") {
+                        scanForVolumes()
+                    }
+                    .font(.caption)
+                }
+
                 TextField("Volume name (e.g. ZOOM_H1)", text: $volumeName)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 250)
+                    .frame(width: 280)
 
                 TextField("Subfolder (optional)", text: $subpath)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 250)
+                    .frame(width: 280)
 
                 HStack {
                     Button("Cancel") {
@@ -299,6 +356,17 @@ struct PairVolumeButton: View {
                 }
             }
             .padding(16)
+        }
+    }
+
+    private func scanForVolumes() {
+        scanning = true
+        scannedVolumes = []
+        viewModel.onScanVolumes { results in
+            DispatchQueue.main.async {
+                self.scannedVolumes = results
+                self.scanning = false
+            }
         }
     }
 }

@@ -1727,8 +1727,19 @@ class MainWindow(QMainWindow):
             save_paired_devices(self.settings, self._paired_devices)
             dlg.set_devices(self._paired_devices)
 
+        def _on_scan_volumes():
+            import json
+            try:
+                data = run_extractor(["scan-volumes"], timeout=10)
+                result = json.loads(data) if data else {}
+                volumes = result.get("volumes", [])
+            except Exception:
+                volumes = []
+            dlg.pair_widget.set_scan_results(volumes)
+
         dlg.deviceForgotten.connect(_on_forget)
         dlg.volumePaired.connect(_on_pair_volume)
+        dlg.pair_widget.scanRequested.connect(_on_scan_volumes)
         try:
             dlg.exec()
         finally:

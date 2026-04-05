@@ -121,6 +121,7 @@ class PairVolumeWidget(QWidget):
     """Inline widget for pairing a new USB volume."""
 
     pairRequested = pyqtSignal(str, str)  # volume_name, subpath
+    scanRequested = pyqtSignal()  # emitted when user clicks Scan
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,11 +129,16 @@ class PairVolumeWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        layout.addWidget(QLabel("Volume:"))
-        self.volume_input = QLineEdit()
-        self.volume_input.setPlaceholderText("e.g. ZOOM_H1 or D")
-        self.volume_input.setFixedWidth(150)
-        layout.addWidget(self.volume_input)
+        self.scan_btn = QPushButton("Scan")
+        self.scan_btn.setToolTip("Scan for mounted volumes with audio files")
+        self.scan_btn.clicked.connect(self._on_scan)
+        layout.addWidget(self.scan_btn)
+
+        self.volume_combo = QComboBox()
+        self.volume_combo.setEditable(True)
+        self.volume_combo.setPlaceholderText("e.g. ZOOM_H1 or D")
+        self.volume_combo.setFixedWidth(180)
+        layout.addWidget(self.volume_combo)
 
         layout.addWidget(QLabel("Subfolder:"))
         self.subpath_input = QLineEdit()
@@ -144,13 +150,33 @@ class PairVolumeWidget(QWidget):
         self.pair_btn.clicked.connect(self._on_pair)
         layout.addWidget(self.pair_btn)
 
+    def _on_scan(self):
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setText("Scanning...")
+        self.scanRequested.emit()
+
+    def set_scan_results(self, volumes: list[dict]):
+        """Populate combo box with scan results. Each dict has volumeName, audioFileCount."""
+        self.volume_combo.clear()
+        for vol in volumes:
+            name = vol.get("volumeName", "")
+            count = vol.get("audioFileCount", 0)
+            self.volume_combo.addItem(f"{name} ({count} files)", name)
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText("Scan")
+
     def _on_pair(self):
-        name = self.volume_input.text().strip()
+        # Get the volume name from the combo's current data or text
+        idx = self.volume_combo.currentIndex()
+        if idx >= 0:
+            name = self.volume_combo.itemData(idx) or self.volume_combo.currentText().strip()
+        else:
+            name = self.volume_combo.currentText().strip()
         if not name:
             return
         sub = self.subpath_input.text().strip()
         self.pairRequested.emit(name, sub)
-        self.volume_input.clear()
+        self.volume_combo.setCurrentText("")
         self.subpath_input.clear()
 
 
@@ -235,9 +261,9 @@ class DeviceManagerDialog(QDialog):
         footer = QHBoxLayout()
         footer.setContentsMargins(16, 8, 16, 12)
 
-        pair_widget = PairVolumeWidget()
-        pair_widget.pairRequested.connect(self._on_pair_volume)
-        footer.addWidget(pair_widget)
+        self.pair_widget = PairVolumeWidget()
+        self.pair_widget.pairRequested.connect(self._on_pair_volume)
+        footer.addWidget(self.pair_widget)
 
         footer.addStretch()
         close_btn = QPushButton("Close")

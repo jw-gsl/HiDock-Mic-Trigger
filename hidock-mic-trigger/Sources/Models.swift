@@ -170,6 +170,10 @@ struct VolumeScanResult: Codable {
     let audioExtensions: [String]
 }
 
+struct VolumeScanResponse: Codable {
+    let volumes: [VolumeScanResult]
+}
+
 struct HiDockSyncRecordingEntry: Identifiable {
     let id: String
     let recording: HiDockSyncRecording
