@@ -93,6 +93,15 @@ def transcribe_file(
 
         text = result["text"].strip()
 
+        # Run anti-hallucination filtering
+        from shared.whisper_guard import clean_transcript
+        text, guard_stats = clean_transcript(text, language=config.WHISPER_LANGUAGE or "en")
+        if guard_stats.filters_triggered:
+            print(f"Whisper-Guard: filters triggered: {guard_stats.filters_triggered}", file=sys.stderr)
+        if guard_stats.is_likely_hallucination:
+            print(f"Whisper-Guard: transcript flagged as likely hallucination "
+                  f"({guard_stats.final_word_count} words)", file=sys.stderr)
+
         # Optionally run diarization
         diarized_result = None
         if diarize:
