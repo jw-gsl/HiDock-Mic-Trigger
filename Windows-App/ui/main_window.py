@@ -729,9 +729,11 @@ class MainWindow(QMainWindow):
         self.sync_status_label.setText("Refreshing...")
         self._sync_busy = True
 
+        # Load paired devices on the main thread (QSettings is not thread-safe)
+        from core.models import DeviceType, load_paired_devices
+        devices = load_paired_devices(self.settings)
+
         def _run():
-            from core.models import DeviceType, load_paired_devices
-            devices = load_paired_devices(self.settings)
             all_recordings = []
             any_connected = False
             output_dir = ""
@@ -1832,11 +1834,9 @@ class MainWindow(QMainWindow):
             dlg.set_devices(self._paired_devices)
 
         def _on_scan_volumes():
-            import json
             try:
                 data = run_extractor(["scan-volumes"], timeout=10)
-                result = json.loads(data) if data else {}
-                volumes = result.get("volumes", [])
+                volumes = data.get("volumes", []) if data else []
             except Exception:
                 volumes = []
             dlg.pair_widget.set_scan_results(volumes)

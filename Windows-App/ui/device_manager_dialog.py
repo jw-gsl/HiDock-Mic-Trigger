@@ -169,7 +169,8 @@ class PairVolumeWidget(QWidget):
         # Get the volume name from the combo's current data or text
         idx = self.volume_combo.currentIndex()
         if idx >= 0:
-            name = self.volume_combo.itemData(idx) or self.volume_combo.currentText().strip()
+            raw = self.volume_combo.itemData(idx)
+            name = str(raw) if raw else self.volume_combo.currentText().strip()
         else:
             name = self.volume_combo.currentText().strip()
         if not name:

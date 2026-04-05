@@ -1433,6 +1433,7 @@ def volume_import_new(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--product-id", type=int, default=None, help="USB product ID of the target device")
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="Report sync status and device recordings as JSON")
