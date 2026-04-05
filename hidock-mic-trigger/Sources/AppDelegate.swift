@@ -2438,8 +2438,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             errPipe.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
                 guard !chunk.isEmpty else { return }
-                errQueue.sync { stderrData.append(chunk) }
-                if let text = String(data: chunk, encoding: .utf8) {
+                errQueue.sync {
+                    stderrData.append(chunk)
+                    guard let text = String(data: chunk, encoding: .utf8) else { return }
                     lineBuffer += text
                     while let range = lineBuffer.range(of: "\n") {
                         let line = String(lineBuffer[lineBuffer.startIndex..<range.lowerBound])
