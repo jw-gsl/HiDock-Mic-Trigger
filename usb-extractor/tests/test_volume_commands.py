@@ -308,3 +308,65 @@ class TestVolumeImportSecurity:
             state_path=tmp_path / "state.json",
         )
         assert result["downloaded"] is False
+
+
+# ---------------------------------------------------------------------------
+# mark-downloaded with --volume-name prefix
+# ---------------------------------------------------------------------------
+class TestMarkDownloadedVolumePrefix:
+    def test_volume_name_prefixes_state_keys(self, tmp_path, monkeypatch):
+        """mark-downloaded --volume-name should store keys as vol:<name>/<file>."""
+        import sys
+        import extractor
+
+        state_path = tmp_path / "state.json"
+        save_state({"downloads": {}}, state_path)
+        # Patch both the module constant and the function defaults
+        monkeypatch.setattr(extractor, "DEFAULT_STATE_PATH", state_path)
+        monkeypatch.setattr(extractor.load_state, "__defaults__", (state_path,))
+        monkeypatch.setattr(extractor.save_state, "__defaults__", (state_path,))
+
+        old_argv = sys.argv
+        try:
+            sys.argv = [
+                "extractor",
+                "mark-downloaded",
+                "--volume-name", "ZOOM",
+                "rec1.wav", "rec2.wav",
+            ]
+            extractor.main()
+        finally:
+            sys.argv = old_argv
+
+        state = load_state(state_path)
+        assert "vol:ZOOM/rec1.wav" in state["downloads"]
+        assert "vol:ZOOM/rec2.wav" in state["downloads"]
+        assert state["downloads"]["vol:ZOOM/rec1.wav"]["downloaded"] is True
+        # Raw filenames should NOT be present as keys
+        assert "rec1.wav" not in state["downloads"]
+
+    def test_without_volume_name_uses_raw_keys(self, tmp_path, monkeypatch):
+        """mark-downloaded without --volume-name should use raw filenames."""
+        import sys
+        import extractor
+
+        state_path = tmp_path / "state.json"
+        save_state({"downloads": {}}, state_path)
+        monkeypatch.setattr(extractor, "DEFAULT_STATE_PATH", state_path)
+        monkeypatch.setattr(extractor.load_state, "__defaults__", (state_path,))
+        monkeypatch.setattr(extractor.save_state, "__defaults__", (state_path,))
+
+        old_argv = sys.argv
+        try:
+            sys.argv = [
+                "extractor",
+                "mark-downloaded",
+                "file1.hda",
+            ]
+            extractor.main()
+        finally:
+            sys.argv = old_argv
+
+        state = load_state(state_path)
+        assert "file1.hda" in state["downloads"]
+        assert state["downloads"]["file1.hda"]["downloaded"] is True

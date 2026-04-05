@@ -1270,7 +1270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             let devices = self.syncPairedDevices
             guard !devices.isEmpty else { return }
-            self.log("Auto-connecting \(devices.count) paired HiDock device(s) on startup")
+            self.log("Auto-connecting \(devices.count) paired device(s) on startup")
             self.syncBusy = true
             self.syncViewModelState()
 
@@ -1280,7 +1280,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             for device in devices {
                 group.enter()
-                self.runExtractor(arguments: ["status", "--timeout-ms", "2000"], productId: device.productId) { [weak self] result in
+
+                let args: [String]
+                let pid: Int?
+                switch device.deviceType {
+                case .hidock:
+                    args = ["status", "--timeout-ms", "2000"]
+                    pid = device.productId
+                case .volume:
+                    args = self.volumeExtractorArguments("volume-status", device: device)
+                    pid = nil
+                }
+
+                self.runExtractor(arguments: args, productId: pid) { [weak self] result in
                     guard let self = self else { group.leave(); return }
                     switch result {
                     case .success(let data):
@@ -2286,6 +2298,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return arguments
     }
 
+    /// Build extractor arguments for a volume device command.
+    private func volumeExtractorArguments(_ command: String, device: HiDockPairedDevice, extra: [String] = []) -> [String] {
+        var args = [command, "--volume-name", device.volumeName ?? ""]
+        if let sub = device.subpath, !sub.isEmpty {
+            args += ["--subpath", sub]
+        }
+        args += extra
+        return args
+    }
+
     private func ensureExtractorReady() -> Bool {
         let configHint = "\n\nTo fix, set the repo path via:\n  defaults write com.hidock.mic-trigger \(repoRootKey) /path/to/hidock-tools"
         guard FileManager.default.fileExists(atPath: extractorScriptPath) else {
@@ -2590,7 +2612,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         for device in devices {
             group.enter()
-            runExtractor(arguments: ["status", "--timeout-ms", "5000"], productId: device.productId) { [weak self] result in
+
+            // Choose extractor command based on device type
+            let args: [String]
+            let pid: Int?
+            switch device.deviceType {
+            case .hidock:
+                args = ["status", "--timeout-ms", "5000"]
+                pid = device.productId
+            case .volume:
+                args = volumeExtractorArguments("volume-status", device: device)
+                pid = nil
+            }
+
+            runExtractor(arguments: args, productId: pid) { [weak self] result in
                 guard let self = self else { group.leave(); return }
                 switch result {
                 case .success(let data):
@@ -2600,17 +2635,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         if payload.connected {
                             anyConnected = true
                         } else if let err = payload.error {
-                            self.log("HiDock sync: \(device.cleanName) not connected: \(err)")
+                            self.log("Sync: \(device.cleanName) not connected: \(err)")
                             deviceErrors[device.cleanName] = err
                         }
                     } catch {
-                        self.log("HiDock sync decode failure for \(device.cleanName): \(error.localizedDescription)")
+                        self.log("Sync decode failure for \(device.cleanName): \(error.localizedDescription)")
                         deviceErrors[device.cleanName] = error.localizedDescription
                     }
                 case .failure(let error):
                     let desc = error.localizedDescription
                     let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
-                    self.log("HiDock sync status error for \(device.cleanName): \(shortDesc)")
+                    self.log("Sync status error for \(device.cleanName): \(shortDesc)")
                     deviceErrors[device.cleanName] = shortDesc
                 }
                 group.leave()
@@ -2813,14 +2848,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let notDownloaded = entries.filter { !$0.recording.downloaded }
         guard !notDownloaded.isEmpty else { return }
 
-        let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceProductId)
+        let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceId)
         let group = DispatchGroup()
         var anyError: String?
 
-        for (productId, deviceEntries) in byDevice {
+        for (deviceId, deviceEntries) in byDevice {
             let filenames = deviceEntries.map(\.recording.name)
+            let device = syncPairedDevices.first { $0.deviceId == deviceId }
+
+            var args: [String]
+            let pid: Int?
+            if let device = device, device.deviceType == .volume {
+                args = ["mark-downloaded", "--volume-name", device.volumeName ?? ""] + filenames
+                pid = nil
+            } else {
+                args = ["mark-downloaded"] + filenames
+                pid = device?.productId
+            }
+
             group.enter()
-            runExtractor(arguments: ["mark-downloaded"] + filenames, productId: productId) { result in
+            runExtractor(arguments: args, productId: pid) { result in
                 if case .failure(let error) = result {
                     anyError = error.localizedDescription
                 }
@@ -2929,6 +2976,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Look up the paired device for a recording entry.
+    private func pairedDevice(for entry: HiDockSyncRecordingEntry) -> HiDockPairedDevice? {
+        syncPairedDevices.first { $0.deviceId == entry.deviceId }
+    }
+
     private func downloadSyncRecordings(
         _ remaining: [HiDockSyncRecordingEntry],
         completed: [HiDockSyncDownloadResult],
@@ -2939,7 +2991,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        runExtractorWithProgress(arguments: ["download", current.recording.name, "--length", "\(current.recording.length)"], productId: current.deviceProductId, onProgress: { [weak self] received, total, pct in
+        // Choose extractor command based on device type
+        let args: [String]
+        let pid: Int?
+        if let device = pairedDevice(for: current), device.deviceType == .volume {
+            args = volumeExtractorArguments("volume-import", device: device, extra: [current.recording.name])
+            pid = nil
+        } else {
+            args = ["download", current.recording.name, "--length", "\(current.recording.length)"]
+            pid = current.deviceProductId
+        }
+
+        runExtractorWithProgress(arguments: args, productId: pid, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
@@ -3018,7 +3081,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        runExtractorWithProgress(arguments: ["download-new"], productId: device.productId, onProgress: { [weak self] received, total, pct in
+        // Choose extractor command based on device type
+        let args: [String]
+        let pid: Int?
+        switch device.deviceType {
+        case .hidock:
+            args = ["download-new"]
+            pid = device.productId
+        case .volume:
+            args = volumeExtractorArguments("volume-import-new", device: device)
+            pid = nil
+        }
+
+        runExtractorWithProgress(arguments: args, productId: pid, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
