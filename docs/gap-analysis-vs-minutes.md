@@ -2,6 +2,7 @@
 
 **Date**: 2026-04-05
 **Comparison**: [HiDock Mic Trigger](https://github.com/jw-gsl/hidock-mic-trigger) vs. [minutes](https://github.com/silverstein/minutes)
+**Status**: Actioned — see [evolution-plan.md](evolution-plan.md) for implementation status
 
 ## The Fundamental Difference
 

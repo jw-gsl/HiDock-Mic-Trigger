@@ -1,6 +1,6 @@
 # HiDock Tools
 
-A suite of tools for working with [HiDock](https://www.hidock.com) USB docking stations. Automatically trigger recording with an external mic, download recordings over USB, and transcribe them locally using Whisper.
+A suite of tools for working with [HiDock](https://www.hidock.com) USB docking stations. Automatically trigger recording with an external mic, download recordings over USB, transcribe locally using Whisper, and extract structured intelligence from every conversation.
 
 ## Downloads
 
@@ -21,6 +21,9 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 | `transcription-pipeline/` | macOS | Transcription pipeline — whisper.cpp (bundled) or OpenAI Whisper on MPS (dev) |
 | `Windows-App/` | Windows | PyQt6 desktop app — Windows port of the macOS menu bar app |
 | `Windows-Script/` | Windows | Python USB extractor and background watcher for Windows |
+| `shared/` | Cross-platform | Python modules for structured transcripts, LLM summarization, knowledge graph, Obsidian sync, config, and hooks |
+| `mcp-server/` | Cross-platform | MCP server exposing meeting knowledge to AI agents (Claude Desktop, Cursor, etc.) |
+| `docs/` | — | Gap analysis, evolution plan, and architecture documentation |
 
 > **macOS is the primary development platform.** The Windows app is a secondary port. See [Windows-App/PORTING.md](Windows-App/PORTING.md) for the porting workflow.
 
@@ -28,9 +31,14 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 
 1. **Mic Trigger** — watches your USB mic (e.g. Samson Q2U) via CoreAudio. When it detects the mic is in use, it silently opens the HiDock's audio input using `ffmpeg`, causing the HiDock to auto-record.
 2. **USB Sync** — pairs with one or more HiDock devices over USB and downloads recordings as MP3 files to a local folder.
-3. **Transcription** — runs Whisper `large-v3-turbo` (via whisper.cpp) to transcribe downloaded recordings to Markdown files. The ~550 MB model is downloaded on first use.
+3. **Transcription** — runs Whisper `large-v3-turbo` (via whisper.cpp) to transcribe downloaded recordings to Markdown files with YAML frontmatter.
+4. **Summarization** (optional) — sends transcripts to an available LLM CLI (`claude`, `codex`, `gemini`, or `ollama`) to extract titles, action items, decisions, key points, and tags. No API keys needed — uses existing AI subscriptions.
+5. **Knowledge Graph** — indexes all transcripts into a SQLite database for full-text search, people tracking, and action item management.
+6. **Obsidian Sync** (optional) — syncs transcripts into an Obsidian vault with `[[wikilinks]]`, auto-generated person notes, and daily notes integration.
+7. **MCP Server** — exposes meeting knowledge to AI agents via the Model Context Protocol. Ask Claude "what did I promise Sarah last week?" and get an answer.
+8. **Post-transcription Hooks** — run custom shell commands after transcription (e.g. send a Slack notification, sync to cloud).
 
-All three are controlled from a single menu bar app with a unified window.
+All processing happens locally. LLM summarization is optional and uses your existing subscriptions.
 
 ## Prerequisites
 
@@ -40,7 +48,7 @@ All three are controlled from a single menu bar app with a unified window.
 - [ffmpeg](https://formulae.brew.sh/formula/ffmpeg): `brew install ffmpeg`
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 - Xcode Command Line Tools: `xcode-select --install`
-- Python 3.11+ (for USB extractor and transcription)
+- Python 3.11+ (for USB extractor, transcription, and shared modules)
 
 ## Quick start
 
@@ -101,9 +109,85 @@ All files are stored under `~/HiDock/`:
 ```
 ~/HiDock/
   Recordings/          # Downloaded MP3 files
-  Raw Transcripts/     # Whisper transcription output (.md)
+  Raw Transcripts/     # Whisper transcription output (.md with YAML frontmatter)
   Speech-to-Text/      # Whisper model cache
   Voice Library/       # Speaker embeddings (when diarization is enabled)
+  knowledge.db         # SQLite knowledge graph index (rebuildable from transcripts)
+```
+
+### Transcript format
+
+Transcripts are Markdown files with YAML frontmatter containing structured metadata:
+
+```yaml
+---
+title: "Weekly sync with Sarah and Dev team"
+type: meeting
+date: 2026-04-05T14:00:00+00:00
+duration: 234.5
+speakers: [Sarah Chen, James Walsh]
+source_device: HiDock H1
+source_file: recording.mp3
+model: large-v3-turbo
+action_items:
+  - task: "Review Q2 roadmap draft"
+    assignee: Sarah Chen
+    due: 2026-04-10
+    status: open
+decisions:
+  - text: "Ship v2.0 by end of April"
+    topic: release
+key_points: ["Budget approved", "Moving standup to 10am"]
+tags: [engineering, planning]
+---
+
+## Transcript
+
+[00:00-00:45] **Sarah Chen:** Let's start with the roadmap...
+```
+
+## Configuration
+
+Settings are stored in a TOML config file at `~/.config/hidock/config.toml` (macOS/Linux) or `%APPDATA%\HiDock\config.toml` (Windows):
+
+```toml
+[general]
+recordings_folder = "~/HiDock/Recordings"
+transcripts_folder = "~/HiDock/Raw Transcripts"
+
+[transcription]
+model = "large-v3-turbo"
+diarization = false
+
+[summarization]
+engine = "auto"        # auto | claude | codex | gemini | ollama | none
+auto_summarize = false
+
+[obsidian]
+enabled = false
+vault_path = ""
+sync_strategy = "symlink"  # symlink | copy | direct
+
+[hooks]
+post_transcription = ""    # shell command to run after each transcription
+```
+
+## MCP Server
+
+The MCP server at `mcp-server/server.py` exposes your meeting knowledge to AI agents. See [mcp-server/README.md](mcp-server/README.md) for setup.
+
+**Available tools**: `search_meetings`, `get_meeting`, `get_recent_meetings`, `get_person_profile`, `list_people`, `list_action_items`, `search_by_person`, `search_by_tag`, `get_stats`, `rebuild_index`.
+
+## Knowledge Graph CLI
+
+Query your meeting knowledge from the command line:
+
+```bash
+python -m shared.knowledge search "budget review"
+python -m shared.knowledge person "Sarah"
+python -m shared.knowledge actions --status open
+python -m shared.knowledge stats
+python -m shared.knowledge rebuild
 ```
 
 ## Permissions

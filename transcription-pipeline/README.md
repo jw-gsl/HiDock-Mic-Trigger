@@ -4,7 +4,7 @@ Local transcription pipeline for HiDock recordings. Two backends available:
 - **`transcribe.py`** — OpenAI Whisper on Apple Silicon MPS (development, requires PyTorch)
 - **`transcribe_cpp.py`** — whisper.cpp via pywhispercpp (bundled builds, lightweight, no PyTorch)
 
-Both produce identical output (Markdown transcripts) and use the same CLI protocol.
+Both produce identical output (Markdown transcripts with YAML frontmatter) and use the same CLI protocol. Both support optional `--summarize` for LLM-powered intelligence extraction and `--diarize` for speaker identification.
 
 ## Setup
 
@@ -61,6 +61,23 @@ Diarization requires a HuggingFace token with access to `pyannote/speaker-diariz
 }
 ```
 
+### Enable LLM summarization
+
+```bash
+.venv/bin/python transcribe.py transcribe --summarize ~/HiDock/Recordings/file.mp3
+.venv/bin/python transcribe.py transcribe-batch --summarize
+```
+
+Summarization requires an LLM CLI tool installed on the system. Detection priority: `claude` > `codex` > `gemini` > `ollama`. No API keys needed — uses your existing AI subscriptions. If no CLI is found, summarization is skipped and transcription completes normally.
+
+The LLM extracts: title, action items (with assignee/due/status), decisions, key points, tags, and a summary paragraph. All structured data is stored in the transcript's YAML frontmatter.
+
+### Combine diarization + summarization
+
+```bash
+.venv/bin/python transcribe.py transcribe --diarize --summarize ~/HiDock/Recordings/file.mp3
+```
+
 ### Voice library (speaker identification)
 
 Enroll speakers and auto-identify them in diarized transcripts:
@@ -100,16 +117,51 @@ Paths are defined in `config.py`:
 
 ## Output format
 
+All transcripts are saved as `<recording-name>.md` with YAML frontmatter containing structured metadata (title, date, duration, speakers, model, source file). When `--summarize` is used, the frontmatter also includes action items, decisions, key points, and tags.
+
 ### Without diarization
 
-Plain text transcript saved as `<recording-name>.md`.
+```markdown
+---
+title: "Discussion about Q2 roadmap"
+type: meeting
+date: 2026-04-05T14:00:00+00:00
+duration: 234.5
+speakers: []
+model: large-v3-turbo
+action_items: []
+---
+
+## Transcript
+
+Welcome everyone to the meeting today...
+```
 
 ### With diarization
 
+```markdown
+---
+title: "Weekly sync with Sarah"
+speakers: [James, Sarah Chen]
+action_items:
+  - task: "Review roadmap draft"
+    assignee: Sarah Chen
+    status: open
+---
+
+## Transcript
+
+[00:00-00:45] **James:** Welcome everyone to the meeting today...
+
+[00:45-01:12] **Sarah Chen:** Thanks, I wanted to discuss the...
 ```
-[00:00-00:45] James: Welcome everyone to the meeting today...
-[00:45-01:12] Speaker_02: Thanks, I wanted to discuss the...
-```
+
+### Post-transcription pipeline
+
+After transcription (and optional summarization), the pipeline automatically:
+1. Runs any configured **post-transcription hook** (shell command from `~/.config/hidock/config.toml`)
+2. Syncs to **Obsidian vault** if configured (with `[[wikilinks]]` for speakers)
+3. Both are non-fatal — failures are logged but don't block the workflow
 
 ## Integration
 

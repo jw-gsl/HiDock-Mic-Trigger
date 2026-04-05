@@ -1,7 +1,7 @@
 # Evolution Plan: From Hardware Tool to Knowledge System
 
 **Date**: 2026-04-05
-**Status**: Draft — awaiting review
+**Status**: Phases 1-3 backend complete. UI integration pending.
 
 ## Vision
 
@@ -114,104 +114,94 @@ Rebuild command: parse all markdown frontmatter → populate tables. Should take
 
 ## Phased Roadmap
 
-### Phase 1: Structured Output (Foundation)
+### Phase 1: Structured Output (Foundation) — COMPLETE
 **Goal**: Make transcripts machine-readable without changing the user workflow.
 
-1. **YAML frontmatter on all new transcripts**
-   - Add to `shared/transcript_writer.py` (new module)
-   - Both `transcribe.py` and `transcribe_cpp.py` call this instead of writing raw markdown
-   - Windows `core/transcription.py` uses same module
-   - Fields: title (auto-generated from first 100 words), type, date, duration, speakers, source_device, source_file
+1. **YAML frontmatter on all new transcripts** — DONE
+   - `shared/transcript_writer.py` — builds/parses YAML frontmatter
+   - `transcribe.py`, `transcribe_cpp.py`, and Windows `core/transcription.py` all integrated
+   - Fields: title, type, date, duration, speakers, source_device, source_file, action_items, decisions, key_points, tags
+   - 22 tests
 
-2. **Migrate existing transcripts**
-   - Script to add frontmatter to existing `.md` files using state.json metadata
-   - Non-destructive: only adds frontmatter header, doesn't modify transcript body
+2. **Migrate existing transcripts** — DONE
+   - `shared/migrate.py` — adds frontmatter to existing `.md` files using state.json metadata
+   - CLI: `python -m shared.migrate --apply --rebuild-index`
+   - 9 tests
 
-3. **CLI detection module** (`shared/llm_cli.py`)
-   - Detect available LLM CLIs on the system
-   - Provide a unified `query(prompt, text) → str` interface
-   - Support: `claude`, `codex`, `gemini`, `ollama` (+ configurable custom command)
-   - Report available engines to the UI (so users know what's configured)
+3. **CLI detection module** — DONE
+   - `shared/llm_cli.py` — detects `claude` > `codex` > `gemini` > `ollama`
+   - Unified `query(prompt) → str` and `query_json(prompt) → dict` interface
+   - Reads `ollama_model` from TOML config
+   - 12 tests
 
-**Deliverable**: All new transcripts have structured frontmatter. LLM CLI detection works.
-
-### Phase 2: Intelligence Layer
+### Phase 2: Intelligence Layer — COMPLETE (backend)
 **Goal**: Extract meaning from transcripts, not just words.
 
-4. **LLM summarization post-transcription**
-   - After Whisper finishes, if an LLM CLI is available, run summarization
-   - Prompt engineering for structured extraction (action items, decisions, key points)
-   - Parse LLM output → update frontmatter YAML
-   - Progress reporting: "Transcribing... → Summarizing... → Done"
-   - Graceful skip if no LLM available (transcript still works without summary)
+4. **LLM summarization post-transcription** — DONE
+   - `shared/summarize.py` — sends transcript to LLM, extracts structured JSON
+   - `--summarize` flag on both `transcribe.py` and `transcribe_cpp.py`
+   - Graceful skip if no LLM available
+   - 8 tests
 
-5. **Auto-titling**
-   - LLM generates a concise meeting title from transcript
-   - Falls back to date + first speaker + duration if no LLM
+5. **Auto-titling** — DONE
+   - `shared/transcript_writer.py:auto_title()` — first sentence with speaker labels stripped
+   - Falls back to "Untitled recording"
 
-6. **SQLite knowledge graph**
-   - Build on first run by parsing all frontmatter
-   - Incremental updates after each new transcription
-   - Exposed to both platforms via `shared/knowledge.py`
+6. **SQLite knowledge graph** — DONE
+   - `shared/knowledge.py` — FTS5, people, action items, decisions, tags
+   - Indexes both speakers (from diarization) and assignees (from action items)
+   - CLI: `python -m shared.knowledge [rebuild|search|person|actions|stats|people]`
+   - 16 tests
 
-7. **Search** (in-app)
-   - Full-text search via SQLite FTS5 over transcript content
-   - Filtered search: by person, date range, topic, action item status
-   - UI: search bar in the recordings table view (both platforms)
+7. **Search** (backend only) — DONE
+   - Full-text search via FTS5 with safe query escaping
+   - Search by person, tag, text
+   - **UI NOT YET BUILT** — needs search bar in recordings table (both platforms)
 
-**Deliverable**: Transcripts have summaries, action items, decisions. Search works. Knowledge graph exists.
-
-### Phase 3: Obsidian & Connectivity
+### Phase 3: Obsidian & Connectivity — COMPLETE (backend)
 **Goal**: Make meeting knowledge part of the user's broader knowledge system.
 
-8. **Obsidian vault sync**
-   - Config: vault path, sync strategy, subfolder name
-   - Auto-sync after transcription completes
+8. **Obsidian vault sync** — DONE
+   - `shared/obsidian.py` — 3 strategies (symlink, copy, direct)
+   - Auto-sync via hooks pipeline after transcription
    - Wikilinks for speaker names
    - Person notes auto-generated in vault
+   - 12 tests
 
-9. **Person profiles**
-   - Aggregate view: all meetings with a person, topics discussed, open action items, last contact
-   - "Losing touch" indicator (configurable threshold)
-   - Accessible from UI and from Obsidian person notes
+9. **Person profiles** — DONE (backend)
+   - `shared/knowledge.py:get_person_profile()` — meeting history, open action items, topics
+   - Accessible via CLI and MCP server
+   - **UI NOT YET BUILT** — needs person profile view in both apps
 
-10. **Post-processing hooks**
-    - User-configurable shell command run after transcription + summarization
-    - Use cases: sync to cloud, notify via Slack, append to daily note, push to Notion
-    - Config: `post_process_command` in settings
+10. **Post-processing hooks** — DONE
+    - `shared/hooks.py` — runs shell command with transcript metadata as env vars
+    - Orchestrates: hook command + Obsidian sync
+    - Config: `hooks.post_transcription` in TOML
+    - 9 tests
 
-11. **Action item dashboard**
-    - Dedicated view: all open action items across meetings
-    - Filter by assignee, due date, meeting
-    - Mark as complete (updates frontmatter in source markdown)
+11. **Action item dashboard** — NOT YET BUILT
+    - Backend ready: `knowledge.py:list_action_items()` and `update_action_item_status()`
+    - **Needs UI** — dedicated view in both macOS (Swift) and Windows (PyQt6)
 
-**Deliverable**: Obsidian integration live. Person profiles. Action item tracking. Hooks.
-
-### Phase 4: Agent Access & Beyond
+### Phase 4: Agent Access & Beyond — PARTIALLY COMPLETE
 **Goal**: Make the knowledge system accessible to AI agents.
 
-12. **MCP server**
-    - TypeScript or Python MCP server exposing:
-      - `search_meetings(query, filters)`
-      - `get_person_profile(name)`
-      - `list_action_items(status, assignee)`
-      - `get_meeting(date_or_title)`
-      - `get_recent_meetings(days)`
-    - Installable via npm/pip
-    - Works with Claude Desktop, Cursor, Windsurf, etc.
+12. **MCP server** — DONE
+    - `mcp-server/server.py` — Python, JSON-RPC over stdio
+    - 10 tools: search_meetings, get_meeting, get_recent_meetings, get_person_profile, list_people, list_action_items, search_by_person, search_by_tag, get_stats, rebuild_index
+    - 1 resource: meetings://stats
+    - 18 tests
 
-13. **Cross-meeting intelligence**
+13. **Cross-meeting intelligence** — NOT YET BUILT
     - Consistency detection (conflicting decisions across meetings)
     - Commitment tracking (stale action items, missed due dates)
     - Topic trends (what are you spending meeting time on?)
-    - Relationship scoring (frequency × recency × topic depth)
+    - Relationship scoring (frequency x recency x topic depth)
 
-14. **Calendar integration** (macOS first)
+14. **Calendar integration** — NOT YET BUILT
     - Match recording timestamps to calendar events
     - Pull attendee lists and meeting titles
     - Auto-populate speaker identification hints
-
-**Deliverable**: Full MCP server. Cross-meeting intelligence. Calendar matching.
 
 ---
 
