@@ -395,6 +395,18 @@ class MainWindow(QMainWindow):
 
         row4.addStretch()
 
+        # Device filter
+        filter_label = QLabel("Filter:")
+        filter_label.setStyleSheet("font-size: 11px; font-weight: 600;")
+        row4.addWidget(filter_label)
+        self.device_filter_combo = QComboBox()
+        self.device_filter_combo.setMinimumWidth(120)
+        self.device_filter_combo.addItem("All", userData=None)
+        self.device_filter_combo.currentIndexChanged.connect(self._on_device_filter_changed)
+        row4.addWidget(self.device_filter_combo)
+
+        row4.addStretch()
+
         # Right: hide downloaded + auto-download
         self.hide_downloaded_check = QCheckBox("Hide Downloaded")
         self.hide_downloaded_check.stateChanged.connect(self._on_hide_downloaded_changed)
@@ -826,6 +838,7 @@ class MainWindow(QMainWindow):
             ))
 
         self._entries = entries
+        self._refresh_device_filter_combo()
         self._refresh_transcription_state()
         self._update_table()
         self._update_tray_tooltip()
@@ -850,6 +863,9 @@ class MainWindow(QMainWindow):
 
     def _update_table(self):
         visible = self._entries
+        filter_device_id = self.device_filter_combo.currentData()
+        if filter_device_id is not None:
+            visible = [e for e in visible if e.device_id == filter_device_id]
         if self.hide_downloaded_check.isChecked():
             visible = [e for e in visible if not e.recording.downloaded]
         self.table_model.set_entries(visible)
@@ -1165,6 +1181,28 @@ class MainWindow(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", path])
         self._last_transcript_path = None
+
+    def _on_device_filter_changed(self, index):
+        self._update_table()
+
+    def _refresh_device_filter_combo(self):
+        """Rebuild device filter combo from current entries, preserving selection."""
+        combo = self.device_filter_combo
+        prev = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("All", userData=None)
+        seen = set()
+        for entry in self._entries:
+            if entry.device_id and entry.device_id not in seen:
+                seen.add(entry.device_id)
+                combo.addItem(entry.device_name or entry.device_id, userData=entry.device_id)
+        # Restore previous selection if still present
+        for i in range(combo.count()):
+            if combo.itemData(i) == prev:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
 
     def _on_hide_downloaded_changed(self, state):
         self.settings.setValue("hideDownloaded", state == Qt.CheckState.Checked.value)
