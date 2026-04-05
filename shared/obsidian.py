@@ -192,10 +192,12 @@ class VaultSync:
         Returns:
             List of generated person note paths.
         """
+        _close_kg = False
         if knowledge_graph is None:
             from shared.knowledge import KnowledgeGraph
             knowledge_graph = KnowledgeGraph(transcripts_dir=self.transcripts_dir)
             knowledge_graph.rebuild()
+            _close_kg = True
 
         people = knowledge_graph.list_people()
         if not people:
@@ -218,6 +220,9 @@ class VaultSync:
             content = self._build_person_note(profile)
             note_path.write_text(content, encoding="utf-8")
             generated.append(note_path)
+
+        if _close_kg:
+            knowledge_graph.close()
 
         return generated
 

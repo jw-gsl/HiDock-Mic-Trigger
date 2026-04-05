@@ -48,6 +48,16 @@ class LLMEngine:
     description: str
 
 
+def _get_ollama_command() -> list[str]:
+    """Get the ollama command with the configured model name."""
+    try:
+        from shared.config_store import get_config
+        model = get_config().get("summarization", "ollama_model", "llama3.2")
+    except Exception:
+        model = "llama3.2"
+    return ["ollama", "run", model]
+
+
 def detect_engines() -> list[LLMEngine]:
     """Detect all available LLM CLI tools on the system.
 
@@ -59,9 +69,10 @@ def detect_engines() -> list[LLMEngine]:
         cfg = _CLI_CONFIGS[name]
         binary = cfg["command"][0]
         if shutil.which(binary):
+            command = _get_ollama_command() if name == "ollama" else list(cfg["command"])
             available.append(LLMEngine(
                 name=name,
-                command=list(cfg["command"]),
+                command=command,
                 description=cfg["description"],
             ))
     return available
@@ -89,9 +100,10 @@ def get_engine(name: str = "auto") -> LLMEngine | None:
         cfg = _CLI_CONFIGS[name]
         binary = cfg["command"][0]
         if shutil.which(binary):
+            command = _get_ollama_command() if name == "ollama" else list(cfg["command"])
             return LLMEngine(
                 name=name,
-                command=list(cfg["command"]),
+                command=command,
                 description=cfg["description"],
             )
     return None

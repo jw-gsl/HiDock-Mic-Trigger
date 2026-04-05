@@ -293,9 +293,12 @@ class KnowledgeGraph:
             "SELECT file_path FROM meetings WHERE id = ?", (meeting_id,)
         ).fetchone()
         if row:
-            conn.execute(
-                "DELETE FROM transcript_fts WHERE file_path = ?", (row["file_path"],)
-            )
+            # FTS5 tables require DELETE by rowid, not by column value
+            fts_row = conn.execute(
+                "SELECT rowid FROM transcript_fts WHERE file_path = ?", (row["file_path"],)
+            ).fetchone()
+            if fts_row:
+                conn.execute("DELETE FROM transcript_fts WHERE rowid = ?", (fts_row["rowid"],))
         conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
 
     def _get_or_create_person(self, name: str) -> int:
