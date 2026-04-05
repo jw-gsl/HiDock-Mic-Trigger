@@ -293,6 +293,9 @@ def write_transcript(
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML frontmatter from a transcript markdown file.
 
+    Handles our specific YAML structure including nested block lists
+    (action_items, decisions) with sub-keys.
+
     Args:
         text: Full file content.
 
@@ -311,26 +314,48 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     yaml_block = text[4:end_idx]  # skip opening ---\n
     body = text[end_idx + 4:].lstrip("\n")  # skip closing ---\n
 
-    # Simple YAML parser — handles our known flat-ish structure
     meta: dict[str, Any] = {}
-    current_key = None
+    current_key: str | None = None
     current_list: list | None = None
+    current_dict: dict | None = None  # for block list items with sub-keys
 
     for line in yaml_block.split("\n"):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
 
-        # List item under a key
+        # Detect indentation level
+        indent = len(line) - len(line.lstrip())
+
+        # Sub-key of a list item (e.g. "    assignee: Alice")
+        if indent >= 4 and current_dict is not None and ":" in stripped and not stripped.startswith("-"):
+            colon_idx = stripped.index(":")
+            k = stripped[:colon_idx].strip()
+            v = stripped[colon_idx + 1:].strip().strip('"')
+            current_dict[k] = v
+            continue
+
+        # Block list item starting with "- " under a key
         if stripped.startswith("- ") and current_key:
             if current_list is None:
                 current_list = []
                 meta[current_key] = current_list
-            val = stripped[2:].strip().strip('"')
-            current_list.append(val)
+
+            item_text = stripped[2:].strip()
+
+            # Check if it's a dict item (e.g. "- task: Do something")
+            if ":" in item_text:
+                colon_idx = item_text.index(":")
+                k = item_text[:colon_idx].strip()
+                v = item_text[colon_idx + 1:].strip().strip('"')
+                current_dict = {k: v}
+                current_list.append(current_dict)
+            else:
+                current_dict = None
+                current_list.append(item_text.strip('"'))
             continue
 
-        # Key: value pair
+        # Top-level key: value pair
         if ":" in stripped and not stripped.startswith("-"):
             colon_idx = stripped.index(":")
             key = stripped[:colon_idx].strip()
@@ -338,6 +363,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 
             current_key = key
             current_list = None
+            current_dict = None
 
             # Inline list: [a, b, c]
             if value.startswith("[") and value.endswith("]"):
@@ -347,8 +373,10 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
                     meta[key] = items
                 else:
                     meta[key] = []
+            elif value == "":
+                # Value will come on next lines (block list)
+                meta[key] = ""
             elif value.strip('"'):
-                # Try numeric
                 clean = value.strip('"')
                 try:
                     meta[key] = float(clean) if "." in clean else int(clean)
