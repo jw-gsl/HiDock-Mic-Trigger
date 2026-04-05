@@ -88,6 +88,22 @@ struct HiDockPairedDevice: Codable, Equatable {
     var subpath: String?        // Optional subfolder to scan on volume
     var pairedAt: String?       // ISO-8601 timestamp
 
+    // Custom Codable to handle backwards compatibility with old JSON
+    // that only had productId + displayName (no deviceType field).
+    enum CodingKeys: String, CodingKey {
+        case productId, displayName, deviceType, volumeName, subpath, pairedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.productId = try container.decode(Int.self, forKey: .productId)
+        self.displayName = try container.decode(String.self, forKey: .displayName)
+        self.deviceType = try container.decodeIfPresent(DeviceType.self, forKey: .deviceType) ?? .hidock
+        self.volumeName = try container.decodeIfPresent(String.self, forKey: .volumeName)
+        self.subpath = try container.decodeIfPresent(String.self, forKey: .subpath)
+        self.pairedAt = try container.decodeIfPresent(String.self, forKey: .pairedAt)
+    }
+
     var cleanName: String {
         sanitizeDeviceName(displayName)
     }
@@ -124,9 +140,19 @@ struct HiDockPairedDevice: Codable, Equatable {
         self.pairedAt = ISO8601DateFormatter().string(from: Date())
     }
 
+    /// Deterministic hash for volume name (stable across runs, unlike hashValue).
+    private static func stableHash(_ string: String) -> Int {
+        let data = Data(string.utf8)
+        var hash: UInt32 = 5381
+        for byte in data {
+            hash = ((hash << 5) &+ hash) &+ UInt32(byte) // djb2
+        }
+        return Int(hash & 0x7FFFFFFF)
+    }
+
     /// Full init for volume devices.
     init(volumeName: String, displayName: String, subpath: String? = nil) {
-        self.productId = volumeName.hashValue
+        self.productId = Self.stableHash(volumeName)
         self.displayName = displayName
         self.deviceType = .volume
         self.volumeName = volumeName

@@ -6,6 +6,7 @@ import pytest
 # conftest.py sets up the usb mock before this import
 from extractor import (
     VOLUME_AUDIO_EXTENSIONS,
+    _safe_resolve,
     _scan_audio_files,
     _audio_file_metadata,
     volume_status,
@@ -237,3 +238,73 @@ class TestVolumeCliParsing:
             sys.argv = ["extractor", "volume-import-new"]
             extractor.main()
         assert exc_info.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# Path traversal protection (_safe_resolve)
+# ---------------------------------------------------------------------------
+class TestSafeResolve:
+    def test_none_subpath_returns_base(self, tmp_path):
+        assert _safe_resolve(tmp_path, None) == tmp_path
+
+    def test_valid_subpath(self, tmp_path):
+        sub = tmp_path / "audio"
+        sub.mkdir()
+        result = _safe_resolve(tmp_path, "audio")
+        assert result == sub.resolve()
+
+    def test_dotdot_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="traversal"):
+            _safe_resolve(tmp_path, "../etc")
+
+    def test_nested_dotdot_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="traversal"):
+            _safe_resolve(tmp_path, "a/../../etc")
+
+
+# ---------------------------------------------------------------------------
+# volume_import_one path traversal protection
+# ---------------------------------------------------------------------------
+class TestVolumeImportSecurity:
+    def test_dotdot_in_filename_rejected(self, tmp_path):
+        result = volume_import_one(
+            "../../../etc/passwd",
+            "V",
+            output_dir=tmp_path / "out",
+            config_path=tmp_path / "config.json",
+            state_path=tmp_path / "state.json",
+        )
+        assert result["downloaded"] is False
+        assert "Invalid filename" in result.get("error", "")
+
+    def test_slash_in_filename_rejected(self, tmp_path):
+        result = volume_import_one(
+            "subdir/file.mp3",
+            "V",
+            output_dir=tmp_path / "out",
+            config_path=tmp_path / "config.json",
+            state_path=tmp_path / "state.json",
+        )
+        assert result["downloaded"] is False
+        assert "Invalid filename" in result.get("error", "")
+
+    def test_backslash_in_filename_rejected(self, tmp_path):
+        result = volume_import_one(
+            "subdir\\file.mp3",
+            "V",
+            output_dir=tmp_path / "out",
+            config_path=tmp_path / "config.json",
+            state_path=tmp_path / "state.json",
+        )
+        assert result["downloaded"] is False
+        assert "Invalid filename" in result.get("error", "")
+
+    def test_empty_filename_rejected(self, tmp_path):
+        result = volume_import_one(
+            "",
+            "V",
+            output_dir=tmp_path / "out",
+            config_path=tmp_path / "config.json",
+            state_path=tmp_path / "state.json",
+        )
+        assert result["downloaded"] is False

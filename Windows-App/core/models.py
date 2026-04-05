@@ -4,10 +4,16 @@ Mirrors the macOS Models.swift DeviceType/HiDockPairedDevice types.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+
+
+def _stable_hash(s: str) -> int:
+    """Deterministic hash stable across Python runs (unlike hash())."""
+    return int(hashlib.md5(s.encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
 
 
 class DeviceType(str, Enum):
@@ -74,7 +80,7 @@ class PairedDevice:
         return cls(
             device_type=DeviceType.VOLUME,
             display_name=display_name,
-            product_id=hash(volume_name) & 0x7FFFFFFF,
+            product_id=_stable_hash(volume_name),
             volume_name=volume_name,
             subpath=subpath,
             paired_at=datetime.now(timezone.utc).isoformat(),

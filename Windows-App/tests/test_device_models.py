@@ -47,7 +47,7 @@ sys.modules["PyQt6.QtCore"] = pyqt6_core
 sys.modules["PyQt6.QtWidgets"] = pyqt6_widgets
 sys.modules["PyQt6.QtGui"] = pyqt6_gui
 
-from core.models import DeviceType, PairedDevice, load_paired_devices, save_paired_devices  # noqa: E402
+from core.models import DeviceType, PairedDevice, load_paired_devices, save_paired_devices, _stable_hash  # noqa: E402
 
 
 class TestDeviceType:
@@ -138,3 +138,24 @@ class TestPersistence:
         # json.loads returns a dict, not a list — handled gracefully
         result = load_paired_devices(settings)
         assert result == []
+
+
+class TestStableHash:
+    def test_deterministic(self):
+        """Same input always produces same output (unlike hash())."""
+        assert _stable_hash("ZOOM_H1") == _stable_hash("ZOOM_H1")
+
+    def test_different_inputs(self):
+        assert _stable_hash("ZOOM_H1") != _stable_hash("USB_REC")
+
+    def test_positive_int(self):
+        result = _stable_hash("test")
+        assert result >= 0
+        assert result <= 0x7FFFFFFF
+
+    def test_volume_product_id_is_stable(self):
+        """Volume factory uses _stable_hash, not hash()."""
+        d1 = PairedDevice.volume("MyDrive", "MyDrive")
+        d2 = PairedDevice.volume("MyDrive", "MyDrive")
+        assert d1.product_id == d2.product_id
+        assert d1.product_id > 0

@@ -1247,9 +1247,26 @@ def _find_volumes() -> list[Path]:
     return sorted(mounts, key=lambda p: p.name)
 
 
+def _safe_resolve(base: Path, user_path: str | None) -> Path:
+    """Resolve a user-supplied subpath within a base directory safely.
+
+    Raises ValueError if the resolved path escapes the base directory.
+    """
+    if user_path is None:
+        return base
+    # Reject obvious traversal attempts
+    if ".." in user_path:
+        raise ValueError(f"Path traversal detected in: {user_path}")
+    resolved = (base / user_path).resolve()
+    base_resolved = base.resolve()
+    if not str(resolved).startswith(str(base_resolved)):
+        raise ValueError(f"Path escapes base directory: {user_path}")
+    return resolved
+
+
 def _scan_audio_files(mount_point: Path, subpath: str | None = None) -> list[Path]:
     """Return all audio files under a volume mount point."""
-    scan_root = mount_point / subpath if subpath else mount_point
+    scan_root = _safe_resolve(mount_point, subpath)
     if not scan_root.is_dir():
         return []
     files = []
@@ -1403,14 +1420,36 @@ def volume_import_one(
     state_path: Path = DEFAULT_STATE_PATH,
 ) -> dict:
     """Copy one audio file from a mounted volume to the recordings folder."""
+    # Validate filename to prevent path traversal
+    if not filename or ".." in filename or "/" in filename or "\\" in filename:
+        return {
+            "filename": filename,
+            "written": 0,
+            "expectedLength": 0,
+            "outputPath": "",
+            "downloaded": False,
+            "error": f"Invalid filename: {filename}",
+        }
+
     if output_dir is None:
         config = load_config(config_path)
         output_dir = resolved_output_dir(config)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     mount = Path("/Volumes") / volume_name
-    scan_root = mount / subpath if subpath else mount
+    scan_root = _safe_resolve(mount, subpath)
     source = scan_root / filename
+
+    # Verify source doesn't escape scan_root after resolution
+    if not str(source.resolve()).startswith(str(scan_root.resolve())):
+        return {
+            "filename": filename,
+            "written": 0,
+            "expectedLength": 0,
+            "outputPath": "",
+            "downloaded": False,
+            "error": f"Path traversal detected: {filename}",
+        }
 
     state_key = f"vol:{volume_name}/{filename}"
     state = load_state(state_path)
