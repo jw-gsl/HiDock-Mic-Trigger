@@ -1258,8 +1258,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             if case .success(let data) = result,
                let response = try? JSONDecoder().decode(HiDockDeviceListResponse.self, from: data) {
-                let alreadyPaired = Set(self.syncPairedDevices.map(\.productId))
-                for device in response.devices where !alreadyPaired.contains(device.productId) {
+                let alreadyPaired = Set(self.syncPairedDevices.map(\.deviceId))
+                for device in response.devices where !alreadyPaired.contains("hidock:\(device.productId)") {
                     let pairedDevice = HiDockPairedDevice(productId: device.productId, displayName: device.displayName)
                     var devices = self.syncPairedDevices
                     devices.append(pairedDevice)
@@ -2700,8 +2700,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 let devices = response.devices
-                let alreadyPaired = Set(self.syncPairedDevices.map(\.productId))
-                let unpaired = devices.filter { !alreadyPaired.contains($0.productId) }
+                let alreadyPaired = Set(self.syncPairedDevices.map(\.deviceId))
+                let unpaired = devices.filter { !alreadyPaired.contains("hidock:\($0.productId)") }
                 if unpaired.isEmpty && devices.isEmpty {
                     self.viewModel.syncStatus = "No HiDock devices found"
                     self.viewModel.syncStatusLevel = .error
