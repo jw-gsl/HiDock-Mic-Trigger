@@ -104,6 +104,15 @@ struct MainWindowView: View {
                 .controlSize(.small)
 
                 Button {
+                    viewModel.onShowDeviceManager()
+                } label: {
+                    Label("Devices", systemImage: "externaldrive.connected.to.line.below")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
                     viewModel.onShowModelManager()
                 } label: {
                     Label("Models", systemImage: "square.and.arrow.down")

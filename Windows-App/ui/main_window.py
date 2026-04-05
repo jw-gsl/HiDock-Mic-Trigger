@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         self._transcribe_after_download = False
         self._trigger_start_time: float | None = None
         self._last_transcript_path: str | None = None
+        self._paired_devices: list = []  # list[PairedDevice] loaded lazily
 
         self._init_menu_bar()
         self._init_ui()
@@ -142,6 +143,8 @@ class MainWindow(QMainWindow):
         voice_lib_act.triggered.connect(self._show_voice_library)
         model_mgr_act = actions_menu.addAction("Models...")
         model_mgr_act.triggered.connect(self._show_model_manager)
+        device_mgr_act = actions_menu.addAction("Devices...")
+        device_mgr_act.triggered.connect(self._show_device_manager)
 
         # Trigger menu
         trigger_menu = menubar.addMenu("Trigger")
@@ -1703,6 +1706,29 @@ class MainWindow(QMainWindow):
     def _show_model_manager(self):
         from ui.model_manager_dialog import ModelManagerDialog
         dlg = ModelManagerDialog(self)
+        dlg.exec()
+
+    def _show_device_manager(self):
+        from core.models import PairedDevice, load_paired_devices, save_paired_devices
+        from ui.device_manager_dialog import DeviceManagerDialog
+
+        self._paired_devices = load_paired_devices(self.settings)
+        dlg = DeviceManagerDialog(self._paired_devices, parent=self)
+
+        def _on_forget(device_id: str):
+            self._paired_devices = [d for d in self._paired_devices if d.device_id != device_id]
+            save_paired_devices(self.settings, self._paired_devices)
+
+        def _on_pair_volume(volume_name: str, subpath: str):
+            device = PairedDevice.volume(volume_name, volume_name, subpath=subpath or None)
+            if any(d.device_id == device.device_id for d in self._paired_devices):
+                return
+            self._paired_devices.append(device)
+            save_paired_devices(self.settings, self._paired_devices)
+            dlg.set_devices(self._paired_devices)
+
+        dlg.deviceForgotten.connect(_on_forget)
+        dlg.volumePaired.connect(_on_pair_volume)
         dlg.exec()
 
     # ── Transcript Viewer ──────────────────────────────────────────────
