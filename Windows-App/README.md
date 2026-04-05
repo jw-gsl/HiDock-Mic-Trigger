@@ -12,7 +12,7 @@ Windows desktop application for HiDock USB docking stations. Provides USB sync, 
 
 ## Features
 
-- **USB Sync** — Pair HiDock devices, browse recordings, download over USB
+- **USB Sync** — Pair HiDock devices or USB volumes (audio recorders, SD cards), browse recordings, download/import
 - **Transcription** — Local transcription using whisper.cpp (no GPU required)
 - **Mic Trigger** — Monitor a USB mic and keep the HiDock input open via ffmpeg
 - **Dark theme** — Modern dark UI with card-based layout

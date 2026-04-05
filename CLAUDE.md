@@ -82,10 +82,10 @@ After building, you MUST complete these steps to avoid stale app copies running:
 
 - `hidock-mic-trigger/` — macOS desktop app (Swift, Xcode) with menu bar presence. Unified UI for mic trigger, USB sync, transcription.
 - `mic-trigger/` — Swift CLI that watches USB mic and keeps HiDock input open via ffmpeg.
-- `usb-extractor/` — Python USB extractor for downloading recordings from HiDock.
+- `usb-extractor/` — Python USB extractor for downloading recordings from HiDock devices and importing audio from generic USB volumes (mass-storage recorders, SD cards, etc.).
 - `transcription-pipeline/` — Python transcription pipeline using OpenAI Whisper with Apple MPS acceleration.
-- `Windows-App/` — PyQt6 desktop app (Windows port).
-- `Windows-Script/` — Python USB extractor and background watcher for Windows.
+- `Windows-App/` — PyQt6 desktop app (Windows port). Includes Device Manager for pairing HiDock and volume devices.
+- `Windows-Script/` — Python USB extractor and background watcher for Windows. Supports both HiDock and volume devices.
 
 ## Testing
 

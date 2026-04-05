@@ -1,6 +1,6 @@
 # HiDock USB Extractor — Windows
 
-Windows-compatible version of the HiDock USB recording extractor. Pulls `.hda` recordings directly from the HiDock over USB and saves them as `.mp3` files.
+Windows-compatible version of the USB recording extractor. Pulls `.hda` recordings directly from HiDock devices over USB, and imports audio files from generic USB volumes (recorders, SD cards, external drives).
 
 ## Prerequisites
 
@@ -103,6 +103,13 @@ python extractor.py list-files
 python extractor.py download 2026Mar09-131439-Rec39.hda
 python extractor.py download-new
 python extractor.py set-output C:\Users\you\HiDock-Recordings
+
+:: Volume device commands (generic USB recorders, SD cards)
+python extractor.py scan-volumes
+python extractor.py volume-status --volume-name ZOOM_H1
+python extractor.py volume-import recording.wav --volume-name ZOOM_H1
+python extractor.py volume-import-new --volume-name ZOOM_H1
+python extractor.py mark-downloaded --volume-name ZOOM_H1 recording.wav
 ```
 
 ## AI agent setup

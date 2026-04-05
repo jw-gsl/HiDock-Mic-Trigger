@@ -1,6 +1,6 @@
 # HiDock USB Extractor
 
-Python tool for downloading recordings directly from HiDock devices over USB, without using HiNotes.
+Python tool for downloading recordings from HiDock devices over USB and importing audio files from generic USB volumes (recorders, SD cards, external drives).
 
 ## Setup
 
@@ -52,6 +52,29 @@ Use `--product-id` to target a specific HiDock when multiple are connected:
 ```bash
 .venv/bin/python extractor.py --product-id 45068 status
 ```
+
+### Volume device commands
+
+For generic USB volumes (audio recorders, SD cards mounted as drives):
+
+```bash
+# Scan for mounted volumes with audio files
+.venv/bin/python extractor.py scan-volumes
+
+# Check recordings on a specific volume
+.venv/bin/python extractor.py volume-status --volume-name ZOOM_H1
+
+# Import a specific audio file from a volume
+.venv/bin/python extractor.py volume-import recording.wav --volume-name ZOOM_H1
+
+# Import all new audio files from a volume
+.venv/bin/python extractor.py volume-import-new --volume-name ZOOM_H1
+
+# Mark volume recordings as downloaded
+.venv/bin/python extractor.py mark-downloaded --volume-name ZOOM_H1 recording.wav
+```
+
+Optional `--subpath` flag scopes scanning to a subfolder on the volume.
 
 ## USB protocol
 

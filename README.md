@@ -17,17 +17,17 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 |---|---|---|
 | `hidock-mic-trigger/` | macOS | Desktop app (Swift/AppKit) — unified UI for mic trigger, USB sync, and transcription |
 | `mic-trigger/` | macOS | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
-| `usb-extractor/` | macOS | Python USB extractor that downloads recordings directly from HiDock over USB |
+| `usb-extractor/` | macOS | Python extractor — downloads from HiDock over USB and imports audio from generic USB volumes |
 | `transcription-pipeline/` | macOS | Transcription pipeline — whisper.cpp (bundled) or OpenAI Whisper on MPS (dev) |
 | `Windows-App/` | Windows | Desktop app (PyQt6) — Windows port of the macOS app |
-| `Windows-Script/` | Windows | Python USB extractor and background watcher for Windows |
+| `Windows-Script/` | Windows | Python extractor and background watcher — HiDock USB and volume device support |
 
 > **macOS is the primary development platform.** The Windows app is a secondary port. See [Windows-App/PORTING.md](Windows-App/PORTING.md) for the porting workflow.
 
 ## How it works
 
 1. **Mic Trigger** — watches your USB mic (e.g. Samson Q2U) via CoreAudio. When it detects the mic is in use, it silently opens the HiDock's audio input using `ffmpeg`, causing the HiDock to auto-record.
-2. **USB Sync** — pairs with one or more HiDock devices over USB and downloads recordings as MP3 files to a local folder.
+2. **USB Sync** — pairs with HiDock devices over USB or generic USB volumes (audio recorders, SD cards) and downloads/imports recordings to a local folder. The Device Manager supports multiple paired devices of both types.
 3. **Transcription** — runs Whisper `large-v3-turbo` (via whisper.cpp) to transcribe downloaded recordings to Markdown files. The ~550 MB model is downloaded on first use.
 
 All three are controlled from a single desktop app with menu bar integration (macOS) or system tray (Windows).
