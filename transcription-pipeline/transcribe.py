@@ -140,6 +140,14 @@ def transcribe_file(
             "last_error": None,
         }
         save_state(state)
+
+        # Run post-transcription hooks (non-fatal)
+        try:
+            from shared.hooks import run_hooks_pipeline
+            run_hooks_pipeline(transcript_path, source_path=mp3_path, summary=summary)
+        except Exception as e:
+            print(f"Hooks failed (non-fatal): {e}", file=sys.stderr)
+
         progress(100)
 
         return {
