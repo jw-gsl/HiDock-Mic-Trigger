@@ -126,6 +126,8 @@ final class HiDockViewModel: ObservableObject {
     var onShowFeedbackHistory: () -> Void = {}
     var onShowCoworkPrompt: () -> Void = {}
     var onOpenInObsidian: (String) -> Void = { _ in }
+    var onMergeSelected: () -> Void = {}
+    var onTrimRecording: (String) -> Void = { _ in }
     var onCheckForUpdates: () -> Void = {}
     var onShowVoiceLibrary: () -> Void = {}
 

@@ -360,6 +360,18 @@ class MainWindow(QMainWindow):
         self.transcribe_all_btn.clicked.connect(self._transcribe_all)
         row3.addWidget(self.transcribe_all_btn)
 
+        self.merge_btn = QPushButton("Merge")
+        self.merge_btn.setToolTip("Merge selected recordings into one file")
+        self.merge_btn.clicked.connect(self._merge_selected)
+        self.merge_btn.setEnabled(False)
+        row3.addWidget(self.merge_btn)
+
+        self.trim_btn = QPushButton("Trim")
+        self.trim_btn.setToolTip("Trim the selected recording")
+        self.trim_btn.clicked.connect(self._trim_selected)
+        self.trim_btn.setEnabled(False)
+        row3.addWidget(self.trim_btn)
+
         self.diarize_check = QCheckBox("Speaker Labels")
         self.diarize_check.setToolTip("Enable speaker diarization (identifies who is speaking)")
         self.diarize_check.stateChanged.connect(self._on_diarize_changed)
@@ -1073,6 +1085,108 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No untranscribed recordings to process", 3000)
             return
         self._run_transcription(targets)
+
+    # ── Merge & Trim ───────────────────────────────────────────────────────
+
+    @pyqtSlot()
+    def _merge_selected(self):
+        import shutil
+        import subprocess
+        import tempfile
+
+        indices = self.table_view.selectionModel().selectedRows()
+        entries = self.table_model.entries()
+        selected = [entries[i.row()] for i in indices]
+        ready = [e for e in selected if e.recording.downloaded and e.recording.output_path and Path(e.recording.output_path).exists()]
+        if len(ready) < 2:
+            self.statusBar().showMessage("Select 2+ downloaded recordings to merge", 3000)
+            return
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            QMessageBox.warning(self, "ffmpeg Required", "ffmpeg not found.\nInstall it and ensure it is on your PATH.")
+            return
+
+        ready.sort(key=lambda e: f"{e.recording.create_date} {e.recording.create_time}")
+        first_stem = Path(ready[0].recording.output_path).stem
+        last_stem = Path(ready[-1].recording.output_path).stem
+        out_dir = Path(ready[0].recording.output_path).parent
+        out_name = f"Merged-{first_stem}-to-{last_stem}.mp3"
+        if len(out_name) > 100:
+            out_name = f"Merged-{first_stem}.mp3"
+        out_path = out_dir / out_name
+        counter = 1
+        while out_path.exists():
+            out_path = out_dir / f"Merged-{first_stem}-to-{last_stem}-{counter}.mp3"
+            counter += 1
+
+        self.statusBar().showMessage(f"Merging {len(ready)} recordings…")
+
+        import threading
+
+        def _do_merge():
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                    for e in ready:
+                        f.write(f"file '{e.recording.output_path}'\n")
+                    list_path = f.name
+                subprocess.run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", str(out_path)], check=True, capture_output=True)
+                Path(list_path).unlink(missing_ok=True)
+                self.statusBar().showMessage(f"Merged {len(ready)} recordings → {out_path.name}")
+                self._refresh_status()
+            except Exception as e:
+                self.statusBar().showMessage(f"Merge failed: {e}")
+
+        threading.Thread(target=_do_merge, daemon=True).start()
+
+    @pyqtSlot()
+    def _trim_selected(self):
+        import shutil
+
+        indices = self.table_view.selectionModel().selectedRows()
+        entries = self.table_model.entries()
+        if len(indices) != 1:
+            self.statusBar().showMessage("Select exactly 1 recording to trim", 3000)
+            return
+        entry = entries[indices[0].row()]
+        if not entry.recording.downloaded or not entry.recording.output_path or not Path(entry.recording.output_path).exists():
+            self.statusBar().showMessage("Recording must be downloaded first", 3000)
+            return
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            QMessageBox.warning(self, "ffmpeg Required", "ffmpeg not found.\nInstall it and ensure it is on your PATH.")
+            return
+
+        from ui.trim_dialog import TrimDialog
+        dlg = TrimDialog(entry.recording.output_path, entry.recording.duration, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        start, end, save_as_copy = dlg.result_values()
+        src = Path(entry.recording.output_path)
+        if save_as_copy:
+            out_path = src.parent / f"{src.stem}-trimmed.mp3"
+        else:
+            out_path = src.parent / f"{src.stem}.tmp.mp3"
+
+        self.statusBar().showMessage("Trimming…")
+
+        import subprocess
+        import threading
+
+        def _do_trim():
+            try:
+                subprocess.run([ffmpeg, "-y", "-i", str(src), "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-c", "copy", str(out_path)], check=True, capture_output=True)
+                if not save_as_copy:
+                    src.unlink()
+                    out_path.rename(src)
+                self.statusBar().showMessage(f"Trimmed {src.name}")
+                self._refresh_status()
+            except Exception as e:
+                self.statusBar().showMessage(f"Trim failed: {e}")
+
+        threading.Thread(target=_do_trim, daemon=True).start()
 
     def _run_transcription(self, targets: list[Path]):
         """Transcribe a list of audio files in a background thread."""
