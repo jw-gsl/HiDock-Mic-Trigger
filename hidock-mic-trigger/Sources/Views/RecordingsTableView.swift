@@ -145,6 +145,24 @@ struct RecordingsTableView: View {
                         Label("Open Transcript", systemImage: "doc.text")
                     }
                 }
+
+                if entry.recording.downloaded && entry.recording.localExists {
+                    Divider()
+
+                    Button {
+                        viewModel.onTrimRecording(entry.recording.outputPath)
+                    } label: {
+                        Label("Trim…", systemImage: "scissors")
+                    }
+
+                    if viewModel.syncCheckedRecordings.count >= 2 {
+                        Button {
+                            viewModel.onMergeSelected()
+                        } label: {
+                            Label("Merge Selected", systemImage: "arrow.triangle.merge")
+                        }
+                    }
+                }
             }
         }
         .padding(4)

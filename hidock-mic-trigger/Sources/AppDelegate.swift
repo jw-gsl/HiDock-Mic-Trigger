@@ -361,6 +361,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.openTranscriptViewer(transcriptMdPath: path)
         }
         viewModel.onShowCoworkPrompt = { [weak self] in self?.showCoworkPrompt() }
+        viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
+        viewModel.onTrimRecording = { [weak self] path in self?.showTrimDialog(for: path) }
         viewModel.onOpenInObsidian = { path in
             let url = URL(fileURLWithPath: path)
             let noteName = url.deletingPathExtension().lastPathComponent
@@ -1647,6 +1649,188 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             }
         }.resume()
+    }
+
+    // MARK: - Merge & Trim Audio
+
+    private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
+
+    private func mergeSelectedRecordings() {
+        let entries = selectedSyncEntries()
+            .filter { $0.recording.downloaded && $0.recording.localExists }
+            .sorted { "\($0.recording.createDate) \($0.recording.createTime)" < "\($1.recording.createDate) \($1.recording.createTime)" }
+        guard entries.count >= 2 else { return }
+        guard FileManager.default.fileExists(atPath: ffmpegPath) else {
+            showError("ffmpeg not found at \(ffmpegPath).\nInstall with: brew install ffmpeg")
+            return
+        }
+        guard let outputFolder = syncOutputFolder else { return }
+
+        let firstName = URL(fileURLWithPath: entries.first!.recording.outputPath).deletingPathExtension().lastPathComponent
+        let lastName = URL(fileURLWithPath: entries.last!.recording.outputPath).deletingPathExtension().lastPathComponent
+        var outputName = "Merged-\(firstName)-to-\(lastName).mp3"
+        if outputName.count > 100 { outputName = "Merged-\(firstName).mp3" }
+        var outputPath = "\(outputFolder)/\(outputName)"
+
+        // Avoid overwriting
+        var counter = 1
+        while FileManager.default.fileExists(atPath: outputPath) {
+            outputPath = "\(outputFolder)/Merged-\(firstName)-to-\(lastName)-\(counter).mp3"
+            counter += 1
+        }
+
+        viewModel.syncStatus = "Merging \(entries.count) recordings…"
+        viewModel.syncStatusLevel = .secondary
+        viewModel.syncBusy = true
+        syncViewModelState()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            // Write concat list to temp file
+            let listPath = NSTemporaryDirectory() + "hidock-merge-list.txt"
+            let listContent = entries.map { "file '\($0.recording.outputPath)'" }.joined(separator: "\n")
+            try? listContent.write(toFile: listPath, atomically: true, encoding: .utf8)
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.ffmpegPath)
+            process.arguments = ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                DispatchQueue.main.async {
+                    self.viewModel.syncBusy = false
+                    self.viewModel.syncStatus = "Merge failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.showError("Merge failed: \(error.localizedDescription)")
+                    self.syncViewModelState()
+                }
+                return
+            }
+
+            try? FileManager.default.removeItem(atPath: listPath)
+
+            DispatchQueue.main.async {
+                self.viewModel.syncBusy = false
+                if process.terminationStatus == 0 {
+                    self.log("Merged \(entries.count) recordings → \(outputPath)")
+                    self.viewModel.syncStatus = "Merged \(entries.count) recordings"
+                    self.viewModel.syncStatusLevel = .success
+                    self.refreshSyncStatus()
+                } else {
+                    self.viewModel.syncStatus = "Merge failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.showError("ffmpeg exited with status \(process.terminationStatus)")
+                }
+                self.syncViewModelState()
+            }
+        }
+    }
+
+    private var trimWindow: NSWindow?
+
+    private func showTrimDialog(for path: String) {
+        guard FileManager.default.fileExists(atPath: ffmpegPath) else {
+            showError("ffmpeg not found at \(ffmpegPath).\nInstall with: brew install ffmpeg")
+            return
+        }
+        let entry = syncEntries.first { $0.recording.outputPath == path }
+        let duration = entry?.recording.duration ?? 0
+
+        let filename = URL(fileURLWithPath: path).lastPathComponent
+        let trimView = TrimAudioView(
+            filename: filename,
+            duration: duration,
+            onTrim: { [weak self] start, end, saveAsCopy in
+                self?.trimWindow?.close()
+                self?.trimWindow = nil
+                self?.trimRecording(path: path, start: start, end: end, saveAsCopy: saveAsCopy)
+            },
+            onCancel: { [weak self] in
+                self?.trimWindow?.close()
+                self?.trimWindow = nil
+            }
+        )
+
+        let hostingView = NSHostingView(rootView: trimView)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 260)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Trim Audio"
+        window.contentView = hostingView
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        trimWindow = window
+    }
+
+    private func trimRecording(path: String, start: Double, end: Double, saveAsCopy: Bool) {
+        let url = URL(fileURLWithPath: path)
+        let outputPath: String
+        if saveAsCopy {
+            let stem = url.deletingPathExtension().lastPathComponent
+            let dir = url.deletingLastPathComponent().path
+            outputPath = "\(dir)/\(stem)-trimmed.mp3"
+        } else {
+            outputPath = path + ".tmp"
+        }
+
+        viewModel.syncStatus = "Trimming…"
+        viewModel.syncStatusLevel = .secondary
+        viewModel.syncBusy = true
+        syncViewModelState()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.ffmpegPath)
+            process.arguments = [
+                "-y", "-i", path,
+                "-ss", String(format: "%.2f", start),
+                "-to", String(format: "%.2f", end),
+                "-c", "copy", outputPath
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                DispatchQueue.main.async {
+                    self.viewModel.syncBusy = false
+                    self.viewModel.syncStatus = "Trim failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.showError("Trim failed: \(error.localizedDescription)")
+                    self.syncViewModelState()
+                }
+                return
+            }
+
+            // If replacing original, swap files
+            if !saveAsCopy && process.terminationStatus == 0 {
+                try? FileManager.default.removeItem(atPath: path)
+                try? FileManager.default.moveItem(atPath: outputPath, toPath: path)
+            }
+
+            DispatchQueue.main.async {
+                self.viewModel.syncBusy = false
+                if process.terminationStatus == 0 {
+                    let name = URL(fileURLWithPath: path).lastPathComponent
+                    self.log("Trimmed \(name) (\(start)s–\(end)s)")
+                    self.viewModel.syncStatus = "Trimmed \(name)"
+                    self.viewModel.syncStatusLevel = .success
+                    self.refreshSyncStatus()
+                } else {
+                    self.viewModel.syncStatus = "Trim failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.showError("ffmpeg exited with status \(process.terminationStatus)")
+                }
+                self.syncViewModelState()
+            }
+        }
     }
 
     // MARK: - Feedback History

@@ -56,6 +56,24 @@ struct SyncToolbarSection: View {
                 }
                 .disabled(viewModel.transcriptionBusy)
 
+                Button {
+                    viewModel.onMergeSelected()
+                } label: {
+                    Label("Merge", systemImage: "arrow.triangle.merge")
+                }
+                .disabled(viewModel.syncBusy || viewModel.syncCheckedRecordings.count < 2)
+
+                Button {
+                    if let entry = viewModel.visibleEntries.first(where: {
+                        viewModel.syncCheckedRecordings.contains($0.recording.name) && $0.recording.downloaded && $0.recording.localExists
+                    }) {
+                        viewModel.onTrimRecording(entry.recording.outputPath)
+                    }
+                } label: {
+                    Label("Trim", systemImage: "scissors")
+                }
+                .disabled(viewModel.syncBusy || viewModel.syncCheckedRecordings.count != 1)
+
                 Toggle("Speaker Labels", isOn: Binding(
                     get: { viewModel.diarizeEnabled },
                     set: { _ in viewModel.onToggleDiarize() }

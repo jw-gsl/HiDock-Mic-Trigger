@@ -24,6 +24,7 @@
 		AC57E3CA0C77C0F9F234F8A8 /* DeviceManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 073D5356B516B86E1A36D08A /* DeviceManagerView.swift */; };
 		AD84D7F268B99977690E39B6 /* CoworkPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3EB96FF645902287442733 /* CoworkPromptView.swift */; };
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
+		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
 		DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 820C64D02A011DC869B43307 /* TranscriptViewerView.swift */; };
 		E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */; };
@@ -57,6 +58,7 @@
 		6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBadge.swift; sourceTree = "<group>"; };
 		820C64D02A011DC869B43307 /* TranscriptViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptViewerView.swift; sourceTree = "<group>"; };
 		8CDAD4DE368D4BD1A70444DB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrimAudioView.swift; sourceTree = "<group>"; };
 		925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicTriggerSection.swift; sourceTree = "<group>"; };
 		95B0A8C5446AA42C053B684F /* ModelManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManagerView.swift; sourceTree = "<group>"; };
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
@@ -117,6 +119,7 @@
 				FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */,
 				3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */,
 				820C64D02A011DC869B43307 /* TranscriptViewerView.swift */,
+				8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */,
 				145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */,
 			);
 			path = Views;
@@ -274,6 +277,7 @@
 				7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */,
 				9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */,
 				DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */,
+				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,
 				E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */,
 				32CB8DC2FB8F5920A75F9D12 /* VoiceLibraryView.swift in Sources */,
 				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,
