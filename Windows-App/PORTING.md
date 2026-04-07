@@ -73,6 +73,29 @@ Both platforms now use whisper.cpp via `pywhispercpp`. The model file is the sam
 - USB protocol changes (shared `extractor.py` in `Windows-Script/`)
 - Whisper model/language changes (config-only, same model on both platforms)
 - State file format changes (JSON, same schema)
+- **Shared module changes** (`shared/`) — these are cross-platform Python, imported by both macOS and Windows backends
+
+## Shared modules (`shared/`)
+
+The `shared/` directory contains cross-platform Python modules used by both platforms. These do NOT need porting — they are imported directly:
+
+| Module | Purpose | Import path |
+|--------|---------|-------------|
+| `shared/transcript_writer.py` | YAML frontmatter + Markdown output | `from shared.transcript_writer import write_transcript` |
+| `shared/llm_cli.py` | LLM CLI detection and invocation | `from shared.llm_cli import get_engine` |
+| `shared/summarize.py` | LLM summarization of transcripts | `from shared.summarize import summarize` |
+| `shared/knowledge.py` | SQLite knowledge graph | `from shared.knowledge import KnowledgeGraph` |
+| `shared/config_store.py` | Cross-platform TOML config | `from shared.config_store import get_config` |
+| `shared/obsidian.py` | Obsidian vault sync | `from shared.obsidian import VaultSync` |
+| `shared/hooks.py` | Post-transcription hooks | `from shared.hooks import run_hooks_pipeline` |
+| `shared/migrate.py` | Add frontmatter to old transcripts | `from shared.migrate import migrate` |
+
+Each platform's transcription entry point (`transcribe.py`, `transcribe_cpp.py`, `Windows-App/core/transcription.py`) adds the repo root to `sys.path` and imports these modules lazily inside functions (not at module level) so that missing optional dependencies don't block startup.
+
+**Windows-specific considerations for shared modules:**
+- Obsidian symlink strategy fails without admin/Developer Mode — default to "copy"
+- `hooks.py` uses `shell=True` which invokes `cmd.exe` on Windows — hook commands must use Windows syntax
+- Config path is `%APPDATA%\HiDock\config.toml` (handled automatically by `config_store.py`)
 
 ## What always needs manual porting
 
@@ -81,3 +104,4 @@ Both platforms now use whisper.cpp via `pywhispercpp`. The model file is the sam
 - Changes to the mic trigger detection logic
 - New notification types
 - UX changes (dark theme, layout, shortcuts are platform-specific)
+- New settings panels (shared modules handle the backend, but UI must be ported)

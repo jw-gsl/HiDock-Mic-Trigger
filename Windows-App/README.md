@@ -94,9 +94,24 @@ Windows-App/
 | `mic-trigger/` — Swift CLI, CoreAudio | `core/mic_trigger.py` — Python, WASAPI |
 | Model: `ggml-large-v3-turbo-q5_0.bin` | Same model, same whisper.cpp backend |
 
+## Shared modules (intelligence layer)
+
+The Windows app integrates the same `shared/` Python modules as macOS for post-transcription intelligence:
+
+- **Structured transcripts** — YAML frontmatter with metadata on all new transcripts
+- **LLM summarization** — auto-detects `claude`, `codex`, `gemini`, or `ollama` CLIs
+- **Knowledge graph** — SQLite FTS5 index over all transcripts (`python -m shared.knowledge`)
+- **Obsidian sync** — syncs transcripts into an Obsidian vault (copy strategy recommended on Windows)
+- **Post-transcription hooks** — runs configured shell commands after transcription
+- **Config** — unified TOML config at `%APPDATA%\HiDock\config.toml`
+
+These modules are imported from `shared/` at the repo root and work identically on both platforms.
+
 ## Known limitations vs macOS
 
 - Mic trigger uses WASAPI polling instead of CoreAudio (approximate detection)
 - USB requires WinUSB driver via Zadig (one-time setup)
 - System tray instead of macOS menu bar
 - No speaker diarization support
+- Obsidian symlink strategy requires Developer Mode or admin privileges — use "copy" strategy instead
+- Post-transcription hook commands must use `cmd.exe` syntax (not bash)

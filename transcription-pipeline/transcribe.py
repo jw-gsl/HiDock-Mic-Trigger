@@ -19,7 +19,32 @@ from pathlib import Path
 import config
 from state import load_state, save_state
 
+# Add the repo root to sys.path so shared modules are importable
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
+
+
+# ── Safe event logging (non-fatal) ───────────────────────────────────────────
+
+def _log(event_type, **kwargs):
+    """Log an event, silently ignoring failures."""
+    try:
+        from shared.event_log import log_event
+        log_event(event_type, **kwargs)
+    except Exception:
+        pass  # Never let logging break the pipeline
+
+
+def _ET(name: str):
+    """Get an EventType by name, or fall back to the string."""
+    try:
+        from shared.event_log import EventType
+        return getattr(EventType, name)
+    except Exception:
+        return name
 
 
 def progress(pct: int) -> None:
@@ -47,8 +72,12 @@ def load_whisper_model():
     return model
 
 
-def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
+def transcribe_file(
+    mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
+) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
+    from shared.transcript_writer import write_transcript
+
     mp3_path = mp3_path.resolve()
     basename = mp3_path.stem
     transcript_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}.md"
@@ -71,6 +100,9 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
 
     start_time = time.monotonic()
     try:
+        _log(_ET("TRANSCRIPTION_STARTED"), file_path=str(mp3_path),
+             metadata={"model": config.WHISPER_MODEL})
+
         if model is None:
             model = load_whisper_model()
 
@@ -84,19 +116,59 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
 
         text = result["text"].strip()
 
+        # Run anti-hallucination filtering
+        from shared.whisper_guard import clean_transcript
+        text, guard_stats = clean_transcript(text, language=config.WHISPER_LANGUAGE or "en")
+        if guard_stats.filters_triggered:
+            print(f"Whisper-Guard: filters triggered: {guard_stats.filters_triggered}", file=sys.stderr)
+            _log(_ET("WHISPER_GUARD_FILTERED"), file_path=str(mp3_path),
+                 metadata={"filters": guard_stats.filters_triggered,
+                           "original_lines": guard_stats.original_lines,
+                           "final_word_count": guard_stats.final_word_count})
+        if guard_stats.is_likely_hallucination:
+            print(f"Whisper-Guard: transcript flagged as likely hallucination "
+                  f"({guard_stats.final_word_count} words)", file=sys.stderr)
+
         # Optionally run diarization
+        diarized_result = None
         if diarize:
             try:
                 from diarize import diarize as run_diarize
-                text = run_diarize(str(mp3_path), text, result.get("segments", []))
+                diarized_result = run_diarize(str(mp3_path), text, result.get("segments", []))
+                # If diarize returns a string (legacy), convert to plain text
+                if isinstance(diarized_result, str):
+                    text = diarized_result
+                    diarized_result = None
             except ImportError:
                 print("diarize module not available, skipping diarization", file=sys.stderr)
             except Exception as e:
                 print(f"Diarization failed: {e}", file=sys.stderr)
 
-        # Write transcript
-        config.RAW_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-        transcript_path.write_text(text + "\n", encoding="utf-8")
+        # Optionally run LLM summarization
+        summary = None
+        if summarize:
+            try:
+                from shared.summarize import summarize as run_summarize
+                progress(90)
+                _log(_ET("SUMMARIZATION_STARTED"), file_path=str(mp3_path))
+                summ_start = time.monotonic()
+                summary = run_summarize(text)
+                _log(_ET("SUMMARIZATION_COMPLETED"), file_path=str(mp3_path),
+                     duration_s=round(time.monotonic() - summ_start, 1))
+            except Exception as e:
+                print(f"Summarization failed (non-fatal): {e}", file=sys.stderr)
+                _log(_ET("SUMMARIZATION_FAILED"), file_path=str(mp3_path),
+                     status="error", error=str(e))
+
+        # Write transcript with frontmatter
+        write_transcript(
+            transcript_path,
+            text,
+            source_path=mp3_path,
+            model=config.WHISPER_MODEL,
+            diarized_result=diarized_result,
+            summary=summary,
+        )
         progress(95)
 
         duration_s = round(time.monotonic() - start_time, 1)
@@ -114,6 +186,28 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
             "last_error": None,
         }
         save_state(state)
+
+        _log(_ET("TRANSCRIPTION_COMPLETED"), file_path=str(mp3_path),
+             duration_s=duration_s, metadata={"model": config.WHISPER_MODEL,
+             "transcript_path": str(transcript_path), "summarized": summary is not None})
+
+        # Run post-transcription hooks (non-fatal)
+        try:
+            from shared.hooks import run_hooks_pipeline
+            hook_results = run_hooks_pipeline(transcript_path, source_path=mp3_path, summary=summary)
+            for hook_name, hook_ok in hook_results.items():
+                if hook_ok is not None:
+                    if hook_ok:
+                        _log(_ET("HOOK_EXECUTED"), file_path=str(transcript_path),
+                             metadata={"hook": hook_name})
+                    else:
+                        _log(_ET("HOOK_FAILED"), file_path=str(transcript_path),
+                             status="error", metadata={"hook": hook_name})
+        except Exception as e:
+            print(f"Hooks failed (non-fatal): {e}", file=sys.stderr)
+            _log(_ET("HOOK_FAILED"), file_path=str(transcript_path),
+                 status="error", error=str(e))
+
         progress(100)
 
         return {
@@ -122,10 +216,13 @@ def transcribe_file(mp3_path: Path, model=None, diarize: bool = False) -> dict:
             "duration_s": duration_s,
             "status": "completed",
             "transcribed": True,
+            "summarized": summary is not None,
         }
 
     except Exception as e:
         duration_s = round(time.monotonic() - start_time, 1)
+        _log(_ET("TRANSCRIPTION_FAILED"), file_path=str(mp3_path),
+             status="error", duration_s=duration_s, error=str(e))
         state = load_state()
         state["transcriptions"][entry_key] = {
             "status": "failed",
@@ -176,7 +273,9 @@ def cmd_transcribe(args):
 
     lock = acquire_lock()
     try:
-        result = transcribe_file(mp3_path, diarize=args.diarize)
+        result = transcribe_file(
+            mp3_path, diarize=args.diarize, summarize=args.summarize,
+        )
     finally:
         release_lock(lock)
 
@@ -214,7 +313,9 @@ def cmd_transcribe_batch(args):
         for i, mp3_path in enumerate(audio_files):
             pct_base = 10 + int(85 * i / len(audio_files))
             progress(pct_base)
-            result = transcribe_file(mp3_path, model=model, diarize=args.diarize)
+            result = transcribe_file(
+                mp3_path, model=model, diarize=args.diarize, summarize=args.summarize,
+            )
             results.append(result)
     finally:
         release_lock(lock)
@@ -275,10 +376,12 @@ def main():
     p_transcribe = sub.add_parser("transcribe", help="Transcribe a single audio file")
     p_transcribe.add_argument("mp3_path", help="Path to audio file")
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
     p_batch.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    p_batch.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_batch.set_defaults(func=cmd_transcribe_batch)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
