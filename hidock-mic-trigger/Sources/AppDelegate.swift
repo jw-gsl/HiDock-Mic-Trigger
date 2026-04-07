@@ -3554,13 +3554,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard !syncDownloading else { return }
         transcriptionCancelled = false
 
-        let all = selectedSyncEntries().filter { !$0.transcribed }
+        let selected = selectedSyncEntries()
+        guard !selected.isEmpty else {
+            log("Transcribe selected: no recordings selected")
+            viewModel.syncStatus = "No recordings selected"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+
+        let alreadyTranscribed = selected.filter { $0.transcribed }
+        var all = selected.filter { !$0.transcribed }
+
+        // If all selected are already transcribed, offer to re-transcribe
+        if all.isEmpty && !alreadyTranscribed.isEmpty {
+            let names = alreadyTranscribed.prefix(3).map { $0.recording.outputName }.joined(separator: ", ")
+            let suffix = alreadyTranscribed.count > 3 ? " and \(alreadyTranscribed.count - 3) more" : ""
+            log("Transcribe selected: all \(alreadyTranscribed.count) recording(s) already transcribed — \(names)\(suffix)")
+            let alert = NSAlert()
+            alert.messageText = "Already Transcribed"
+            alert.informativeText = "\(alreadyTranscribed.count) selected recording\(alreadyTranscribed.count == 1 ? " is" : "s are") already transcribed.\n\nRe-transcribe?"
+            alert.addButton(withTitle: "Re-transcribe")
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .informational
+            if alert.runModal() == .alertFirstButtonReturn {
+                all = alreadyTranscribed
+            } else {
+                return
+            }
+        }
         guard !all.isEmpty else { return }
 
         let ready = all.filter { $0.recording.downloaded && $0.recording.localExists }
         let needsDownload = all.filter { !$0.recording.downloaded || !$0.recording.localExists }
+        log("Transcribe selected: \(all.count) to process (\(ready.count) ready, \(needsDownload.count) need download)")
 
         if needsDownload.isEmpty {
+            log("Transcribe selected: starting transcription for \(ready.count) ready recording(s)")
             startTranscription(entries: ready)
         } else {
             guard ensureExtractorReady() else { return }
@@ -3613,11 +3643,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func startTranscription(entries: [HiDockSyncRecordingEntry]) {
-        guard !entries.isEmpty else { return }
+        guard !entries.isEmpty else {
+            log("startTranscription: called with empty entries")
+            return
+        }
+        log("startTranscription: \(entries.count) recording(s)")
         if entries.count == 1 {
             transcribeFile(mp3Path: entries[0].recording.outputPath)
         } else {
-            guard !transcriptionBusy else { return }
+            guard !transcriptionBusy else {
+                log("startTranscription: skipping, already busy")
+                return
+            }
             transcriptionBusy = true
             viewModel.syncStatus = "Transcribing \(entries.count) recordings..."
             viewModel.syncStatusLevel = .secondary
