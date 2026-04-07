@@ -24,8 +24,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import config
-from state import load_state, save_state
+import config  # noqa: E402
+from state import load_state, save_state  # noqa: E402
 
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
 

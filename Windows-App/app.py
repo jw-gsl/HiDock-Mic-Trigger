@@ -1,6 +1,6 @@
 """HiDock Tools — Windows desktop application.
 
-This is a Python/PyQt6 port of the macOS hidock-mic-trigger menu bar app.
+Python/PyQt6 port of the macOS hidock-mic-trigger app.
 See README.md for setup and PORTING.md for the macOS -> Windows workflow.
 """
 from __future__ import annotations
@@ -121,6 +121,9 @@ def main():
     tray_icon.activated.connect(
         lambda reason: window.show() if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None
     )
+
+    # Click on tray notification opens the last transcript
+    tray_icon.messageClicked.connect(window._on_tray_notification_clicked)
 
     sys.exit(app.exec())
 

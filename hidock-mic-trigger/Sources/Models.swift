@@ -74,9 +74,35 @@ struct HiDockDeviceListResponse: Codable {
     let devices: [HiDockDevice]
 }
 
+/// The kind of device: HiDock proprietary USB or generic mass-storage volume.
+enum DeviceType: String, Codable {
+    case hidock = "hidock"
+    case volume = "volume"
+}
+
 struct HiDockPairedDevice: Codable, Equatable {
     let productId: Int
     let displayName: String
+    var deviceType: DeviceType
+    var volumeName: String?     // For volume devices: mount name / drive letter
+    var subpath: String?        // Optional subfolder to scan on volume
+    var pairedAt: String?       // ISO-8601 timestamp
+
+    // Custom Codable to handle backwards compatibility with old JSON
+    // that only had productId + displayName (no deviceType field).
+    enum CodingKeys: String, CodingKey {
+        case productId, displayName, deviceType, volumeName, subpath, pairedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.productId = try container.decode(Int.self, forKey: .productId)
+        self.displayName = try container.decode(String.self, forKey: .displayName)
+        self.deviceType = try container.decodeIfPresent(DeviceType.self, forKey: .deviceType) ?? .hidock
+        self.volumeName = try container.decodeIfPresent(String.self, forKey: .volumeName)
+        self.subpath = try container.decodeIfPresent(String.self, forKey: .subpath)
+        self.pairedAt = try container.decodeIfPresent(String.self, forKey: .pairedAt)
+    }
 
     var cleanName: String {
         sanitizeDeviceName(displayName)
@@ -90,25 +116,80 @@ struct HiDockPairedDevice: Codable, Equatable {
         return name
     }
 
-    static func == (lhs: HiDockPairedDevice, rhs: HiDockPairedDevice) -> Bool {
-        lhs.productId == rhs.productId
+    /// Unique string identity used for state keys and filtering.
+    var deviceId: String {
+        switch deviceType {
+        case .hidock:
+            return "hidock:\(productId)"
+        case .volume:
+            return "volume:\(volumeName ?? String(productId))"
+        }
     }
+
+    static func == (lhs: HiDockPairedDevice, rhs: HiDockPairedDevice) -> Bool {
+        lhs.deviceId == rhs.deviceId
+    }
+
+    /// Backwards-compatible init for existing HiDock pairing code.
+    init(productId: Int, displayName: String) {
+        self.productId = productId
+        self.displayName = displayName
+        self.deviceType = .hidock
+        self.volumeName = nil
+        self.subpath = nil
+        self.pairedAt = ISO8601DateFormatter().string(from: Date())
+    }
+
+    /// Deterministic hash for volume name (stable across runs, unlike hashValue).
+    private static func stableHash(_ string: String) -> Int {
+        let data = Data(string.utf8)
+        var hash: UInt32 = 5381
+        for byte in data {
+            hash = ((hash << 5) &+ hash) &+ UInt32(byte) // djb2
+        }
+        return Int(hash & 0x7FFFFFFF)
+    }
+
+    /// Full init for volume devices.
+    init(volumeName: String, displayName: String, subpath: String? = nil) {
+        self.productId = Self.stableHash(volumeName)
+        self.displayName = displayName
+        self.deviceType = .volume
+        self.volumeName = volumeName
+        self.subpath = subpath
+        self.pairedAt = ISO8601DateFormatter().string(from: Date())
+    }
+}
+
+/// Volume scan result from the extractor `scan-volumes` command.
+struct VolumeScanResult: Codable {
+    let volumeName: String
+    let mountPoint: String
+    let audioFileCount: Int
+    let totalSizeBytes: Int
+    let audioExtensions: [String]
+}
+
+struct VolumeScanResponse: Codable {
+    let volumes: [VolumeScanResult]
 }
 
 struct HiDockSyncRecordingEntry: Identifiable {
     let id: String
     let recording: HiDockSyncRecording
     let deviceProductId: Int
+    let deviceId: String
     let deviceName: String
     var transcribed: Bool = false
     var transcriptPath: String? = nil
     var speakersTagged: Bool = false
     var summaryPath: String? = nil
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil) {
-        self.id = "\(deviceProductId)-\(recording.name)"
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil) {
+        self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
+        self.deviceId = deviceId
         self.deviceName = deviceName
         self.transcribed = transcribed
         self.transcriptPath = transcriptPath

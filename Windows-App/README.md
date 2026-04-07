@@ -12,7 +12,7 @@ Windows desktop application for HiDock USB docking stations. Provides USB sync, 
 
 ## Features
 
-- **USB Sync** — Pair HiDock devices, browse recordings, download over USB
+- **USB Sync** — Pair HiDock devices or USB volumes (audio recorders, SD cards), browse recordings, download/import
 - **Transcription** — Local transcription using whisper.cpp (no GPU required)
 - **Mic Trigger** — Monitor a USB mic and keep the HiDock input open via ffmpeg
 - **Dark theme** — Modern dark UI with card-based layout
@@ -88,7 +88,7 @@ Windows-App/
 
 | macOS (primary) | Windows (this port) |
 |-----------------|---------------------|
-| `hidock-mic-trigger/` — Swift/AppKit menu bar app | `Windows-App/` — Python/PyQt6 desktop app |
+| `hidock-mic-trigger/` — Swift/AppKit desktop app | `Windows-App/` — Python/PyQt6 desktop app |
 | `usb-extractor/` — Python USB extractor | `Windows-Script/` — Windows-adapted USB extractor |
 | `transcription-pipeline/` — whisper.cpp via `transcribe_cpp.py` | `core/transcription.py` — whisper.cpp via pywhispercpp |
 | `mic-trigger/` — Swift CLI, CoreAudio | `core/mic_trigger.py` — Python, WASAPI |

@@ -5,7 +5,6 @@ name, description, size, install status, and download/delete controls.
 """
 from __future__ import annotations
 
-import json
 import sys
 import threading
 from pathlib import Path
@@ -18,7 +17,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )

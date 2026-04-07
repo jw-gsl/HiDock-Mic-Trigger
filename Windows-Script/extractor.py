@@ -27,6 +27,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import signal
 import struct
 import sys
@@ -611,7 +612,6 @@ def transfer_file_stream(
     request_id: int = 6,
     timeout_ms: int = 5000,
 ) -> bytes:
-    payload = build_name_only_payload(filename)
     out_path = Path(tempfile.gettempdir()) / output_name_for(filename)
     written = transfer_file_stream_to_path(
         dev,
@@ -1067,8 +1067,373 @@ def pull_file(filename: str, out_dir: Path, request_id: int = 1, timeout_ms: int
     return out_path
 
 
+# ── Volume (mass-storage) support ──────────────────────────────────────────────
+
+VOLUME_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".wma"}
+
+
+def _find_volumes() -> list[Path]:
+    """Return mount points of removable/external drives.
+
+    On Windows, iterates drive letters and checks for removable or fixed non-C drives.
+    On Linux, checks /media and /mnt for mounted directories.
+    """
+    if platform.system() == "Windows":
+        import ctypes
+        drives = []
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        for i in range(26):
+            if bitmask & (1 << i):
+                letter = chr(ord("A") + i)
+                drive_path = Path(f"{letter}:\\")
+                # Skip C: (system drive)
+                if letter == "C":
+                    continue
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW(str(drive_path))
+                # 2=REMOVABLE, 3=FIXED (external USB drives often report as FIXED)
+                if drive_type in (2, 3) and drive_path.exists():
+                    drives.append(drive_path)
+        return sorted(drives, key=lambda p: str(p))
+    else:
+        # Linux: check /media/<user>/ and /mnt/
+        mounts: list[Path] = []
+        for base in [Path("/media"), Path("/mnt")]:
+            if not base.exists():
+                continue
+            for entry in base.iterdir():
+                if entry.is_dir():
+                    # /media often has a username subdirectory
+                    if base == Path("/media"):
+                        for sub_entry in entry.iterdir():
+                            if sub_entry.is_dir() and not sub_entry.is_symlink():
+                                mounts.append(sub_entry)
+                    else:
+                        if not entry.is_symlink():
+                            mounts.append(entry)
+        return sorted(mounts, key=lambda p: p.name)
+
+
+def _volume_mount_path(volume_name: str) -> Path:
+    """Resolve a volume name to its mount path on the current platform.
+
+    On Windows, volume_name is a drive letter like "D" or "E".
+    On Linux, volume_name is the directory name under /media/<user>/ or /mnt/.
+    """
+    if platform.system() == "Windows":
+        # volume_name is the drive letter
+        return Path(f"{volume_name}:\\")
+    else:
+        # Check /media/<user>/<name> first, then /mnt/<name>
+        for base in [Path("/media"), Path("/mnt")]:
+            if not base.exists():
+                continue
+            if base == Path("/media"):
+                for user_dir in base.iterdir():
+                    candidate = user_dir / volume_name
+                    if candidate.is_dir():
+                        return candidate
+            else:
+                candidate = base / volume_name
+                if candidate.is_dir():
+                    return candidate
+        return Path("/mnt") / volume_name
+
+
+def _safe_resolve(base: Path, user_path: str | None) -> Path:
+    """Resolve a user-supplied subpath within a base directory safely.
+
+    Raises ValueError if the resolved path escapes the base directory.
+    """
+    if user_path is None:
+        return base
+    if ".." in user_path:
+        raise ValueError(f"Path traversal detected in: {user_path}")
+    resolved = (base / user_path).resolve()
+    base_resolved = base.resolve()
+    if not str(resolved).startswith(str(base_resolved)):
+        raise ValueError(f"Path escapes base directory: {user_path}")
+    return resolved
+
+
+def _scan_audio_files(mount_point: Path, subpath: str | None = None) -> list[Path]:
+    """Return all audio files under a volume mount point."""
+    scan_root = _safe_resolve(mount_point, subpath)
+    if not scan_root.is_dir():
+        return []
+    files = []
+    for entry in scan_root.rglob("*"):
+        if entry.is_file() and entry.suffix.lower() in VOLUME_AUDIO_EXTENSIONS:
+            files.append(entry)
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _audio_file_metadata(audio_path: Path) -> dict:
+    """Build a recording-like metadata dict from a filesystem audio file."""
+    stat = audio_path.stat()
+    mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+
+    duration = stat.st_size / 16000.0  # rough estimate
+    try:
+        from mutagen import File as MutagenFile
+        mf = MutagenFile(str(audio_path))
+        if mf and mf.info:
+            duration = mf.info.length
+    except Exception:
+        pass
+
+    return {
+        "name": audio_path.name,
+        "createDate": mtime.strftime("%Y/%m/%d"),
+        "createTime": mtime.strftime("%H:%M:%S"),
+        "length": stat.st_size,
+        "duration": round(duration, 1),
+        "version": 0,
+        "mode": "external",
+        "signature": md5_hex(f"{audio_path.name}:{stat.st_size}:{int(stat.st_mtime)}"),
+    }
+
+
+def scan_volumes() -> dict:
+    """Enumerate mounted volumes and count audio files on each."""
+    results = []
+    for mount in _find_volumes():
+        audio_files = _scan_audio_files(mount)
+        if not audio_files:
+            continue
+        total_size = sum(f.stat().st_size for f in audio_files)
+        extensions = sorted({f.suffix.lower() for f in audio_files})
+        results.append({
+            "volumeName": mount.name if platform.system() != "Windows" else mount.drive.rstrip(":"),
+            "mountPoint": str(mount),
+            "audioFileCount": len(audio_files),
+            "totalSizeBytes": total_size,
+            "audioExtensions": extensions,
+        })
+    return {"volumes": results}
+
+
+def volume_status(
+    volume_name: str,
+    subpath: str | None = None,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    state_path: Path = DEFAULT_STATE_PATH,
+) -> dict:
+    """Return recording status for a mounted volume (same shape as HiDock status)."""
+    config = load_config(config_path)
+    output_dir = resolved_output_dir(config)
+    state = load_state(state_path)
+    downloads = state.get("downloads", {})
+
+    mount = _volume_mount_path(volume_name)
+    connected = mount.is_dir()
+
+    payload = {
+        "connected": connected,
+        "outputDir": str(output_dir),
+        "statePath": str(state_path.resolve()),
+        "configPath": str(config_path.resolve()),
+        "recordings": [],
+    }
+
+    if not connected:
+        payload["error"] = f"Volume '{volume_name}' is not mounted"
+        return payload
+
+    audio_files = _scan_audio_files(mount, subpath)
+    items: list[dict] = []
+    seen_names: set[str] = set()
+
+    for audio_path in audio_files:
+        meta = _audio_file_metadata(audio_path)
+        name = meta["name"]
+        state_key = f"vol:{volume_name}/{name}"
+        seen_names.add(state_key)
+        stored = downloads.get(state_key, {})
+        output_path = Path(stored["output_path"]) if "output_path" in stored else output_dir / name
+        local_exists = output_path.exists()
+        downloaded = bool(stored.get("downloaded"))
+        status = "downloaded" if downloaded else "on_device"
+        if stored.get("last_error") and not downloaded:
+            status = "failed"
+
+        items.append({
+            **meta,
+            "sourcePath": str(audio_path),
+            "outputPath": str(output_path),
+            "outputName": name,
+            "downloaded": downloaded,
+            "localExists": local_exists,
+            "downloadedAt": stored.get("downloaded_at"),
+            "lastError": stored.get("last_error"),
+            "status": status,
+            "humanLength": human_size(meta["length"]),
+        })
+
+    # Include state-only entries for files no longer on the volume
+    for state_key, stored in downloads.items():
+        if not state_key.startswith(f"vol:{volume_name}/"):
+            continue
+        if state_key in seen_names:
+            continue
+        output_path = Path(stored["output_path"]) if "output_path" in stored else None
+        local_exists = output_path.exists() if output_path else False
+        items.append({
+            "name": state_key.split("/", 1)[1],
+            "createDate": "",
+            "createTime": "",
+            "length": stored.get("length", 0),
+            "duration": 0,
+            "version": 0,
+            "mode": "external",
+            "signature": stored.get("signature", ""),
+            "sourcePath": "",
+            "outputPath": str(output_path) if output_path else "",
+            "outputName": state_key.split("/", 1)[1],
+            "downloaded": bool(stored.get("downloaded")),
+            "localExists": local_exists,
+            "downloadedAt": stored.get("downloaded_at"),
+            "lastError": stored.get("last_error"),
+            "status": "downloaded" if stored.get("downloaded") else "missing_local",
+            "humanLength": human_size(stored.get("length", 0)),
+        })
+
+    items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
+    payload["recordings"] = items
+    return payload
+
+
+def volume_import_one(
+    filename: str,
+    volume_name: str,
+    subpath: str | None = None,
+    output_dir: Path | None = None,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    state_path: Path = DEFAULT_STATE_PATH,
+) -> dict:
+    """Copy one audio file from a mounted volume to the recordings folder."""
+    # Validate filename to prevent path traversal
+    if not filename or ".." in filename or "/" in filename or "\\" in filename:
+        return {
+            "filename": filename,
+            "written": 0,
+            "expectedLength": 0,
+            "outputPath": "",
+            "downloaded": False,
+            "error": f"Invalid filename: {filename}",
+        }
+
+    if output_dir is None:
+        config = load_config(config_path)
+        output_dir = resolved_output_dir(config)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mount = _volume_mount_path(volume_name)
+    scan_root = _safe_resolve(mount, subpath)
+    source = scan_root / filename
+
+    # Verify source doesn't escape scan_root after resolution
+    if not str(source.resolve()).startswith(str(scan_root.resolve())):
+        return {
+            "filename": filename,
+            "written": 0,
+            "expectedLength": 0,
+            "outputPath": "",
+            "downloaded": False,
+            "error": f"Path traversal detected: {filename}",
+        }
+
+    state_key = f"vol:{volume_name}/{filename}"
+    state = load_state(state_path)
+    downloads = state.get("downloads", {})
+
+    if not source.is_file():
+        downloads[state_key] = {
+            **downloads.get(state_key, {}),
+            "downloaded": False,
+            "updated_at": utc_now_iso(),
+            "last_error": f"Source file not found: {source}",
+        }
+        save_state(state, state_path)
+        return {
+            "filename": filename,
+            "written": 0,
+            "expectedLength": 0,
+            "outputPath": "",
+            "downloaded": False,
+            "error": f"Source file not found: {source}",
+        }
+
+    stat = source.stat()
+    out_path = output_dir / filename
+    shutil.copy2(str(source), str(out_path))
+    written = out_path.stat().st_size
+
+    meta = _audio_file_metadata(source)
+    downloads[state_key] = {
+        "downloaded": written == stat.st_size,
+        "downloaded_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "output_path": str(out_path),
+        "length": stat.st_size,
+        "last_error": None,
+        "volume_name": volume_name,
+        "signature": meta["signature"],
+    }
+    save_state(state, state_path)
+
+    return {
+        "filename": filename,
+        "written": written,
+        "expectedLength": stat.st_size,
+        "outputPath": str(out_path),
+        "downloaded": written == stat.st_size,
+    }
+
+
+def volume_import_new(
+    volume_name: str,
+    subpath: str | None = None,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    state_path: Path = DEFAULT_STATE_PATH,
+) -> dict:
+    """Import all new audio files from a mounted volume."""
+    status = volume_status(volume_name, subpath=subpath, config_path=config_path, state_path=state_path)
+    if not status["connected"]:
+        return {
+            "connected": False,
+            "outputDir": status["outputDir"],
+            "downloaded": [],
+            "skipped": [],
+            "error": status.get("error"),
+        }
+
+    downloaded: list[dict] = []
+    skipped: list[dict] = []
+    for item in status["recordings"]:
+        if item["downloaded"]:
+            skipped.append({"filename": item["name"], "reason": "already_downloaded"})
+            continue
+        result = volume_import_one(
+            item["name"],
+            volume_name,
+            subpath=subpath,
+            output_dir=Path(status["outputDir"]),
+            config_path=config_path,
+            state_path=state_path,
+        )
+        downloaded.append(result)
+
+    return {
+        "connected": True,
+        "outputDir": status["outputDir"],
+        "downloaded": downloaded,
+        "skipped": skipped,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--product-id", type=int, default=None, help="USB product ID of the target device")
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="Report sync status and device recordings as JSON")
@@ -1084,6 +1449,10 @@ def main() -> int:
 
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
+
+    mark_dl = sub.add_parser("mark-downloaded", help="Mark recordings as already downloaded without transferring")
+    mark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to mark")
+    mark_dl.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
 
     pull = sub.add_parser("pull", help="Pull one known device-side .hda file")
     pull.add_argument("filename", help="Device-side filename, e.g. 2026Feb26-160117-Rec35.hda")
@@ -1125,6 +1494,22 @@ def main() -> int:
     transfer.add_argument("--request-id", type=lambda s: int(s, 0), default=6)
     transfer.add_argument("--timeout-ms", type=int, default=5000)
 
+    # Volume (mass-storage) commands
+    sub.add_parser("scan-volumes", help="List mounted volumes with audio files")
+
+    vol_status = sub.add_parser("volume-status", help="Report recordings on a mounted volume as JSON")
+    vol_status.add_argument("--volume-name", required=True, help="Name/letter of the mounted volume")
+    vol_status.add_argument("--subpath", default=None, help="Subdirectory within the volume to scan")
+
+    vol_import = sub.add_parser("volume-import", help="Import one audio file from a mounted volume")
+    vol_import.add_argument("filename", help="Audio filename on the volume")
+    vol_import.add_argument("--volume-name", required=True, help="Name/letter of the mounted volume")
+    vol_import.add_argument("--subpath", default=None, help="Subdirectory within the volume")
+
+    vol_import_new = sub.add_parser("volume-import-new", help="Import all new audio files from a mounted volume")
+    vol_import_new.add_argument("--volume-name", required=True, help="Name/letter of the mounted volume")
+    vol_import_new.add_argument("--subpath", default=None, help="Subdirectory within the volume")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -1147,6 +1532,27 @@ def main() -> int:
         return 0
     if args.command == "download-new":
         print(json.dumps(download_new(timeout_ms=args.timeout_ms), indent=2))
+        return 0
+    if args.command == "mark-downloaded":
+        state = load_state()
+        downloads = state["downloads"]
+        marked = []
+        vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
+        for filename in args.filenames:
+            state_key = f"{vol_prefix}{filename}"
+            record = {
+                **downloads.get(state_key, {}),
+                "downloaded": True,
+                "downloaded_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+                "last_error": None,
+            }
+            if args.product_id is not None:
+                record["product_id"] = args.product_id
+            downloads[state_key] = record
+            marked.append(filename)
+        save_state(state)
+        print(json.dumps({"marked": marked}, indent=2))
         return 0
 
     if args.command == "pull":
@@ -1240,6 +1646,22 @@ def main() -> int:
             release_device(dev, interface_number)
         print(f"written={written}")
         print(out_path)
+        return 0
+
+    if args.command == "scan-volumes":
+        print(json.dumps(scan_volumes(), indent=2))
+        return 0
+    if args.command == "volume-status":
+        result = volume_status(args.volume_name, subpath=args.subpath)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.command == "volume-import":
+        result = volume_import_one(args.filename, args.volume_name, subpath=args.subpath)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("downloaded") else 1
+    if args.command == "volume-import-new":
+        result = volume_import_new(args.volume_name, subpath=args.subpath)
+        print(json.dumps(result, indent=2))
         return 0
 
     raise AssertionError("unreachable")

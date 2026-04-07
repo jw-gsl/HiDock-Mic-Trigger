@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var voiceLibraryWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
     private var coworkPromptWindow: NSWindow?
+    private var deviceManagerWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -30,8 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var diarizeEnabled = false
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
-    private var syncFilterDeviceProductId: Int? = nil
-    private var syncDeviceConnected: [Int: Bool] = [:]
+    private var syncFilterDeviceId: String? = nil
+    private var syncDeviceConnected: [String: Bool] = [:]
     private var syncBusy = false
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
@@ -70,6 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let syncHideDownloadedKey = "hidockSyncHideDownloaded"
     private let syncAutoDownloadKey = "hidockSyncAutoDownload"
     private let hasCompletedOnboardingKey = "hasCompletedOnboarding"
+    private let notifyTranscriptionKey = "notifyTranscriptionComplete"
+    private let notifyDownloadKey = "notifyDownloadComplete"
+    private let notifyMicChangesKey = "notifyMicChanges"
 
     /// Repo root resolved from UserDefaults, falling back to the default home directory path.
     private var repoRoot: String {
@@ -263,12 +267,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
+        let userInfo = response.notification.request.content.userInfo
+        let categoryId = response.notification.request.content.categoryIdentifier
+
         if response.actionIdentifier == Self.micSwitchActionID {
             DispatchQueue.main.async { [weak self] in
                 self?.showSyncWindow()
             }
+        } else if response.actionIdentifier == Self.openTranscriptActionID {
+            if let path = userInfo["transcriptPath"] as? String {
+                DispatchQueue.main.async { [weak self] in
+                    self?.openTranscriptViewer(transcriptMdPath: path)
+                }
+            }
+        } else if response.actionIdentifier == Self.revealTranscriptActionID {
+            if let path = userInfo["transcriptPath"] as? String {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
+        } else if categoryId == Self.transcriptionCategoryID && response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            // Clicking the notification body opens the transcript
+            if let path = userInfo["transcriptPath"] as? String {
+                DispatchQueue.main.async { [weak self] in
+                    self?.openTranscriptViewer(transcriptMdPath: path)
+                }
+            }
         } else if response.actionIdentifier == UpdateChecker.updateActionID ||
-                    response.notification.request.content.categoryIdentifier == UpdateChecker.updateCategoryID {
+                    categoryId == UpdateChecker.updateCategoryID {
             if let urlString = UserDefaults.standard.string(forKey: UpdateChecker.updateURLKey),
                let url = URL(string: urlString) {
                 NSWorkspace.shared.open(url)
@@ -320,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onSelectAll = { [weak self] in self?.selectAllSyncRecordings() }
         viewModel.onSelectNone = { [weak self] in self?.selectNoneSyncRecordings() }
         viewModel.onSelectNotDownloaded = { [weak self] in self?.selectNotDownloadedSyncRecordings() }
-        viewModel.onFilterByDevice = { [weak self] pid in self?.filterSyncByDevice(pid) }
+        viewModel.onFilterByDevice = { [weak self] deviceId in self?.filterSyncByDevice(deviceId) }
         viewModel.onToggleChecked = { [weak self] name in self?.toggleSyncRecordingCheckbox(name) }
         viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
@@ -348,12 +372,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
+        viewModel.onShowDeviceManager = { [weak self] in self?.openDeviceManager() }
+        viewModel.onForgetDevice = { [weak self] device in self?.forgetDevice(device) }
+        viewModel.onPairVolume = { [weak self] volumeName, subpath in self?.pairVolume(volumeName: volumeName, subpath: subpath) }
+        viewModel.onScanVolumes = { [weak self] completion in self?.scanVolumes(completion: completion) }
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
+
+        // Notification preferences (default to true if not set)
+        viewModel.notifyTranscriptionComplete = UserDefaults.standard.object(forKey: notifyTranscriptionKey) == nil || UserDefaults.standard.bool(forKey: notifyTranscriptionKey)
+        viewModel.notifyDownloadComplete = UserDefaults.standard.object(forKey: notifyDownloadKey) == nil || UserDefaults.standard.bool(forKey: notifyDownloadKey)
+        viewModel.notifyMicChanges = UserDefaults.standard.object(forKey: notifyMicChangesKey) == nil || UserDefaults.standard.bool(forKey: notifyMicChangesKey)
+        viewModel.onToggleNotifyTranscription = { [weak self] in
+            guard let self = self else { return }
+            let newVal = !self.viewModel.notifyTranscriptionComplete
+            UserDefaults.standard.set(newVal, forKey: self.notifyTranscriptionKey)
+            self.viewModel.notifyTranscriptionComplete = newVal
+        }
+        viewModel.onToggleNotifyDownload = { [weak self] in
+            guard let self = self else { return }
+            let newVal = !self.viewModel.notifyDownloadComplete
+            UserDefaults.standard.set(newVal, forKey: self.notifyDownloadKey)
+            self.viewModel.notifyDownloadComplete = newVal
+        }
+        viewModel.onToggleNotifyMicChanges = { [weak self] in
+            guard let self = self else { return }
+            let newVal = !self.viewModel.notifyMicChanges
+            UserDefaults.standard.set(newVal, forKey: self.notifyMicChangesKey)
+            self.viewModel.notifyMicChanges = newVal
+        }
 
         // Appearance
         let currentMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
@@ -398,7 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncHideDownloaded = syncHideDownloaded
         viewModel.syncAutoDownload = syncAutoDownload
         viewModel.diarizeEnabled = diarizeEnabled
-        viewModel.syncFilterDeviceProductId = syncFilterDeviceProductId
+        viewModel.syncFilterDeviceId = syncFilterDeviceId
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
         viewModel.syncDeviceConnected = syncDeviceConnected
@@ -435,7 +486,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func postSyncDownloadNotification(title: String, body: String) {
+        guard UserDefaults.standard.object(forKey: notifyDownloadKey) == nil || UserDefaults.standard.bool(forKey: notifyDownloadKey) else { return }
         postNotification(title: title, body: body)
+    }
+
+    private func postTranscriptionNotification(title: String, body: String, transcriptPath: String? = nil) {
+        guard UserDefaults.standard.object(forKey: notifyTranscriptionKey) == nil || UserDefaults.standard.bool(forKey: notifyTranscriptionKey) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = Self.transcriptionCategoryID
+        if let path = transcriptPath {
+            content.userInfo["transcriptPath"] = path
+        }
+        let request = UNNotificationRequest(identifier: "transcription-\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - CLI output monitoring
@@ -648,14 +714,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private static let micSwitchCategoryID = "MIC_SWITCH"
     private static let micSwitchActionID = "OPEN_MIC_MENU"
+    private static let transcriptionCategoryID = "TRANSCRIPTION_COMPLETE"
+    private static let openTranscriptActionID = "OPEN_TRANSCRIPT"
+    private static let revealTranscriptActionID = "REVEAL_TRANSCRIPT"
 
     private func registerNotificationCategories() {
-        let openAction = UNNotificationAction(identifier: Self.micSwitchActionID, title: "Open Mic Settings", options: .foreground)
-        let category = UNNotificationCategory(identifier: Self.micSwitchCategoryID, actions: [openAction], intentIdentifiers: [])
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+        let openMicAction = UNNotificationAction(identifier: Self.micSwitchActionID, title: "Open Mic Settings", options: .foreground)
+        let micCategory = UNNotificationCategory(identifier: Self.micSwitchCategoryID, actions: [openMicAction], intentIdentifiers: [])
+
+        let openTranscriptAction = UNNotificationAction(identifier: Self.openTranscriptActionID, title: "Open Transcript", options: .foreground)
+        let revealTranscriptAction = UNNotificationAction(identifier: Self.revealTranscriptActionID, title: "Show in Finder", options: .foreground)
+        let transcriptionCategory = UNNotificationCategory(identifier: Self.transcriptionCategoryID, actions: [openTranscriptAction, revealTranscriptAction], intentIdentifiers: [])
+
+        UNUserNotificationCenter.current().setNotificationCategories([micCategory, transcriptionCategory])
     }
 
     private func postMicChangeNotification(title: String, body: String, micName: String) {
+        guard UserDefaults.standard.object(forKey: notifyMicChangesKey) == nil || UserDefaults.standard.bool(forKey: notifyMicChangesKey) else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -973,7 +1048,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         var title = "HiDock"
         #endif
         // Only show connected devices in the menu bar
-        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.deviceId] == true }
         if !connectedDevices.isEmpty {
             let deviceParts = connectedDevices.map { "\($0.shortName) ✓" }
             title += " · \(deviceParts.joined(separator: " · "))"
@@ -1184,8 +1259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             if case .success(let data) = result,
                let response = try? JSONDecoder().decode(HiDockDeviceListResponse.self, from: data) {
-                let alreadyPaired = Set(self.syncPairedDevices.map(\.productId))
-                for device in response.devices where !alreadyPaired.contains(device.productId) {
+                let alreadyPaired = Set(self.syncPairedDevices.map(\.deviceId))
+                for device in response.devices where !alreadyPaired.contains("hidock:\(device.productId)") {
                     let pairedDevice = HiDockPairedDevice(productId: device.productId, displayName: device.displayName)
                     var devices = self.syncPairedDevices
                     devices.append(pairedDevice)
@@ -1196,7 +1271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             let devices = self.syncPairedDevices
             guard !devices.isEmpty else { return }
-            self.log("Auto-connecting \(devices.count) paired HiDock device(s) on startup")
+            self.log("Auto-connecting \(devices.count) paired device(s) on startup")
             self.syncBusy = true
             self.syncViewModelState()
 
@@ -1206,12 +1281,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             for device in devices {
                 group.enter()
-                self.runExtractor(arguments: ["status", "--timeout-ms", "2000"], productId: device.productId) { [weak self] result in
+
+                let args: [String]
+                let pid: Int?
+                switch device.deviceType {
+                case .hidock:
+                    args = ["status", "--timeout-ms", "2000"]
+                    pid = device.productId
+                case .volume:
+                    args = self.volumeExtractorArguments("volume-status", device: device)
+                    pid = nil
+                }
+
+                self.runExtractor(arguments: args, productId: pid) { [weak self] result in
                     guard let self = self else { group.leave(); return }
                     switch result {
                     case .success(let data):
                         if let status = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) {
-                            self.renderSyncStatus(status, deviceProductId: device.productId, deviceName: device.cleanName)
+                            self.renderSyncStatus(status, device: device)
                             if status.connected {
                                 anyConnected = true
                                 self.log("Auto-connect: \(device.cleanName) connected (\(status.recordings.count) recordings)")
@@ -1257,7 +1344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncWindowItem?.title = "Show Window..."
             return
         }
-        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.deviceId] == true }
         if connectedDevices.isEmpty {
             syncWindowItem?.title = "Show Window..."
         } else {
@@ -1298,7 +1385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.alertStyle = .informational
         alert.messageText = "HiDock Mic Trigger"
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        alert.informativeText = "Menu bar app for controlling the HiDock mic trigger CLI.\nVersion \(version)"
+        alert.informativeText = "Desktop app for HiDock USB docking stations.\nMic trigger, USB sync, and transcription.\nVersion \(version)"
         alert.runModal()
     }
 
@@ -1467,7 +1554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Gather system info
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let macOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.productId] == true }
+        let connectedDevices = syncPairedDevices.filter { syncDeviceConnected[$0.deviceId] == true }
         let deviceStatus = connectedDevices.isEmpty ? "Not connected" : connectedDevices.map(\.shortName).joined(separator: ", ")
         let triggerStatus = process != nil ? "Running (\(selectedMicName ?? "unknown mic"))" : "Stopped"
         let recordingCount = syncEntries.count
@@ -1925,6 +2012,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    // MARK: - Device Manager
+
+    private func openDeviceManager() {
+        if let existing = deviceManagerWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let managerView = DeviceManagerView(viewModel: viewModel)
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 480),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Device Manager"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 560, height: 400)
+        win.contentView = NSHostingView(rootView: managerView)
+
+        deviceManagerWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func forgetDevice(_ device: HiDockPairedDevice) {
+        var devices = syncPairedDevices
+        devices.removeAll { $0.deviceId == device.deviceId }
+        syncPairedDevices = devices
+        syncDeviceConnected.removeValue(forKey: device.deviceId)
+        viewModel.syncPairedDevices = syncPairedDevices
+        viewModel.syncDeviceConnected = syncDeviceConnected
+        viewModel.syncPaired = !syncPairedDevices.isEmpty
+        log("Forgot device: \(device.cleanName) (\(device.deviceId))")
+        updateMenuSyncStatus(connected: syncDeviceConnected.values.contains(true))
+
+        // Remove entries from this device
+        syncEntries.removeAll { $0.deviceId == device.deviceId }
+        viewModel.syncEntries = syncEntries
+    }
+
+    private func pairVolume(volumeName: String, subpath: String?) {
+        let device = HiDockPairedDevice(volumeName: volumeName, displayName: volumeName, subpath: subpath)
+
+        // Check for duplicate
+        if syncPairedDevices.contains(where: { $0.deviceId == device.deviceId }) {
+            log("Volume '\(volumeName)' is already paired")
+            return
+        }
+
+        var devices = syncPairedDevices
+        devices.append(device)
+        syncPairedDevices = devices
+        viewModel.syncPairedDevices = syncPairedDevices
+        viewModel.syncPaired = true
+        log("Paired volume: \(volumeName) (subpath: \(subpath ?? "none"))")
+    }
+
+    private func scanVolumes(completion: @escaping ([VolumeScanResult]) -> Void) {
+        guard ensureExtractorReady() else {
+            completion([])
+            return
+        }
+        runExtractor(arguments: ["scan-volumes"]) { [weak self] result in
+            guard self != nil else { completion([]); return }
+            switch result {
+            case .success(let data):
+                if let response = try? JSONDecoder().decode(VolumeScanResponse.self, from: data) {
+                    completion(response.volumes)
+                } else {
+                    completion([])
+                }
+            case .failure:
+                completion([])
+            }
+        }
+    }
+
     // MARK: - Model Manager
 
     @objc private func openModelManagerMenu() {
@@ -2110,6 +2278,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return arguments
     }
 
+    /// Build extractor arguments for a volume device command.
+    private func volumeExtractorArguments(_ command: String, device: HiDockPairedDevice, extra: [String] = []) -> [String] {
+        var args = [command, "--volume-name", device.volumeName ?? ""]
+        if let sub = device.subpath, !sub.isEmpty {
+            args += ["--subpath", sub]
+        }
+        args += extra
+        return args
+    }
+
     private func ensureExtractorReady() -> Bool {
         let configHint = "\n\nTo fix, set the repo path via:\n  defaults write com.hidock.mic-trigger \(repoRootKey) /path/to/hidock-tools"
         guard FileManager.default.fileExists(atPath: extractorScriptPath) else {
@@ -2219,8 +2397,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             errPipe.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
                 guard !chunk.isEmpty else { return }
-                errQueue.sync { stderrData.append(chunk) }
-                if let text = String(data: chunk, encoding: .utf8) {
+                errQueue.sync {
+                    stderrData.append(chunk)
+                    guard let text = String(data: chunk, encoding: .utf8) else { return }
                     lineBuffer += text
                     while let range = lineBuffer.range(of: "\n") {
                         let line = String(lineBuffer[lineBuffer.startIndex..<range.lowerBound])
@@ -2272,21 +2451,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Sync Actions
 
-    private func renderSyncStatus(_ status: HiDockSyncStatusResponse, deviceProductId: Int, deviceName: String) {
+    private func renderSyncStatus(_ status: HiDockSyncStatusResponse, device: HiDockPairedDevice) {
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
-        syncDeviceConnected[deviceProductId] = status.connected
-        syncEntries.removeAll { $0.deviceProductId == deviceProductId }
+        syncDeviceConnected[device.deviceId] = status.connected
+        syncEntries.removeAll { $0.deviceId == device.deviceId }
         for recording in status.recordings {
-            syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: deviceProductId, deviceName: deviceName))
+            syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: device.productId, deviceId: device.deviceId, deviceName: device.cleanName))
         }
         let validNames = Set(syncEntries.map(\.recording.name))
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
 
         if !syncBusy {
             let connectedNames = syncPairedDevices
-                .filter { syncDeviceConnected[$0.productId] == true }
-                .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+                .filter { syncDeviceConnected[$0.deviceId] == true }
+                .map { "\(hidockDeviceEmoji($0.shortName, deviceType: $0.deviceType)) \($0.shortName)" }
             if connectedNames.isEmpty {
                 viewModel.syncStatus = "Not connected"
                 viewModel.syncStatusLevel = .secondary
@@ -2374,8 +2553,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
-    private func filterSyncByDevice(_ productId: Int?) {
-        syncFilterDeviceProductId = productId
+    private func filterSyncByDevice(_ deviceId: String?) {
+        syncFilterDeviceId = deviceId
         syncViewModelState()
     }
 
@@ -2414,27 +2593,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         for device in devices {
             group.enter()
-            runExtractor(arguments: ["status", "--timeout-ms", "5000"], productId: device.productId) { [weak self] result in
+
+            // Choose extractor command based on device type
+            let args: [String]
+            let pid: Int?
+            switch device.deviceType {
+            case .hidock:
+                args = ["status", "--timeout-ms", "5000"]
+                pid = device.productId
+            case .volume:
+                args = volumeExtractorArguments("volume-status", device: device)
+                pid = nil
+            }
+
+            runExtractor(arguments: args, productId: pid) { [weak self] result in
                 guard let self = self else { group.leave(); return }
                 switch result {
                 case .success(let data):
                     do {
                         let payload = try JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data)
-                        self.renderSyncStatus(payload, deviceProductId: device.productId, deviceName: device.cleanName)
+                        self.renderSyncStatus(payload, device: device)
                         if payload.connected {
                             anyConnected = true
                         } else if let err = payload.error {
-                            self.log("HiDock sync: \(device.cleanName) not connected: \(err)")
+                            self.log("Sync: \(device.cleanName) not connected: \(err)")
                             deviceErrors[device.cleanName] = err
                         }
                     } catch {
-                        self.log("HiDock sync decode failure for \(device.cleanName): \(error.localizedDescription)")
+                        self.log("Sync decode failure for \(device.cleanName): \(error.localizedDescription)")
                         deviceErrors[device.cleanName] = error.localizedDescription
                     }
                 case .failure(let error):
                     let desc = error.localizedDescription
                     let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
-                    self.log("HiDock sync status error for \(device.cleanName): \(shortDesc)")
+                    self.log("Sync status error for \(device.cleanName): \(shortDesc)")
                     deviceErrors[device.cleanName] = shortDesc
                 }
                 group.leave()
@@ -2447,8 +2639,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.stopSyncRefreshTimer()
             if anyConnected {
                 let connectedNames = self.syncPairedDevices
-                    .filter { self.syncDeviceConnected[$0.productId] == true }
-                    .map { "\(hidockDeviceEmoji($0.shortName)) \($0.shortName)" }
+                    .filter { self.syncDeviceConnected[$0.deviceId] == true }
+                    .map { "\(hidockDeviceEmoji($0.shortName, deviceType: $0.deviceType)) \($0.shortName)" }
                 let deviceList = connectedNames.joined(separator: " · ")
                 self.viewModel.syncStatus = "Connected — \(deviceList)"
                 self.viewModel.syncStatusLevel = .success
@@ -2524,8 +2716,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 let devices = response.devices
-                let alreadyPaired = Set(self.syncPairedDevices.map(\.productId))
-                let unpaired = devices.filter { !alreadyPaired.contains($0.productId) }
+                let alreadyPaired = Set(self.syncPairedDevices.map(\.deviceId))
+                let unpaired = devices.filter { !alreadyPaired.contains("hidock:\($0.productId)") }
                 if unpaired.isEmpty && devices.isEmpty {
                     self.viewModel.syncStatus = "No HiDock devices found"
                     self.viewModel.syncStatusLevel = .error
@@ -2621,7 +2813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         syncEntries = syncEntries.filter { entry in
-            syncPairedDevices.contains(where: { $0.productId == entry.deviceProductId })
+            syncPairedDevices.contains(where: { $0.deviceId == entry.deviceId })
         }
         syncCheckedRecordings = syncCheckedRecordings.intersection(Set(syncEntries.map(\.recording.name)))
         if syncPairedDevices.isEmpty {
@@ -2637,14 +2829,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let notDownloaded = entries.filter { !$0.recording.downloaded }
         guard !notDownloaded.isEmpty else { return }
 
-        let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceProductId)
+        let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceId)
         let group = DispatchGroup()
         var anyError: String?
 
-        for (productId, deviceEntries) in byDevice {
+        for (deviceId, deviceEntries) in byDevice {
             let filenames = deviceEntries.map(\.recording.name)
+            let device = syncPairedDevices.first { $0.deviceId == deviceId }
+
+            var args: [String]
+            let pid: Int?
+            if let device = device, device.deviceType == .volume {
+                args = ["mark-downloaded", "--volume-name", device.volumeName ?? ""] + filenames
+                pid = nil
+            } else {
+                args = ["mark-downloaded"] + filenames
+                pid = device?.productId
+            }
+
             group.enter()
-            runExtractor(arguments: ["mark-downloaded"] + filenames, productId: productId) { result in
+            runExtractor(arguments: args, productId: pid) { result in
                 if case .failure(let error) = result {
                     anyError = error.localizedDescription
                 }
@@ -2721,12 +2925,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case .success(let downloaded):
                 if let payload = downloaded.first, entries.count == 1 {
                     let body = "\(payload.filename.replacingOccurrences(of: ".hda", with: ".mp3")) saved successfully."
-                    self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
+                    self.postSyncDownloadNotification(title: "✅ Download Complete", body: body)
                 } else {
                     let body = entries.count == 1
                         ? "\(entries[0].recording.outputName) saved successfully."
                         : "\(entries.count) recordings were saved successfully."
-                    self.postSyncDownloadNotification(title: "✅ HiDock Download Complete", body: body)
+                    self.postSyncDownloadNotification(title: "✅ Download Complete", body: body)
                 }
                 self.syncCheckedRecordings.subtract(entries.map(\.recording.name))
                 self.refreshSyncStatus()
@@ -2753,6 +2957,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Look up the paired device for a recording entry.
+    private func pairedDevice(for entry: HiDockSyncRecordingEntry) -> HiDockPairedDevice? {
+        syncPairedDevices.first { $0.deviceId == entry.deviceId }
+    }
+
     private func downloadSyncRecordings(
         _ remaining: [HiDockSyncRecordingEntry],
         completed: [HiDockSyncDownloadResult],
@@ -2763,7 +2972,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        runExtractorWithProgress(arguments: ["download", current.recording.name, "--length", "\(current.recording.length)"], productId: current.deviceProductId, onProgress: { [weak self] received, total, pct in
+        // Choose extractor command based on device type
+        let args: [String]
+        let pid: Int?
+        if let device = pairedDevice(for: current), device.deviceType == .volume {
+            args = volumeExtractorArguments("volume-import", device: device, extra: [current.recording.name])
+            pid = nil
+        } else {
+            args = ["download", current.recording.name, "--length", "\(current.recording.length)"]
+            pid = current.deviceProductId
+        }
+
+        runExtractorWithProgress(arguments: args, productId: pid, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
@@ -2811,7 +3031,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let body = totalDownloaded == 1
                     ? "1 new recording was saved successfully."
                     : "\(totalDownloaded) new recordings were saved successfully."
-                postSyncDownloadNotification(title: "✅ HiDock Downloads Complete", body: body)
+                postSyncDownloadNotification(title: "✅ Downloads Complete", body: body)
             }
             viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
             viewModel.syncStatusLevel = .success
@@ -2827,7 +3047,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if case .success(let data) = result,
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let succeeded = json["succeeded"] as? Int, succeeded > 0 {
-                        self.postNotification(title: "📝 Transcription Complete", body: "\(succeeded) new recording\(succeeded == 1 ? "" : "s") transcribed.")
+                        let transcriptFolder = self.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+                        self.postTranscriptionNotification(
+                            title: "📝 Transcription Complete",
+                            body: "\(succeeded) new recording\(succeeded == 1 ? "" : "s") transcribed.",
+                            transcriptPath: transcriptFolder
+                        )
                     }
                     self.refreshTranscriptionState()
                     self.syncViewModelState()
@@ -2837,7 +3062,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        runExtractorWithProgress(arguments: ["download-new"], productId: device.productId, onProgress: { [weak self] received, total, pct in
+        // Choose extractor command based on device type
+        let args: [String]
+        let pid: Int?
+        switch device.deviceType {
+        case .hidock:
+            args = ["download-new"]
+            pid = device.productId
+        case .volume:
+            args = volumeExtractorArguments("volume-import-new", device: device)
+            pid = nil
+        }
+
+        runExtractorWithProgress(arguments: args, productId: pid, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
@@ -3102,7 +3339,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let transcribed = json["transcribed"] as? Bool, transcribed {
                     let duration = json["duration_s"] as? Double ?? 0
-                    self.postNotification(title: "📝 Transcription Complete", body: "\(filename) transcribed in \(Int(duration))s")
+                    let transcriptPath = json["transcript_path"] as? String
+                    self.postTranscriptionNotification(
+                        title: "📝 Transcription Complete",
+                        body: "\(filename) transcribed in \(Int(duration))s",
+                        transcriptPath: transcriptPath
+                    )
                     self.viewModel.syncStatus = "Transcription complete"
                     self.viewModel.syncStatusLevel = .success
                 } else {
@@ -3219,7 +3461,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             transcriptionCurrentFile = nil
             transcriptionProgress = 0
             let body = "\(paths.count) recordings transcribed."
-            postNotification(title: "📝 Transcription Complete", body: body)
+            // For batch, point to the transcript folder
+            let transcriptFolder = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+            postTranscriptionNotification(title: "📝 Transcription Complete", body: body, transcriptPath: transcriptFolder)
             viewModel.syncStatus = "Batch transcription complete"
             viewModel.syncStatusLevel = .success
             refreshTranscriptionState()

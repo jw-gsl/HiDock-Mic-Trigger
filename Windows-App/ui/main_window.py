@@ -1,4 +1,4 @@
-"""Unified main window — mirrors the macOS hidock-mic-trigger app.
+"""Main window — mirrors the macOS hidock-mic-trigger desktop app.
 
 Layout (top to bottom):
   1. Menu bar
@@ -12,7 +12,6 @@ Layout (top to bottom):
 """
 from __future__ import annotations
 
-import json
 import os
 import platform
 import subprocess
@@ -24,17 +23,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 from PyQt6.QtCore import QSettings, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
-    QHeaderView,
-    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -79,6 +75,8 @@ class MainWindow(QMainWindow):
         self._sync_busy = False
         self._transcribe_after_download = False
         self._trigger_start_time: float | None = None
+        self._last_transcript_path: str | None = None
+        self._paired_devices: list = []  # list[PairedDevice] loaded lazily
 
         self._init_menu_bar()
         self._init_ui()
@@ -145,6 +143,8 @@ class MainWindow(QMainWindow):
         voice_lib_act.triggered.connect(self._show_voice_library)
         model_mgr_act = actions_menu.addAction("Models...")
         model_mgr_act.triggered.connect(self._show_model_manager)
+        device_mgr_act = actions_menu.addAction("Devices...")
+        device_mgr_act.triggered.connect(self._show_device_manager)
 
         # Trigger menu
         trigger_menu = menubar.addMenu("Trigger")
@@ -162,6 +162,37 @@ class MainWindow(QMainWindow):
         feedback_act.triggered.connect(self._send_feedback)
         history_act = help_menu.addAction("My Feedback")
         history_act.triggered.connect(self._show_feedback_history)
+        help_menu.addSeparator()
+
+        # Notifications submenu
+        notif_menu = help_menu.addMenu("Notifications")
+        self._notif_transcription_act = QAction("Transcription Complete", self, checkable=True)
+        self._notif_transcription_act.setChecked(
+            self.settings.value("notifyTranscription", True, type=bool)
+        )
+        self._notif_transcription_act.triggered.connect(
+            lambda checked: self.settings.setValue("notifyTranscription", checked)
+        )
+        notif_menu.addAction(self._notif_transcription_act)
+
+        self._notif_download_act = QAction("Download Complete", self, checkable=True)
+        self._notif_download_act.setChecked(
+            self.settings.value("notifyDownload", True, type=bool)
+        )
+        self._notif_download_act.triggered.connect(
+            lambda checked: self.settings.setValue("notifyDownload", checked)
+        )
+        notif_menu.addAction(self._notif_download_act)
+
+        self._notif_mic_act = QAction("Mic Changes", self, checkable=True)
+        self._notif_mic_act.setChecked(
+            self.settings.value("notifyMicChanges", True, type=bool)
+        )
+        self._notif_mic_act.triggered.connect(
+            lambda checked: self.settings.setValue("notifyMicChanges", checked)
+        )
+        notif_menu.addAction(self._notif_mic_act)
+
         help_menu.addSeparator()
 
         # Appearance submenu
@@ -361,6 +392,18 @@ class MainWindow(QMainWindow):
         select_new_btn = QPushButton("Select New")
         select_new_btn.clicked.connect(self._select_new_rows)
         row4.addWidget(select_new_btn)
+
+        row4.addStretch()
+
+        # Device filter
+        filter_label = QLabel("Filter:")
+        filter_label.setStyleSheet("font-size: 11px; font-weight: 600;")
+        row4.addWidget(filter_label)
+        self.device_filter_combo = QComboBox()
+        self.device_filter_combo.setMinimumWidth(120)
+        self.device_filter_combo.addItem("All", userData=None)
+        self.device_filter_combo.currentIndexChanged.connect(self._on_device_filter_changed)
+        row4.addWidget(self.device_filter_combo)
 
         row4.addStretch()
 
@@ -564,7 +607,6 @@ class MainWindow(QMainWindow):
     # ── Settings ────────────────────────────────────────────────────────
 
     def _load_settings(self):
-        mic = self.settings.value("triggerMicName", "")
         auto_start = self.settings.value("autoStartTrigger", False, type=bool)
         self.auto_start_check.setChecked(auto_start)
 
@@ -699,12 +741,56 @@ class MainWindow(QMainWindow):
         self.sync_status_label.setText("Refreshing...")
         self._sync_busy = True
 
+        # Load paired devices on the main thread (QSettings is not thread-safe)
+        from core.models import DeviceType, load_paired_devices
+        devices = load_paired_devices(self.settings)
+
         def _run():
-            try:
-                data = run_extractor(["status"], timeout=10)
-                self._sync_complete_signal.emit(data, None)
-            except Exception as e:
-                self._sync_complete_signal.emit(None, str(e))
+            all_recordings = []
+            any_connected = False
+            output_dir = ""
+            errors = []
+
+            # If no paired devices, fall back to default HiDock status
+            if not devices:
+                try:
+                    data = run_extractor(["status"], timeout=10)
+                    self._sync_complete_signal.emit(data, None)
+                except Exception as e:
+                    self._sync_complete_signal.emit(None, str(e))
+                return
+
+            for device in devices:
+                try:
+                    if device.device_type == DeviceType.VOLUME:
+                        args = ["volume-status", "--volume-name", device.volume_name or ""]
+                        if device.subpath:
+                            args += ["--subpath", device.subpath]
+                        data = run_extractor(args, timeout=10)
+                    else:
+                        data = run_extractor(["status"], product_id=device.product_id, timeout=10)
+
+                    if data.get("connected"):
+                        any_connected = True
+                    if data.get("outputDir") and not output_dir:
+                        output_dir = data["outputDir"]
+                    for r in data.get("recordings", []):
+                        r["_device_id"] = device.device_id
+                        r["_device_name"] = device.display_name
+                        r["_device_product_id"] = device.product_id
+                        all_recordings.append(r)
+                except Exception as e:
+                    errors.append(f"{device.display_name}: {e}")
+
+            merged = {
+                "connected": any_connected,
+                "outputDir": output_dir,
+                "recordings": all_recordings,
+                "_multi_device": True,
+            }
+            if errors and not any_connected:
+                merged["error"] = "; ".join(errors)
+            self._sync_complete_signal.emit(merged, None)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -744,9 +830,15 @@ class MainWindow(QMainWindow):
         entries = []
         for r in recordings:
             rec = SyncRecording.from_dict(r)
-            entries.append(SyncRecordingEntry(recording=rec, device_name="HiDock"))
+            entries.append(SyncRecordingEntry(
+                recording=rec,
+                device_product_id=r.get("_device_product_id", 0),
+                device_id=r.get("_device_id", ""),
+                device_name=r.get("_device_name", "HiDock"),
+            ))
 
         self._entries = entries
+        self._refresh_device_filter_combo()
         self._refresh_transcription_state()
         self._update_table()
         self._update_tray_tooltip()
@@ -771,6 +863,9 @@ class MainWindow(QMainWindow):
 
     def _update_table(self):
         visible = self._entries
+        filter_device_id = self.device_filter_combo.currentData()
+        if filter_device_id is not None:
+            visible = [e for e in visible if e.device_id == filter_device_id]
         if self.hide_downloaded_check.isChecked():
             visible = [e for e in visible if not e.recording.downloaded]
         self.table_model.set_entries(visible)
@@ -843,26 +938,68 @@ class MainWindow(QMainWindow):
         if not indices:
             self.statusBar().showMessage("No rows selected", 3000)
             return
-        entries = self.table_model.entries()
-        filenames = [entries[i.row()].recording.name for i in indices]
-        self._run_download(["download"] + filenames)
+        visible = self.table_model.entries()
+        selected = [visible[i.row()] for i in indices]
+
+        # Group by device for proper command routing
+        from core.models import DeviceType, load_paired_devices
+        devices = {d.device_id: d for d in load_paired_devices(self.settings)}
+
+        # Build per-device download commands
+        commands: list[tuple[list[str], int | None]] = []
+        for entry in selected:
+            device = devices.get(entry.device_id)
+            if device and device.device_type == DeviceType.VOLUME:
+                args = ["volume-import", entry.recording.name, "--volume-name", device.volume_name or ""]
+                if device.subpath:
+                    args += ["--subpath", device.subpath]
+                commands.append((args, None))
+            else:
+                commands.append((["download", entry.recording.name, "--length", str(entry.recording.length)], entry.device_product_id or None))
+
+        self._run_download_commands(commands)
 
     @pyqtSlot()
     def _download_new(self):
-        self._run_download(["download-new"])
+        from core.models import DeviceType, load_paired_devices
+        devices = load_paired_devices(self.settings)
 
-    def _run_download(self, args: list[str]):
+        if not devices:
+            self._run_download(["download-new"])
+            return
+
+        commands: list[tuple[list[str], int | None]] = []
+        for device in devices:
+            if device.device_type == DeviceType.VOLUME:
+                args = ["volume-import-new", "--volume-name", device.volume_name or ""]
+                if device.subpath:
+                    args += ["--subpath", device.subpath]
+                commands.append((args, None))
+            else:
+                commands.append((["download-new"], device.product_id))
+        self._run_download_commands(commands)
+
+    def _run_download(self, args: list[str], product_id: int | None = None):
+        self._run_download_commands([(args, product_id)])
+
+    def _run_download_commands(self, commands: list[tuple[list[str], int | None]]):
+        """Run multiple extractor download commands sequentially in a background thread."""
         self.sync_status_label.setText("Downloading...")
         self._show_progress(0, 0, "Downloading...")
 
         def _run():
-            try:
-                data = run_extractor(args, timeout=300)
-                self._sync_complete_signal.emit(data, None)
-            except Exception as e:
-                self._sync_complete_signal.emit(None, str(e))
-            finally:
-                self._progress_signal.emit(-1, -1, "")  # hide progress
+            last_data = None
+            last_error = None
+            for args, pid in commands:
+                try:
+                    last_data = run_extractor(args, product_id=pid, timeout=300)
+                except Exception as e:
+                    last_error = str(e)
+            if last_error and last_data is None:
+                self._sync_complete_signal.emit(None, last_error)
+            else:
+                self._sync_complete_signal.emit(last_data or {}, None)
+            self._progress_signal.emit(-1, -1, "")  # hide progress
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -872,10 +1009,25 @@ class MainWindow(QMainWindow):
         if not indices:
             self.statusBar().showMessage("No rows selected", 3000)
             return
-        entries = self.table_model.entries()
-        filenames = [entries[i.row()].recording.name for i in indices]
+        visible = self.table_model.entries()
+        selected = [visible[i.row()] for i in indices]
+
+        # Group by device_id
+        from core.models import DeviceType, load_paired_devices
+        devices = {d.device_id: d for d in load_paired_devices(self.settings)}
+        by_device: dict[str, list[SyncRecordingEntry]] = {}
+        for entry in selected:
+            by_device.setdefault(entry.device_id, []).append(entry)
+
         try:
-            run_extractor(["mark-downloaded"] + filenames)
+            for device_id, device_entries in by_device.items():
+                filenames = [e.recording.name for e in device_entries]
+                device = devices.get(device_id)
+                if device and device.device_type == DeviceType.VOLUME:
+                    run_extractor(["mark-downloaded", "--volume-name", device.volume_name or ""] + filenames)
+                else:
+                    pid = device.product_id if device else None
+                    run_extractor(["mark-downloaded"] + filenames, product_id=pid)
             self._refresh_status()
         except Exception as e:
             self.statusBar().showMessage(f"Error: {e}", 5000)
@@ -964,8 +1116,14 @@ class MainWindow(QMainWindow):
                     self._log_signal.emit(f"Error transcribing {mp3_path.name}: {e}")
 
             succeeded = sum(1 for r in results if r.get("transcribed"))
+            transcript_paths = [r["transcript_path"] for r in results if r.get("transcribed") and r.get("transcript_path")]
             self._sync_complete_signal.emit(
-                {"_transcription_done": True, "succeeded": succeeded, "total": len(targets)},
+                {
+                    "_transcription_done": True,
+                    "succeeded": succeeded,
+                    "total": len(targets),
+                    "transcript_paths": transcript_paths,
+                },
                 None,
             )
 
@@ -986,18 +1144,65 @@ class MainWindow(QMainWindow):
         self.cancel_transcription_btn.setVisible(False)
         succeeded = data.get("succeeded", 0)
         total = data.get("total", 0)
+        transcript_paths = data.get("transcript_paths", [])
         self.statusBar().showMessage(f"Transcribed {succeeded}/{total} files", 5000)
         self._hide_progress()
         self._refresh_transcription_state()
         self._update_table()
-        # Tray notification
-        if self._tray_icon:
+
+        # Store last transcript path for click-to-open from tray notification
+        if transcript_paths:
+            self._last_transcript_path = transcript_paths[-1]
+        elif str(RAW_TRANSCRIPTS_DIR) and RAW_TRANSCRIPTS_DIR.exists():
+            self._last_transcript_path = str(RAW_TRANSCRIPTS_DIR)
+
+        # Tray notification (respects user preference)
+        if self._tray_icon and self.settings.value("notifyTranscription", True, type=bool):
+            body = f"Transcribed {succeeded}/{total} files"
+            if succeeded == 1 and transcript_paths:
+                body += "\nClick to open transcript"
+            elif succeeded > 1:
+                body += "\nClick to open transcript folder"
             self._tray_icon.showMessage(
                 "Transcription Complete",
-                f"Transcribed {succeeded}/{total} files",
+                body,
                 QSystemTrayIcon.MessageIcon.Information,
-                3000,
+                5000,
             )
+
+    def _on_tray_notification_clicked(self):
+        """Handle click on tray notification — opens the last completed transcript."""
+        path = self._last_transcript_path
+        if not path:
+            return
+        if os.path.isfile(path) or os.path.isdir(path):
+            if platform.system() == "Windows":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+        self._last_transcript_path = None
+
+    def _on_device_filter_changed(self, index):
+        self._update_table()
+
+    def _refresh_device_filter_combo(self):
+        """Rebuild device filter combo from current entries, preserving selection."""
+        combo = self.device_filter_combo
+        prev = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("All", userData=None)
+        seen = set()
+        for entry in self._entries:
+            if entry.device_id and entry.device_id not in seen:
+                seen.add(entry.device_id)
+                combo.addItem(entry.device_name or entry.device_id, userData=entry.device_id)
+        # Restore previous selection if still present
+        for i in range(combo.count()):
+            if combo.itemData(i) == prev:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
 
     def _on_hide_downloaded_changed(self, state):
         self.settings.setValue("hideDownloaded", state == Qt.CheckState.Checked.value)
@@ -1205,7 +1410,7 @@ class MainWindow(QMainWindow):
 
         restart_btn = msg.addButton("Restart && Update", QMessageBox.ButtonRole.AcceptRole)
         quit_btn = msg.addButton("Update on Quit", QMessageBox.ButtonRole.ActionRole)
-        skip_btn = msg.addButton("Skip this version", QMessageBox.ButtonRole.RejectRole)
+        msg.addButton("Skip this version", QMessageBox.ButtonRole.RejectRole)
 
         msg.exec()
         clicked = msg.clickedButton()
@@ -1410,7 +1615,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Sending feedback...")
 
         def _worker():
-            import urllib.request, ssl
+            import urllib.request
+            import ssl
             try:
                 import certifi
                 ctx = ssl.create_default_context(cafile=certifi.where())
@@ -1478,7 +1684,7 @@ class MainWindow(QMainWindow):
     def _show_feedback_history(self):
         from PyQt6.QtWidgets import (
             QDialog, QLineEdit, QListWidget, QListWidgetItem,
-            QSplitter, QTextEdit,
+            QTextEdit,
         )
 
         history = self._load_feedback_history()
@@ -1645,6 +1851,41 @@ class MainWindow(QMainWindow):
         from ui.model_manager_dialog import ModelManagerDialog
         dlg = ModelManagerDialog(self)
         dlg.exec()
+
+    def _show_device_manager(self):
+        from core.models import PairedDevice, load_paired_devices, save_paired_devices
+        from ui.device_manager_dialog import DeviceManagerDialog
+
+        self._paired_devices = load_paired_devices(self.settings)
+        dlg = DeviceManagerDialog(self._paired_devices, parent=self)
+
+        def _on_forget(device_id: str):
+            self._paired_devices = [d for d in self._paired_devices if d.device_id != device_id]
+            save_paired_devices(self.settings, self._paired_devices)
+
+        def _on_pair_volume(volume_name: str, subpath: str):
+            device = PairedDevice.volume(volume_name, volume_name, subpath=subpath or None)
+            if any(d.device_id == device.device_id for d in self._paired_devices):
+                return
+            self._paired_devices.append(device)
+            save_paired_devices(self.settings, self._paired_devices)
+            dlg.set_devices(self._paired_devices)
+
+        def _on_scan_volumes():
+            try:
+                data = run_extractor(["scan-volumes"], timeout=10)
+                volumes = data.get("volumes", []) if data else []
+            except Exception:
+                volumes = []
+            dlg.pair_widget.set_scan_results(volumes)
+
+        dlg.deviceForgotten.connect(_on_forget)
+        dlg.volumePaired.connect(_on_pair_volume)
+        dlg.pair_widget.scanRequested.connect(_on_scan_volumes)
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     # ── Transcript Viewer ──────────────────────────────────────────────
 
