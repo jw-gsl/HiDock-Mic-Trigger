@@ -4,13 +4,21 @@ struct MicTriggerSection: View {
     @ObservedObject var viewModel: HiDockViewModel
     @State private var pulseAnimation = false
 
+    private var isDevBuild: Bool {
+        #if DEV_BUILD
+        return true
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 // Status indicator
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(viewModel.triggerRunning ? Color.green : Color.gray)
+                        .fill(isDevBuild ? Color.orange : (viewModel.triggerRunning ? Color.green : Color.gray))
                         .frame(width: 10, height: 10)
                         .shadow(color: viewModel.triggerRunning ? Color.green.opacity(pulseAnimation ? 0.6 : 0.0) : .clear, radius: pulseAnimation ? 6 : 0)
                         .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulseAnimation)
@@ -22,6 +30,11 @@ struct MicTriggerSection: View {
                         }
                     Text("Mic Trigger")
                         .font(.headline)
+                    if isDevBuild {
+                        Text("(disabled in dev)")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 }
 
                 if viewModel.triggerRunning {
@@ -53,17 +66,17 @@ struct MicTriggerSection: View {
                     } label: {
                         Label("Start", systemImage: "play.fill")
                     }
-                    .disabled(viewModel.triggerRunning)
+                    .disabled(viewModel.triggerRunning || isDevBuild)
                     .buttonStyle(.borderedProminent)
                     .tint(.green)
-                    .opacity(viewModel.triggerRunning ? 0.6 : 1.0)
+                    .opacity(viewModel.triggerRunning || isDevBuild ? 0.6 : 1.0)
 
                     Button {
                         viewModel.onStopTrigger()
                     } label: {
                         Label("Stop", systemImage: "stop.fill")
                     }
-                    .disabled(!viewModel.triggerRunning)
+                    .disabled(!viewModel.triggerRunning || isDevBuild)
                     .buttonStyle(.bordered)
 
                     Divider()

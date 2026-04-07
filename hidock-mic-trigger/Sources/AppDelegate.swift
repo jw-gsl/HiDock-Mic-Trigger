@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var transcriptViewerWindow: NSWindow?
     private var voiceLibraryWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
+    private var coworkPromptWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -200,9 +201,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Apply saved appearance mode
         applyAppearanceMode()
 
+        #if !DEV_BUILD
         if autoStartOnLaunch {
             startTrigger()
         }
+        #endif
         autoConnectSyncIfPaired()
 
         // Wire update status to the footer bar
@@ -329,6 +332,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         viewModel.onRevealTranscript = { [weak self] path in
             self?.openTranscriptViewer(transcriptMdPath: path)
+        }
+        viewModel.onOpenTranscriptViewer = { [weak self] path in
+            self?.openTranscriptViewer(transcriptMdPath: path)
+        }
+        viewModel.onShowCoworkPrompt = { [weak self] in self?.showCoworkPrompt() }
+        viewModel.onOpenInObsidian = { path in
+            let url = URL(fileURLWithPath: path)
+            let noteName = url.deletingPathExtension().lastPathComponent
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            task.arguments = ["obsidian", "open", noteName]
+            try? task.run()
         }
         viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
@@ -1001,6 +1016,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func toggleAutoStartMenu() { toggleAutoStart() }
 
     private func startTrigger() {
+        #if DEV_BUILD
+        log("Mic trigger disabled in dev build")
+        return
+        #endif
         guard process == nil else { return }
 
         if !FileManager.default.isExecutableFile(atPath: binaryPath) {
@@ -1752,6 +1771,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     // MARK: - Voice Library
+
+    // MARK: - Cowork Prompt
+
+    private func showCoworkPrompt() {
+        if let existing = coworkPromptWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let view = CoworkPromptView()
+        let hostingView = NSHostingView(rootView: view)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.title = "Cowork Setup"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        coworkPromptWindow = window
+    }
 
     @objc private func openVoiceLibraryMenu() {
         openVoiceLibrary()
@@ -2963,6 +3006,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)
             process.arguments = [self.transcriptionScriptPath] + arguments
 
+            // Ensure the subprocess has a proper shell environment —
+            // apps launched via LaunchAgent inherit a minimal env that
+            // can break torch/MPS.
+            var env = ProcessInfo.processInfo.environment
+            let home = NSHomeDirectory()
+            env["HOME"] = home
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            }
+            // Metal / MPS needs access to the GPU frameworks
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            process.environment = env
+
             let outPipe = Pipe()
             let errPipe = Pipe()
             process.standardOutput = outPipe
@@ -3025,6 +3081,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 let remainingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
                 if !remainingOut.isEmpty { outQueue.sync { outData.append(remainingOut) } }
+
+                let remainingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+                if !remainingErr.isEmpty { errQueue.sync { stderrData.append(remainingErr) } }
 
                 let finalOut = outQueue.sync { outData }
                 let finalErr = errQueue.sync { stderrData }
@@ -3107,10 +3166,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func transcribeSelectedRecordings() {
         guard ensureTranscriptionReady() else { return }
+        guard !syncDownloading else { return }
         transcriptionCancelled = false
-        let entries = selectedSyncEntries().filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
-        guard !entries.isEmpty else { return }
 
+        let all = selectedSyncEntries().filter { !$0.transcribed }
+        guard !all.isEmpty else { return }
+
+        let ready = all.filter { $0.recording.downloaded && $0.recording.localExists }
+        let needsDownload = all.filter { !$0.recording.downloaded || !$0.recording.localExists }
+
+        if needsDownload.isEmpty {
+            startTranscription(entries: ready)
+        } else {
+            guard ensureExtractorReady() else { return }
+
+            // Capture all entries we intend to transcribe *before* the
+            // download+refresh cycle, which can clear checkbox selection.
+            let allEntriesToTranscribe = all
+            syncBusy = true
+            syncDownloading = true
+            startDownloadTimer()
+            let label = needsDownload.count == 1
+                ? needsDownload[0].recording.outputName
+                : "\(needsDownload.count) recordings"
+            viewModel.syncStatus = "Downloading \(label) before transcription..."
+            viewModel.syncStatusLevel = .secondary
+            syncViewModelState()
+
+            downloadSyncRecordings(needsDownload, completed: []) { [weak self] result in
+                guard let self = self else { return }
+                self.stopDownloadTimer()
+                self.syncBusy = false
+                self.syncDownloading = false
+                switch result {
+                case .success(let downloaded):
+                    self.refreshSyncStatus()
+                    // Use the pre-captured entries instead of re-querying
+                    // selections (which may have been cleared by refresh).
+                    let readyNow = allEntriesToTranscribe.filter {
+                        FileManager.default.fileExists(atPath: $0.recording.outputPath)
+                    }
+                    if !readyNow.isEmpty {
+                        self.startTranscription(entries: readyNow)
+                    } else {
+                        self.viewModel.syncStatus = "Download complete but no files ready for transcription"
+                        self.viewModel.syncStatusLevel = .warning
+                        self.syncViewModelState()
+                    }
+                case .failure(let error):
+                    if self.syncDownloadStopping {
+                        self.syncDownloadStopping = false
+                        return
+                    }
+                    self.viewModel.syncStatus = "Download failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.showError("Failed to download recordings for transcription:\n\(error.localizedDescription)")
+                    self.syncViewModelState()
+                }
+            }
+        }
+    }
+
+    private func startTranscription(entries: [HiDockSyncRecordingEntry]) {
+        guard !entries.isEmpty else { return }
         if entries.count == 1 {
             transcribeFile(mp3Path: entries[0].recording.outputPath)
         } else {
@@ -3226,14 +3344,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if let info = lookup[mp3Name] {
                         self.syncEntries[i].transcribed = info["transcribed"] as? Bool ?? false
                         self.syncEntries[i].transcriptPath = info["transcript_path"] as? String
+                        // Check speaker tagging state from diarized JSON
+                        self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
+                        // Check if summary exists
+                        self.syncEntries[i].summaryPath = self.findSummaryPath(for: mp3Name)
                     } else {
                         self.syncEntries[i].transcribed = false
                         self.syncEntries[i].transcriptPath = nil
+                        self.syncEntries[i].speakersTagged = false
+                        self.syncEntries[i].summaryPath = nil
                     }
                 }
                 self.syncViewModelState()
             }
         }
+    }
+
+    // MARK: - Speaker Tagging & Summary Helpers
+
+    private func checkSpeakersTagged(transcriptPath: String?) -> Bool {
+        guard let mdPath = transcriptPath else { return false }
+        let mdURL = URL(fileURLWithPath: mdPath)
+        let baseName = mdURL.deletingPathExtension().lastPathComponent
+        let dirURL = mdURL.deletingLastPathComponent()
+        let diarizedPath = dirURL.appendingPathComponent(baseName + "_diarized.json").path
+
+        guard FileManager.default.fileExists(atPath: diarizedPath),
+              let data = FileManager.default.contents(atPath: diarizedPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let speakerNames = json["speaker_names"] as? [String: String] else {
+            return false
+        }
+
+        if speakerNames.isEmpty { return false }
+        let untaggedPattern = try? NSRegularExpression(pattern: "^Speaker \\d+$")
+        for (_, name) in speakerNames {
+            let range = NSRange(name.startIndex..., in: name)
+            if untaggedPattern?.firstMatch(in: name, range: range) != nil {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func findSummaryPath(for mp3Name: String) -> String? {
+        let summariesDir = (NSHomeDirectory() as NSString).appendingPathComponent("HiDock/Summaries")
+        let baseName = (mp3Name as NSString).deletingPathExtension
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) else { return nil }
+        // Match summary files that contain the recording base name
+        if let match = contents.first(where: { $0.hasSuffix(".md") && $0.contains(baseName) }) {
+            return (summariesDir as NSString).appendingPathComponent(match)
+        }
+        return nil
     }
 
     // MARK: - Logging

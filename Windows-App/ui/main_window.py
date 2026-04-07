@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         )
         self._entries: list[SyncRecordingEntry] = []
         self._sync_busy = False
+        self._transcribe_after_download = False
         self._trigger_start_time: float | None = None
 
         self._init_menu_bar()
@@ -421,6 +422,9 @@ class MainWindow(QMainWindow):
 
         footer_row.addStretch()
 
+        cowork_btn = QPushButton("\u2728 Cowork")
+        cowork_btn.clicked.connect(self._show_cowork_prompt)
+        footer_row.addWidget(cowork_btn)
         models_btn = QPushButton("Models")
         models_btn.clicked.connect(self._show_model_manager)
         footer_row.addWidget(models_btn)
@@ -748,6 +752,17 @@ class MainWindow(QMainWindow):
         self._update_tray_tooltip()
         self.statusBar().showMessage(f"Loaded {len(entries)} recordings", 3000)
 
+        # Auto-transcribe after download-for-transcription
+        if self._transcribe_after_download:
+            self._transcribe_after_download = False
+            targets = [
+                Path(e.recording.output_path)
+                for e in entries
+                if e.recording.downloaded and e.recording.output_path and not e.recording.transcribed
+            ]
+            if targets:
+                self._run_transcription(targets)
+
         # Auto-download if enabled
         if self.auto_download_check.isChecked():
             not_downloaded = [e for e in entries if not e.recording.downloaded]
@@ -872,15 +887,27 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No rows selected", 3000)
             return
         entries = self.table_model.entries()
-        targets = []
+        ready = []
+        needs_download = []
         for i in indices:
             entry = entries[i.row()]
             if entry.recording.downloaded and entry.recording.output_path:
-                targets.append(Path(entry.recording.output_path))
-        if not targets:
-            self.statusBar().showMessage("No downloaded recordings selected", 3000)
+                ready.append(Path(entry.recording.output_path))
+            elif not entry.recording.downloaded:
+                needs_download.append(entry.recording.name)
+
+        if not ready and not needs_download:
+            self.statusBar().showMessage("No recordings selected", 3000)
             return
-        self._run_transcription(targets)
+
+        if needs_download:
+            self._transcribe_after_download = True
+            self.statusBar().showMessage(
+                f"Downloading {len(needs_download)} recording(s) before transcription..."
+            )
+            self._run_download(["download"] + needs_download)
+        elif ready:
+            self._run_transcription(ready)
 
     @pyqtSlot()
     def _transcribe_all(self):
@@ -1001,6 +1028,8 @@ class MainWindow(QMainWindow):
             if key in status:
                 entry.recording.transcribed = status[key].get("transcribed", False)
                 entry.recording.transcript_path = status[key].get("transcript_path")
+                entry.recording.speakers_tagged = status[key].get("speakers_tagged", False)
+                entry.recording.summary_path = status[key].get("summary_path")
         self._update_table()
 
     # ── Progress bar ────────────────────────────────────────────────────
@@ -1601,6 +1630,11 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     # ── Voice Library ──────────────────────────────────────────────────
+
+    def _show_cowork_prompt(self):
+        from ui.cowork_dialog import CoworkDialog
+        dlg = CoworkDialog(self)
+        dlg.exec()
 
     def _show_voice_library(self):
         from ui.voice_library_dialog import VoiceLibraryDialog

@@ -31,9 +31,11 @@ struct TranscriptionIndicator: View {
     let transcriptionCurrentFile: String?
     let transcriptionProgress: Int
     var onRevealTranscript: (String) -> Void = { _ in }
+    var onOpenTranscriptViewer: ((String) -> Void)? = nil
 
     var body: some View {
-        if entry.transcribed {
+        if entry.transcribed && entry.speakersTagged {
+            // Fully ready — green checkmark
             Button {
                 if let path = entry.transcriptPath {
                     onRevealTranscript(path)
@@ -43,7 +45,21 @@ struct TranscriptionIndicator: View {
                     .foregroundColor(.green)
             }
             .buttonStyle(.plain)
-            .help("Show transcript in Finder")
+            .help("Transcript ready — show in Finder")
+        } else if entry.transcribed && !entry.speakersTagged {
+            // Transcribed but speakers need tagging — orange tag
+            Button {
+                if let path = entry.transcriptPath, let handler = onOpenTranscriptViewer {
+                    handler(path)
+                } else if let path = entry.transcriptPath {
+                    onRevealTranscript(path)
+                }
+            } label: {
+                Image(systemName: "tag.fill")
+                    .foregroundColor(.orange)
+            }
+            .buttonStyle(.plain)
+            .help("Speakers need tagging — click to open")
         } else if transcriptionBusy && transcriptionCurrentFile == entry.recording.outputName {
             HStack(spacing: 4) {
                 ProgressView()

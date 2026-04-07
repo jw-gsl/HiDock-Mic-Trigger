@@ -32,7 +32,8 @@ struct RecordingsTableView: View {
                     transcriptionBusy: viewModel.transcriptionBusy,
                     transcriptionCurrentFile: viewModel.transcriptionCurrentFile,
                     transcriptionProgress: viewModel.transcriptionProgress,
-                    onRevealTranscript: viewModel.onRevealTranscript
+                    onRevealTranscript: viewModel.onRevealTranscript,
+                    onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer
                 )
             }
             .width(min: 70, ideal: 90, max: 100)
@@ -76,18 +77,32 @@ struct RecordingsTableView: View {
             .width(min: 100, ideal: 250, max: .infinity)
 
             TableColumn("") { entry in
-                if entry.recording.downloaded && entry.recording.localExists {
-                    Button {
-                        viewModel.onRevealRecording(entry.recording.outputPath)
-                    } label: {
-                        Image(systemName: "folder")
+                HStack(spacing: 4) {
+                    if entry.recording.downloaded && entry.recording.localExists {
+                        Button {
+                            viewModel.onRevealRecording(entry.recording.outputPath)
+                        } label: {
+                            Image(systemName: "folder")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.accentColor)
+                        .help("Show in Finder")
                     }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.accentColor)
-                    .help("Show in Finder")
+                    if entry.summaryPath != nil {
+                        Button {
+                            if let path = entry.summaryPath {
+                                viewModel.onOpenInObsidian(path)
+                            }
+                        } label: {
+                            Image(systemName: "book.closed")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.purple)
+                        .help("Open in Obsidian")
+                    }
                 }
             }
-            .width(36)
+            .width(min: 36, ideal: 60, max: 70)
         }
         .contextMenu(forSelectionType: HiDockSyncRecordingEntry.ID.self) { selection in
             if let id = selection.first, let entry = viewModel.visibleEntries.first(where: { $0.id == id }) {
@@ -105,7 +120,7 @@ struct RecordingsTableView: View {
                     Label("Mark as Downloaded", systemImage: "checkmark.circle")
                 }
 
-                if entry.recording.downloaded && entry.recording.localExists && !entry.transcribed {
+                if !entry.transcribed {
                     Button {
                         viewModel.onTranscribeSelected()
                     } label: {

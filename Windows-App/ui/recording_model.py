@@ -22,6 +22,8 @@ _GREEN = QColor("#a6e3a1")
 _RED = QColor("#f38ba8")
 _YELLOW = QColor("#f9e2af")
 _GRAY = QColor("#585b70")
+_ORANGE = QColor("#fab387")
+_PURPLE = QColor("#cba6f7")
 _SECONDARY = QColor("#a6adc8")
 _ACCENT = QColor("#89b4fa")
 
@@ -70,7 +72,11 @@ class RecordingTableModel(QAbstractTableModel):
                     return "\u2717 Failed"
                 return "\u25cf On device"
             elif col_key == "transcribed":
-                return "\u2713" if rec.transcribed else "\u2014"
+                if rec.transcribed and rec.speakers_tagged:
+                    return "\u2713"
+                elif rec.transcribed:
+                    return "\U0001f3f7"  # tag emoji
+                return "\u2014"
             elif col_key == "name":
                 return rec.output_name or rec.name
             elif col_key == "created":
@@ -95,7 +101,11 @@ class RecordingTableModel(QAbstractTableModel):
                     return _RED
                 return _GRAY
             elif col_key == "transcribed":
-                return _GREEN if rec.transcribed else _GRAY
+                if rec.transcribed and rec.speakers_tagged:
+                    return _GREEN
+                elif rec.transcribed:
+                    return _ORANGE
+                return _GRAY
             elif col_key == "path":
                 return _SECONDARY
 
@@ -118,10 +128,10 @@ class RecordingTableModel(QAbstractTableModel):
                     parts.append(f"Signature: {rec.signature}")
                 return "\n".join(parts)
             elif col_key == "transcribed":
-                if rec.transcribed and rec.transcript_path:
-                    return f"Transcript: {rec.transcript_path}"
+                if rec.transcribed and rec.speakers_tagged:
+                    return f"Ready — Transcript: {rec.transcript_path}"
                 elif rec.transcribed:
-                    return "Transcribed"
+                    return "Speakers need tagging — click to open transcript"
                 return "Not transcribed"
             elif col_key == "path":
                 return rec.output_path or "Not downloaded"

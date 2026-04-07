@@ -53,6 +53,15 @@ struct MainWindowView: View {
                 .help("Change appearance")
 
                 Button {
+                    viewModel.onShowCoworkPrompt()
+                } label: {
+                    Label("Cowork", systemImage: "sparkles")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
                     viewModel.onCheckForUpdates()
                 } label: {
                     Label("Check for Updates", systemImage: "arrow.triangle.2.circlepath")

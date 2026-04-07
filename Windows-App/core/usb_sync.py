@@ -35,6 +35,8 @@ class SyncRecording:
     # Transcription state (merged separately)
     transcribed: bool = False
     transcript_path: str | None = None
+    speakers_tagged: bool = False
+    summary_path: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "SyncRecording":
