@@ -102,14 +102,18 @@ struct HiDockSyncRecordingEntry: Identifiable {
     let deviceName: String
     var transcribed: Bool = false
     var transcriptPath: String? = nil
+    var speakersTagged: Bool = false
+    var summaryPath: String? = nil
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil) {
         self.id = "\(deviceProductId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
         self.deviceName = deviceName
         self.transcribed = transcribed
         self.transcriptPath = transcriptPath
+        self.speakersTagged = speakersTagged
+        self.summaryPath = summaryPath
     }
 
     var statusText: String {

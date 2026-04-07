@@ -222,15 +222,50 @@ def transcribe_file(
         }
 
 
+def _check_speakers_tagged(transcript_path: str | None) -> bool:
+    """Check if all speakers in a diarized transcript have been named."""
+    import re
+    if not transcript_path:
+        return False
+    md_path = Path(transcript_path)
+    diarized_path = md_path.parent / f"{md_path.stem}_diarized.json"
+    if not diarized_path.exists():
+        return False
+    try:
+        data = json.loads(diarized_path.read_text(encoding="utf-8"))
+        speaker_names = data.get("speaker_names", {})
+        if not speaker_names:
+            return False
+        return not any(re.match(r"^Speaker \d+$", name) for name in speaker_names.values())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _find_summary_path(mp3_name: str) -> str | None:
+    """Find a matching summary file for the given recording."""
+    from core.config import HIDOCK_ROOT
+    summaries_dir = HIDOCK_ROOT / "Summaries"
+    if not summaries_dir.exists():
+        return None
+    base_name = Path(mp3_name).stem
+    for f in summaries_dir.iterdir():
+        if f.suffix == ".md" and base_name in f.name:
+            return str(f)
+    return None
+
+
 def get_transcription_status() -> dict:
     """Return transcription status keyed by MP3 filename."""
     state = load_state()
     lookup = {}
     for key, info in state.get("transcriptions", {}).items():
+        tp = info.get("transcript_path")
         lookup[key] = {
             "status": info.get("status", "unknown"),
-            "transcript_path": info.get("transcript_path"),
+            "transcript_path": tp,
             "transcribed": info.get("status") == "completed",
+            "speakers_tagged": _check_speakers_tagged(tp),
+            "summary_path": _find_summary_path(key),
         }
     # Check for transcript files on disk not in state
     if RAW_TRANSCRIPTS_DIR.exists():
@@ -241,10 +276,13 @@ def get_transcription_status() -> dict:
                     for ext in (".md", ".txt"):
                         txt = RAW_TRANSCRIPTS_DIR / f"{mp3.stem}{ext}"
                         if txt.exists():
+                            tp = str(txt)
                             lookup[mp3.name] = {
                                 "status": "completed",
-                                "transcript_path": str(txt),
+                                "transcript_path": tp,
                                 "transcribed": True,
+                                "speakers_tagged": _check_speakers_tagged(tp),
+                                "summary_path": _find_summary_path(mp3.name),
                             }
                             break
     return lookup

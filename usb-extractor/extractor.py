@@ -360,7 +360,7 @@ def parse_query_file_list_payload(raw_payloads: list[bytes], expected_count: int
 
     total = -1
     cursor = 0
-    if len(data) >= 6 and (data[0] & ~0xFF) == 0 and (data[1] & ~0xFF) == 0:
+    if len(data) >= 6 and data[0] == 0xFF and data[1] == 0xFF:
         total = (data[2] << 24) | (data[3] << 16) | (data[4] << 8) | data[5]
         cursor = 6
 
@@ -599,18 +599,50 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
         declared_count = None
         if len(first_payload) >= 6 and first_payload[:2] == b"\xff\xff":
             declared_count = struct.unpack(">I", first_payload[2:6])[0]
-        if declared_count is None or len(parse_query_file_list_payload(payloads, expected_count=declared_count)) < declared_count:
+
+        # The device has an ~8 KB response buffer.  When the catalog is larger
+        # it truncates mid-record.  Sending a follow-up request whose payload
+        # is the number of fully-parsed records triggers a continuation that
+        # picks up exactly where the first response left off.  We concatenate
+        # all raw payloads so truncated records are reassembled correctly.
+        parsed_so_far = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
+        next_req_id = request_id + 1
+        max_continuations = 10  # safety limit
+        while declared_count is not None and parsed_so_far < declared_count and max_continuations > 0:
+            max_continuations -= 1
             try:
-                continuation = read_raw_response_payload(
-                    dev,
-                    CMD_QUERY_FILE_LIST,
-                    request_id + 1,
-                    timeout_ms=min(timeout_ms, 2000),
-                )
-                if continuation:
-                    payloads.append(continuation)
-            except HiDockProtocolError:
-                pass
+                offset_payload = struct.pack(">I", parsed_so_far)
+                req = build_simple_request(CMD_QUERY_FILE_LIST, next_req_id, offset_payload)
+                drain_input(dev)
+                dev.write(OUT_ENDPOINT, req, timeout=timeout_ms)
+
+                pending = b""
+                started = False
+                deadline = time.time() + (min(timeout_ms, 3000) / 1000.0)
+                while time.time() < deadline:
+                    try:
+                        chunk = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=1000))
+                        pending += chunk
+                        started = True
+                    except usb.core.USBTimeoutError:
+                        if started:
+                            break
+                        continue
+
+                frames, _ = extract_frames(pending)
+                if not frames:
+                    break
+                body = frames[0][2]
+                if not body:
+                    break
+                payloads.append(body)
+                new_count = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
+                if new_count <= parsed_so_far:
+                    break  # no progress
+                parsed_so_far = new_count
+                next_req_id += 1
+            except (HiDockProtocolError, usb.core.USBError):
+                break
 
     if not payloads:
         raise HiDockProtocolError("no file list response received")
@@ -926,11 +958,12 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 duration = audio.info.length
             except Exception:
                 duration = max(length / 8000.0, 0.0)
+        ts = bcdish_filename_to_datetime(name)
         items.append(
             {
                 "name": name,
-                "createDate": "",
-                "createTime": "",
+                "createDate": ts.strftime("%Y/%m/%d") if ts else "",
+                "createTime": ts.strftime("%H:%M:%S") if ts else "",
                 "length": length,
                 "duration": duration,
                 "version": 0,
@@ -970,16 +1003,40 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         if owner:
             error += f" — device held by {owner}"
         payload["error"] = error
+        payload["recordings"] = build_recording_status_items([], state, output_dir, product_id=product_id)
         return payload
 
     try:
         interface_number = prepare_device(dev)
     except usb.core.USBError as exc:
         payload["error"] = _enrich_usb_error(str(exc), product_id)
+        payload["recordings"] = build_recording_status_items([], state, output_dir, product_id=product_id)
         return payload
 
     try:
-        recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
+        # Fast path: query file count first and compare with cached catalog.
+        # The full file list query can require multiple USB round-trips for
+        # large catalogs, so skip it when the count hasn't changed.
+        cache_key = str(product_id) if product_id else "default"
+        catalogs = state.get("catalogs", {})
+        cached = catalogs.get(cache_key, {})
+        cached_recordings = cached.get("recordings", [])
+
+        file_count = None
+        try:
+            file_count = query_file_count(dev, request_id=1, timeout_ms=min(timeout_ms, 1000))
+        except Exception:
+            pass
+
+        if file_count is not None and len(cached_recordings) == file_count and cached_recordings:
+            recordings = cached_recordings
+        else:
+            recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
+            # Cache the raw catalog for next time
+            catalogs[cache_key] = {"recordings": recordings}
+            state["catalogs"] = catalogs
+            save_state(state, state_path)
+
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
     except Exception as exc:

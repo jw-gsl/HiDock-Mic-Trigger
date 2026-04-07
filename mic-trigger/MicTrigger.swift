@@ -106,10 +106,14 @@ func killOrphanedFFmpeg(hidockDevice: String) {
     p.standardError = Pipe()
     do {
         try p.run()
-        p.waitUntilExit()
     } catch { return }
 
-    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    // Read pipe data BEFORE waitUntilExit to avoid deadlock when ps output
+    // exceeds the 64KB pipe buffer (macOS has ~190KB of process output).
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+
+    let output = String(data: data, encoding: .utf8) ?? ""
     // Match both old numeric-index style and new device-name style
     let needles = [
         "ffmpeg -loglevel error -f avfoundation -i :\(hidockDevice)",

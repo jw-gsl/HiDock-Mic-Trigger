@@ -47,7 +47,7 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Transcribe Selected", systemImage: "text.bubble")
                 }
-                .disabled(viewModel.transcriptionBusy || !viewModel.hasSelection)
+                .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
 
                 Button {
                     viewModel.onTranscribeAll()
@@ -61,6 +61,12 @@ struct SyncToolbarSection: View {
                     set: { _ in viewModel.onToggleDiarize() }
                 ))
                 .toggleStyle(.checkbox)
+
+                if viewModel.needsTaggingCount > 0 {
+                    Label("\(viewModel.needsTaggingCount) need tagging", systemImage: "tag.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.orange)
+                }
             }
             .buttonStyle(.bordered)
             .controlSize(.small)

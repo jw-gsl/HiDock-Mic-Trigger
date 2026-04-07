@@ -80,6 +80,10 @@ final class HiDockViewModel: ObservableObject {
         !syncCheckedRecordings.isEmpty
     }
 
+    var needsTaggingCount: Int {
+        syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
+    }
+
     var syncSummary: String {
         let visible = visibleEntries
         let downloadedCount = syncEntries.filter(\.recording.downloaded).count
@@ -117,8 +121,11 @@ final class HiDockViewModel: ObservableObject {
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
+    var onOpenTranscriptViewer: (String) -> Void = { _ in }
     var onSendFeedback: () -> Void = {}
     var onShowFeedbackHistory: () -> Void = {}
+    var onShowCoworkPrompt: () -> Void = {}
+    var onOpenInObsidian: (String) -> Void = { _ in }
     var onCheckForUpdates: () -> Void = {}
     var onShowVoiceLibrary: () -> Void = {}
 
