@@ -167,6 +167,7 @@ def transcribe_file(
             source_path=mp3_path,
             model=config.WHISPER_MODEL,
             diarized_result=diarized_result,
+            whisper_segments=result.get("segments", []),
             summary=summary,
         )
 

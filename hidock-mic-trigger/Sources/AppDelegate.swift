@@ -3749,20 +3749,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)
             process.arguments = [self.transcriptionScriptPath, "status"]
 
+            // Set environment (same as runTranscription) so the subprocess
+            // works when launched from a LaunchAgent's minimal env.
+            var env = ProcessInfo.processInfo.environment
+            env["HOME"] = NSHomeDirectory()
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            }
+            process.environment = env
+
             let pipe = Pipe()
             process.standardOutput = pipe
-            process.standardError = Pipe()
+            let errPipe = Pipe()
+            process.standardError = errPipe
 
             do {
                 try process.run()
                 process.waitUntilExit()
             } catch {
+                NSLog("refreshTranscriptionState: failed to run process: %@", error.localizedDescription)
                 return
             }
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard process.terminationStatus == 0,
-                  let lookup = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else {
+            if process.terminationStatus != 0 {
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                let errMsg = String(data: errData, encoding: .utf8) ?? "unknown error"
+                NSLog("refreshTranscriptionState: process exited %d: %@", process.terminationStatus, errMsg)
+                return
+            }
+            guard let lookup = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else {
+                NSLog("refreshTranscriptionState: failed to decode JSON (%d bytes)", data.count)
                 return
             }
 

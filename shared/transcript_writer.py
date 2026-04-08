@@ -31,6 +31,22 @@ from pathlib import Path
 from typing import Any
 
 
+_MODEL_DESCRIPTIONS = {
+    "large-v3-turbo": "OpenAI Whisper large-v3-turbo (809M params, multilingual)",
+    "large-v3": "OpenAI Whisper large-v3 (1.55B params, multilingual)",
+    "large-v2": "OpenAI Whisper large-v2 (1.55B params, multilingual)",
+    "medium": "OpenAI Whisper medium (769M params, multilingual)",
+    "small": "OpenAI Whisper small (244M params, multilingual)",
+    "base": "OpenAI Whisper base (74M params, multilingual)",
+    "tiny": "OpenAI Whisper tiny (39M params, multilingual)",
+}
+
+
+def _model_description(model_key: str) -> str:
+    """Return a human-readable model description for frontmatter."""
+    return _MODEL_DESCRIPTIONS.get(model_key, model_key)
+
+
 def _yaml_escape(value: str) -> str:
     """Escape a string for YAML output (quote if it contains special chars)."""
     if not value:
@@ -118,7 +134,8 @@ def build_frontmatter(
     if source_file:
         lines.append(f"source_file: {_yaml_escape(source_file)}")
     if model:
-        lines.append(f"model: {_yaml_escape(model)}")
+        model_desc = _model_description(model)
+        lines.append(f"model: {_yaml_escape(model_desc)}")
     lines.append(f"action_items: {_format_action_items(action_items or [])}")
     lines.append(f"decisions: {_format_decisions(decisions or [])}")
     # key_points can be list[str] or list[dict] — normalize to strings for YAML
@@ -226,6 +243,21 @@ def _format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _format_timestamped_segments(segments: list[dict]) -> str:
+    """Format Whisper segments with timestamps (no speaker labels)."""
+    lines = []
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        start = seg.get("start")
+        if start is not None:
+            lines.append(f"[{_format_timestamp(start)}] {text}")
+        else:
+            lines.append(text)
+    return "\n\n".join(lines)
+
+
 def write_transcript(
     output_path: Path,
     transcript_text: str,
@@ -234,6 +266,7 @@ def write_transcript(
     model: str = "",
     duration_s: float | None = None,
     diarized_result: dict | None = None,
+    whisper_segments: list[dict] | None = None,
     source_device: str = "",
     summary: dict | None = None,
 ) -> Path:
@@ -259,6 +292,10 @@ def write_transcript(
     if diarized_result and diarized_result.get("segments"):
         body = format_diarized_transcript(diarized_result)
         speakers = extract_speakers_from_diarized(diarized_result)
+    elif whisper_segments:
+        # Non-diarized but we have timestamped segments — format with timestamps
+        body = _format_timestamped_segments(whisper_segments)
+        speakers = []
     else:
         body = transcript_text
         speakers = []
