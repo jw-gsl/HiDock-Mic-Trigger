@@ -37,7 +37,14 @@ final class HiDockViewModel: ObservableObject {
     @Published var transcriptionFileIndex: Int = 0
     @Published var transcriptionFileCount: Int = 0
     @Published var transcriptionStatus: String = ""
+    @Published var transcriptionPaused = false
+    @Published var transcriptionQueue: [TranscriptionQueueItem] = []
     var onCancelTranscription: () -> Void = {}
+    var onShowTranscriptionQueue: () -> Void = {}
+    var onRemoveFromQueue: (String) -> Void = { _ in }
+    var onMoveInQueue: (Int, Int) -> Void = { _, _ in }
+    var onPauseTranscription: () -> Void = {}
+    var onResumeTranscription: () -> Void = {}
 
     // MARK: - Computed
     var visibleEntries: [HiDockSyncRecordingEntry] {

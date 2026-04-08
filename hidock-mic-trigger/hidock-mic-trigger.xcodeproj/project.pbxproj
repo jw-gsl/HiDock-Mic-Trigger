@@ -16,6 +16,7 @@
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
 		7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */; };
 		7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */; };
+		80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */; };
 		8F4F17F9FC81801F1A855275 /* HiDockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */; };
 		9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */; };
 		9C9AC2D1761397E2D6138BEC /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B035CBE2580FAE9A62ACD9 /* ModelsTests.swift */; };
@@ -67,6 +68,7 @@
 		ED5594D4170BD809E24E4CAC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackHistoryView.swift; sourceTree = "<group>"; };
+		F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionQueueView.swift; sourceTree = "<group>"; };
 		FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncHeaderSection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -118,6 +120,7 @@
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
 				FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */,
 				3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */,
+				F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */,
 				820C64D02A011DC869B43307 /* TranscriptViewerView.swift */,
 				8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */,
 				145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */,
@@ -277,6 +280,7 @@
 				7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */,
 				9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */,
 				DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */,
+				80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */,
 				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,
 				E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */,
 				32CB8DC2FB8F5920A75F9D12 /* VoiceLibraryView.swift in Sources */,

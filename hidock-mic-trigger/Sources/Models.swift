@@ -215,3 +215,26 @@ struct HiDockSyncRecordingEntry: Identifiable {
 enum StatusLevel {
     case normal, success, warning, error, info, secondary
 }
+
+struct TranscriptionQueueItem: Identifiable {
+    let id: String
+    let path: String
+    let filename: String
+    var status: TranscriptionQueueStatus
+    var progress: Int = 0
+
+    init(path: String) {
+        self.id = path
+        self.path = path
+        self.filename = (path as NSString).lastPathComponent
+        self.status = .queued
+    }
+}
+
+enum TranscriptionQueueStatus: String {
+    case queued = "Queued"
+    case transcribing = "Transcribing"
+    case completed = "Completed"
+    case failed = "Failed"
+    case cancelled = "Cancelled"
+}

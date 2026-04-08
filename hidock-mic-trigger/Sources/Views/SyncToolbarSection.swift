@@ -80,6 +80,19 @@ struct SyncToolbarSection: View {
                 ))
                 .toggleStyle(.checkbox)
 
+                if !viewModel.transcriptionQueue.isEmpty {
+                    Button {
+                        viewModel.onShowTranscriptionQueue()
+                    } label: {
+                        let queued = viewModel.transcriptionQueue.filter { $0.status == .queued }.count
+                        let active = viewModel.transcriptionQueue.filter { $0.status == .transcribing }.count
+                        Label(
+                            active > 0 ? "Queue (\(active) + \(queued))" : "Queue (\(queued))",
+                            systemImage: "list.bullet.rectangle"
+                        )
+                    }
+                }
+
                 if viewModel.needsTaggingCount > 0 {
                     Label("\(viewModel.needsTaggingCount) need tagging", systemImage: "tag.fill")
                         .font(.caption.weight(.medium))

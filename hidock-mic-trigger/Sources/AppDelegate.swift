@@ -45,13 +45,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncDownloading = false
 
     // Transcription
-    private let transcriptionQueue = DispatchQueue(label: "hidock.transcription", qos: .background)
+    private let transcriptionDispatchQueue = DispatchQueue(label: "hidock.transcription", qos: .background)
     private var transcriptionBusy = false
     private var transcriptionCancelled = false
+    private var transcriptionPaused = false
     private var transcriptionCurrentFile: String? = nil
     private var transcriptionProgress: Int = 0
     private var transcriptionFileIndex: Int = 0
     private var transcriptionFileCount: Int = 0
+    private var pendingTranscriptionQueue: [TranscriptionQueueItem] = []
+    private var transcriptionQueueWindow: NSWindow?
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
@@ -367,6 +370,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowCoworkPrompt = { [weak self] in self?.showCoworkPrompt() }
         viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
         viewModel.onTrimRecording = { [weak self] path in self?.showTrimDialog(for: path) }
+        viewModel.onShowTranscriptionQueue = { [weak self] in self?.showTranscriptionQueueWindow() }
+        viewModel.onRemoveFromQueue = { [weak self] path in self?.removeFromTranscriptionQueue(path) }
+        viewModel.onMoveInQueue = { [weak self] from, to in self?.moveInTranscriptionQueue(from: from, to: to) }
+        viewModel.onPauseTranscription = { [weak self] in self?.pauseTranscription() }
+        viewModel.onResumeTranscription = { [weak self] in self?.resumeTranscription() }
         viewModel.onOpenInObsidian = { path in
             let url = URL(fileURLWithPath: path)
             let noteName = url.deletingPathExtension().lastPathComponent
@@ -464,6 +472,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.transcriptionBusy = transcriptionBusy
         viewModel.transcriptionCurrentFile = transcriptionCurrentFile
         viewModel.transcriptionProgress = transcriptionProgress
+        viewModel.transcriptionPaused = transcriptionPaused
+        viewModel.transcriptionQueue = pendingTranscriptionQueue
         viewModel.transcriptionFileIndex = transcriptionFileIndex
         viewModel.transcriptionFileCount = transcriptionFileCount
     }
@@ -3131,9 +3141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         ?? "\(self.syncOutputFolder ?? "")/\(d.filename.replacingOccurrences(of: ".hda", with: ".mp3"))"
                 }
                 if !paths.isEmpty, self.ensureTranscriptionReady() {
-                    self.transcriptionBusy = true
-                    self.syncViewModelState()
-                    self.transcribeSequentially(paths, index: 0)
+                    self.enqueueTranscriptions(paths)
                 }
             case .failure(let error):
                 if self.syncDownloadStopping {
@@ -3388,7 +3396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         log("runTranscription: \(arguments.joined(separator: " "))")
-        transcriptionQueue.async {
+        transcriptionDispatchQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
             process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)
@@ -3497,8 +3505,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func transcribeFile(mp3Path: String) {
+        guard ensureTranscriptionReady() else { return }
+        enqueueTranscriptions([mp3Path])
+    }
+
+    /// Legacy single-file transcription path (kept for auto-download→transcribe flow)
+    private func transcribeFileDirect(mp3Path: String) {
         guard !transcriptionBusy else {
-            log("transcribeFile: skipping, transcription already in progress")
+            // Already busy — enqueue instead
+            enqueueTranscriptions([mp3Path])
             return
         }
         guard ensureTranscriptionReady() else { return }
@@ -3655,21 +3670,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log("startTranscription: called with empty entries")
             return
         }
-        log("startTranscription: \(entries.count) recording(s)")
-        if entries.count == 1 {
-            transcribeFile(mp3Path: entries[0].recording.outputPath)
-        } else {
-            guard !transcriptionBusy else {
-                log("startTranscription: skipping, already busy")
-                return
-            }
-            transcriptionBusy = true
-            viewModel.syncStatus = "Transcribing \(entries.count) recordings..."
-            viewModel.syncStatusLevel = .secondary
-            syncViewModelState()
+        let paths = entries.map(\.recording.outputPath)
+        enqueueTranscriptions(paths)
+    }
 
-            let paths = entries.map(\.recording.outputPath)
-            transcribeSequentially(paths, index: 0)
+    private func enqueueTranscriptions(_ paths: [String]) {
+        for path in paths {
+            if !pendingTranscriptionQueue.contains(where: { $0.path == path }) {
+                pendingTranscriptionQueue.append(TranscriptionQueueItem(path: path))
+            }
+        }
+        log("Enqueued \(paths.count) recording(s), queue size: \(pendingTranscriptionQueue.count)")
+        syncViewModelState()
+        processNextInQueue()
+    }
+
+    private func processNextInQueue() {
+        guard !transcriptionBusy, !transcriptionPaused, !transcriptionCancelled else { return }
+        guard let index = pendingTranscriptionQueue.firstIndex(where: { $0.status == .queued }) else {
+            // Queue empty — all done
+            let completed = pendingTranscriptionQueue.filter { $0.status == .completed }.count
+            if completed > 0 {
+                let transcriptFolder = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+                postTranscriptionNotification(title: "Transcription Complete", body: "\(completed) recording\(completed == 1 ? "" : "s") transcribed.", transcriptPath: transcriptFolder)
+                viewModel.syncStatus = "Transcription complete"
+                viewModel.syncStatusLevel = .success
+            }
+            refreshTranscriptionState()
+            syncViewModelState()
+            return
+        }
+
+        transcriptionBusy = true
+        pendingTranscriptionQueue[index].status = .transcribing
+        let item = pendingTranscriptionQueue[index]
+        let filename = item.filename
+        let total = pendingTranscriptionQueue.count
+        let position = pendingTranscriptionQueue.filter({ $0.status == .completed }).count + 1
+
+        transcriptionCurrentFile = filename
+        transcriptionProgress = 0
+        viewModel.syncStatus = "Transcribing \(filename) (\(position)/\(total))…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+
+        var args = ["transcribe", item.path]
+        if diarizeEnabled { args.append("--diarize") }
+        runTranscription(arguments: args, onProgress: { [weak self] pct in
+            guard let self = self else { return }
+            self.transcriptionProgress = pct
+            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
+                self.pendingTranscriptionQueue[idx].progress = pct
+            }
+            self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)% (\(position)/\(total))"
+            self.syncViewModelState()
+        }) { [weak self] result in
+            guard let self = self else { return }
+            self.transcriptionBusy = false
+            self.transcriptionCurrentFile = nil
+            self.transcriptionProgress = 0
+
+            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
+                switch result {
+                case .success:
+                    self.pendingTranscriptionQueue[idx].status = .completed
+                case .failure:
+                    self.pendingTranscriptionQueue[idx].status = .failed
+                }
+            }
+
+            self.refreshTranscriptionState()
+            self.syncViewModelState()
+            // Process next item
+            self.processNextInQueue()
         }
     }
 
@@ -3677,55 +3750,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("Transcription cancelled by user")
         transcriptionCancelled = true
         transcriptionBusy = false
+        transcriptionPaused = false
         transcriptionCurrentFile = nil
         transcriptionProgress = 0
+        // Mark remaining queued items as cancelled
+        for i in pendingTranscriptionQueue.indices {
+            if pendingTranscriptionQueue[i].status == .queued {
+                pendingTranscriptionQueue[i].status = .cancelled
+            }
+        }
         viewModel.syncStatus = "Transcription cancelled"
         viewModel.syncStatusLevel = .warning
         syncViewModelState()
     }
 
-    private func transcribeSequentially(_ paths: [String], index: Int) {
-        guard !transcriptionCancelled, index < paths.count else {
-            transcriptionBusy = false
-            transcriptionCurrentFile = nil
-            transcriptionProgress = 0
-            let body = "\(paths.count) recordings transcribed."
-            // For batch, point to the transcript folder
-            let transcriptFolder = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
-            postTranscriptionNotification(title: "📝 Transcription Complete", body: body, transcriptPath: transcriptFolder)
-            viewModel.syncStatus = "Batch transcription complete"
-            viewModel.syncStatusLevel = .success
-            refreshTranscriptionState()
-            syncViewModelState()
+    private func pauseTranscription() {
+        log("Transcription paused by user")
+        transcriptionPaused = true
+        viewModel.syncStatus = "Transcription paused"
+        viewModel.syncStatusLevel = .warning
+        syncViewModelState()
+    }
+
+    private func resumeTranscription() {
+        log("Transcription resumed by user")
+        transcriptionPaused = false
+        transcriptionCancelled = false
+        syncViewModelState()
+        processNextInQueue()
+    }
+
+    private func removeFromTranscriptionQueue(_ path: String) {
+        pendingTranscriptionQueue.removeAll { $0.path == path && $0.status == .queued }
+        syncViewModelState()
+    }
+
+    private func moveInTranscriptionQueue(from: Int, to: Int) {
+        guard from >= 0, from < pendingTranscriptionQueue.count, to >= 0, to <= pendingTranscriptionQueue.count else { return }
+        let item = pendingTranscriptionQueue.remove(at: from)
+        let insertAt = to > from ? to - 1 : to
+        pendingTranscriptionQueue.insert(item, at: min(insertAt, pendingTranscriptionQueue.count))
+        syncViewModelState()
+    }
+
+    private func showTranscriptionQueueWindow() {
+        if let existing = transcriptionQueueWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
             return
         }
-
-        let filename = (paths[index] as NSString).lastPathComponent
-        transcriptionCurrentFile = filename
-        transcriptionProgress = 0
-        transcriptionFileIndex = index
-        transcriptionFileCount = paths.count
-        viewModel.syncStatus = "Transcribing \(filename) (\(index + 1)/\(paths.count))..."
-        viewModel.syncStatusLevel = .secondary
-        syncViewModelState()
-
-        var seqArgs = ["transcribe", paths[index]]
-        if diarizeEnabled { seqArgs.append("--diarize") }
-        runTranscription(arguments: seqArgs, onProgress: { [weak self] pct in
-            guard let self = self else { return }
-            self.transcriptionProgress = pct
-            self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)% (\(index + 1)/\(paths.count))"
-            self.syncViewModelState()
-        }) { [weak self] _ in
-            self?.refreshTranscriptionState()
-            self?.transcribeSequentially(paths, index: index + 1)
-        }
+        let queueView = TranscriptionQueueView(viewModel: viewModel)
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 450, height: 400),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Transcription Queue"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 350, height: 250)
+        win.contentView = NSHostingView(rootView: queueView)
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        transcriptionQueueWindow = win
     }
 
     private func transcribeAllRecordings() {
         guard ensureTranscriptionReady() else { return }
-        guard !transcriptionBusy else { return }
-
         let paths = viewModel.visibleEntries
             .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
             .map(\.recording.outputPath)
@@ -3736,9 +3827,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        transcriptionBusy = true
-        syncViewModelState()
-        transcribeSequentially(paths, index: 0)
+        enqueueTranscriptions(paths)
     }
 
     private func refreshTranscriptionState() {
@@ -3747,7 +3836,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        transcriptionQueue.async {
+        transcriptionDispatchQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
             process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)

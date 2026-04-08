@@ -107,11 +107,45 @@ def transcribe_file(
             model = load_whisper_model()
 
         progress(15)
-        result = model.transcribe(
-            str(mp3_path),
-            language=config.WHISPER_LANGUAGE,
-            verbose=False,
-        )
+
+        # Estimate duration for synthetic progress (Whisper processes ~30s chunks)
+        # Emit progress updates while model.transcribe() blocks
+        import threading
+        _transcribe_done = threading.Event()
+        _result_holder = [None]
+
+        def _estimate_progress():
+            """Emit synthetic progress from 15→85 based on elapsed time."""
+            import mutagen.mp3
+            try:
+                audio_info = mutagen.mp3.MP3(str(mp3_path))
+                audio_duration = audio_info.info.length
+            except Exception:
+                audio_duration = 300  # fallback 5 min estimate
+            # Rough estimate: Whisper processes ~60s of audio per 30s of wall time on MPS
+            estimated_wall_time = max(audio_duration / 2, 30)
+            start = time.monotonic()
+            while not _transcribe_done.is_set():
+                elapsed = time.monotonic() - start
+                frac = min(elapsed / estimated_wall_time, 0.95)
+                pct = int(15 + frac * 70)  # 15 → 85
+                progress(min(pct, 84))
+                _transcribe_done.wait(timeout=3)
+
+        progress_thread = threading.Thread(target=_estimate_progress, daemon=True)
+        progress_thread.start()
+
+        try:
+            _result_holder[0] = model.transcribe(
+                str(mp3_path),
+                language=config.WHISPER_LANGUAGE,
+                verbose=False,
+            )
+        finally:
+            _transcribe_done.set()
+            progress_thread.join(timeout=2)
+
+        result = _result_holder[0]
         progress(85)
 
         text = result["text"].strip()
