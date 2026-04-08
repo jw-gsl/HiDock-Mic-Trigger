@@ -637,7 +637,7 @@ class MainWindow(QMainWindow):
             self.settings.value("autoDownload", False, type=bool)
         )
         self.diarize_check.setChecked(
-            self.settings.value("diarizeEnabled", False, type=bool)
+            self.settings.value("diarizeEnabled", True, type=bool)
         )
 
         if auto_start:

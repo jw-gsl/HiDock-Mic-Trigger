@@ -313,6 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncHideDownloaded = viewModel.syncHideDownloaded
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
+        // Default diarization to ON — speaker labels are almost always wanted
+        if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
+            UserDefaults.standard.set(true, forKey: "diarizeEnabled")
+        }
         diarizeEnabled = UserDefaults.standard.bool(forKey: "diarizeEnabled")
         viewModel.diarizeEnabled = diarizeEnabled
 
