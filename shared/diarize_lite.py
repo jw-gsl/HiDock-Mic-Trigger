@@ -21,7 +21,7 @@ from shared.models import ensure_silero_vad
 
 # Silero VAD operates on 16kHz audio in chunks
 _VAD_SR = 16000
-_VAD_WINDOW_SIZE = 512  # 32ms at 16kHz
+_VAD_WINDOW_SIZE = 256  # 16ms at 16kHz (Silero VAD v5)
 
 _vad_session = None
 _speaker_embed_session = None
@@ -329,12 +329,13 @@ def diarize(
                 "end": ws["end"],
                 "text": ws["text"],
                 "speaker": "Speaker 1",
+                "speaker_id": 0,
             })
         return {
             "version": 1,
             "audio_file": str(audio_path),
             "segments": segments_out,
-            "speaker_names": {"Speaker 1": "Speaker 1"},
+            "speaker_names": {"0": "Speaker 1"},
         }
 
     # Extract speaker embeddings for each speech segment
