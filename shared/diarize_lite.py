@@ -351,17 +351,17 @@ def diarize(
         whisper_segments, speech_segments, speaker_labels
     )
 
-    # Build output
+    # Build output — use integer speaker_id to match the app's decoder
     speaker_names = {}
     segments_out = []
     for ws, spk_id in zip(whisper_segments, ws_speakers):
-        speaker_label = f"Speaker {spk_id + 1}"
-        speaker_names[speaker_label] = speaker_label
+        speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
         segments_out.append({
             "start": ws["start"],
             "end": ws["end"],
             "text": ws["text"],
-            "speaker": speaker_label,
+            "speaker": f"Speaker {spk_id + 1}",
+            "speaker_id": spk_id,
         })
 
     return {

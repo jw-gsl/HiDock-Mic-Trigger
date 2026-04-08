@@ -169,6 +169,43 @@ def transcribe_file(
             diarized_result=diarized_result,
             summary=summary,
         )
+
+        # Always save a segments JSON alongside the transcript so the
+        # in-app viewer can show timestamped text (with or without speakers).
+        import json as _json
+        segments_json_path = transcript_path.with_name(
+            transcript_path.stem + "_diarized.json"
+        )
+        if diarized_result and diarized_result.get("segments"):
+            # Diarized — save as-is (already has speaker_id + timestamps)
+            _json.loads  # ensure json imported
+            segments_json_path.write_text(
+                _json.dumps(diarized_result, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        else:
+            # Non-diarized — build segments from Whisper output with timestamps
+            whisper_segments = result.get("segments", [])
+            plain_segments = []
+            for seg in whisper_segments:
+                plain_segments.append({
+                    "start": seg.get("start", 0.0),
+                    "end": seg.get("end", 0.0),
+                    "text": seg.get("text", "").strip(),
+                    "speaker_id": 0,
+                    "speaker": "",
+                })
+            plain_result = {
+                "version": 1,
+                "audio_file": str(mp3_path),
+                "segments": plain_segments,
+                "speaker_names": {},
+            }
+            segments_json_path.write_text(
+                _json.dumps(plain_result, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
         progress(95)
 
         duration_s = round(time.monotonic() - start_time, 1)

@@ -20,13 +20,21 @@ struct DiarizedSegment: Codable, Identifiable {
     var id: String { "\(speakerId)-\(start)" }
     let start: Double
     let end: Double
-    let speakerId: Int
+    var speakerId: Int
     var text: String
 
     enum CodingKeys: String, CodingKey {
         case start, end
         case speakerId = "speaker_id"
         case text
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        start = try c.decode(Double.self, forKey: .start)
+        end = try c.decode(Double.self, forKey: .end)
+        speakerId = (try? c.decode(Int.self, forKey: .speakerId)) ?? 0
+        text = try c.decode(String.self, forKey: .text)
     }
 }
 
@@ -63,8 +71,13 @@ struct TranscriptViewerView: View {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
     }
 
+    private var hasSpeakers: Bool {
+        // Non-diarized transcripts have all speaker_id=0 and empty speaker_names
+        uniqueSpeakerIds.count > 1 || !transcript.speakerNames.isEmpty
+    }
+
     private func speakerName(for id: Int) -> String {
-        transcript.speakerNames["\(id)"] ?? "Speaker \(id)"
+        transcript.speakerNames["\(id)"] ?? "Speaker \(id + 1)"
     }
 
     var body: some View {
@@ -91,18 +104,20 @@ struct TranscriptViewerView: View {
 
             Divider()
 
-            // Speaker legend
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
-                        speakerPill(speakerId: speakerId, interactive: true)
+            // Speaker legend (only for diarized transcripts)
+            if hasSpeakers {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
+                            speakerPill(speakerId: speakerId, interactive: true)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-            }
 
-            Divider()
+                Divider()
+            }
 
             // Segments list
             ScrollView {
@@ -173,7 +188,9 @@ struct TranscriptViewerView: View {
                 .foregroundColor(.secondary)
                 .frame(width: 50, alignment: .leading)
 
-            speakerPill(speakerId: segment.speakerId, interactive: true)
+            if hasSpeakers {
+                speakerPill(speakerId: segment.speakerId, interactive: true)
+            }
 
             Text(segment.text)
                 .font(.body)

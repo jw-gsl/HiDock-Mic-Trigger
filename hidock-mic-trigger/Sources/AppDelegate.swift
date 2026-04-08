@@ -1952,16 +1952,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let dirURL = mdURL.deletingLastPathComponent()
         let diarizedPath = dirURL.appendingPathComponent(baseName + "_diarized.json").path
 
-        guard FileManager.default.fileExists(atPath: diarizedPath) else {
-            // No diarized JSON — fall back to revealing the .md in Finder
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: transcriptMdPath)])
-            return
+        // Try to load the segments JSON for in-app viewing
+        var transcript: DiarizedTranscript?
+        if FileManager.default.fileExists(atPath: diarizedPath),
+           let data = FileManager.default.contents(atPath: diarizedPath) {
+            do {
+                transcript = try JSONDecoder().decode(DiarizedTranscript.self, from: data)
+            } catch {
+                log("Failed to decode transcript JSON at \(diarizedPath): \(error.localizedDescription)")
+            }
         }
 
-        // Load the diarized transcript
-        guard let data = FileManager.default.contents(atPath: diarizedPath),
-              let transcript = try? JSONDecoder().decode(DiarizedTranscript.self, from: data) else {
-            log("Failed to decode diarized transcript at \(diarizedPath)")
+        guard let transcript = transcript else {
+            // No segments JSON — fall back to revealing the .md in Finder
+            log("No segments JSON found at \(diarizedPath), opening .md in Finder")
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: transcriptMdPath)])
             return
         }

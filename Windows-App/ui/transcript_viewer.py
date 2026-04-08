@@ -99,24 +99,27 @@ class TranscriptViewerDialog(QDialog):
             seg.get("speaker_id", 0) for seg in self.transcript.get("segments", [])
         ))
         speaker_names = self.transcript.get("speaker_names", {})
+        self._has_speakers = len(speaker_ids) > 1 or bool(speaker_names)
 
-        for sid in speaker_ids:
-            name = speaker_names.get(str(sid), f"Speaker {sid}")
-            color = _speaker_color(sid)
-            btn = QPushButton(name)
-            btn.setStyleSheet(
-                f"QPushButton {{ background: {color.name()}; color: white; "
-                f"border-radius: 10px; padding: 3px 10px; font-size: 12px; border: none; }}"
-                f"QPushButton:hover {{ background: {color.lighter(120).name()}; }}"
-            )
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda checked, s=sid: self._rename_speaker(s))
-            legend_layout.addWidget(btn)
+        if self._has_speakers:
+            for sid in speaker_ids:
+                name = speaker_names.get(str(sid), f"Speaker {sid + 1}")
+                color = _speaker_color(sid)
+                btn = QPushButton(name)
+                btn.setStyleSheet(
+                    f"QPushButton {{ background: {color.name()}; color: white; "
+                    f"border-radius: 10px; padding: 3px 10px; font-size: 12px; border: none; }}"
+                    f"QPushButton:hover {{ background: {color.lighter(120).name()}; }}"
+                )
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda checked, s=sid: self._rename_speaker(s))
+                legend_layout.addWidget(btn)
 
         legend_layout.addStretch()
         legend_widget = QWidget()
         legend_widget.setLayout(legend_layout)
-        layout.addWidget(legend_widget)
+        if self._has_speakers:
+            layout.addWidget(legend_widget)
 
         # Segments scroll area
         scroll = QScrollArea()
@@ -149,20 +152,21 @@ class TranscriptViewerDialog(QDialog):
             ts_label.setFixedWidth(55)
             row.addWidget(ts_label)
 
-            # Speaker pill
-            sid = seg.get("speaker_id", 0)
-            name = speaker_names.get(str(sid), f"Speaker {sid}")
-            color = _speaker_color(sid)
-            pill = QPushButton(name)
-            pill.setFixedHeight(22)
-            pill.setStyleSheet(
-                f"QPushButton {{ background: {color.name()}; color: white; "
-                f"border-radius: 10px; padding: 2px 8px; font-size: 11px; border: none; }}"
-                f"QPushButton:hover {{ background: {color.lighter(120).name()}; }}"
-            )
-            pill.setCursor(Qt.CursorShape.PointingHandCursor)
-            pill.clicked.connect(lambda checked, s=sid: self._rename_speaker(s))
-            row.addWidget(pill)
+            # Speaker pill (only for diarized transcripts)
+            if self._has_speakers:
+                sid = seg.get("speaker_id", 0)
+                name = speaker_names.get(str(sid), f"Speaker {sid + 1}")
+                color = _speaker_color(sid)
+                pill = QPushButton(name)
+                pill.setFixedHeight(22)
+                pill.setStyleSheet(
+                    f"QPushButton {{ background: {color.name()}; color: white; "
+                    f"border-radius: 10px; padding: 2px 8px; font-size: 11px; border: none; }}"
+                    f"QPushButton:hover {{ background: {color.lighter(120).name()}; }}"
+                )
+                pill.setCursor(Qt.CursorShape.PointingHandCursor)
+                pill.clicked.connect(lambda checked, s=sid: self._rename_speaker(s))
+                row.addWidget(pill)
 
             # Text
             text_label = QLabel(seg.get("text", ""))
