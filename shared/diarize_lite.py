@@ -233,14 +233,14 @@ def cluster_speakers(
     # Compute linkage using cosine distance
     Z = linkage(embeddings, method="average", metric="cosine")
 
-    if n_speakers is not None:
-        labels = fcluster(Z, t=n_speakers, criterion="maxclust")
+    if n_speakers is not None and isinstance(n_speakers, int) and n_speakers > 0:
+        labels = fcluster(Z, t=float(n_speakers), criterion="maxclust")
     else:
         labels = fcluster(Z, t=distance_threshold, criterion="distance")
         # Cap at max_speakers
         n_clusters = len(set(labels))
         if n_clusters > max_speakers:
-            labels = fcluster(Z, t=max_speakers, criterion="maxclust")
+            labels = fcluster(Z, t=float(max_speakers), criterion="maxclust")
 
     # Convert to 0-indexed
     labels = [int(lbl) - 1 for lbl in labels]
