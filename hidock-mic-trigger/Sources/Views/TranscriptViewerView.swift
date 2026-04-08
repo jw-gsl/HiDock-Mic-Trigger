@@ -1,4 +1,35 @@
 import SwiftUI
+import AVFoundation
+
+// MARK: - Audio Player
+
+class SegmentAudioPlayer: ObservableObject {
+    @Published var playingSegmentId: String?
+    private var player: AVAudioPlayer?
+    private var stopTimer: Timer?
+
+    func play(audioPath: String, start: Double, end: Double, segmentId: String) {
+        stop()
+        guard let url = URL(string: "file://\(audioPath)"),
+              let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        self.player = player
+        player.currentTime = start
+        player.play()
+        playingSegmentId = segmentId
+        let duration = end - start
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+            self?.stop()
+        }
+    }
+
+    func stop() {
+        player?.stop()
+        player = nil
+        stopTimer?.invalidate()
+        stopTimer = nil
+        playingSegmentId = nil
+    }
+}
 
 // MARK: - Data Models
 
@@ -63,6 +94,7 @@ struct TranscriptViewerView: View {
     @State var transcript: DiarizedTranscript
     @State var editingSpeakerId: Int? = nil
     @State var editingName: String = ""
+    @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
     let onEnrollSpeaker: (String, String, Double, Double) -> Void
@@ -183,6 +215,20 @@ struct TranscriptViewerView: View {
     @ViewBuilder
     private func segmentRow(segment: DiarizedSegment) -> some View {
         HStack(alignment: .top, spacing: 8) {
+            // Play button
+            Button {
+                if audioPlayer.playingSegmentId == segment.id {
+                    audioPlayer.stop()
+                } else {
+                    audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id)
+                }
+            } label: {
+                Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
+                    .foregroundColor(audioPlayer.playingSegmentId == segment.id ? .blue : .secondary)
+            }
+            .buttonStyle(.plain)
+            .frame(width: 18)
+
             Text("[\(formatTime(seconds: segment.start))]")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(.secondary)

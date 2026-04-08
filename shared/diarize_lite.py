@@ -369,10 +369,7 @@ def diarize(
 
     # Filter Whisper hallucinations: remove repeated short segments at the end
     whisper_segments = _filter_hallucinations(whisper_segments)
-
-    # Merge Whisper's micro-segments into conversational turns (by pause gap)
-    whisper_segments = _merge_whisper_segments(whisper_segments, max_gap=1.5)
-    print(f"  Whisper segments after merge: {len(whisper_segments)}", file=sys.stderr)
+    print(f"  Whisper segments: {len(whisper_segments)}", file=sys.stderr)
 
     # Load audio
     audio = load_audio(audio_path, sr=_VAD_SR)
@@ -383,9 +380,10 @@ def diarize(
     print(f"  Speech segments: {len(speech_segments)}", file=sys.stderr)
 
     if not speech_segments:
-        # No speech detected — assign all to Speaker 1
+        # No speech detected — assign all to Speaker 1, merge by pause
+        merged = _merge_whisper_segments(whisper_segments, max_gap=1.5)
         segments_out = []
-        for ws in whisper_segments:
+        for ws in merged:
             segments_out.append({
                 "start": ws["start"],
                 "end": ws["end"],
@@ -409,23 +407,47 @@ def diarize(
     n_detected = len(set(speaker_labels))
     print(f"  Speakers detected: {n_detected}", file=sys.stderr)
 
-    # Assign speaker labels to whisper segments
+    # Assign speaker labels to each individual Whisper segment
     ws_speakers = _assign_speakers_to_whisper_segments(
         whisper_segments, speech_segments, speaker_labels
     )
 
-    # Build output — use integer speaker_id to match the app's decoder
+    # Renumber speaker IDs to be contiguous (0, 1, 2...) based on first appearance
+    seen_ids = []
+    for spk_id in ws_speakers:
+        if spk_id not in seen_ids:
+            seen_ids.append(spk_id)
+    id_map = {old: new for new, old in enumerate(seen_ids)}
+    ws_speakers = [id_map[s] for s in ws_speakers]
+    n_detected = len(seen_ids)
+    print(f"  Speakers (renumbered): {n_detected}", file=sys.stderr)
+
+    # Build labeled segments, then merge consecutive same-speaker turns
     speaker_names = {}
-    segments_out = []
+    raw_segments = []
     for ws, spk_id in zip(whisper_segments, ws_speakers):
         speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
-        segments_out.append({
+        raw_segments.append({
             "start": ws["start"],
             "end": ws["end"],
-            "text": ws["text"],
+            "text": ws.get("text", "").strip(),
             "speaker": f"Speaker {spk_id + 1}",
             "speaker_id": spk_id,
         })
+
+    # Merge consecutive segments from the same speaker
+    segments_out = []
+    for seg in raw_segments:
+        if not seg["text"]:
+            continue
+        if segments_out and segments_out[-1]["speaker_id"] == seg["speaker_id"]:
+            # Same speaker — merge text, extend end time
+            segments_out[-1]["end"] = seg["end"]
+            segments_out[-1]["text"] += " " + seg["text"]
+        else:
+            segments_out.append(dict(seg))
+
+    print(f"  Output segments: {len(segments_out)} (merged from {len(raw_segments)})", file=sys.stderr)
 
     return {
         "version": 1,
