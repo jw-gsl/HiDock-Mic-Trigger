@@ -102,6 +102,7 @@ struct TranscriptViewerView: View {
     @State var editingSpeakerId: Int? = nil
     @State var editingName: String = ""
     @State var rediarizeNSpeakers: Int = 2
+    @State var transcriptHistory: [DiarizedTranscript] = []
     @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
@@ -131,6 +132,17 @@ struct TranscriptViewerView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
+                if !transcriptHistory.isEmpty {
+                    Button {
+                        undoMerge()
+                    } label: {
+                        Label("Undo", systemImage: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .keyboardShortcut("z", modifiers: .command)
+                }
+
                 if onRediarize != nil {
                     Stepper("Speakers: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
                         .font(.caption)
@@ -308,7 +320,16 @@ struct TranscriptViewerView: View {
         saveTranscript()
     }
 
+    private func undoMerge() {
+        guard let previous = transcriptHistory.popLast() else { return }
+        transcript = previous
+        saveTranscript()
+    }
+
     private func mapSpeaker(from sourceId: Int, to targetId: Int) {
+        // Save current state for undo
+        transcriptHistory.append(transcript)
+
         // Reassign all segments from sourceId to targetId
         for i in transcript.segments.indices {
             if transcript.segments[i].speakerId == sourceId {
