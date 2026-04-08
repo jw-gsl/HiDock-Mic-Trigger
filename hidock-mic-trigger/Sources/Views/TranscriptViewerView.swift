@@ -177,23 +177,15 @@ struct TranscriptViewerView: View {
                     HStack(spacing: 8) {
                         ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
                             speakerPill(speakerId: speakerId, interactive: true)
-
-                            // "Map to..." menu for merging speakers
-                            if uniqueSpeakerIds.count > 1 {
-                                Menu {
-                                    ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
-                                        Button("Map to \(speakerName(for: targetId))") {
-                                            mapSpeaker(from: speakerId, to: targetId)
+                                .contextMenu {
+                                    if uniqueSpeakerIds.count > 1 {
+                                        ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
+                                            Button("Merge into \(speakerName(for: targetId))") {
+                                                mapSpeaker(from: speakerId, to: targetId)
+                                            }
                                         }
                                     }
-                                } label: {
-                                    Image(systemName: "arrow.right.circle")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
                                 }
-                                .menuStyle(.borderlessButton)
-                                .frame(width: 16)
-                            }
                         }
                     }
                     .padding(.horizontal, 16)
