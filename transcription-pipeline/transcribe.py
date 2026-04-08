@@ -133,14 +133,12 @@ def transcribe_file(
         diarized_result = None
         if diarize:
             try:
-                from diarize import diarize as run_diarize
-                diarized_result = run_diarize(str(mp3_path), text, result.get("segments", []))
-                # If diarize returns a string (legacy), convert to plain text
-                if isinstance(diarized_result, str):
-                    text = diarized_result
-                    diarized_result = None
+                from shared.diarize_lite import diarize as run_diarize
+                diarized_result = run_diarize(
+                    str(mp3_path), text, result.get("segments", [])
+                )
             except ImportError:
-                print("diarize module not available, skipping diarization", file=sys.stderr)
+                print("diarize_lite module not available, skipping diarization", file=sys.stderr)
             except Exception as e:
                 print(f"Diarization failed: {e}", file=sys.stderr)
 
