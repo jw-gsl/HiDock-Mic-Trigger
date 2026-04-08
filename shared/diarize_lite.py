@@ -79,9 +79,9 @@ def _load_speaker_embed_model():
 def detect_speech_segments(
     audio: np.ndarray,
     sr: int = 16000,
-    threshold: float = 0.5,
-    min_speech_duration: float = 0.25,
-    min_silence_duration: float = 0.3,
+    threshold: float = 0.08,
+    min_speech_duration: float = 0.15,
+    min_silence_duration: float = 1.5,
 ) -> list[tuple[float, float]]:
     """Detect speech segments using Silero VAD.
 
@@ -284,6 +284,61 @@ def _assign_speakers_to_whisper_segments(
     return result
 
 
+def _filter_hallucinations(segments: list[dict], max_repeats: int = 3) -> list[dict]:
+    """Remove repeated short segments at the end (Whisper hallucination)."""
+    if len(segments) < max_repeats + 1:
+        return segments
+
+    # Check if the last N segments are all the same short text
+    last_texts = [s.get("text", "").strip().lower() for s in segments[-max_repeats:]]
+    if len(set(last_texts)) == 1 and len(last_texts[0]) < 20:
+        # Find where the repetition starts
+        repeated = last_texts[0]
+        cutoff = len(segments)
+        for i in range(len(segments) - 1, -1, -1):
+            if segments[i].get("text", "").strip().lower() == repeated:
+                cutoff = i
+            else:
+                break
+        removed = len(segments) - cutoff
+        if removed > 0:
+            print(f"  Filtered {removed} hallucinated segments ('{repeated}')", file=sys.stderr)
+            return segments[:cutoff]
+
+    return segments
+
+
+def _merge_whisper_segments(segments: list[dict], max_gap: float = 1.5) -> list[dict]:
+    """Merge Whisper micro-segments into longer conversational turns."""
+    if not segments:
+        return segments
+
+    merged = []
+    current = {
+        "start": segments[0].get("start", 0),
+        "end": segments[0].get("end", 0),
+        "text": segments[0].get("text", "").strip(),
+    }
+
+    for seg in segments[1:]:
+        gap = seg.get("start", 0) - current["end"]
+        if gap <= max_gap:
+            # Merge: extend the current segment
+            current["end"] = seg.get("end", current["end"])
+            current["text"] += " " + seg.get("text", "").strip()
+        else:
+            # Gap too large: start a new segment
+            merged.append(current)
+            current = {
+                "start": seg.get("start", 0),
+                "end": seg.get("end", 0),
+                "text": seg.get("text", "").strip(),
+            }
+
+    merged.append(current)
+    return merged
+
+
 def diarize(
     audio_path: str | Path,
     whisper_segments: list[dict],
@@ -311,6 +366,13 @@ def diarize(
     """
     audio_path = Path(audio_path)
     print(f"Diarizing {audio_path.name}...", file=sys.stderr)
+
+    # Filter Whisper hallucinations: remove repeated short segments at the end
+    whisper_segments = _filter_hallucinations(whisper_segments)
+
+    # Merge Whisper's micro-segments into conversational turns (by pause gap)
+    whisper_segments = _merge_whisper_segments(whisper_segments, max_gap=1.5)
+    print(f"  Whisper segments after merge: {len(whisper_segments)}", file=sys.stderr)
 
     # Load audio
     audio = load_audio(audio_path, sr=_VAD_SR)
