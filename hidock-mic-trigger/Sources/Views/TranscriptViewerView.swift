@@ -60,6 +60,13 @@ struct DiarizedSegment: Codable, Identifiable {
         case text
     }
 
+    init(start: Double, end: Double, speakerId: Int = 0, text: String) {
+        self.start = start
+        self.end = end
+        self.speakerId = speakerId
+        self.text = text
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         start = try c.decode(Double.self, forKey: .start)
@@ -94,10 +101,12 @@ struct TranscriptViewerView: View {
     @State var transcript: DiarizedTranscript
     @State var editingSpeakerId: Int? = nil
     @State var editingName: String = ""
+    @State var rediarizeNSpeakers: Int = 2
     @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
     let onEnrollSpeaker: (String, String, Double, Double) -> Void
+    var onRediarize: ((String, Int?) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -122,6 +131,20 @@ struct TranscriptViewerView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
+                if onRediarize != nil {
+                    Stepper("Speakers: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
+                        .font(.caption)
+                        .frame(width: 140)
+
+                    Button {
+                        onRediarize?(filePath, rediarizeNSpeakers)
+                    } label: {
+                        Label("Re-diarize", systemImage: "person.2.wave.2")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
                 Button {
                     saveTranscript()
                 } label: {
@@ -142,6 +165,23 @@ struct TranscriptViewerView: View {
                     HStack(spacing: 8) {
                         ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
                             speakerPill(speakerId: speakerId, interactive: true)
+
+                            // "Map to..." menu for merging speakers
+                            if uniqueSpeakerIds.count > 1 {
+                                Menu {
+                                    ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
+                                        Button("Map to \(speakerName(for: targetId))") {
+                                            mapSpeaker(from: speakerId, to: targetId)
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "arrow.right.circle")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                .menuStyle(.borderlessButton)
+                                .frame(width: 16)
+                            }
                         }
                     }
                     .padding(.horizontal, 16)
@@ -264,6 +304,34 @@ struct TranscriptViewerView: View {
         if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
             onEnrollSpeaker(trimmed, audioPath, segment.start, segment.end)
         }
+
+        saveTranscript()
+    }
+
+    private func mapSpeaker(from sourceId: Int, to targetId: Int) {
+        // Reassign all segments from sourceId to targetId
+        for i in transcript.segments.indices {
+            if transcript.segments[i].speakerId == sourceId {
+                transcript.segments[i].speakerId = targetId
+                transcript.segments[i].text = transcript.segments[i].text // trigger update
+            }
+        }
+        // Remove the old speaker name
+        transcript.speakerNames.removeValue(forKey: "\(sourceId)")
+
+        // Re-merge consecutive same-speaker segments
+        var merged: [DiarizedSegment] = []
+        for seg in transcript.segments {
+            if let last = merged.last, last.speakerId == seg.speakerId {
+                var updated = merged.removeLast()
+                updated.text += " " + seg.text
+                // Can't mutate end directly on the struct — rebuild
+                merged.append(DiarizedSegment(start: updated.start, end: seg.end, speakerId: updated.speakerId, text: updated.text))
+            } else {
+                merged.append(seg)
+            }
+        }
+        transcript.segments = merged
 
         saveTranscript()
     }

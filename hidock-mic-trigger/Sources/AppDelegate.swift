@@ -1847,6 +1847,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    // MARK: - Re-diarize
+
+    private func rediarizeTranscript(jsonPath: String, nSpeakers: Int?) {
+        guard ensureTranscriptionReady() else { return }
+        log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
+        viewModel.syncStatus = "Re-diarizing…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+
+        var args = ["rediarize", jsonPath]
+        if let n = nSpeakers { args += ["--n-speakers", "\(n)"] }
+
+        runTranscription(arguments: args) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                self.log("Re-diarization complete")
+                self.viewModel.syncStatus = "Re-diarization complete — reopen transcript to see changes"
+                self.viewModel.syncStatusLevel = .success
+                // Close and reopen the viewer to pick up the new data
+                self.transcriptViewerWindow?.close()
+                self.transcriptViewerWindow = nil
+                // Derive md path from json path
+                let mdPath = jsonPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.openTranscriptViewer(transcriptMdPath: mdPath)
+                }
+            case .failure(let error):
+                self.log("Re-diarization failed: \(error.localizedDescription)")
+                self.viewModel.syncStatus = "Re-diarization failed"
+                self.viewModel.syncStatusLevel = .error
+            }
+            self.syncViewModelState()
+        }
+    }
+
     // MARK: - Feedback History
 
     private var feedbackHistoryPath: String {
@@ -1998,6 +2034,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             audioPath: audioPath,
             onEnrollSpeaker: { [weak self] name, audio, start, end in
                 self?.enrollSpeakerInVoiceLibrary(name: name, audioPath: audio, start: start, end: end)
+            },
+            onRediarize: { [weak self] jsonPath, nSpeakers in
+                self?.rediarizeTranscript(jsonPath: jsonPath, nSpeakers: nSpeakers)
             }
         )
 

@@ -45,6 +45,7 @@ final class HiDockViewModel: ObservableObject {
     var onMoveInQueue: (Int, Int) -> Void = { _, _ in }
     var onPauseTranscription: () -> Void = {}
     var onResumeTranscription: () -> Void = {}
+    var onRediarize: (String, Int?) -> Void = { _, _ in }  // jsonPath, nSpeakers
 
     // MARK: - Computed
     var visibleEntries: [HiDockSyncRecordingEntry] {

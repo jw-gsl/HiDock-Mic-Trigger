@@ -163,6 +163,17 @@ def transcribe_file(
             print(f"Whisper-Guard: transcript flagged as likely hallucination "
                   f"({guard_stats.final_word_count} words)", file=sys.stderr)
 
+        # Apply local corrections dictionary (e.g. "volaris" → "VOLARIS")
+        try:
+            from shared.corrections import apply_corrections
+            text = apply_corrections(text)
+            # Also apply to individual segments
+            for seg in result.get("segments", []):
+                if "text" in seg:
+                    seg["text"] = apply_corrections(seg["text"])
+        except ImportError:
+            pass
+
         # Optionally run diarization
         diarized_result = None
         if diarize:
@@ -439,6 +450,59 @@ def cmd_status(_args):
     print(json.dumps(lookup))
 
 
+def cmd_rediarize(args):
+    """Re-run speaker diarization on an existing transcript without re-transcribing."""
+    import json as _json
+
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    audio_path = data.get("audio_file", "")
+    if not Path(audio_path).exists():
+        print(f"Audio file not found: {audio_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Extract the raw segments (un-merge them — keep individual text chunks)
+    segments = data.get("segments", [])
+    # These are already the whisper-level segments we need
+    progress(5)
+
+    from shared.diarize_lite import diarize as run_diarize
+    progress(10)
+
+    n_speakers = args.n_speakers if hasattr(args, "n_speakers") else None
+    diarized_result = run_diarize(audio_path, segments, n_speakers=n_speakers)
+    progress(90)
+
+    # Apply corrections
+    try:
+        from shared.corrections import apply_corrections
+        for seg in diarized_result.get("segments", []):
+            if "text" in seg:
+                seg["text"] = apply_corrections(seg["text"])
+    except ImportError:
+        pass
+
+    # Save back
+    json_path.write_text(
+        _json.dumps(diarized_result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    progress(100)
+
+    n = len(diarized_result.get("segments", []))
+    speakers = diarized_result.get("speaker_names", {})
+    print(_json.dumps({
+        "status": "completed",
+        "segments": n,
+        "speakers": len(speakers),
+        "speaker_names": speakers,
+    }))
+
+
 def main():
     parser = argparse.ArgumentParser(description="HiDock Transcription Pipeline")
     sub = parser.add_subparsers(dest="command")
@@ -453,6 +517,11 @@ def main():
     p_batch.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_batch.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_batch.set_defaults(func=cmd_transcribe_batch)
+
+    p_rediarize = sub.add_parser("rediarize", help="Re-run speaker diarization without re-transcribing")
+    p_rediarize.add_argument("json_path", help="Path to _diarized.json file")
+    p_rediarize.add_argument("--n-speakers", type=int, help="Force number of speakers")
+    p_rediarize.set_defaults(func=cmd_rediarize)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)
