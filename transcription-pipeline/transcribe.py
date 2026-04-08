@@ -135,7 +135,7 @@ def transcribe_file(
             try:
                 from shared.diarize_lite import diarize as run_diarize
                 diarized_result = run_diarize(
-                    str(mp3_path), text, result.get("segments", [])
+                    str(mp3_path), result.get("segments", [])
                 )
             except ImportError:
                 print("diarize_lite module not available, skipping diarization", file=sys.stderr)
