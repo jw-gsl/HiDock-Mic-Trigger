@@ -198,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         wireViewModel()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
+        loadCachedRecordings()
         showSyncWindow()
 
         // Show onboarding wizard on first run
@@ -1843,6 +1844,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.showError("ffmpeg exited with status \(process.terminationStatus)")
                 }
                 self.syncViewModelState()
+            }
+        }
+    }
+
+    // MARK: - Cached Recordings (instant load)
+
+    private func loadCachedRecordings() {
+        // Load cached recordings from extractor state for instant display
+        // The live USB refresh will update these in the background
+        guard ensureExtractorReady() else { return }
+        let devices = syncPairedDevices
+        guard !devices.isEmpty else { return }
+
+        // Run status with a very short timeout — it'll use cached catalog if available
+        for device in devices {
+            runExtractor(arguments: ["status", "--timeout-ms", "500"], productId: device.productId) { [weak self] result in
+                guard let self = self else { return }
+                if case .success(let data) = result,
+                   let payload = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) {
+                    self.renderSyncStatus(payload, device: device)
+                    self.refreshTranscriptionState()
+                    self.syncViewModelState()
+                }
             }
         }
     }
