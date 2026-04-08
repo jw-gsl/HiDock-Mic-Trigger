@@ -85,6 +85,45 @@ def _mel_filterbank(n_filters: int, n_fft: int, sr: int) -> np.ndarray:
     return filterbank
 
 
+def compute_mel_spectrogram(
+    audio: np.ndarray,
+    sr: int = 16000,
+    n_fft: int = 512,
+    hop_length: int = 160,
+    n_mels: int = 80,
+) -> np.ndarray:
+    """Compute log-mel spectrogram for neural speaker models.
+
+    Returns:
+        Log-mel spectrogram of shape (n_mels, n_frames).
+    """
+    emphasized = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])
+    n_samples = len(emphasized)
+    n_frames = 1 + (n_samples - n_fft) // hop_length
+    if n_frames < 1:
+        emphasized = np.pad(emphasized, (0, n_fft - n_samples))
+        n_frames = 1
+
+    frames = np.zeros((n_frames, n_fft))
+    for i in range(n_frames):
+        start = i * hop_length
+        end = start + n_fft
+        frame_data = emphasized[start:end]
+        frames[i, : len(frame_data)] = frame_data
+
+    window = np.hamming(n_fft)
+    frames *= window
+    mag_spec = np.abs(np.fft.rfft(frames, n=n_fft))
+    power_spec = (mag_spec ** 2) / n_fft
+
+    mel_fb = _mel_filterbank(n_mels, n_fft, sr)
+    mel_spec = power_spec @ mel_fb.T
+    mel_spec = np.maximum(mel_spec, 1e-10)
+    log_mel = np.log(mel_spec)
+
+    return log_mel.T.astype(np.float32)  # (n_mels, n_frames)
+
+
 def extract_mfcc(
     audio: np.ndarray,
     sr: int = 16000,
@@ -168,14 +207,29 @@ def extract_neural_embedding(
         # Too short — pad to at least 100ms
         audio = np.pad(audio, (0, 1600 - len(audio)))
 
-    # TitaNet expects: "audio_signal" shape (batch, samples) float32
-    audio_input = audio[np.newaxis, :].astype(np.float32)
+    input_info = session.get_inputs()[0]
+    input_name = input_info.name
 
-    # Get input/output names from the model
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
+    # Detect whether the model expects raw audio or mel-spectrogram
+    input_shape = input_info.shape
+    if len(input_shape) == 3 and (input_shape[1] == 80 or input_shape[-1] == 80):
+        # Mel-spectrogram model (e.g. NeMo TitaNet): input (batch, 80, T)
+        mel = compute_mel_spectrogram(audio, sr=sr)  # (80, T)
+        audio_input = mel[np.newaxis, :, :].astype(np.float32)  # (1, 80, T)
+        length_input = np.array([mel.shape[1]], dtype=np.int64)
+        # Find the "embs" output (embedding, not logits)
+        output_names = [o.name for o in session.get_outputs()]
+        emb_name = next((n for n in output_names if "emb" in n.lower()), output_names[-1])
+        inputs = {input_name: audio_input}
+        if len(session.get_inputs()) > 1:
+            inputs[session.get_inputs()[1].name] = length_input
+        outputs = session.run([emb_name], inputs)
+    else:
+        # Raw audio model: input (batch, samples)
+        audio_input = audio[np.newaxis, :].astype(np.float32)
+        output_name = session.get_outputs()[0].name
+        outputs = session.run([output_name], {input_name: audio_input})
 
-    outputs = session.run([output_name], {input_name: audio_input})
     embedding = outputs[0].flatten().astype(np.float32)
 
     # Normalize to unit length
