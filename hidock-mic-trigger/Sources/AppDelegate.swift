@@ -55,6 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var transcriptionFileCount: Int = 0
     private var pendingTranscriptionQueue: [TranscriptionQueueItem] = []
     private var transcriptionQueueWindow: NSWindow?
+    private var transcriptionProgressTimer: Timer?
+    private var transcriptionStartTime: Date?
+    private var transcriptionEstimatedDuration: TimeInterval = 180  // 3 min default
+    private var transcriptionLastRealProgress: Int = 0
 
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
@@ -3476,6 +3480,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             // Metal / MPS needs access to the GPU frameworks
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            // Force unbuffered Python output so PROGRESS lines arrive immediately
+            env["PYTHONUNBUFFERED"] = "1"
             process.environment = env
 
             let outPipe = Pipe()
@@ -3773,14 +3779,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         transcriptionCurrentFile = filename
         transcriptionProgress = 0
+        transcriptionLastRealProgress = 0
         viewModel.syncStatus = "Transcribing \(filename) (\(position)/\(total))…"
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
+
+        // Estimate duration from file size (~8KB/s for 16kHz mono MP3, Whisper ~2x realtime on MPS)
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: item.path)[.size] as? Int) ?? 0
+        let audioDuration = Double(fileSize) / 8000.0
+        transcriptionEstimatedDuration = max(audioDuration / 2.0, 60)  // Whisper ~2x realtime
+        transcriptionStartTime = Date()
+
+        // Start a Swift-side timer for synthetic progress (Python GIL blocks the progress thread)
+        transcriptionProgressTimer?.invalidate()
+        transcriptionProgressTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.transcriptionBusy else { return }
+            guard let startTime = self.transcriptionStartTime else { return }
+            let elapsed = Date().timeIntervalSince(startTime)
+            let frac = min(elapsed / self.transcriptionEstimatedDuration, 0.95)
+            let syntheticPct = max(15, min(Int(15 + frac * 70), 84))
+            // Only use synthetic if real progress hasn't overtaken it
+            let displayPct = max(syntheticPct, self.transcriptionLastRealProgress)
+            self.transcriptionProgress = displayPct
+            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
+                self.pendingTranscriptionQueue[idx].progress = displayPct
+            }
+            self.viewModel.syncStatus = "Transcribing \(filename) — \(displayPct)% (\(position)/\(total))"
+            self.syncViewModelState()
+        }
 
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
         runTranscription(arguments: args, onProgress: { [weak self] pct in
             guard let self = self else { return }
+            self.transcriptionLastRealProgress = pct
             self.transcriptionProgress = pct
             if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
                 self.pendingTranscriptionQueue[idx].progress = pct
@@ -3789,6 +3821,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.syncViewModelState()
         }) { [weak self] result in
             guard let self = self else { return }
+            self.transcriptionProgressTimer?.invalidate()
+            self.transcriptionProgressTimer = nil
             self.transcriptionBusy = false
             self.transcriptionCurrentFile = nil
             self.transcriptionProgress = 0
