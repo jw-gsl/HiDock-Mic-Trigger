@@ -45,3 +45,4 @@ hidock-mic-trigger/Sources/*.bak
 # Feedback token (injected at build time, never committed)
 feedback_token.txt
 Windows-App/core/feedback_token.py
+.claude/worktrees/

@@ -1,21 +1,25 @@
 """Transcript viewer dialog — shows diarized transcript with speaker management."""
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -51,6 +55,14 @@ class TranscriptViewerDialog(QDialog):
         self.json_path = json_path
         self.audio_path = audio_path
         self.transcript: dict = {}
+        self._history: list[dict] = []
+
+        # Audio playback
+        self._player = QMediaPlayer()
+        self._audio_output = QAudioOutput()
+        self._player.setAudioOutput(self._audio_output)
+        self._playing_seg_id: str | None = None
+        self._stop_timer = None
 
         self._load_transcript()
 
@@ -81,6 +93,27 @@ class TranscriptViewerDialog(QDialog):
         top_bar.addWidget(audio_label)
         top_bar.addStretch()
 
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.clicked.connect(self._undo_merge)
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.setShortcut("Ctrl+Z")
+        top_bar.addWidget(self._undo_btn)
+
+        top_bar.addSpacing(8)
+
+        top_bar.addWidget(QLabel("Speakers:"))
+        self._speaker_spin = QSpinBox()
+        self._speaker_spin.setRange(2, 8)
+        self._speaker_spin.setValue(2)
+        self._speaker_spin.setFixedWidth(50)
+        top_bar.addWidget(self._speaker_spin)
+
+        rediarize_btn = QPushButton("Re-diarize")
+        rediarize_btn.clicked.connect(self._rediarize)
+        top_bar.addWidget(rediarize_btn)
+
+        top_bar.addSpacing(8)
+
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self._save_transcript)
         top_bar.addWidget(save_btn)
@@ -101,6 +134,7 @@ class TranscriptViewerDialog(QDialog):
         speaker_names = self.transcript.get("speaker_names", {})
         self._has_speakers = len(speaker_ids) > 1 or bool(speaker_names)
 
+        self._speaker_ids = speaker_ids
         if self._has_speakers:
             for sid in speaker_ids:
                 name = speaker_names.get(str(sid), f"Speaker {sid + 1}")
@@ -113,6 +147,8 @@ class TranscriptViewerDialog(QDialog):
                 )
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.clicked.connect(lambda checked, s=sid: self._rename_speaker(s))
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(lambda pos, s=sid, b=btn: self._show_merge_menu(s, b, pos))
                 legend_layout.addWidget(btn)
 
         legend_layout.addStretch()
@@ -144,8 +180,18 @@ class TranscriptViewerDialog(QDialog):
             row = QHBoxLayout()
             row.setSpacing(8)
 
-            # Timestamp
+            # Play button
             start = seg.get("start", 0.0)
+            end = seg.get("end", start + 5.0)
+            seg_id = f"{seg.get('speaker_id', 0)}-{start}"
+            play_btn = QPushButton("▶")
+            play_btn.setFixedSize(22, 22)
+            play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            play_btn.setStyleSheet("QPushButton { border: none; font-size: 12px; }")
+            play_btn.clicked.connect(lambda checked, s=start, e=end, sid=seg_id: self._play_segment(s, e, sid))
+            row.addWidget(play_btn)
+
+            # Timestamp
             ts_label = QLabel(f"[{_format_time(start)}]")
             ts_label.setFont(QFont("Menlo, Consolas, monospace", 11))
             ts_label.setStyleSheet("color: gray;")
@@ -233,13 +279,122 @@ class TranscriptViewerDialog(QDialog):
             QMessageBox.warning(self, "Save Failed", f"Could not save transcript:\n{e}")
 
     def _refresh_ui(self):
-        """Rebuild the segments display after a rename."""
+        """Rebuild the entire dialog UI after changes."""
         # Clear existing segments
         while self.segments_layout.count():
             child = self.segments_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
         self._populate_segments()
+        self._undo_btn.setEnabled(bool(self._history))
 
-        # Rebuild legend — close and reopen is simpler for full refresh
-        # For now just update segment pills (legend requires full rebuild)
+    def _play_segment(self, start: float, end: float, seg_id: str):
+        """Play audio for a segment's time range."""
+        if self._playing_seg_id == seg_id:
+            self._player.stop()
+            self._playing_seg_id = None
+            return
+
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(self.audio_path))
+        self._player.setPosition(int(start * 1000))
+        self._player.play()
+        self._playing_seg_id = seg_id
+
+        # Stop after segment duration
+        from PyQt6.QtCore import QTimer
+        duration_ms = int((end - start) * 1000)
+        if self._stop_timer:
+            self._stop_timer.stop()
+        self._stop_timer = QTimer(self)
+        self._stop_timer.setSingleShot(True)
+        self._stop_timer.timeout.connect(lambda: self._player.stop())
+        self._stop_timer.start(duration_ms)
+
+    def _show_merge_menu(self, source_id: int, button: QPushButton, pos):
+        """Show context menu to merge this speaker into another."""
+        menu = QMenu(self)
+        speaker_names = self.transcript.get("speaker_names", {})
+        for target_id in self._speaker_ids:
+            if target_id == source_id:
+                continue
+            target_name = speaker_names.get(str(target_id), f"Speaker {target_id + 1}")
+            action = menu.addAction(f"Merge into {target_name}")
+            action.triggered.connect(lambda checked, t=target_id: self._merge_speaker(source_id, t))
+        menu.exec(button.mapToGlobal(pos))
+
+    def _merge_speaker(self, source_id: int, target_id: int):
+        """Merge all segments from source speaker into target."""
+        self._history.append(copy.deepcopy(self.transcript))
+
+        segments = self.transcript.get("segments", [])
+        for seg in segments:
+            if seg.get("speaker_id") == source_id:
+                seg["speaker_id"] = target_id
+
+        # Remove source speaker name
+        speaker_names = self.transcript.get("speaker_names", {})
+        speaker_names.pop(str(source_id), None)
+
+        # Merge consecutive same-speaker segments
+        merged = []
+        for seg in segments:
+            if not seg.get("text", "").strip():
+                continue
+            if merged and merged[-1].get("speaker_id") == seg.get("speaker_id"):
+                merged[-1]["end"] = seg["end"]
+                merged[-1]["text"] += " " + seg.get("text", "").strip()
+            else:
+                merged.append(dict(seg))
+        self.transcript["segments"] = merged
+
+        self._speaker_ids = sorted(set(s.get("speaker_id", 0) for s in merged))
+        self._save_transcript()
+        self._refresh_ui()
+
+    def _undo_merge(self):
+        """Undo the last merge operation."""
+        if not self._history:
+            return
+        self.transcript = self._history.pop()
+        self._speaker_ids = sorted(set(
+            s.get("speaker_id", 0) for s in self.transcript.get("segments", [])
+        ))
+        self._save_transcript()
+        self._refresh_ui()
+
+    def _rediarize(self):
+        """Re-run speaker diarization without re-transcribing."""
+        n_speakers = self._speaker_spin.value()
+        try:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            script = repo_root / "transcription-pipeline" / "transcribe.py"
+            if not script.exists():
+                QMessageBox.warning(self, "Error", "Transcription script not found")
+                return
+
+            self.setWindowTitle("Re-diarizing…")
+            import threading
+
+            def _run():
+                try:
+                    cmd = [
+                        sys.executable, str(script),
+                        "rediarize", self.json_path,
+                        "--n-speakers", str(n_speakers),
+                    ]
+                    subprocess.run(cmd, capture_output=True, check=True)
+                    # Reload and refresh
+                    self._load_transcript()
+                    self._speaker_ids = sorted(set(
+                        s.get("speaker_id", 0) for s in self.transcript.get("segments", [])
+                    ))
+                    self._refresh_ui()
+                    self.setWindowTitle(f"Transcript — {self.transcript.get('audio_file', '')}")
+                except Exception as e:
+                    print(f"Re-diarize failed: {e}")
+                    self.setWindowTitle(f"Re-diarize failed")
+
+            threading.Thread(target=_run, daemon=True).start()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Re-diarize failed:\n{e}")
