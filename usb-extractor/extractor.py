@@ -1003,14 +1003,19 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         if owner:
             error += f" — device held by {owner}"
         payload["error"] = error
-        payload["recordings"] = build_recording_status_items([], state, output_dir, product_id=product_id)
+        # Use cached catalog so recordings persist when device is disconnected
+        cache_key = str(product_id) if product_id else "default"
+        cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+        payload["recordings"] = build_recording_status_items(cached_recs, state, output_dir, product_id=product_id)
         return payload
 
     try:
         interface_number = prepare_device(dev)
     except usb.core.USBError as exc:
         payload["error"] = _enrich_usb_error(str(exc), product_id)
-        payload["recordings"] = build_recording_status_items([], state, output_dir, product_id=product_id)
+        cache_key = str(product_id) if product_id else "default"
+        cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+        payload["recordings"] = build_recording_status_items(cached_recs, state, output_dir, product_id=product_id)
         return payload
 
     try:
