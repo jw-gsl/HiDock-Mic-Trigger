@@ -614,7 +614,6 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
             try:
                 offset_payload = struct.pack(">I", parsed_so_far)
                 req = build_simple_request(CMD_QUERY_FILE_LIST, next_req_id, offset_payload)
-                drain_input(dev)
                 dev.write(OUT_ENDPOINT, req, timeout=timeout_ms)
 
                 pending = b""
