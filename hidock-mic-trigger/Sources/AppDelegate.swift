@@ -3296,7 +3296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     entries.first(where: { $0.recording.outputName == d.filename.replacingOccurrences(of: ".hda", with: ".mp3") })?.recording.outputPath
                         ?? "\(self.syncOutputFolder ?? "")/\(d.filename.replacingOccurrences(of: ".hda", with: ".mp3"))"
                 }
-                if !paths.isEmpty, self.ensureTranscriptionReady() {
+                if !paths.isEmpty, self.syncAutoTranscribe, self.ensureTranscriptionReady() {
                     self.enqueueTranscriptions(paths)
                 }
             case .failure(let error):
