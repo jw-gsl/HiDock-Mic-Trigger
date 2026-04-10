@@ -20,6 +20,8 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncHideDownloaded = false
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
+    @Published var mergeGroups: [MergeGroup] = []
+    @Published var expandedMergeGroups: Set<String> = []
     @Published var syncBusy = false
     @Published var syncDownloading = false
     @Published var syncDownloadProgress: String?
@@ -85,6 +87,35 @@ final class HiDockViewModel: ObservableObject {
         return entries
     }
 
+    /// Build the display list with merge groups expanded/collapsed
+    var displayRows: [DisplayRow] {
+        let entries = visibleEntries
+        // Collect all child names across all merge groups
+        let allChildNames = Set(mergeGroups.flatMap(\.childNames))
+
+        var rows: [DisplayRow] = []
+        var insertedGroups = Set<String>()
+
+        for entry in entries {
+            // Check if this entry is a child of a merge group
+            if let group = mergeGroups.first(where: { $0.childNames.contains(entry.recording.name) }) {
+                // Insert the merge parent row at the position of the first child we encounter
+                if !insertedGroups.contains(group.id) {
+                    insertedGroups.insert(group.id)
+                    rows.append(.mergeParent(group))
+                }
+                // Show child only if the group is expanded
+                if expandedMergeGroups.contains(group.id) {
+                    rows.append(.mergeChild(entry))
+                }
+            } else {
+                rows.append(.recording(entry))
+            }
+        }
+
+        return rows
+    }
+
     var hasSelection: Bool {
         !syncCheckedRecordings.isEmpty
     }
@@ -135,6 +166,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleHideDownloaded: () -> Void = {}
     var onToggleAutoDownload: () -> Void = {}
     var onToggleAutoTranscribe: () -> Void = {}
+    var onToggleMergeExpand: (String) -> Void = { _ in }
     var onTranscribeSelected: () -> Void = {}
     var onTranscribeAll: () -> Void = {}
     var onToggleDiarize: () -> Void = {}

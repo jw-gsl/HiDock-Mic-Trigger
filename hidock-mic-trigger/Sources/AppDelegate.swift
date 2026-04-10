@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncAutoDownload = false
     private var syncAutoTranscribe = false
     private let syncAutoTranscribeKey = "hidockSyncAutoTranscribe"
+    private var mergeGroups: [MergeGroup] = []
+    private let mergeGroupsPath = "\(NSHomeDirectory())/HiDock/merge_groups.json"
     private var diarizeEnabled = false
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
@@ -205,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         loadCachedRecordings()
+        loadMergeGroups()
         showSyncWindow()
 
         // Show onboarding wizard on first run
@@ -366,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onToggleAutoTranscribe = { [weak self] in self?.toggleAutoTranscribe() }
+        viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onTranscribeAll = { [weak self] in self?.transcribeAllRecordings() }
         viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
@@ -1755,9 +1759,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Merged \(entries.count) recordings → \(outputPath)")
                     self.viewModel.syncStatus = "Merged → \(outputName)"
                     self.viewModel.syncStatusLevel = .success
+
+                    // Save merge group for tree display
+                    let totalDuration = entries.reduce(0.0) { $0 + $1.recording.duration }
+                    let group = MergeGroup(
+                        outputPath: outputPath,
+                        childNames: entries.map(\.recording.name),
+                        totalDuration: totalDuration
+                    )
+                    self.mergeGroups.append(group)
+                    self.saveMergeGroups()
+
                     self.syncCheckedRecordings.removeAll()
                     self.refreshSyncStatus()
-                    // Reveal the merged file
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: outputPath)])
                 } else {
                     self.viewModel.syncStatus = "Merge failed"
@@ -1766,6 +1780,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.syncViewModelState()
             }
+        }
+    }
+
+    private func saveMergeGroups() {
+        do {
+            let data = try JSONEncoder().encode(mergeGroups)
+            try data.write(to: URL(fileURLWithPath: mergeGroupsPath))
+        } catch {
+            log("Failed to save merge groups: \(error)")
+        }
+        viewModel.mergeGroups = mergeGroups
+        syncViewModelState()
+    }
+
+    private func loadMergeGroups() {
+        guard FileManager.default.fileExists(atPath: mergeGroupsPath),
+              let data = FileManager.default.contents(atPath: mergeGroupsPath),
+              let groups = try? JSONDecoder().decode([MergeGroup].self, from: data) else {
+            return
+        }
+        mergeGroups = groups
+        viewModel.mergeGroups = groups
+    }
+
+    private func toggleMergeExpand(_ groupId: String) {
+        if viewModel.expandedMergeGroups.contains(groupId) {
+            viewModel.expandedMergeGroups.remove(groupId)
+        } else {
+            viewModel.expandedMergeGroups.insert(groupId)
         }
     }
 

@@ -212,8 +212,40 @@ struct HiDockSyncRecordingEntry: Identifiable {
     }
 }
 
+enum DisplayRow: Identifiable {
+    case recording(HiDockSyncRecordingEntry)
+    case mergeParent(MergeGroup)
+    case mergeChild(HiDockSyncRecordingEntry)
+
+    var id: String {
+        switch self {
+        case .recording(let e): return e.id
+        case .mergeParent(let g): return "merge-\(g.id)"
+        case .mergeChild(let e): return "child-\(e.id)"
+        }
+    }
+}
+
 enum StatusLevel {
     case normal, success, warning, error, info, secondary
+}
+
+struct MergeGroup: Codable, Identifiable {
+    let id: String
+    let outputPath: String
+    let outputName: String
+    let childNames: [String]  // recording names (e.g. "2026Apr10-130151-Rec07.hda")
+    let createdAt: String
+    let totalDuration: Double
+
+    init(outputPath: String, childNames: [String], totalDuration: Double) {
+        self.id = outputPath
+        self.outputPath = outputPath
+        self.outputName = (outputPath as NSString).lastPathComponent
+        self.childNames = childNames
+        self.createdAt = ISO8601DateFormatter().string(from: Date())
+        self.totalDuration = totalDuration
+    }
 }
 
 struct TranscriptionQueueItem: Identifiable {
