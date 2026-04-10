@@ -125,11 +125,11 @@ struct RecordingsTableView: View {
                     }
                 }
 
-                if entry.recording.downloaded {
+                if entry.recording.downloaded && !entry.recording.localExists {
                     Button {
                         viewModel.onUnmarkDownloaded()
                     } label: {
-                        Label("Unmark Downloaded", systemImage: "arrow.uturn.backward.circle")
+                        Label("Unmark", systemImage: "arrow.uturn.backward.circle")
                     }
                 }
 

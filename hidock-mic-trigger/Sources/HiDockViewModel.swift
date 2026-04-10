@@ -88,10 +88,12 @@ final class HiDockViewModel: ObservableObject {
         !syncCheckedRecordings.isEmpty
     }
 
-    var allSelectedDownloaded: Bool {
+    var anySelectedMarkedOnly: Bool {
+        // "Marked" = downloaded flag set but file doesn't exist locally (skipped)
         guard hasSelection else { return false }
-        let selected = syncEntries.filter { syncCheckedRecordings.contains($0.recording.name) }
-        return !selected.isEmpty && selected.allSatisfy { $0.recording.downloaded }
+        return syncEntries.contains {
+            syncCheckedRecordings.contains($0.recording.name) && $0.recording.downloaded && !$0.recording.localExists
+        }
     }
 
     var needsTaggingCount: Int {
