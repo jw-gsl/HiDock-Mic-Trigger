@@ -121,9 +121,8 @@ struct RecordingsTableView: View {
             StatusBadge(text: "Merged", level: .info)
                 .frame(width: 110, alignment: .leading)
 
-            // Transcribed (placeholder — TODO: track merged file transcription)
-            Text("—")
-                .foregroundColor(.secondary.opacity(0.5))
+            // Transcription state for merged file
+            mergeTranscriptionIndicator(group: group)
                 .frame(width: 90, alignment: .leading)
 
             // Recording name — truncate to match regular row length
@@ -169,6 +168,48 @@ struct RecordingsTableView: View {
         }
         .font(.system(size: 12))
         .padding(.vertical, 1)
+    }
+
+    @ViewBuilder
+    private func mergeTranscriptionIndicator(group: MergeGroup) -> some View {
+        // Check if the merged file has a transcript
+        let mp3Name = (group.outputPath as NSString).lastPathComponent
+        let entry = viewModel.syncEntries.first { $0.recording.outputName == mp3Name }
+
+        if let entry = entry, entry.transcribed && entry.speakersTagged {
+            Button {
+                if let path = entry.transcriptPath {
+                    viewModel.onOpenTranscriptViewer(path)
+                }
+            } label: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            }
+            .buttonStyle(.plain)
+            .help("Transcribed and tagged")
+        } else if let entry = entry, entry.transcribed && !entry.speakersTagged {
+            Button {
+                if let path = entry.transcriptPath {
+                    viewModel.onOpenTranscriptViewer(path)
+                }
+            } label: {
+                Image(systemName: "tag.fill")
+                    .foregroundColor(.orange)
+            }
+            .buttonStyle(.plain)
+            .help("Needs speaker tagging")
+        } else if viewModel.transcriptionBusy && viewModel.transcriptionCurrentFile == mp3Name {
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("\(viewModel.transcriptionProgress)%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.orange)
+            }
+        } else {
+            Text("—")
+                .foregroundColor(.secondary.opacity(0.5))
+        }
     }
 
     private func humanSize(_ bytes: Int) -> String {
