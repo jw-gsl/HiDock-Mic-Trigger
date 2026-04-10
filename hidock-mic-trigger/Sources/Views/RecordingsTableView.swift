@@ -127,8 +127,8 @@ struct RecordingsTableView: View {
                 .frame(width: 90, alignment: .leading)
 
             // Recording name — truncate to match regular row length
-            let displayName = group.outputName.count > 35
-                ? String(group.outputName.prefix(32)) + "…"
+            let displayName = group.outputName.count > 30
+                ? String(group.outputName.prefix(28)) + "…"
                 : group.outputName
             Text(displayName)
                 .lineLimit(1)
