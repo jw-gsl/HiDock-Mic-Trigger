@@ -28,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncCheckedRecordings: Set<String> = []
     private var syncHideDownloaded = false
     private var syncAutoDownload = false
+    private var syncAutoTranscribe = false
+    private let syncAutoTranscribeKey = "hidockSyncAutoTranscribe"
     private var diarizeEnabled = false
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
@@ -321,6 +323,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncHideDownloaded = viewModel.syncHideDownloaded
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
+        viewModel.syncAutoTranscribe = UserDefaults.standard.bool(forKey: syncAutoTranscribeKey)
+        syncAutoTranscribe = viewModel.syncAutoTranscribe
         // Default diarization to ON — speaker labels are almost always wanted
         if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "diarizeEnabled")
@@ -361,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onUnmarkDownloaded = { [weak self] in self?.unmarkSyncRecordingsAsDownloaded() }
         viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
+        viewModel.onToggleAutoTranscribe = { [weak self] in self?.toggleAutoTranscribe() }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onTranscribeAll = { [weak self] in self?.transcribeAllRecordings() }
         viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
@@ -468,6 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncCheckedRecordings = syncCheckedRecordings
         viewModel.syncHideDownloaded = syncHideDownloaded
         viewModel.syncAutoDownload = syncAutoDownload
+        viewModel.syncAutoTranscribe = syncAutoTranscribe
         viewModel.diarizeEnabled = diarizeEnabled
         viewModel.syncFilterDeviceId = syncFilterDeviceId
         viewModel.syncPairedDevices = syncPairedDevices
@@ -2788,6 +2794,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    private func toggleAutoTranscribe() {
+        syncAutoTranscribe.toggle()
+        UserDefaults.standard.set(syncAutoTranscribe, forKey: syncAutoTranscribeKey)
+        syncViewModelState()
+    }
+
     private func toggleDiarize() {
         diarizeEnabled.toggle()
         UserDefaults.standard.set(diarizeEnabled, forKey: "diarizeEnabled")
@@ -3151,8 +3163,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
             if let error = anyError {
-                self.showError("Failed to mark recordings:\n\(error)")
+                self.showError("Failed to skip recordings:\n\(error)")
             }
+            self.syncCheckedRecordings.removeAll()
             self.refreshSyncStatus()
         }
     }
@@ -3192,8 +3205,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
             if let error = anyError {
-                self.showError("Failed to unmark recordings:\n\(error)")
+                self.showError("Failed to unskip recordings:\n\(error)")
             }
+            self.syncCheckedRecordings.removeAll()
             self.refreshSyncStatus()
         }
     }
@@ -3367,26 +3381,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
             viewModel.syncStatusLevel = .success
             refreshSyncStatus()
-            if totalDownloaded > 0, ensureTranscriptionReady(), !transcriptionBusy {
-                transcriptionBusy = true
-                syncViewModelState()
-                var batchArgs = ["transcribe-batch"]
-                if diarizeEnabled { batchArgs.append("--diarize") }
-                runTranscription(arguments: batchArgs) { [weak self] result in
-                    guard let self = self else { return }
-                    self.transcriptionBusy = false
-                    if case .success(let data) = result,
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let succeeded = json["succeeded"] as? Int, succeeded > 0 {
-                        let transcriptFolder = self.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
-                        self.postTranscriptionNotification(
-                            title: "📝 Transcription Complete",
-                            body: "\(succeeded) new recording\(succeeded == 1 ? "" : "s") transcribed.",
-                            transcriptPath: transcriptFolder
-                        )
-                    }
-                    self.refreshTranscriptionState()
-                    self.syncViewModelState()
+            if totalDownloaded > 0, self.syncAutoTranscribe, ensureTranscriptionReady() {
+                // Queue newly downloaded recordings for transcription
+                let newPaths = self.syncEntries
+                    .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
+                    .map(\.recording.outputPath)
+                if !newPaths.isEmpty {
+                    self.enqueueTranscriptions(newPaths)
                 }
             }
             syncViewModelState()

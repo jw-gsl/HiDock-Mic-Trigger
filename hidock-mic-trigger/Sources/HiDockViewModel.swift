@@ -19,6 +19,7 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncCheckedRecordings: Set<String> = []
     @Published var syncHideDownloaded = false
     @Published var syncAutoDownload = false
+    @Published var syncAutoTranscribe = false
     @Published var syncBusy = false
     @Published var syncDownloading = false
     @Published var syncDownloadProgress: String?
@@ -133,6 +134,7 @@ final class HiDockViewModel: ObservableObject {
     var onUnmarkDownloaded: () -> Void = {}
     var onToggleHideDownloaded: () -> Void = {}
     var onToggleAutoDownload: () -> Void = {}
+    var onToggleAutoTranscribe: () -> Void = {}
     var onTranscribeSelected: () -> Void = {}
     var onTranscribeAll: () -> Void = {}
     var onToggleDiarize: () -> Void = {}

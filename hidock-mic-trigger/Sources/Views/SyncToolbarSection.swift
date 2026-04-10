@@ -140,6 +140,12 @@ struct SyncToolbarSection: View {
                     set: { _ in viewModel.onToggleAutoDownload() }
                 ))
                 .toggleStyle(.checkbox)
+
+                Toggle("Auto-transcribe", isOn: Binding(
+                    get: { viewModel.syncAutoTranscribe },
+                    set: { _ in viewModel.onToggleAutoTranscribe() }
+                ))
+                .toggleStyle(.checkbox)
             }
             .font(.caption)
             .buttonStyle(.bordered)
