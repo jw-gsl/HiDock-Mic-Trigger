@@ -3437,13 +3437,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
             viewModel.syncStatusLevel = .success
             refreshSyncStatus()
-            if totalDownloaded > 0, self.syncAutoTranscribe, ensureTranscriptionReady() {
-                // Queue newly downloaded recordings for transcription
-                let newPaths = self.syncEntries
+            // Auto-transcribe any untranscribed downloaded files
+            if self.syncAutoTranscribe, ensureTranscriptionReady() {
+                // Refresh entries first to get latest state
+                let untranscribed = self.syncEntries
                     .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
                     .map(\.recording.outputPath)
-                if !newPaths.isEmpty {
-                    self.enqueueTranscriptions(newPaths)
+                if !untranscribed.isEmpty {
+                    self.log("Auto-transcribe: \(untranscribed.count) untranscribed recording(s) found")
+                    self.enqueueTranscriptions(untranscribed)
                 }
             }
             syncViewModelState()
@@ -3767,11 +3769,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard !syncDownloading else { return }
         transcriptionCancelled = false
 
+        // Collect paths from regular selections AND checked merge groups
+        var mergedPaths: [String] = []
+        for group in mergeGroups {
+            if syncCheckedRecordings.contains("merge:\(group.id)"),
+               FileManager.default.fileExists(atPath: group.outputPath) {
+                mergedPaths.append(group.outputPath)
+            }
+        }
+
         let selected = selectedSyncEntries()
-        guard !selected.isEmpty else {
+        guard !selected.isEmpty || !mergedPaths.isEmpty else {
             log("Transcribe selected: no recordings selected")
             viewModel.syncStatus = "No recordings selected"
             viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+
+        // If only merged files selected, enqueue them directly
+        if selected.isEmpty && !mergedPaths.isEmpty {
+            log("Transcribe selected: \(mergedPaths.count) merged file(s)")
+            enqueueTranscriptions(mergedPaths)
+            syncCheckedRecordings.removeAll()
             syncViewModelState()
             return
         }
