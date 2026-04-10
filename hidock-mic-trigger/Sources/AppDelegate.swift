@@ -1682,10 +1682,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
 
     private func mergeSelectedRecordings() {
-        let entries = selectedSyncEntries()
+        let selected = selectedSyncEntries()
+        let entries = selected
             .filter { $0.recording.downloaded && $0.recording.localExists }
             .sorted { "\($0.recording.createDate) \($0.recording.createTime)" < "\($1.recording.createDate) \($1.recording.createTime)" }
-        guard entries.count >= 2 else { return }
+        guard entries.count >= 2 else {
+            let total = selected.count
+            let local = selected.filter { $0.recording.localExists }.count
+            log("Merge: \(total) selected, \(local) have local files, need 2+ downloaded files")
+            if total >= 2 && local < 2 {
+                viewModel.syncStatus = "Merge requires 2+ downloaded recordings (only \(local) available locally)"
+                viewModel.syncStatusLevel = .warning
+                syncViewModelState()
+            }
+            return
+        }
         guard FileManager.default.fileExists(atPath: ffmpegPath) else {
             showError("ffmpeg not found at \(ffmpegPath).\nInstall with: brew install ffmpeg")
             return
