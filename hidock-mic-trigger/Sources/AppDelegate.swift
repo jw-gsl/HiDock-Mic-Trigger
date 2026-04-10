@@ -1716,9 +1716,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             counter += 1
         }
 
+        log("Merging \(entries.count) recordings into \(outputPath)")
         viewModel.syncStatus = "Merging \(entries.count) recordings…"
         viewModel.syncStatusLevel = .secondary
-        viewModel.syncBusy = true
         syncViewModelState()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1739,7 +1739,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 process.waitUntilExit()
             } catch {
                 DispatchQueue.main.async {
-                    self.viewModel.syncBusy = false
                     self.viewModel.syncStatus = "Merge failed"
                     self.viewModel.syncStatusLevel = .error
                     self.showError("Merge failed: \(error.localizedDescription)")
@@ -1751,12 +1750,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? FileManager.default.removeItem(atPath: listPath)
 
             DispatchQueue.main.async {
-                self.viewModel.syncBusy = false
                 if process.terminationStatus == 0 {
+                    let outputName = (outputPath as NSString).lastPathComponent
                     self.log("Merged \(entries.count) recordings → \(outputPath)")
-                    self.viewModel.syncStatus = "Merged \(entries.count) recordings"
+                    self.viewModel.syncStatus = "Merged → \(outputName)"
                     self.viewModel.syncStatusLevel = .success
+                    self.syncCheckedRecordings.removeAll()
                     self.refreshSyncStatus()
+                    // Reveal the merged file
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: outputPath)])
                 } else {
                     self.viewModel.syncStatus = "Merge failed"
                     self.viewModel.syncStatusLevel = .error
@@ -3922,16 +3924,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func cancelTranscription() {
         log("Transcription cancelled by user")
         transcriptionCancelled = true
-        transcriptionBusy = false
         transcriptionPaused = false
-        transcriptionCurrentFile = nil
-        transcriptionProgress = 0
-        // Mark remaining queued items as cancelled
+
+        // Stop the progress timer
+        transcriptionProgressTimer?.invalidate()
+        transcriptionProgressTimer = nil
+
+        // Mark the currently transcribing item as cancelled
         for i in pendingTranscriptionQueue.indices {
+            if pendingTranscriptionQueue[i].status == .transcribing {
+                pendingTranscriptionQueue[i].status = .cancelled
+            }
             if pendingTranscriptionQueue[i].status == .queued {
                 pendingTranscriptionQueue[i].status = .cancelled
             }
         }
+
+        transcriptionBusy = false
+        transcriptionCurrentFile = nil
+        transcriptionProgress = 0
         viewModel.syncStatus = "Transcription cancelled"
         viewModel.syncStatusLevel = .warning
         syncViewModelState()

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import AVFoundation
 
@@ -158,12 +159,22 @@ struct TranscriptViewerView: View {
                 }
 
                 Button {
+                    copyAllToClipboard()
+                } label: {
+                    Label("Copy All", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+
+                Button {
                     saveTranscript()
                 } label: {
                     Label("Save", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Save speaker name changes to the transcript JSON file")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -310,6 +321,22 @@ struct TranscriptViewerView: View {
         }
 
         saveTranscript()
+    }
+
+    private func copyAllToClipboard() {
+        var lines: [String] = []
+        for seg in transcript.segments {
+            let ts = "[\(formatTime(seconds: seg.start))]"
+            if hasSpeakers {
+                let name = speakerName(for: seg.speakerId)
+                lines.append("\(ts) \(name): \(seg.text)")
+            } else {
+                lines.append("\(ts) \(seg.text)")
+            }
+        }
+        let text = lines.joined(separator: "\n\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func undoMerge() {
