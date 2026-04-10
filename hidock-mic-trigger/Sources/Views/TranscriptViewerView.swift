@@ -123,6 +123,45 @@ struct TranscriptViewerView: View {
         transcript.speakerNames["\(id)"] ?? "Speaker \(id + 1)"
     }
 
+    // MARK: - Computed Stats
+
+    private struct SpeakerStats {
+        let speakerId: Int
+        var talkTime: Double = 0
+        var wordCount: Int = 0
+        var turns: Int = 0
+        var longestMonologue: Double = 0
+    }
+
+    private var speakerStats: [SpeakerStats] {
+        var stats: [Int: SpeakerStats] = [:]
+        var prevSpeaker: Int? = nil
+
+        for seg in transcript.segments {
+            let dur = seg.end - seg.start
+            let words = seg.text.split(separator: " ").count
+            let id = seg.speakerId
+
+            if stats[id] == nil {
+                stats[id] = SpeakerStats(speakerId: id)
+            }
+            stats[id]!.talkTime += dur
+            stats[id]!.wordCount += words
+            stats[id]!.longestMonologue = max(stats[id]!.longestMonologue, dur)
+            if prevSpeaker != id {
+                stats[id]!.turns += 1
+            }
+            prevSpeaker = id
+        }
+
+        return stats.values.sorted { $0.talkTime > $1.talkTime }
+    }
+
+    private var totalDuration: Double {
+        guard let first = transcript.segments.first, let last = transcript.segments.last else { return 0 }
+        return last.end - first.start
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Top bar
@@ -183,6 +222,12 @@ struct TranscriptViewerView: View {
 
             Divider()
 
+            // Stats header
+            if hasSpeakers && !speakerStats.isEmpty {
+                statsHeader
+                Divider()
+            }
+
             // Speaker legend (only for diarized transcripts)
             if hasSpeakers {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -219,6 +264,46 @@ struct TranscriptViewerView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 400)
+    }
+
+    // MARK: - Stats Header
+
+    private var statsHeader: some View {
+        HStack(spacing: 12) {
+            Text(formatTime(seconds: totalDuration))
+                .font(.caption.weight(.medium))
+                .foregroundColor(.secondary)
+
+            // Talk time split per speaker — visual bars
+            let totalTalk = speakerStats.reduce(0.0) { $0 + $1.talkTime }
+            ForEach(speakerStats, id: \.speakerId) { stat in
+                let pct = totalTalk > 0 ? stat.talkTime / totalTalk * 100 : 0
+                let color = colorForSpeaker(stat.speakerId)
+                let wpm = stat.talkTime > 0 ? Int(Double(stat.wordCount) / (stat.talkTime / 60)) : 0
+                HStack(spacing: 4) {
+                    Circle().fill(color).frame(width: 6, height: 6)
+                    Text("\(speakerName(for: stat.speakerId)) \(String(format: "%.0f%%", pct))  \(wpm)wpm")
+                        .font(.caption)
+                }
+            }
+
+            // Stacked bar showing the split visually
+            GeometryReader { geo in
+                HStack(spacing: 1) {
+                    ForEach(speakerStats, id: \.speakerId) { stat in
+                        let frac = totalTalk > 0 ? stat.talkTime / totalTalk : 0
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(colorForSpeaker(stat.speakerId).opacity(0.7))
+                            .frame(width: max(2, geo.size.width * CGFloat(frac)))
+                    }
+                }
+            }
+            .frame(width: 120, height: 10)
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
     }
 
     // MARK: - Subviews
