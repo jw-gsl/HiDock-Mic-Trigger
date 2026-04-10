@@ -126,11 +126,14 @@ struct RecordingsTableView: View {
                 .foregroundColor(.secondary.opacity(0.5))
                 .frame(width: 90, alignment: .leading)
 
-            // Recording name
-            Text(group.outputName)
+            // Recording name — truncate to match regular row length
+            let displayName = group.outputName.count > 35
+                ? String(group.outputName.prefix(32)) + "…"
+                : group.outputName
+            Text(displayName)
                 .lineLimit(1)
-                .truncationMode(.middle)
                 .frame(width: 220, alignment: .leading)
+                .clipped()
 
             // Created (earliest child)
             Text(earliestDate)
