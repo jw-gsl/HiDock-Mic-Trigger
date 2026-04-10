@@ -168,13 +168,14 @@ struct TranscriptViewerView: View {
                 .keyboardShortcut("c", modifiers: [.command, .shift])
 
                 Button {
-                    saveTranscript()
+                    // Reveal the markdown transcript file in Finder
+                    let mdPath = filePath.replacingOccurrences(of: "_diarized.json", with: ".md")
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: mdPath)])
                 } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
+                    Label("Show File", systemImage: "folder")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Save speaker name changes to the transcript JSON file")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
