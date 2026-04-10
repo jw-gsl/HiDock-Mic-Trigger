@@ -1648,12 +1648,23 @@ def main() -> int:
     if args.command == "mark-downloaded":
         state = load_state()
         downloads = state["downloads"]
+        config = load_config()
+        output_dir = resolved_output_dir(config)
+        # Look up catalog for size info when marking new entries
+        cache_key = str(args.product_id) if args.product_id else "default"
+        cached_recs = {r["name"]: r for r in state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])}
         marked = []
         vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
         for filename in args.filenames:
             state_key = f"{vol_prefix}{filename}"
+            existing = downloads.get(state_key, {})
+            # Populate length/output_path from catalog if not already set
+            if not existing.get("length") and filename in cached_recs:
+                existing.setdefault("length", cached_recs[filename].get("length"))
+            if not existing.get("output_path"):
+                existing["output_path"] = str(output_path_for(filename, output_dir))
             record = {
-                **downloads.get(state_key, {}),
+                **existing,
                 "downloaded": True,
                 "downloaded_at": utc_now_iso(),
                 "updated_at": utc_now_iso(),
