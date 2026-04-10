@@ -1,16 +1,13 @@
 """Lightweight speaker diarization using Silero VAD + speaker embeddings.
 
-Detects speech segments via Silero VAD (ONNX), extracts speaker embeddings
-(neural TitaNet when available, MFCC fallback otherwise), and clusters them
-with agglomerative clustering to assign speaker labels to whisper transcript
-segments.
-
-Key improvements for HiDock audio:
-- Audio normalization before VAD (handles varying recording levels)
-- Whisper-segment-based embedding extraction (more granular than VAD)
-- Fallback to Whisper boundaries when VAD detects too little speech
-- Max segment duration cap to prevent monster merged blocks
-- Minimum 2 speakers for meetings >5 minutes
+Techniques inspired by silverstein/minutes:
+- Audio normalization with peak-based retry for VAD
+- Running-average speaker templates for better clustering
+- Minimum 1.5s segment threshold for embeddings (short segments inherit)
+- Post-clustering merge pass for over-split speakers
+- Silence-to-padding replacement to prevent Whisper hallucination
+- Whisper boundary fallback when VAD detects too little speech
+- Max segment duration cap to prevent monster blocks
 """
 from __future__ import annotations
 
@@ -19,18 +16,19 @@ from pathlib import Path
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import cosine as cosine_distance
 
 from shared.audio_utils import extract_embedding, load_audio, segment_audio
 from shared.models import ensure_silero_vad
 
-# Silero VAD operates on 16kHz audio in chunks
 _VAD_SR = 16000
 _VAD_WINDOW_SIZE = 256  # 16ms at 16kHz (Silero VAD v5)
 
 # Quality thresholds
-_MIN_VAD_SEGMENTS_PER_MINUTE = 1.0  # Below this, VAD is failing
-_MAX_MERGED_SEGMENT_SECONDS = 90.0  # Cap merged segments at this duration
-_MIN_SPEAKERS_FOR_LONG_AUDIO = 2  # Force at least 2 speakers for >5min audio
+_MIN_VAD_SEGMENTS_PER_MINUTE = 1.0
+_MAX_MERGED_SEGMENT_SECONDS = 90.0
+_MIN_SPEAKERS_FOR_LONG_AUDIO = 2
+_MIN_EMBEDDING_DURATION = 1.5  # Skip segments shorter than this for embedding
 
 _vad_session = None
 _speaker_embed_session = None
@@ -41,14 +39,9 @@ def load_vad_model():
     global _vad_session
     if _vad_session is not None:
         return _vad_session
-
     import onnxruntime as ort
-
     model_path = ensure_silero_vad()
-    _vad_session = ort.InferenceSession(
-        str(model_path),
-        providers=["CPUExecutionProvider"],
-    )
+    _vad_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     return _vad_session
 
 
@@ -57,18 +50,11 @@ def _load_speaker_embed_model():
     global _speaker_embed_session
     if _speaker_embed_session is not None:
         return _speaker_embed_session
-
     try:
         from shared.models import ensure_speaker_embed
-
         model_path = ensure_speaker_embed()
-
         import onnxruntime as ort
-
-        _speaker_embed_session = ort.InferenceSession(
-            str(model_path),
-            providers=["CPUExecutionProvider"],
-        )
+        _speaker_embed_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         return _speaker_embed_session
     except ImportError:
         return None
@@ -77,27 +63,76 @@ def _load_speaker_embed_model():
         return None
 
 
-def _normalize_audio(audio: np.ndarray, target_rms: float = 0.06) -> np.ndarray:
-    """Normalize audio to a consistent RMS level.
+# ── Audio Preprocessing (inspired by minutes) ──────────────────────────────
 
-    HiDock recordings vary in level (RMS 0.005-0.063). The Silero VAD
-    produces near-zero probabilities below RMS ~0.04. Normalizing to
-    a consistent level ensures VAD works reliably.
-    """
+def _normalize_audio(audio: np.ndarray, target_rms: float = 0.06) -> np.ndarray:
+    """Normalize audio to a consistent RMS level for VAD."""
     rms = np.sqrt(np.mean(audio ** 2))
     if rms < 1e-6:
-        return audio  # silence, don't amplify noise
-    gain = target_rms / rms
-    # Clamp gain to avoid extreme amplification of very quiet recordings
-    gain = min(gain, 20.0)
-    normalized = audio * gain
-    # Clip to prevent clipping
-    return np.clip(normalized, -1.0, 1.0).astype(np.float32)
+        return audio
+    gain = min(target_rms / rms, 20.0)
+    return np.clip(audio * gain, -1.0, 1.0).astype(np.float32)
 
+
+def _normalize_peak(audio: np.ndarray, target_peak: float = 0.5) -> np.ndarray:
+    """Normalize audio by peak amplitude (minutes approach for retry)."""
+    peak = np.max(np.abs(audio))
+    if peak < 1e-6:
+        return audio
+    gain = min(target_peak / peak, 20.0)
+    return np.clip(audio * gain, -1.0, 1.0).astype(np.float32)
+
+
+def _replace_silence_with_padding(
+    audio: np.ndarray, sr: int = 16000,
+    silence_threshold_s: float = 0.5, padding_s: float = 0.3,
+) -> np.ndarray:
+    """Replace long silence with short padding to prevent Whisper hallucination loops.
+
+    From minutes: silence >500ms is replaced with 300ms of zeros, giving
+    Whisper a natural segment boundary without triggering repetitive output.
+    """
+    chunk_size = int(0.05 * sr)  # 50ms chunks
+    padding_samples = int(padding_s * sr)
+    silence_chunks_needed = int(silence_threshold_s / 0.05)
+
+    rms_values = []
+    for i in range(0, len(audio) - chunk_size + 1, chunk_size):
+        rms = np.sqrt(np.mean(audio[i:i + chunk_size] ** 2))
+        rms_values.append(rms)
+
+    if not rms_values:
+        return audio
+
+    # Adaptive noise floor from quietest 20% (minutes approach)
+    sorted_rms = sorted(rms_values)
+    noise_floor = sorted_rms[len(sorted_rms) // 5] * 4
+
+    result_chunks = []
+    silence_count = 0
+    for i, rms in enumerate(rms_values):
+        start = i * chunk_size
+        end = start + chunk_size
+        if rms < noise_floor:
+            silence_count += 1
+            if silence_count == silence_chunks_needed:
+                # Replace accumulated silence with short padding
+                result_chunks.append(np.zeros(padding_samples, dtype=np.float32))
+            elif silence_count > silence_chunks_needed:
+                continue  # Skip additional silence
+            else:
+                result_chunks.append(audio[start:end])
+        else:
+            silence_count = 0
+            result_chunks.append(audio[start:end])
+
+    return np.concatenate(result_chunks) if result_chunks else audio
+
+
+# ── VAD ─────────────────────────────────────────────────────────────────────
 
 def detect_speech_segments(
-    audio: np.ndarray,
-    sr: int = 16000,
+    audio: np.ndarray, sr: int = 16000,
     threshold: float = 0.08,
     min_speech_duration: float = 0.15,
     min_silence_duration: float = 1.5,
@@ -107,57 +142,42 @@ def detect_speech_segments(
         raise ValueError(f"Silero VAD requires {_VAD_SR}Hz audio, got {sr}Hz")
 
     session = load_vad_model()
-
     state = np.zeros((2, 1, 128), dtype=np.float32)
     sr_tensor = np.array(_VAD_SR, dtype=np.int64)
 
-    n_samples = len(audio)
     speech_probs = []
-
-    for i in range(0, n_samples - _VAD_WINDOW_SIZE + 1, _VAD_WINDOW_SIZE):
-        chunk = audio[i : i + _VAD_WINDOW_SIZE]
-        chunk = chunk[np.newaxis, :]
-
+    for i in range(0, len(audio) - _VAD_WINDOW_SIZE + 1, _VAD_WINDOW_SIZE):
+        chunk = audio[i:i + _VAD_WINDOW_SIZE][np.newaxis, :]
         try:
-            ort_inputs = {
-                "input": chunk,
-                "state": state,
-                "sr": sr_tensor,
-            }
-            out, state_out = session.run(None, ort_inputs)
-            state = state_out
-            prob = out[0][0] if out[0].ndim > 0 else float(out[0])
-            speech_probs.append(float(prob))
-        except Exception as e:
-            print(f"VAD inference error: {e}", file=sys.stderr)
+            out, state = session.run(None, {"input": chunk, "state": state, "sr": sr_tensor})
+            speech_probs.append(float(out[0][0] if out[0].ndim > 0 else out[0]))
+        except Exception:
             speech_probs.append(0.0)
 
     if not speech_probs:
         return []
 
-    is_speech = [p >= threshold for p in speech_probs]
-
+    chunk_dur = _VAD_WINDOW_SIZE / _VAD_SR
     segments = []
-    chunk_duration = _VAD_WINDOW_SIZE / _VAD_SR
     in_speech = False
     start = 0.0
 
-    for i, sp in enumerate(is_speech):
-        t = i * chunk_duration
-        if sp and not in_speech:
+    for i, p in enumerate(speech_probs):
+        t = i * chunk_dur
+        if p >= threshold and not in_speech:
             start = t
             in_speech = True
-        elif not sp and in_speech:
-            end = t
-            if end - start >= min_speech_duration:
-                segments.append((start, end))
+        elif p < threshold and in_speech:
+            if t - start >= min_speech_duration:
+                segments.append((start, t))
             in_speech = False
 
     if in_speech:
-        end = len(is_speech) * chunk_duration
+        end = len(speech_probs) * chunk_dur
         if end - start >= min_speech_duration:
             segments.append((start, end))
 
+    # Merge across short silence gaps
     merged = []
     for seg in segments:
         if merged and seg[0] - merged[-1][1] < min_silence_duration:
@@ -169,25 +189,22 @@ def detect_speech_segments(
 
 
 def _whisper_segments_as_speech(whisper_segments: list[dict]) -> list[tuple[float, float]]:
-    """Convert Whisper segments to (start, end) tuples for use as speech regions.
+    """Convert Whisper segments to speech regions (fallback when VAD fails)."""
+    return [(ws["start"], ws["end"]) for ws in whisper_segments
+            if ws.get("end", 0) > ws.get("start", 0)]
 
-    Used as fallback when VAD fails to detect enough speech.
-    """
-    segments = []
-    for ws in whisper_segments:
-        start = ws.get("start", 0.0)
-        end = ws.get("end", start)
-        if end > start:
-            segments.append((start, end))
-    return segments
 
+# ── Embeddings with minimum duration threshold ─────────────────────────────
 
 def extract_speaker_embeddings(
-    audio: np.ndarray,
-    sr: int,
-    segments: list[tuple[float, float]],
-) -> np.ndarray:
-    """Extract speaker embeddings for each segment."""
+    audio: np.ndarray, sr: int, segments: list[tuple[float, float]],
+) -> tuple[np.ndarray, list[int]]:
+    """Extract speaker embeddings, skipping segments shorter than 1.5s.
+
+    Returns:
+        Tuple of (embeddings array, valid_indices) where valid_indices
+        maps each embedding back to its segment index.
+    """
     speaker_session = _load_speaker_embed_model()
     if speaker_session is not None:
         print("  Using neural speaker embeddings (TitaNet)", file=sys.stderr)
@@ -196,11 +213,29 @@ def extract_speaker_embeddings(
 
     chunks = segment_audio(audio, sr, segments)
     embeddings = []
-    for chunk in chunks:
+    valid_indices = []
+
+    for i, chunk in enumerate(chunks):
+        dur = len(chunk) / sr
+        if dur < _MIN_EMBEDDING_DURATION:
+            continue  # Too short for reliable embedding
         emb = extract_embedding(chunk, sr=sr, onnx_session=speaker_session)
         embeddings.append(emb)
-    return np.array(embeddings, dtype=np.float32)
+        valid_indices.append(i)
 
+    skipped = len(segments) - len(valid_indices)
+    if skipped > 0:
+        print(f"  Skipped {skipped} segments <{_MIN_EMBEDDING_DURATION}s for embedding", file=sys.stderr)
+
+    if not embeddings:
+        # All segments too short — fall back to extracting from all anyway
+        embeddings = [extract_embedding(c, sr=sr, onnx_session=speaker_session) for c in chunks]
+        valid_indices = list(range(len(chunks)))
+
+    return np.array(embeddings, dtype=np.float32), valid_indices
+
+
+# ── Clustering with running-average templates + post-merge ──────────────────
 
 def cluster_speakers(
     embeddings: np.ndarray,
@@ -208,7 +243,7 @@ def cluster_speakers(
     max_speakers: int = 10,
     distance_threshold: float = 1.2,
 ) -> list[int]:
-    """Cluster speaker embeddings using agglomerative clustering."""
+    """Cluster speaker embeddings with post-clustering merge pass."""
     n = len(embeddings)
     if n == 0:
         return []
@@ -222,23 +257,106 @@ def cluster_speakers(
     Z = linkage(embeddings, method="average", metric="cosine")
 
     if n_speakers is not None and isinstance(n_speakers, int) and n_speakers > 0:
-        labels = fcluster(Z, t=float(n_speakers), criterion="maxclust")
+        labels = list(fcluster(Z, t=float(n_speakers), criterion="maxclust"))
     else:
-        labels = fcluster(Z, t=distance_threshold, criterion="distance")
-        n_clusters = len(set(labels))
-        if n_clusters > max_speakers:
-            labels = fcluster(Z, t=float(max_speakers), criterion="maxclust")
+        labels = list(fcluster(Z, t=distance_threshold, criterion="distance"))
+        if len(set(labels)) > max_speakers:
+            labels = list(fcluster(Z, t=float(max_speakers), criterion="maxclust"))
 
     labels = [int(lbl) - 1 for lbl in labels]
+
+    # Post-clustering merge pass (inspired by minutes)
+    # Compute running-average centroid per cluster, merge similar ones
+    labels = _post_cluster_merge(embeddings, labels, merge_threshold=distance_threshold * 0.8)
+
     return labels
 
+
+def _post_cluster_merge(
+    embeddings: np.ndarray, labels: list[int],
+    merge_threshold: float = 0.4,
+) -> list[int]:
+    """Merge clusters whose centroids are close (catches over-splitting).
+
+    Uses running-average centroids instead of just the first embedding.
+    """
+    unique_labels = sorted(set(labels))
+    if len(unique_labels) <= 1:
+        return labels
+
+    # Compute centroid for each cluster (mean of all embeddings in cluster)
+    centroids = {}
+    for lbl in unique_labels:
+        mask = [i for i, l in enumerate(labels) if l == lbl]
+        centroid = embeddings[mask].mean(axis=0)
+        norm = np.linalg.norm(centroid)
+        if norm > 1e-10:
+            centroid = centroid / norm
+        centroids[lbl] = centroid
+
+    # Find pairs to merge
+    merge_map = {}
+    for i, lbl_a in enumerate(unique_labels):
+        if lbl_a in merge_map:
+            continue
+        for lbl_b in unique_labels[i + 1:]:
+            if lbl_b in merge_map:
+                continue
+            dist = cosine_distance(centroids[lbl_a], centroids[lbl_b])
+            if dist < merge_threshold:
+                merge_map[lbl_b] = lbl_a
+                print(f"  Post-merge: cluster {lbl_b} → {lbl_a} (dist={dist:.3f})", file=sys.stderr)
+
+    if not merge_map:
+        return labels
+
+    # Apply transitive merges
+    def resolve(lbl):
+        while lbl in merge_map:
+            lbl = merge_map[lbl]
+        return lbl
+
+    return [resolve(l) for l in labels]
+
+
+# ── Speaker Assignment ──────────────────────────────────────────────────────
 
 def _assign_speakers_to_whisper_segments(
     whisper_segments: list[dict],
     speech_segments: list[tuple[float, float]],
     speaker_labels: list[int],
+    valid_indices: list[int] | None = None,
 ) -> list[int]:
-    """Map each whisper segment to the closest speech segment's speaker."""
+    """Map each whisper segment to the closest speech segment's speaker.
+
+    If valid_indices is provided, short segments that were skipped for
+    embedding inherit from their nearest temporal neighbor.
+    """
+    # Build full label array including inherited labels for skipped segments
+    full_labels = [0] * len(speech_segments)
+    if valid_indices is not None:
+        # Fill valid positions
+        for vi, label in zip(valid_indices, speaker_labels):
+            if vi < len(full_labels):
+                full_labels[vi] = label
+
+        # Forward-fill then backward-fill for gaps
+        last_known = 0
+        for i in range(len(full_labels)):
+            if i in valid_indices:
+                idx = valid_indices.index(i)
+                last_known = speaker_labels[idx]
+            full_labels[i] = last_known
+
+        # Backward pass for any leading unknowns
+        if valid_indices and valid_indices[0] > 0:
+            first_label = speaker_labels[0]
+            for i in range(valid_indices[0]):
+                full_labels[i] = first_label
+    else:
+        full_labels = speaker_labels
+
+    # Now assign whisper segments by overlap
     result = []
     for ws in whisper_segments:
         ws_start = ws["start"]
@@ -246,17 +364,19 @@ def _assign_speakers_to_whisper_segments(
         best_overlap = 0.0
         best_speaker = 0
 
-        for (ss_start, ss_end), spk in zip(speech_segments, speaker_labels):
-            overlap_start = max(ws_start, ss_start)
-            overlap_end = min(ws_end, ss_end)
-            overlap = max(0.0, overlap_end - overlap_start)
+        for idx, (ss_start, ss_end) in enumerate(speech_segments):
+            if idx >= len(full_labels):
+                break
+            overlap = max(0.0, min(ws_end, ss_end) - max(ws_start, ss_start))
             if overlap > best_overlap:
                 best_overlap = overlap
-                best_speaker = spk
+                best_speaker = full_labels[idx]
 
         result.append(best_speaker)
     return result
 
+
+# ── Hallucination filter ────────────────────────────────────────────────────
 
 def _filter_hallucinations(segments: list[dict], max_repeats: int = 3) -> list[dict]:
     """Remove repeated short segments at the end (Whisper hallucination)."""
@@ -276,12 +396,13 @@ def _filter_hallucinations(segments: list[dict], max_repeats: int = 3) -> list[d
         if removed > 0:
             print(f"  Filtered {removed} hallucinated segments ('{repeated}')", file=sys.stderr)
             return segments[:cutoff]
-
     return segments
 
 
+# ── Segment splitting ───────────────────────────────────────────────────────
+
 def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED_SEGMENT_SECONDS) -> list[dict]:
-    """Split segments that exceed max_duration at sentence boundaries."""
+    """Split segments exceeding max_duration at sentence boundaries."""
     result = []
     for seg in segments:
         dur = seg.get("end", 0) - seg.get("start", 0)
@@ -289,7 +410,6 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
             result.append(seg)
             continue
 
-        # Split the text at sentence boundaries
         text = seg.get("text", "")
         sentences = text.replace("? ", "?\n").replace(". ", ".\n").replace("! ", "!\n").split("\n")
         sentences = [s.strip() for s in sentences if s.strip()]
@@ -298,7 +418,6 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
             result.append(seg)
             continue
 
-        # Distribute sentences proportionally across the time range
         total_chars = sum(len(s) for s in sentences)
         if total_chars == 0:
             result.append(seg)
@@ -313,130 +432,130 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
         for sentence in sentences:
             current_text.append(sentence)
             current_chars += len(sentence)
-            elapsed = (current_chars / total_chars) * total_dur
-            current_end = start + elapsed
+            current_end = start + (current_chars / total_chars) * total_dur
 
-            if current_end - current_start >= max_duration and len(current_text) > 0:
-                result.append({
-                    **seg,
-                    "start": current_start,
-                    "end": current_end,
-                    "text": " ".join(current_text),
-                })
+            if current_end - current_start >= max_duration:
+                result.append({**seg, "start": current_start, "end": current_end,
+                               "text": " ".join(current_text)})
                 current_start = current_end
                 current_text = []
 
         if current_text:
-            result.append({
-                **seg,
-                "start": current_start,
-                "end": seg["end"],
-                "text": " ".join(current_text),
-            })
+            result.append({**seg, "start": current_start, "end": seg["end"],
+                           "text": " ".join(current_text)})
 
     return result
 
+
+# ── Main diarization pipeline ──────────────────────────────────────────────
 
 def diarize(
     audio_path: str | Path,
     whisper_segments: list[dict],
     n_speakers: int | None = None,
 ) -> dict:
-    """Run full diarization on an audio file with pre-computed whisper segments."""
+    """Run full diarization pipeline."""
     audio_path = Path(audio_path)
     print(f"Diarizing {audio_path.name}...", file=sys.stderr)
 
-    # Filter Whisper hallucinations
     whisper_segments = _filter_hallucinations(whisper_segments)
     print(f"  Whisper segments: {len(whisper_segments)}", file=sys.stderr)
 
-    # Load and NORMALIZE audio — critical for consistent VAD
+    # Load audio
     audio_raw = load_audio(audio_path, sr=_VAD_SR)
+    audio_duration = len(audio_raw) / _VAD_SR
     raw_rms = np.sqrt(np.mean(audio_raw ** 2))
-    audio = _normalize_audio(audio_raw)
-    norm_rms = np.sqrt(np.mean(audio ** 2))
-    audio_duration = len(audio) / _VAD_SR
-    print(f"  Audio: {audio_duration:.1f}s, RMS {raw_rms:.4f} → {norm_rms:.4f} (normalized)", file=sys.stderr)
+    raw_peak = np.max(np.abs(audio_raw))
 
-    # Detect speech segments via VAD
-    speech_segments = detect_speech_segments(audio, sr=_VAD_SR)
+    # Step 1: RMS normalization for VAD
+    audio_norm = _normalize_audio(audio_raw)
+    norm_rms = np.sqrt(np.mean(audio_norm ** 2))
+    print(f"  Audio: {audio_duration:.1f}s, RMS {raw_rms:.4f}→{norm_rms:.4f}, peak {raw_peak:.3f}", file=sys.stderr)
+
+    # Step 2: Detect speech with normalized audio
+    speech_segments = detect_speech_segments(audio_norm, sr=_VAD_SR)
     total_speech = sum(e - s for s, e in speech_segments)
-    vad_segs_per_min = len(speech_segments) / max(audio_duration / 60, 0.1)
-    print(f"  VAD: {len(speech_segments)} segments, {total_speech:.0f}s speech ({100 * total_speech / max(audio_duration, 1):.0f}%), {vad_segs_per_min:.1f}/min", file=sys.stderr)
+    vad_per_min = len(speech_segments) / max(audio_duration / 60, 0.1)
+    print(f"  VAD pass 1: {len(speech_segments)} segs, {total_speech:.0f}s speech, {vad_per_min:.1f}/min", file=sys.stderr)
 
-    # FALLBACK: if VAD found too few segments, use Whisper segment boundaries
-    # This handles cases where even normalized audio doesn't trigger VAD well
+    # Step 3: Peak normalization retry if VAD still poor (minutes approach)
+    if vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE and raw_peak < 0.5:
+        audio_peak_norm = _normalize_peak(audio_raw, target_peak=0.5)
+        speech_segments_retry = detect_speech_segments(audio_peak_norm, sr=_VAD_SR)
+        retry_per_min = len(speech_segments_retry) / max(audio_duration / 60, 0.1)
+        if retry_per_min > vad_per_min:
+            speech_segments = speech_segments_retry
+            audio_norm = audio_peak_norm
+            total_speech = sum(e - s for s, e in speech_segments)
+            vad_per_min = retry_per_min
+            print(f"  VAD pass 2 (peak norm): {len(speech_segments)} segs, {total_speech:.0f}s, {vad_per_min:.1f}/min", file=sys.stderr)
+
+    # Step 4: Whisper boundary fallback
     use_whisper_boundaries = False
-    if len(whisper_segments) > 5 and vad_segs_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE:
-        print(f"  VAD insufficient ({vad_segs_per_min:.1f}/min < {_MIN_VAD_SEGMENTS_PER_MINUTE}), using Whisper boundaries", file=sys.stderr)
+    if len(whisper_segments) > 5 and vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE:
+        print(f"  VAD insufficient, using Whisper boundaries", file=sys.stderr)
         speech_segments = _whisper_segments_as_speech(whisper_segments)
         use_whisper_boundaries = True
-        print(f"  Whisper boundaries: {len(speech_segments)} segments", file=sys.stderr)
 
     if not speech_segments:
-        # Still nothing — assign all to Speaker 1
-        segments_out = _build_single_speaker_output(whisper_segments)
-        return {
-            "version": 1,
-            "audio_file": str(audio_path),
-            "segments": segments_out,
-            "speaker_names": {"0": "Speaker 1"},
-        }
+        return _build_single_speaker_result(audio_path, whisper_segments)
 
-    # Extract speaker embeddings
-    # Use the ORIGINAL (non-normalized) audio for embeddings — normalization
-    # can distort the speaker characteristics
-    embeddings = extract_speaker_embeddings(audio_raw, _VAD_SR, speech_segments)
-    print(f"  Embeddings: {embeddings.shape}", file=sys.stderr)
+    # Step 5: Extract embeddings (skip <1.5s segments, use original audio)
+    embeddings, valid_indices = extract_speaker_embeddings(audio_raw, _VAD_SR, speech_segments)
+    print(f"  Embeddings: {embeddings.shape} ({len(valid_indices)} valid of {len(speech_segments)})", file=sys.stderr)
 
-    # Force minimum 2 speakers for long meetings
-    effective_n_speakers = n_speakers
-    if effective_n_speakers is None and audio_duration > 300:  # >5 min
-        effective_n_speakers = max(2, effective_n_speakers or 0) or None
-        # Only force if we have enough data points
-        if len(speech_segments) >= 4:
-            effective_n_speakers = _MIN_SPEAKERS_FOR_LONG_AUDIO
-            print(f"  Forcing min {effective_n_speakers} speakers (audio >{audio_duration / 60:.0f}min)", file=sys.stderr)
+    # Step 6: Force minimum speakers for long meetings
+    effective_n = n_speakers
+    if effective_n is None and audio_duration > 300 and len(valid_indices) >= 4:
+        effective_n = _MIN_SPEAKERS_FOR_LONG_AUDIO
+        print(f"  Forcing min {effective_n} speakers (>{audio_duration / 60:.0f}min)", file=sys.stderr)
 
-    # Cluster speakers
-    speaker_labels = cluster_speakers(embeddings, n_speakers=effective_n_speakers)
+    # Step 7: Cluster with post-merge pass
+    speaker_labels = cluster_speakers(embeddings, n_speakers=effective_n)
     n_detected = len(set(speaker_labels))
-    print(f"  Speakers detected: {n_detected}", file=sys.stderr)
+    print(f"  Speakers: {n_detected} (after post-merge)", file=sys.stderr)
 
-    # Assign speakers to Whisper segments
+    # Step 8: Assign speakers to whisper segments
     if use_whisper_boundaries:
-        # When using Whisper boundaries, the speech_segments ARE the whisper segments
-        # so the assignment is 1:1
-        ws_speakers = speaker_labels
+        # 1:1 mapping — but need to handle valid_indices
+        ws_speakers = [0] * len(whisper_segments)
+        for vi, label in zip(valid_indices, speaker_labels):
+            if vi < len(ws_speakers):
+                ws_speakers[vi] = label
+        # Fill gaps
+        last = 0
+        for i in range(len(ws_speakers)):
+            if i in valid_indices:
+                idx = valid_indices.index(i)
+                last = speaker_labels[idx]
+            ws_speakers[i] = last
     else:
         ws_speakers = _assign_speakers_to_whisper_segments(
-            whisper_segments, speech_segments, speaker_labels
+            whisper_segments, speech_segments, speaker_labels, valid_indices
         )
 
-    # Renumber speaker IDs contiguously
-    seen_ids = []
-    for spk_id in ws_speakers:
-        if spk_id not in seen_ids:
-            seen_ids.append(spk_id)
-    id_map = {old: new for new, old in enumerate(seen_ids)}
+    # Step 9: Renumber contiguously
+    seen = []
+    for s in ws_speakers:
+        if s not in seen:
+            seen.append(s)
+    id_map = {old: new for new, old in enumerate(seen)}
     ws_speakers = [id_map[s] for s in ws_speakers]
-    n_detected = len(seen_ids)
-    print(f"  Speakers (renumbered): {n_detected}", file=sys.stderr)
+    n_final = len(seen)
+    print(f"  Final speakers: {n_final}", file=sys.stderr)
 
-    # Build labeled segments, merge consecutive same-speaker
+    # Step 10: Build output, merge same-speaker, split long segments
     speaker_names = {}
     raw_segments = []
-    for ws, spk_id in zip(whisper_segments, ws_speakers):
-        speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+    for ws, spk in zip(whisper_segments, ws_speakers):
+        speaker_names[str(spk)] = f"Speaker {spk + 1}"
         raw_segments.append({
-            "start": ws["start"],
-            "end": ws["end"],
+            "start": ws["start"], "end": ws["end"],
             "text": ws.get("text", "").strip(),
-            "speaker": f"Speaker {spk_id + 1}",
-            "speaker_id": spk_id,
+            "speaker": f"Speaker {spk + 1}", "speaker_id": spk,
         })
 
-    # Merge consecutive same-speaker segments
+    # Merge consecutive same-speaker
     segments_out = []
     for seg in raw_segments:
         if not seg["text"]:
@@ -447,10 +566,8 @@ def diarize(
         else:
             segments_out.append(dict(seg))
 
-    # Split any monster segments that exceeded the cap
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
-
-    print(f"  Output segments: {len(segments_out)} (merged from {len(raw_segments)})", file=sys.stderr)
+    print(f"  Output: {len(segments_out)} segments (from {len(raw_segments)} raw)", file=sys.stderr)
 
     return {
         "version": 1,
@@ -460,8 +577,8 @@ def diarize(
     }
 
 
-def _build_single_speaker_output(whisper_segments: list[dict]) -> list[dict]:
-    """Build output with all segments assigned to Speaker 1."""
+def _build_single_speaker_result(audio_path, whisper_segments):
+    """Build output with all segments as Speaker 1."""
     segments_out = []
     for ws in whisper_segments:
         text = ws.get("text", "").strip()
@@ -472,13 +589,11 @@ def _build_single_speaker_output(whisper_segments: list[dict]) -> list[dict]:
             segments_out[-1]["text"] += " " + text
         else:
             segments_out.append({
-                "start": ws["start"],
-                "end": ws["end"],
-                "text": text,
-                "speaker": "Speaker 1",
-                "speaker_id": 0,
+                "start": ws["start"], "end": ws["end"], "text": text,
+                "speaker": "Speaker 1", "speaker_id": 0,
             })
-
-    # Split at the cap
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
-    return segments_out
+    return {
+        "version": 1, "audio_file": str(audio_path),
+        "segments": segments_out, "speaker_names": {"0": "Speaker 1"},
+    }

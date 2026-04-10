@@ -130,7 +130,7 @@ def test_diarize_output_format_with_speech(mock_load_audio, mock_detect, mock_em
     # Two embeddings — make them different enough to cluster into 2 speakers
     emb1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     emb2 = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-    mock_embed.return_value = np.stack([emb1, emb2])
+    mock_embed.return_value = (np.stack([emb1, emb2]), [0, 1])
 
     whisper_segments = [
         {"start": 0.0, "end": 1.0, "text": "Hello"},
