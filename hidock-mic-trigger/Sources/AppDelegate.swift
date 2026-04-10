@@ -1711,13 +1711,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let lastName = URL(fileURLWithPath: entries.last!.recording.outputPath).deletingPathExtension().lastPathComponent
         var outputName = "Merged-\(firstName)-to-\(lastName).mp3"
         if outputName.count > 100 { outputName = "Merged-\(firstName).mp3" }
-        var outputPath = "\(outputFolder)/\(outputName)"
+        let outputPath = "\(outputFolder)/\(outputName)"
+        let childNames = Set(entries.map(\.recording.name))
 
-        // Avoid overwriting
-        var counter = 1
-        while FileManager.default.fileExists(atPath: outputPath) {
-            outputPath = "\(outputFolder)/Merged-\(firstName)-to-\(lastName)-\(counter).mp3"
-            counter += 1
+        // Check if these same children were already merged — replace instead of creating duplicates
+        if let existingIdx = mergeGroups.firstIndex(where: { Set($0.childNames) == childNames }) {
+            let old = mergeGroups[existingIdx]
+            if old.outputPath != outputPath {
+                try? FileManager.default.removeItem(atPath: old.outputPath)
+                // Clean up old transcripts
+                let oldStem = (old.outputPath as NSString).lastPathComponent.replacingOccurrences(of: ".mp3", with: "")
+                let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+                for suffix in ["", "_diarized", "_whisper"] {
+                    let ext = suffix.isEmpty ? ".md" : ".json"
+                    try? FileManager.default.removeItem(atPath: "\(transcriptDir)/\(oldStem)\(suffix)\(ext)")
+                }
+                log("Replaced existing merge: \(old.outputName)")
+            }
+            mergeGroups.remove(at: existingIdx)
+        }
+
+        // Remove any existing file at the output path (re-merge)
+        if FileManager.default.fileExists(atPath: outputPath) {
+            try? FileManager.default.removeItem(atPath: outputPath)
         }
 
         log("Merging \(entries.count) recordings into \(outputPath)")
