@@ -451,8 +451,24 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
             continue
 
         text = seg.get("text", "")
+        # Split at sentence boundaries first
         sentences = text.replace("? ", "?\n").replace(". ", ".\n").replace("! ", "!\n").split("\n")
         sentences = [s.strip() for s in sentences if s.strip()]
+
+        # If no/few sentence boundaries, or individual sentences are still too long, use commas
+        avg_sentence_dur = dur / max(len(sentences), 1)
+        if (len(sentences) <= 1 or avg_sentence_dur > max_duration) and ", " in text:
+            clauses = text.split(", ")
+            # Recombine into chunks of ~3-4 clauses
+            sentences = []
+            buf = []
+            for clause in clauses:
+                buf.append(clause)
+                if len(buf) >= 3:
+                    sentences.append(", ".join(buf))
+                    buf = []
+            if buf:
+                sentences.append(", ".join(buf))
 
         if len(sentences) <= 1:
             result.append(seg)
@@ -612,7 +628,10 @@ def diarize(
             segments_out.append(dict(seg))
 
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
-    print(f"  Output: {len(segments_out)} segments (from {len(raw_segments)} raw)", file=sys.stderr)
+    # Second pass catches segments where the first split produced chunks still > max
+    segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
+    max_dur = max((s["end"] - s["start"] for s in segments_out), default=0)
+    print(f"  Output: {len(segments_out)} segments (from {len(raw_segments)} raw), max {max_dur:.0f}s", file=sys.stderr)
 
     return {
         "version": 1,
