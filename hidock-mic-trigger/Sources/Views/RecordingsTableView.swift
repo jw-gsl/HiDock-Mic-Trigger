@@ -130,7 +130,6 @@ struct RecordingsTableView: View {
             Text(group.outputName)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .fontWeight(.medium)
                 .frame(width: 220, alignment: .leading)
 
             // Created (earliest child)
