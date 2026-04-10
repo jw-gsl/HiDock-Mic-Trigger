@@ -79,21 +79,19 @@ struct SyncHeaderSection: View {
                     }
                     .disabled(viewModel.syncBusy || !viewModel.syncPaired)
 
-                    if viewModel.allSelectedDownloaded {
-                        Button {
+                    Button {
+                        if viewModel.allSelectedDownloaded {
                             viewModel.onUnmarkDownloaded()
-                        } label: {
-                            Label("Unmark", systemImage: "arrow.uturn.backward.circle")
-                        }
-                        .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-                    } else {
-                        Button {
+                        } else {
                             viewModel.onMarkDownloaded()
-                        } label: {
-                            Label("Mark Done", systemImage: "checkmark.circle")
                         }
-                        .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+                    } label: {
+                        Label(
+                            viewModel.allSelectedDownloaded ? "Unmark" : "Mark Done",
+                            systemImage: viewModel.allSelectedDownloaded ? "arrow.uturn.backward.circle" : "checkmark.circle"
+                        )
                     }
+                    .disabled(viewModel.syncBusy || !viewModel.hasSelection)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
