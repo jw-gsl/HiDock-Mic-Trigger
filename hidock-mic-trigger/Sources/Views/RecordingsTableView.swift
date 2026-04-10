@@ -81,55 +81,100 @@ struct RecordingsTableView: View {
 
     @ViewBuilder
     private func mergeParentRow(group: MergeGroup) -> some View {
-        HStack(spacing: 6) {
-            // Expand/collapse arrow
-            Button {
-                viewModel.onToggleMergeExpand(group.id)
-            } label: {
-                Image(systemName: viewModel.expandedMergeGroups.contains(group.id) ? "chevron.down" : "chevron.right")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(width: 16)
+        let fileExists = FileManager.default.fileExists(atPath: group.outputPath)
+        let totalSize = group.childNames.reduce(0) { total, name in
+            let entry = viewModel.visibleEntries.first { $0.recording.name == name }
+            return total + (entry?.recording.length ?? 0)
+        }
+        let firstChild = viewModel.visibleEntries.first { group.childNames.contains($0.recording.name) }
+        let deviceName = firstChild?.deviceName ?? ""
+        let earliestDate = group.childNames.compactMap { name in
+            viewModel.visibleEntries.first { $0.recording.name == name }
+        }.map { "\($0.recording.createDate) \($0.recording.createTime)" }.sorted().first ?? ""
+
+        HStack(spacing: 0) {
+            // Checkbox
+            Toggle("", isOn: Binding(
+                get: { viewModel.syncCheckedRecordings.contains("merge:\(group.id)") },
+                set: { _ in viewModel.onToggleChecked("merge:\(group.id)", false) }
+            ))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .frame(width: 36)
+
+            // Device + expand arrow
+            HStack(spacing: 4) {
+                Text(deviceName)
+                    .lineLimit(1)
+                Button {
+                    viewModel.onToggleMergeExpand(group.id)
+                } label: {
+                    Image(systemName: viewModel.expandedMergeGroups.contains(group.id) ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .frame(width: 120, alignment: .leading)
 
-            Image(systemName: "arrow.triangle.merge")
-                .foregroundColor(.purple)
-                .frame(width: 16)
-
+            // Status
             StatusBadge(text: "Merged", level: .info)
-                .frame(width: 80)
+                .frame(width: 110, alignment: .leading)
 
+            // Transcribed (placeholder — TODO: track merged file transcription)
+            Text("—")
+                .foregroundColor(.secondary.opacity(0.5))
+                .frame(width: 90, alignment: .leading)
+
+            // Recording name
             Text(group.outputName)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .fontWeight(.medium)
+                .frame(width: 220, alignment: .leading)
 
-            Spacer()
+            // Created (earliest child)
+            Text(earliestDate)
+                .font(.caption.monospacedDigit())
+                .frame(width: 155, alignment: .leading)
 
+            // Length (total)
             Text(formatRecordingDuration(group.totalDuration))
                 .font(.caption.monospacedDigit())
-                .foregroundColor(.secondary)
+                .frame(width: 70, alignment: .leading)
 
-            Text("\(group.childNames.count) files")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.purple.opacity(0.1))
-                .cornerRadius(4)
+            // Size (total)
+            Text(humanSize(totalSize))
+                .font(.caption.monospacedDigit())
+                .frame(width: 70, alignment: .leading)
 
-            if FileManager.default.fileExists(atPath: group.outputPath) {
-                Button {
-                    viewModel.onRevealRecording(group.outputPath)
-                } label: {
-                    Image(systemName: "folder")
+            // Actions
+            HStack(spacing: 4) {
+                if fileExists {
+                    Button {
+                        viewModel.onRevealRecording(group.outputPath)
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.accentColor)
+                    .help("Show in Finder")
                 }
-                .buttonStyle(.plain)
-                .foregroundColor(.accentColor)
             }
+            .frame(width: 50)
+
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .font(.system(size: 12))
+        .padding(.vertical, 1)
+    }
+
+    private func humanSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        let kb = Double(bytes) / 1024
+        if kb < 1024 { return String(format: "%.0f KB", kb) }
+        let mb = kb / 1024
+        return String(format: "%.1f MB", mb)
     }
 
     // MARK: - Recording Row
