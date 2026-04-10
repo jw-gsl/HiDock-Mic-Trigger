@@ -188,6 +188,46 @@ def detect_speech_segments(
     return merged
 
 
+def _merge_adjacent_speech(
+    segments: list[tuple[float, float]],
+    gap_threshold: float = 0.3,
+    short_threshold: float = 0.5,
+    absorb_gap: float = 1.0,
+) -> list[tuple[float, float]]:
+    """Merge adjacent speech segments for more stable embeddings (minutes approach).
+
+    - Adjacent segments <300ms apart get merged
+    - Short segments <500ms can absorb neighbors across up to 1s gaps
+    """
+    if len(segments) <= 1:
+        return segments
+
+    # First pass: merge across small gaps
+    merged = [segments[0]]
+    for seg in segments[1:]:
+        if seg[0] - merged[-1][1] < gap_threshold:
+            merged[-1] = (merged[-1][0], seg[1])
+        else:
+            merged.append(seg)
+
+    # Second pass: short segments absorb neighbors
+    result = []
+    i = 0
+    while i < len(merged):
+        start, end = merged[i]
+        dur = end - start
+        if dur < short_threshold and i + 1 < len(merged):
+            next_start, next_end = merged[i + 1]
+            if next_start - end < absorb_gap:
+                result.append((start, next_end))
+                i += 2
+                continue
+        result.append((start, end))
+        i += 1
+
+    return result
+
+
 def _whisper_segments_as_speech(whisper_segments: list[dict]) -> list[tuple[float, float]]:
     """Convert Whisper segments to speech regions (fallback when VAD fails)."""
     return [(ws["start"], ws["end"]) for ws in whisper_segments
@@ -499,6 +539,11 @@ def diarize(
 
     if not speech_segments:
         return _build_single_speaker_result(audio_path, whisper_segments)
+
+    # Step 4b: Merge adjacent speech segments for better embeddings (minutes approach)
+    # Adjacent segments <300ms apart get merged; short segments <500ms absorb neighbors up to 1s
+    speech_segments = _merge_adjacent_speech(speech_segments, gap_threshold=0.3, short_threshold=0.5, absorb_gap=1.0)
+    print(f"  After speech merge: {len(speech_segments)} segments", file=sys.stderr)
 
     # Step 5: Extract embeddings (skip <1.5s segments, use original audio)
     embeddings, valid_indices = extract_speaker_embeddings(audio_raw, _VAD_SR, speech_segments)
