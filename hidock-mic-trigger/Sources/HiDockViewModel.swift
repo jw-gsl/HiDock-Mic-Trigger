@@ -88,6 +88,12 @@ final class HiDockViewModel: ObservableObject {
         !syncCheckedRecordings.isEmpty
     }
 
+    var allSelectedDownloaded: Bool {
+        guard hasSelection else { return false }
+        let selected = syncEntries.filter { syncCheckedRecordings.contains($0.recording.name) }
+        return !selected.isEmpty && selected.allSatisfy { $0.recording.downloaded }
+    }
+
     var needsTaggingCount: Int {
         syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
     }
