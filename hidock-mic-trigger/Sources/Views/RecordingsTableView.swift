@@ -8,7 +8,10 @@ struct RecordingsTableView: View {
             TableColumn("") { entry in
                 Toggle("", isOn: Binding(
                     get: { viewModel.syncCheckedRecordings.contains(entry.recording.name) },
-                    set: { _ in viewModel.onToggleChecked(entry.recording.name) }
+                    set: { _ in
+                        let shiftHeld = NSEvent.modifierFlags.contains(.shift)
+                        viewModel.onToggleChecked(entry.recording.name, shiftHeld)
+                    }
                 ))
                 .toggleStyle(.checkbox)
                 .labelsHidden()
@@ -114,10 +117,20 @@ struct RecordingsTableView: View {
                     }
                 }
 
-                Button {
-                    viewModel.onMarkDownloaded()
-                } label: {
-                    Label("Mark as Downloaded", systemImage: "checkmark.circle")
+                if !entry.recording.downloaded {
+                    Button {
+                        viewModel.onMarkDownloaded()
+                    } label: {
+                        Label("Mark as Downloaded", systemImage: "checkmark.circle")
+                    }
+                }
+
+                if entry.recording.downloaded {
+                    Button {
+                        viewModel.onUnmarkDownloaded()
+                    } label: {
+                        Label("Unmark Downloaded", systemImage: "arrow.uturn.backward.circle")
+                    }
                 }
 
                 if !entry.transcribed {

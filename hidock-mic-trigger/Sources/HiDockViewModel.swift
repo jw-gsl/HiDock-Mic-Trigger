@@ -121,7 +121,8 @@ final class HiDockViewModel: ObservableObject {
     var onSelectNone: () -> Void = {}
     var onSelectNotDownloaded: () -> Void = {}
     var onFilterByDevice: (String?) -> Void = { _ in }
-    var onToggleChecked: (String) -> Void = { _ in }
+    var onToggleChecked: (String, Bool) -> Void = { _, _ in }  // name, shiftHeld
+    var onUnmarkDownloaded: () -> Void = {}
     var onToggleHideDownloaded: () -> Void = {}
     var onToggleAutoDownload: () -> Void = {}
     var onTranscribeSelected: () -> Void = {}

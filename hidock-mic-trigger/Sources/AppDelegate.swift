@@ -357,7 +357,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onSelectNone = { [weak self] in self?.selectNoneSyncRecordings() }
         viewModel.onSelectNotDownloaded = { [weak self] in self?.selectNotDownloadedSyncRecordings() }
         viewModel.onFilterByDevice = { [weak self] deviceId in self?.filterSyncByDevice(deviceId) }
-        viewModel.onToggleChecked = { [weak self] name in self?.toggleSyncRecordingCheckbox(name) }
+        viewModel.onToggleChecked = { [weak self] name, shift in self?.toggleSyncRecordingCheckbox(name, shiftHeld: shift) }
+        viewModel.onUnmarkDownloaded = { [weak self] in self?.unmarkSyncRecordingsAsDownloaded() }
         viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
@@ -2793,12 +2794,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
-    private func toggleSyncRecordingCheckbox(_ name: String) {
-        if syncCheckedRecordings.contains(name) {
-            syncCheckedRecordings.remove(name)
+    private var lastToggledRecordingName: String?
+
+    private func toggleSyncRecordingCheckbox(_ name: String, shiftHeld: Bool = false) {
+        let visible = visibleSyncEntries
+        let willCheck = !syncCheckedRecordings.contains(name)
+
+        if shiftHeld, let anchor = lastToggledRecordingName,
+           let anchorIdx = visible.firstIndex(where: { $0.recording.name == anchor }),
+           let targetIdx = visible.firstIndex(where: { $0.recording.name == name }) {
+            // Shift+click: select/deselect the range
+            let range = min(anchorIdx, targetIdx)...max(anchorIdx, targetIdx)
+            for i in range {
+                let entryName = visible[i].recording.name
+                if willCheck {
+                    syncCheckedRecordings.insert(entryName)
+                } else {
+                    syncCheckedRecordings.remove(entryName)
+                }
+            }
         } else {
-            syncCheckedRecordings.insert(name)
+            if syncCheckedRecordings.contains(name) {
+                syncCheckedRecordings.remove(name)
+            } else {
+                syncCheckedRecordings.insert(name)
+            }
         }
+
+        lastToggledRecordingName = name
         syncViewModelState()
     }
 
@@ -3129,6 +3152,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             if let error = anyError {
                 self.showError("Failed to mark recordings:\n\(error)")
+            }
+            self.refreshSyncStatus()
+        }
+    }
+
+    private func unmarkSyncRecordingsAsDownloaded() {
+        let entries = selectedSyncEntries()
+        let downloaded = entries.filter { $0.recording.downloaded }
+        guard !downloaded.isEmpty else { return }
+
+        let byDevice = Dictionary(grouping: downloaded, by: \.deviceId)
+        let group = DispatchGroup()
+        var anyError: String?
+
+        for (deviceId, deviceEntries) in byDevice {
+            let filenames = deviceEntries.map(\.recording.name)
+            let device = syncPairedDevices.first { $0.deviceId == deviceId }
+
+            var args: [String]
+            let pid: Int?
+            if let device = device, device.deviceType == .volume {
+                args = ["unmark-downloaded", "--volume-name", device.volumeName ?? ""] + filenames
+                pid = nil
+            } else {
+                args = ["unmark-downloaded"] + filenames
+                pid = device?.productId
+            }
+
+            group.enter()
+            runExtractor(arguments: args, productId: pid) { result in
+                if case .failure(let error) = result {
+                    anyError = error.localizedDescription
+                }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            if let error = anyError {
+                self.showError("Failed to unmark recordings:\n\(error)")
             }
             self.refreshSyncStatus()
         }

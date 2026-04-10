@@ -1567,6 +1567,10 @@ def main() -> int:
     mark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to mark")
     mark_dl.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
 
+    unmark_dl = sub.add_parser("unmark-downloaded", help="Unmark recordings so they can be re-downloaded")
+    unmark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to unmark")
+    unmark_dl.add_argument("--volume-name", default=None, help="For volume devices")
+
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
 
@@ -1661,6 +1665,20 @@ def main() -> int:
             marked.append(filename)
         save_state(state)
         print(json.dumps({"marked": marked}, indent=2))
+        return 0
+    if args.command == "unmark-downloaded":
+        state = load_state()
+        downloads = state["downloads"]
+        unmarked = []
+        vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
+        for filename in args.filenames:
+            state_key = f"{vol_prefix}{filename}"
+            if state_key in downloads:
+                downloads[state_key]["downloaded"] = False
+                downloads[state_key]["updated_at"] = utc_now_iso()
+                unmarked.append(filename)
+        save_state(state)
+        print(json.dumps({"unmarked": unmarked}, indent=2))
         return 0
     if args.command == "status":
         print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
