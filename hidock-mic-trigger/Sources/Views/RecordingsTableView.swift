@@ -121,7 +121,7 @@ struct RecordingsTableView: View {
                     Button {
                         viewModel.onMarkDownloaded()
                     } label: {
-                        Label("Mark as Downloaded", systemImage: "checkmark.circle")
+                        Label("Skip", systemImage: "forward.fill")
                     }
                 }
 
@@ -129,7 +129,7 @@ struct RecordingsTableView: View {
                     Button {
                         viewModel.onUnmarkDownloaded()
                     } label: {
-                        Label("Unmark", systemImage: "arrow.uturn.backward.circle")
+                        Label("Unskip", systemImage: "backward.fill")
                     }
                 }
 

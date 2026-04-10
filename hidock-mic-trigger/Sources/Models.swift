@@ -199,7 +199,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
 
     var statusText: String {
         if recording.downloaded && recording.localExists { return "Downloaded" }
-        if recording.downloaded && !recording.localExists { return "Marked" }
+        if recording.downloaded && !recording.localExists { return "Skipped" }
         if recording.lastError != nil { return "Failed" }
         return "On device"
     }

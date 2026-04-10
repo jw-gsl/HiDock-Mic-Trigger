@@ -82,7 +82,7 @@ struct SyncHeaderSection: View {
                     Button {
                         viewModel.onMarkDownloaded()
                     } label: {
-                        Label("Mark Done", systemImage: "checkmark.circle")
+                        Label("Skip", systemImage: "forward.fill")
                     }
                     .disabled(viewModel.syncBusy || !viewModel.hasSelection)
 
@@ -90,7 +90,7 @@ struct SyncHeaderSection: View {
                         Button {
                             viewModel.onUnmarkDownloaded()
                         } label: {
-                            Label("Unmark", systemImage: "arrow.uturn.backward.circle")
+                            Label("Unskip", systemImage: "backward.fill")
                         }
                         .disabled(viewModel.syncBusy)
                     }
