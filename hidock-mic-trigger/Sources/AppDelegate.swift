@@ -3584,7 +3584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("Model download cancelled")
     }
 
-    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         log("runTranscription: \(arguments.joined(separator: " "))")
         transcriptionDispatchQueue.async {
             let process = Process()
@@ -3631,7 +3631,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     while let range = lineBuffer.range(of: "\n") {
                         let line = String(lineBuffer[lineBuffer.startIndex..<range.lowerBound])
                         lineBuffer = String(lineBuffer[range.upperBound...])
-                        if line.hasPrefix("PROGRESS:") {
+                        if line.hasPrefix("STAGE:") {
+                            // STAGE:2/5:Transcribing
+                            let parts = String(line.dropFirst("STAGE:".count)).split(separator: ":", maxSplits: 1)
+                            if parts.count >= 1 {
+                                let nums = parts[0].split(separator: "/")
+                                if nums.count == 2, let cur = Int(nums[0]), let tot = Int(nums[1]) {
+                                    let label = parts.count > 1 ? String(parts[1]) : ""
+                                    DispatchQueue.main.async { onStage?(cur, tot, label) }
+                                }
+                            }
+                        } else if line.hasPrefix("PROGRESS:") {
                             if let pct = Int(line.dropFirst("PROGRESS:".count)) {
                                 DispatchQueue.main.async { onProgress?(pct) }
                             }
@@ -3958,7 +3968,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
                 self.pendingTranscriptionQueue[idx].progress = pct
             }
-            self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)% (\(position)/\(total))"
+            self.syncViewModelState()
+        }, onStage: { [weak self] current, stageTotal, label in
+            guard let self = self else { return }
+            let pct = Int(Double(current) / Double(max(stageTotal, 1)) * 100)
+            self.transcriptionProgress = pct
+            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
+                self.pendingTranscriptionQueue[idx].progress = pct
+            }
+            self.viewModel.syncStatus = "\(label) (\(current)/\(stageTotal)) — \(filename) [\(position)/\(total)]"
             self.syncViewModelState()
         }) { [weak self] result in
             guard let self = self else { return }

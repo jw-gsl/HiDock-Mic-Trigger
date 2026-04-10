@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from shared.diarize_lite import (
     _filter_hallucinations,
-    _merge_whisper_segments,
+    _split_long_segments,
 )
 
 
@@ -86,78 +86,51 @@ class TestFilterHallucinations:
 
 
 # ---------------------------------------------------------------------------
-# _merge_whisper_segments
+# _split_long_segments
 # ---------------------------------------------------------------------------
-class TestMergeWhisperSegments:
-    def test_no_merge_when_large_gap(self):
-        segments = [
-            {"start": 0, "end": 1, "text": "Hello"},
-            {"start": 5, "end": 6, "text": "World"},
-        ]
-        result = _merge_whisper_segments(segments, max_gap=1.5)
-        assert len(result) == 2
-        assert result[0]["text"] == "Hello"
-        assert result[1]["text"] == "World"
-
-    def test_merge_small_gap(self):
-        segments = [
-            {"start": 0, "end": 1, "text": "Hello"},
-            {"start": 1.5, "end": 2.5, "text": "World"},
-        ]
-        result = _merge_whisper_segments(segments, max_gap=1.5)
+class TestSplitLongSegments:
+    def test_short_segment_unchanged(self):
+        segments = [{"start": 0, "end": 30, "text": "Short segment.", "speaker_id": 0}]
+        result = _split_long_segments(segments, max_duration=90)
         assert len(result) == 1
-        assert result[0]["text"] == "Hello World"
-        assert result[0]["start"] == 0
-        assert result[0]["end"] == 2.5
 
-    def test_merge_multiple_into_one(self):
-        segments = [
-            {"start": 0, "end": 1, "text": "One"},
-            {"start": 1.2, "end": 2, "text": "Two"},
-            {"start": 2.3, "end": 3, "text": "Three"},
-        ]
-        result = _merge_whisper_segments(segments, max_gap=1.5)
-        assert len(result) == 1
-        assert result[0]["text"] == "One Two Three"
+    def test_long_segment_split(self):
+        # 200s segment with multiple sentences should be split
+        text = "First sentence. Second sentence. Third sentence. Fourth sentence."
+        segments = [{"start": 0, "end": 200, "text": text, "speaker_id": 0}]
+        result = _split_long_segments(segments, max_duration=90)
+        assert len(result) >= 2
+        # All text should be preserved
+        combined = " ".join(s["text"] for s in result)
+        for word in ["First", "Second", "Third", "Fourth"]:
+            assert word in combined
 
-    def test_partial_merge(self):
-        segments = [
-            {"start": 0, "end": 1, "text": "A"},
-            {"start": 1.2, "end": 2, "text": "B"},
-            {"start": 10, "end": 11, "text": "C"},
-            {"start": 11.2, "end": 12, "text": "D"},
-        ]
-        result = _merge_whisper_segments(segments, max_gap=1.5)
-        assert len(result) == 2
-        assert result[0]["text"] == "A B"
-        assert result[1]["text"] == "C D"
+    def test_single_sentence_not_split(self):
+        segments = [{"start": 0, "end": 200, "text": "One long sentence without periods", "speaker_id": 0}]
+        result = _split_long_segments(segments, max_duration=90)
+        assert len(result) == 1  # Can't split without sentence boundaries
 
     def test_empty_segments(self):
-        result = _merge_whisper_segments([])
+        result = _split_long_segments([])
         assert result == []
 
-    def test_single_segment(self):
-        segments = [{"start": 0, "end": 1, "text": "Only"}]
-        result = _merge_whisper_segments(segments)
-        assert len(result) == 1
-        assert result[0]["text"] == "Only"
+    def test_preserves_speaker_id(self):
+        text = "First part. Second part. Third part. Fourth part."
+        segments = [{"start": 0, "end": 200, "text": text, "speaker_id": 2, "speaker": "Speaker 3"}]
+        result = _split_long_segments(segments, max_duration=90)
+        for seg in result:
+            assert seg["speaker_id"] == 2
 
-    def test_strips_text(self):
-        segments = [
-            {"start": 0, "end": 1, "text": "  Hello  "},
-            {"start": 1.1, "end": 2, "text": "  World  "},
-        ]
-        result = _merge_whisper_segments(segments, max_gap=1.5)
-        assert result[0]["text"] == "Hello World"
-
-    def test_exact_gap_boundary(self):
-        """Gap exactly equal to max_gap should merge (<=)."""
-        segments = [
-            {"start": 0, "end": 1, "text": "A"},
-            {"start": 2.5, "end": 3, "text": "B"},
-        ]
-        result = _merge_whisper_segments(segments, max_gap=1.5)
-        assert len(result) == 1
+    def test_time_ranges_continuous(self):
+        text = "A sentence here. Another one here. And a third. Plus a fourth one."
+        segments = [{"start": 10, "end": 210, "text": text, "speaker_id": 0}]
+        result = _split_long_segments(segments, max_duration=90)
+        if len(result) > 1:
+            assert result[0]["start"] == 10
+            assert result[-1]["end"] == 210
+            # Each segment starts where the previous ended
+            for i in range(1, len(result)):
+                assert abs(result[i]["start"] - result[i-1]["end"]) < 0.1
 
 
 # ---------------------------------------------------------------------------

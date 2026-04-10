@@ -52,6 +52,11 @@ def progress(pct: int) -> None:
     print(f"PROGRESS:{pct}", file=sys.stderr, flush=True)
 
 
+def stage(current: int, total: int, label: str = "") -> None:
+    """Emit a STAGE line on stderr for stage-based progress."""
+    print(f"STAGE:{current}/{total}:{label}", file=sys.stderr, flush=True)
+
+
 def load_whisper_model():
     """Load Whisper model onto MPS (or CPU fallback)."""
     import torch
@@ -103,13 +108,13 @@ def transcribe_file(
         _log(_ET("TRANSCRIPTION_STARTED"), file_path=str(mp3_path),
              metadata={"model": config.WHISPER_MODEL})
 
+        total_stages = 5 if diarize else 4
+        stage(1, total_stages, "Loading model")
         if model is None:
             model = load_whisper_model()
 
+        stage(2, total_stages, "Transcribing")
         progress(15)
-        # Note: synthetic progress (15→85%) is handled by the Swift app timer
-        # because Python's GIL prevents a background thread from running
-        # while model.transcribe() holds it.
         result = model.transcribe(
             str(mp3_path),
             language=config.WHISPER_LANGUAGE,
@@ -132,6 +137,7 @@ def transcribe_file(
             print(f"Whisper-Guard: transcript flagged as likely hallucination "
                   f"({guard_stats.final_word_count} words)", file=sys.stderr)
 
+        stage(3, total_stages, "Applying corrections")
         # Apply local corrections dictionary (e.g. "volaris" → "VOLARIS")
         try:
             from shared.corrections import apply_corrections
@@ -146,6 +152,7 @@ def transcribe_file(
         # Optionally run diarization
         diarized_result = None
         if diarize:
+            stage(4, total_stages, "Diarizing speakers")
             try:
                 from shared.diarize_lite import diarize as run_diarize
                 diarized_result = run_diarize(
@@ -172,6 +179,7 @@ def transcribe_file(
                 _log(_ET("SUMMARIZATION_FAILED"), file_path=str(mp3_path),
                      status="error", error=str(e))
 
+        stage(total_stages, total_stages, "Writing output")
         # Write transcript with frontmatter
         write_transcript(
             transcript_path,
@@ -183,31 +191,35 @@ def transcribe_file(
             summary=summary,
         )
 
-        # Always save a segments JSON alongside the transcript so the
-        # in-app viewer can show timestamped text (with or without speakers).
+        # Save the original Whisper micro-segments (for re-diarization)
         import json as _json
+        whisper_raw_path = transcript_path.with_name(
+            transcript_path.stem + "_whisper.json"
+        )
+        whisper_raw_segs = [
+            {"start": seg.get("start", 0.0), "end": seg.get("end", 0.0),
+             "text": seg.get("text", "").strip()}
+            for seg in result.get("segments", [])
+        ]
+        whisper_raw_path.write_text(
+            _json.dumps({"audio_file": str(mp3_path), "segments": whisper_raw_segs},
+                        indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        # Save the diarized/timestamped JSON for the in-app viewer
         segments_json_path = transcript_path.with_name(
             transcript_path.stem + "_diarized.json"
         )
         if diarized_result and diarized_result.get("segments"):
-            # Diarized — save as-is (already has speaker_id + timestamps)
-            _json.loads  # ensure json imported
             segments_json_path.write_text(
                 _json.dumps(diarized_result, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
         else:
-            # Non-diarized — build segments from Whisper output with timestamps
-            whisper_segments = result.get("segments", [])
-            plain_segments = []
-            for seg in whisper_segments:
-                plain_segments.append({
-                    "start": seg.get("start", 0.0),
-                    "end": seg.get("end", 0.0),
-                    "text": seg.get("text", "").strip(),
-                    "speaker_id": 0,
-                    "speaker": "",
-                })
+            plain_segments = [
+                {**ws, "speaker_id": 0, "speaker": ""} for ws in whisper_raw_segs
+            ]
             plain_result = {
                 "version": 1,
                 "audio_file": str(mp3_path),
@@ -434,9 +446,17 @@ def cmd_rediarize(args):
         print(f"Audio file not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Extract the raw segments (un-merge them — keep individual text chunks)
-    segments = data.get("segments", [])
-    # These are already the whisper-level segments we need
+    # Try to load the original Whisper micro-segments for better diarization
+    whisper_raw_path = json_path.with_name(
+        json_path.stem.replace("_diarized", "_whisper") + ".json"
+    )
+    if whisper_raw_path.exists():
+        whisper_data = _json.loads(whisper_raw_path.read_text(encoding="utf-8"))
+        segments = whisper_data.get("segments", [])
+        print(f"Using original Whisper segments: {len(segments)}", file=sys.stderr)
+    else:
+        segments = data.get("segments", [])
+        print(f"No _whisper.json found, using existing {len(segments)} segments", file=sys.stderr)
     progress(5)
 
     from shared.diarize_lite import diarize as run_diarize
