@@ -1,5 +1,20 @@
 # HiDock Tools - Agent Instructions
 
+## Research & Planning — IMPORTANT
+
+When investigating improvements, researching competitor approaches, or planning features:
+
+1. **Document findings in a plan file** — create `docs/PLAN-<topic>.md` with:
+   - Research findings (what competitors do, what we found)
+   - Proposed improvements with priority (high/medium/low)
+   - Implementation checklist with `- [ ]` items
+   - Track completion as work progresses
+2. **Reference external repos** — when studying other projects (e.g. silverstein/minutes), document specific techniques, version numbers, and what we adopted vs didn't
+3. **Critical self-assessment** — after implementing, honestly evaluate quality and document remaining gaps
+4. **Update plans as work completes** — tick off items, add new findings, keep plans as living documents
+
+Plans live in `docs/` and are the source of truth for what's been researched, what's decided, and what's left to do.
+
 ## Development Workflow — IMPORTANT
 
 **NEVER commit directly to `main`.** All changes must go through feature branches and pull requests.
