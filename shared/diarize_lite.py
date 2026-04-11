@@ -614,15 +614,58 @@ def diarize(
     n_final = len(seen)
     print(f"  Final speakers: {n_final}", file=sys.stderr)
 
-    # Step 10: Build output, merge same-speaker, split long segments
+    # Step 10: Auto-match against voice library (from minutes v0.10.0)
     speaker_names = {}
+    for spk_id in range(n_final):
+        # Compute centroid for this speaker
+        spk_indices = [i for i, s in enumerate(ws_speakers) if s == spk_id]
+        if not spk_indices:
+            speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+            continue
+
+        # Get embeddings for this speaker's whisper segments via speech segments
+        spk_embeddings = []
+        for wi in spk_indices:
+            ws = whisper_segments[wi]
+            ws_mid = (ws["start"] + ws["end"]) / 2
+            # Find the closest speech segment with a valid embedding
+            best_dist = float("inf")
+            best_emb_idx = None
+            for vi, emb_idx in enumerate(valid_indices):
+                if emb_idx < len(speech_segments):
+                    ss_start, ss_end = speech_segments[emb_idx]
+                    ss_mid = (ss_start + ss_end) / 2
+                    dist = abs(ws_mid - ss_mid)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_emb_idx = vi
+            if best_emb_idx is not None and best_emb_idx < len(embeddings):
+                spk_embeddings.append(embeddings[best_emb_idx])
+
+        if spk_embeddings:
+            centroid = np.mean(spk_embeddings, axis=0).astype(np.float32)
+            norm = np.linalg.norm(centroid)
+            if norm > 1e-10:
+                centroid = centroid / norm
+
+            # Check voice library
+            matched_name, confidence = identify_speaker(centroid, threshold=0.55)
+            if matched_name:
+                speaker_names[str(spk_id)] = matched_name
+                print(f"  Auto-matched speaker {spk_id} → {matched_name} ({confidence:.0%})", file=sys.stderr)
+            else:
+                speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+        else:
+            speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+
+    # Step 11: Build output, merge same-speaker, split long segments
     raw_segments = []
     for ws, spk in zip(whisper_segments, ws_speakers):
-        speaker_names[str(spk)] = f"Speaker {spk + 1}"
         raw_segments.append({
             "start": ws["start"], "end": ws["end"],
             "text": ws.get("text", "").strip(),
-            "speaker": f"Speaker {spk + 1}", "speaker_id": spk,
+            "speaker": speaker_names.get(str(spk), f"Speaker {spk + 1}"),
+            "speaker_id": spk,
         })
 
     # Merge consecutive same-speaker
