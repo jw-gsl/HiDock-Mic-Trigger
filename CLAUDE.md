@@ -1,19 +1,49 @@
 # HiDock Tools - Agent Instructions
 
-## Research & Planning — IMPORTANT
+## Research, Planning & Documentation — MANDATORY
 
-When investigating improvements, researching competitor approaches, or planning features:
+**Every piece of thinking, research, analysis, or planning MUST be captured in a dated markdown file in `docs/`.** This is not optional — it ensures continuity across sessions and prevents ideas being lost.
 
-1. **Document findings in a plan file** — create `docs/PLAN-<topic>.md` with:
-   - Research findings (what competitors do, what we found)
-   - Proposed improvements with priority (high/medium/low)
-   - Implementation checklist with `- [ ]` items
-   - Track completion as work progresses
-2. **Reference external repos** — when studying other projects (e.g. silverstein/minutes), document specific techniques, version numbers, and what we adopted vs didn't
-3. **Critical self-assessment** — after implementing, honestly evaluate quality and document remaining gaps
-4. **Update plans as work completes** — tick off items, add new findings, keep plans as living documents
+### When to create/update a plan:
+- **Researching a topic** (competitor analysis, tech evaluation) → `docs/PLAN-<topic>.md`
+- **Investigating a bug** (root cause analysis, findings) → update the relevant plan or create one
+- **Planning a feature** (design, checklist, decisions) → `docs/PLAN-<feature>.md`
+- **Session debrief** (what was done, what's left, quality assessment) → update existing plans
+- **Ideas raised but not implemented** → add to `docs/PLAN-unimplemented-ideas.md`
 
-Plans live in `docs/` and are the source of truth for what's been researched, what's decided, and what's left to do.
+### Plan file format:
+```markdown
+# Topic Name
+Research date: YYYY-MM-DD
+Sources: [links, repo names, version numbers]
+
+## Current State
+Brief summary of where things are.
+
+## Findings
+What was researched, what was learned.
+
+## Completed
+- [x] Items done with brief notes
+
+## In Progress
+- [ ] Items being worked on
+
+## Planned
+- [ ] Items to do next, with priority
+
+## Rejected / Not Applicable
+Items considered but not adopted, with reasoning.
+```
+
+### Rules:
+1. **Date everything** — research findings, decisions, status changes
+2. **Update continuously** — tick off items as they complete, don't let plans go stale
+3. **Reference sources** — repo names, version numbers, URLs for external research
+4. **Critical self-assessment** — after implementing, honestly evaluate quality and document gaps
+5. **Consolidate** — if multiple plans overlap, merge them. One source of truth per topic.
+
+Plans in `docs/` are the project's memory. They persist across sessions and ensure nothing is forgotten.
 
 ## Development Workflow — IMPORTANT
 
