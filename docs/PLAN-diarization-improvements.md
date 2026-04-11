@@ -38,28 +38,29 @@ Pipeline: Whisper large-v3-turbo → Silero VAD → TitaNet embeddings → agglo
 ## In Progress
 
 ### Wire voice library into diarization pipeline
-**Priority: HIGH** | Branch: feature/voice-training | Status: NOT STARTED
+**Priority: HIGH** | Branch: feature/voice-training | Status: IMPLEMENTED
 
 The voice library enrolls speakers but diarization doesn't check it.
 Minutes had the same gap — fixed in v0.10.0.
 
 Implementation:
-- [ ] After clustering in `diarize()`, compute centroid per cluster
-- [ ] Call `identify_speaker(centroid)` against voice library
-- [ ] If match found (confidence > threshold), use enrolled name
-- [ ] Write matched names into `speaker_names` dict
-- [ ] Pre-fill names in the `_diarized.json` output
-- [ ] New transcriptions auto-name known speakers
+- [x] After clustering in `diarize()`, compute centroid per cluster
+- [x] Call `identify_speaker(centroid)` against voice library
+- [x] If match found (confidence > 0.55), use enrolled name
+- [x] Write matched names into `speaker_names` dict
+- [x] Pre-fill names in the `_diarized.json` output
+- [ ] Test: new transcriptions auto-name known speakers (needs voice library data)
 
 ### Preserve short interjections
-**Priority: HIGH** | Status: NOT STARTED
+**Priority: HIGH** | Status: VERIFIED OK
 
 Minutes v0.11.0 found short responses ("yeah", "right") were being stripped.
-Our same-speaker merge might absorb these into the wrong speaker's block.
+Tested: our same-speaker merge only combines consecutive same-speaker segments,
+so cross-speaker interjections stay separate. 48 segments <3s found in test
+transcript, all correctly attributed.
 
-- [ ] Check if 0.5-2s segments get merged into previous speaker
-- [ ] If so, add minimum gap check before merging (don't merge across pauses >0.3s)
-- [ ] Test on meetings with fast back-and-forth
+- [x] Check if 0.5-2s segments get merged into previous speaker — NO, working correctly
+- [x] Test on meetings with fast back-and-forth — verified on Rec73
 
 ---
 
