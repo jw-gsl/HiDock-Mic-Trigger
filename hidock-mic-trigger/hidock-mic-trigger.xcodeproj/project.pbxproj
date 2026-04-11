@@ -30,6 +30,7 @@
 		DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 820C64D02A011DC869B43307 /* TranscriptViewerView.swift */; };
 		E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */; };
 		E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */; };
+		F3CB2D177D38A5309EB86E29 /* VoiceTrainingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */; };
 		F86651607F00054F72662894 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED5594D4170BD809E24E4CAC /* Models.swift */; };
 /* End PBXBuildFile section */
 
@@ -64,6 +65,7 @@
 		95B0A8C5446AA42C053B684F /* ModelManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManagerView.swift; sourceTree = "<group>"; };
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
 		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
+		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED5594D4170BD809E24E4CAC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -124,6 +126,7 @@
 				820C64D02A011DC869B43307 /* TranscriptViewerView.swift */,
 				8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */,
 				145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */,
+				A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -284,6 +287,7 @@
 				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,
 				E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */,
 				32CB8DC2FB8F5920A75F9D12 /* VoiceLibraryView.swift in Sources */,
+				F3CB2D177D38A5309EB86E29 /* VoiceTrainingView.swift in Sources */,
 				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncWindow: NSWindow?
     private var transcriptViewerWindow: NSWindow?
     private var voiceLibraryWindow: NSWindow?
+    private var voiceTrainingWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
     private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
@@ -399,6 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? task.run()
         }
         viewModel.onShowVoiceLibrary = { [weak self] in self?.openVoiceLibrary() }
+        viewModel.onShowVoiceTraining = { [weak self] in self?.showVoiceTraining() }
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
         viewModel.onShowDeviceManager = { [weak self] in self?.openDeviceManager() }
@@ -826,6 +828,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let voiceLibraryItem = NSMenuItem(title: "Voice Library...", action: #selector(openVoiceLibraryMenu), keyEquivalent: "")
         voiceLibraryItem.target = self
         menu.addItem(voiceLibraryItem)
+        let voiceTrainingItem = NSMenuItem(title: "Voice Training...", action: #selector(openVoiceTrainingMenu), keyEquivalent: "")
+        voiceTrainingItem.target = self
+        menu.addItem(voiceTrainingItem)
         let modelManagerItem = NSMenuItem(title: "Models...", action: #selector(openModelManagerMenu), keyEquivalent: "")
         modelManagerItem.target = self
         menu.addItem(modelManagerItem)
@@ -2168,6 +2173,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Cowork Prompt
 
+    // MARK: - Voice Training
+
+    private func showVoiceTraining() {
+        if let existing = voiceTrainingWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let view = VoiceTrainingView(
+            onEnroll: { [weak self] name, audioPath, start, end in
+                self?.enrollSpeakerInVoiceLibrary(name: name, audioPath: audioPath, start: start, end: end)
+            },
+            onRefresh: { [weak self] completion in
+                self?.loadVoiceTrainingData(completion: completion)
+            }
+        )
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 550),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Voice Training"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 600, height: 400)
+        win.contentView = NSHostingView(rootView: view)
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        voiceTrainingWindow = win
+    }
+
+    private func loadVoiceTrainingData(completion: @escaping ([VoiceClusterData]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: self.repoRoot)
+            process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)
+            process.arguments = ["\(self.repoRoot)/shared/voice_training.py"]
+
+            var env = ProcessInfo.processInfo.environment
+            env["HOME"] = NSHomeDirectory()
+            env["PYTHONPATH"] = self.repoRoot
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            }
+            process.environment = env
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard process.terminationStatus == 0,
+                  let clusters = try? JSONDecoder().decode([VoiceClusterData].self, from: data) else {
+                self.log("Voice training: failed to decode clusters (\(data.count) bytes)")
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+
+            DispatchQueue.main.async { completion(clusters) }
+        }
+    }
+
     private func showCoworkPrompt() {
         if let existing = coworkPromptWindow, existing.isVisible {
             existing.makeKeyAndOrderFront(nil)
@@ -2192,6 +2270,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func openVoiceLibraryMenu() {
         openVoiceLibrary()
+    }
+
+    @objc private func openVoiceTrainingMenu() {
+        showVoiceTraining()
     }
 
     private func openVoiceLibrary() {

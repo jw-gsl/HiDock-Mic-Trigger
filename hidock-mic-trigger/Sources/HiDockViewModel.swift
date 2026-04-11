@@ -181,6 +181,7 @@ final class HiDockViewModel: ObservableObject {
     var onTrimRecording: (String) -> Void = { _ in }
     var onCheckForUpdates: () -> Void = {}
     var onShowVoiceLibrary: () -> Void = {}
+    var onShowVoiceTraining: () -> Void = {}
 
     // MARK: - Onboarding State
     @Published var showOnboarding = false
