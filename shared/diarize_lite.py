@@ -470,9 +470,18 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
             if buf:
                 sentences.append(", ".join(buf))
 
+        # Last resort: split by word count when no punctuation at all
         if len(sentences) <= 1:
-            result.append(seg)
-            continue
+            words = text.split()
+            if len(words) > 20:
+                # Split into chunks of ~100 words (~90s of speech at ~130wpm)
+                chunk_size = max(int(len(words) * max_duration / dur), 20)
+                sentences = []
+                for i in range(0, len(words), chunk_size):
+                    sentences.append(" ".join(words[i:i + chunk_size]))
+            else:
+                result.append(seg)
+                continue
 
         total_chars = sum(len(s) for s in sentences)
         if total_chars == 0:
