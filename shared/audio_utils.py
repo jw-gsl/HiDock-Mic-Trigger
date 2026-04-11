@@ -213,9 +213,14 @@ def extract_neural_embedding(
     # Detect whether the model expects raw audio or mel-spectrogram
     input_shape = input_info.shape
     if len(input_shape) == 3 and (input_shape[1] == 80 or input_shape[-1] == 80):
-        # Mel-spectrogram model (e.g. NeMo TitaNet): input (batch, 80, T)
+        # Mel-spectrogram model — detect axis order from shape
         mel = compute_mel_spectrogram(audio, sr=sr)  # (80, T)
-        audio_input = mel[np.newaxis, :, :].astype(np.float32)  # (1, 80, T)
+        if input_shape[-1] == 80:
+            # CAM++ style: (batch, T, 80)
+            audio_input = mel.T[np.newaxis, :, :].astype(np.float32)
+        else:
+            # TitaNet style: (batch, 80, T)
+            audio_input = mel[np.newaxis, :, :].astype(np.float32)
         length_input = np.array([mel.shape[1]], dtype=np.int64)
         # Find the "embs" output (embedding, not logits)
         output_names = [o.name for o in session.get_outputs()]

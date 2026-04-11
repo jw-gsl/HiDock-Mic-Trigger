@@ -21,11 +21,26 @@ SILERO_VAD_URL = (
     "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
 )
 
-# TitaNet Small — neural speaker embedding (~10MB, Apache-2.0)
-SPEAKER_EMBED_FILENAME = "speaker_embedding.onnx"
-SPEAKER_EMBED_URL = (
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx"
-)
+# Speaker embedding models — configurable (from minutes v0.10.0)
+SPEAKER_EMBED_MODELS = {
+    "titanet": {
+        "filename": "speaker_embedding.onnx",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+        "dim": 192,
+        "description": "NeMo TitaNet Small (192-dim, mel-spectrogram input)",
+    },
+    "campp": {
+        "filename": "campp_speaker.onnx",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+        "dim": 512,
+        "description": "3D-Speaker CAM++ (512-dim, ~12% lower error than TitaNet)",
+    },
+}
+
+# Default model — can be changed via config
+SPEAKER_EMBED_MODEL = "titanet"
+SPEAKER_EMBED_FILENAME = SPEAKER_EMBED_MODELS[SPEAKER_EMBED_MODEL]["filename"]
+SPEAKER_EMBED_URL = SPEAKER_EMBED_MODELS[SPEAKER_EMBED_MODEL]["url"]
 
 # ── Model Registry ──────────────────────────────────────────────────────────
 
@@ -131,9 +146,28 @@ def ensure_silero_vad() -> Path:
     return download_model_if_needed(SILERO_VAD_URL, SILERO_VAD_FILENAME)
 
 
-def ensure_speaker_embed() -> Path:
-    """Ensure the TitaNet speaker embedding ONNX model is available locally."""
+def ensure_speaker_embed(model_key: str | None = None) -> Path:
+    """Ensure the speaker embedding ONNX model is available locally."""
+    key = model_key or SPEAKER_EMBED_MODEL
+    if key in SPEAKER_EMBED_MODELS:
+        model = SPEAKER_EMBED_MODELS[key]
+        return download_model_if_needed(model["url"], model["filename"])
     return download_model_if_needed(SPEAKER_EMBED_URL, SPEAKER_EMBED_FILENAME)
+
+
+def get_speaker_embed_model_name() -> str:
+    """Return the current speaker embedding model name."""
+    return SPEAKER_EMBED_MODEL
+
+
+def set_speaker_embed_model(key: str) -> None:
+    """Switch the speaker embedding model. Clears cached session."""
+    global SPEAKER_EMBED_MODEL, SPEAKER_EMBED_FILENAME, SPEAKER_EMBED_URL
+    if key not in SPEAKER_EMBED_MODELS:
+        raise ValueError(f"Unknown model: {key}. Choose from: {list(SPEAKER_EMBED_MODELS.keys())}")
+    SPEAKER_EMBED_MODEL = key
+    SPEAKER_EMBED_FILENAME = SPEAKER_EMBED_MODELS[key]["filename"]
+    SPEAKER_EMBED_URL = SPEAKER_EMBED_MODELS[key]["url"]
 
 
 # Backward-compatible alias

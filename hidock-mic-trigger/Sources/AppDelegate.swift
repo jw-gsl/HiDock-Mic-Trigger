@@ -4011,8 +4011,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if completed > 0 {
                 let transcriptFolder = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
                 postTranscriptionNotification(title: "Transcription Complete", body: "\(completed) recording\(completed == 1 ? "" : "s") transcribed.", transcriptPath: transcriptFolder)
-                viewModel.syncStatus = "Transcription complete"
-                viewModel.syncStatusLevel = .success
+
+                // Post-meeting nudge (from minutes v0.11.2)
+                // Subtle status bar suggestion — not a modal or popup
+                let untagged = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
+                if untagged > 3 {
+                    viewModel.syncStatus = "✅ \(completed) transcribed — \(untagged) need speaker tagging"
+                    viewModel.syncStatusLevel = .info
+                } else {
+                    viewModel.syncStatus = "Transcription complete"
+                    viewModel.syncStatusLevel = .success
+                }
             }
             refreshTranscriptionState()
             syncViewModelState()

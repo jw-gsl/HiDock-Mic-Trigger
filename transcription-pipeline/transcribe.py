@@ -113,14 +113,38 @@ def transcribe_file(
         if model is None:
             model = load_whisper_model()
 
+        # Preprocess: strip long silence to prevent hallucination loops (from minutes)
         stage(2, total_stages, "Transcribing")
+        transcribe_path = str(mp3_path)
+        try:
+            from shared.diarize_lite import _replace_silence_with_padding
+            from shared.audio_utils import load_audio
+            import soundfile as sf
+            import tempfile
+            raw_audio = load_audio(str(mp3_path), sr=16000)
+            processed = _replace_silence_with_padding(raw_audio, sr=16000)
+            if len(processed) < len(raw_audio) * 0.95:  # Only use if >5% was stripped
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                sf.write(tmp.name, processed, 16000)
+                transcribe_path = tmp.name
+                print(f"Silence stripped: {len(raw_audio)/16000:.0f}s → {len(processed)/16000:.0f}s", file=sys.stderr)
+        except Exception as e:
+            print(f"Silence stripping skipped: {e}", file=sys.stderr)
+
         progress(15)
         result = model.transcribe(
-            str(mp3_path),
+            transcribe_path,
             language=config.WHISPER_LANGUAGE,
             verbose=False,
         )
         progress(85)
+
+        # Clean up temp file
+        if transcribe_path != str(mp3_path):
+            try:
+                Path(transcribe_path).unlink()
+            except OSError:
+                pass
 
         text = result["text"].strip()
 

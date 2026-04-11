@@ -20,6 +20,7 @@ from scipy.spatial.distance import cosine as cosine_distance
 
 from shared.audio_utils import extract_embedding, load_audio, segment_audio
 from shared.models import ensure_silero_vad
+from shared.voice_library_lite import identify_speaker
 
 _VAD_SR = 16000
 _VAD_WINDOW_SIZE = 256  # 16ms at 16kHz (Silero VAD v5)
@@ -416,6 +417,43 @@ def _assign_speakers_to_whisper_segments(
     return result
 
 
+# ── Non-speech event anonymization (from minutes v0.11.0) ──────────────────
+
+import re
+
+_NON_SPEECH_PATTERN = re.compile(
+    r"^\s*\[(?:laughter|laughing|cough|coughing|sneeze|applause|music|noise|"
+    r"silence|inaudible|crosstalk|background noise|phone ringing|door|"
+    r"breathing|sigh|clearing throat|um|uh)\]\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_non_speech(text: str) -> bool:
+    """Check if a segment is a non-speech event marker."""
+    return bool(_NON_SPEECH_PATTERN.match(text.strip()))
+
+
+def _anonymize_non_speech(segments: list[dict]) -> list[dict]:
+    """Remove speaker attribution from non-speech event segments.
+
+    [laughter], [cough] etc. don't belong to any speaker — they're
+    ambient events. Keeping them as anonymous preserves the information
+    without misattributing noise to a person.
+    """
+    result = []
+    for seg in segments:
+        if _is_non_speech(seg.get("text", "")):
+            result.append({
+                **seg,
+                "speaker": "",
+                "speaker_id": -1,  # -1 = no speaker
+            })
+        else:
+            result.append(seg)
+    return result
+
+
 # ── Hallucination filter ────────────────────────────────────────────────────
 
 def _filter_hallucinations(segments: list[dict], max_repeats: int = 3) -> list[dict]:
@@ -667,6 +705,9 @@ def diarize(
             "speaker": speaker_names.get(str(spk), f"Speaker {spk + 1}"),
             "speaker_id": spk,
         })
+
+    # Anonymize non-speech events (from minutes v0.11.0)
+    raw_segments = _anonymize_non_speech(raw_segments)
 
     # Merge consecutive same-speaker
     segments_out = []

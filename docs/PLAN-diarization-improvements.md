@@ -66,40 +66,52 @@ transcript, all correctly attributed.
 
 ## Planned
 
-### Track embedding model version in voice profiles
-**Priority: MEDIUM** | From: minutes v0.10.0
+### Configurable embedding models + CAM++ evaluation
+**Priority: MEDIUM** | From: minutes v0.10.0 | Status: IMPLEMENTED + BENCHMARKED (Apr 11)
 
-If we ever switch from TitaNet to CAM++, old enrollments would produce bad matches.
+Added model registry with TitaNet and CAM++ options. Benchmarked on real HiDock audio:
+- TitaNet: same-speaker 0.855, cross-speaker 0.745, **gap 0.110**
+- CAM++: same-speaker 0.945, cross-speaker 0.894, **gap 0.051**
+TitaNet has 2x better speaker separation on our audio. Keeping as default.
+CAM++ available via `set_speaker_embed_model("campp")`.
 
-- [ ] Add `model_version` field to voice library entries (already exists but not enforced)
-- [ ] Skip matching when model versions differ
-- [ ] Re-enrollment prompt when model changes
-
-### Evaluate CAM++ embedding model
-**Priority: MEDIUM** | From: minutes v0.10.0
-
-Minutes reports 12% lower error with CAM++_LM vs CAM++. TitaNet is a different family.
-
-- [ ] Download CAM++ ONNX model
-- [ ] Benchmark against TitaNet on our worst transcripts
-- [ ] If better, add as configurable option
+- [x] Download CAM++ ONNX model
+- [x] Benchmark against TitaNet on real meetings — TitaNet wins on HiDock audio
+- [x] Add as configurable option in models.py
+- [x] Fix extract_neural_embedding to handle CAM++ input shape (N,T,80)
 
 ### Non-speech event anonymization
-**Priority: LOW** | From: minutes v0.11.0
+**Priority: LOW** | From: minutes v0.11.0 | Status: IMPLEMENTED (Apr 11)
 
-`[laughter]`, `[cough]` etc. shouldn't get speaker labels.
-
-- [ ] Detect non-speech markers in Whisper output
-- [ ] Strip speaker assignment from these segments
+- [x] Detect non-speech markers ([laughter], [cough], etc.)
+- [x] Strip speaker assignment (speaker_id = -1)
+- [x] Wired into diarize pipeline after segment building
 
 ### Post-meeting workflow nudges
-**Priority: MEDIUM** | From: minutes v0.11.2
+**Priority: MEDIUM** | From: minutes v0.11.2 | Status: IMPLEMENTED basic (Apr 11)
 
-After transcription completes, suggest next steps.
+Subtle status bar nudge after transcription queue completes.
+Not a modal — just an info message in the status bar.
 
-- [ ] "Tag speakers" nudge when speakers are untagged
+- [x] "Tag speakers" nudge when untagged count > 3
 - [ ] "Open Voice Training" nudge after 5+ meetings with unconfirmed voices
 - [ ] Weekly summary suggestion (Fridays)
+
+### Silence stripping before Whisper
+**Priority: MEDIUM** | From: minutes | Status: IMPLEMENTED (Apr 11)
+
+- [x] Preprocess audio: strip silence >500ms, replace with 300ms padding
+- [x] Only applied when >5% of audio is stripped
+- [x] Adaptive noise floor (quietest 20% × 4x)
+- [x] Temp WAV created, cleaned up after Whisper
+
+### Track embedding model version in voice profiles
+**Priority: LOW** | From: minutes v0.10.0
+
+Model version already tracked in voice library entries. Enforcement not yet added.
+
+- [ ] Skip matching when model versions differ
+- [ ] Re-enrollment prompt when model changes
 
 ### Background auto-identification
 **Priority: LOW** | From: minutes v0.11.2
