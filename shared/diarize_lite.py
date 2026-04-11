@@ -26,7 +26,7 @@ _VAD_WINDOW_SIZE = 256  # 16ms at 16kHz (Silero VAD v5)
 
 # Quality thresholds
 _MIN_VAD_SEGMENTS_PER_MINUTE = 1.0
-_MAX_MERGED_SEGMENT_SECONDS = 90.0
+_MAX_MERGED_SEGMENT_SECONDS = 30.0
 _MIN_SPEAKERS_FOR_LONG_AUDIO = 2
 _MIN_EMBEDDING_DURATION = 1.5  # Skip segments shorter than this for embedding
 
