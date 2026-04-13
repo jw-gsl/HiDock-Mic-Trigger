@@ -360,9 +360,15 @@ def estimate_speaker_count(
 
             score = silhouette_score(embeddings_arr, labels, metric="cosine")
 
-            # Penalise higher k values — prefer simpler explanations
-            # k=2 gets full score, k=3 gets 85%, k=4 gets 70% etc.
-            penalty = 1.0 - (k - 2) * 0.15
+            # Slight bias toward MORE speakers (over-segment then merge)
+            # Industry consensus: easier to merge than to split
+            # k=2 gets 90%, k=3 gets full score, k=4 gets 95% etc.
+            if k == 2:
+                penalty = 0.90
+            elif k <= 4:
+                penalty = 1.0
+            else:
+                penalty = 1.0 - (k - 4) * 0.1  # Penalise above 4
             adjusted_score = score * penalty
 
             if adjusted_score > best_score:
