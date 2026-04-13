@@ -278,6 +278,102 @@ def extract_speaker_embeddings(
 
 # ── Clustering with running-average templates + post-merge ──────────────────
 
+def estimate_speaker_count(
+    audio: np.ndarray, sr: int = 16000,
+    max_speakers: int = 6, n_samples: int = 30,
+) -> int:
+    """Estimate the number of speakers by sampling points across the audio.
+
+    Takes ~5 seconds. Extracts embeddings from spread-out points,
+    then tries k=2..max_speakers clustering and picks the best
+    silhouette score.
+
+    Args:
+        audio: Full audio array.
+        sr: Sample rate.
+        max_speakers: Maximum speakers to test.
+        n_samples: Number of sample points to extract.
+
+    Returns:
+        Estimated number of speakers (minimum 2).
+    """
+    from sklearn.metrics import silhouette_score
+
+    audio_duration = len(audio) / sr
+    if audio_duration < 30:
+        return 2  # Too short to estimate
+
+    # Use VAD to find actual speech segments, then sample from those
+    audio_norm = _normalize_audio(audio)
+    speech_segs = detect_speech_segments(audio_norm, sr=sr)
+
+    if len(speech_segs) < 4:
+        return 2
+
+    # Merge adjacent speech for more stable clips
+    speech_segs = _merge_adjacent_speech(speech_segs)
+
+    # Pick up to n_samples speech segments, spread across the meeting
+    step = max(1, len(speech_segs) // n_samples)
+    selected = speech_segs[::step][:n_samples]
+
+    # Extract embeddings from speech segments (use original audio for quality)
+    speaker_session = _load_speaker_embed_model()
+    embeddings = []
+
+    for start, end in selected:
+        dur = end - start
+        if dur < 1.5:
+            continue
+        # Cap at 5 seconds
+        end = min(end, start + 5.0)
+        s = int(start * sr)
+        e = int(end * sr)
+        chunk = audio[s:e]
+        if len(chunk) < sr:
+            continue
+        try:
+            emb = extract_embedding(chunk, sr=sr, onnx_session=speaker_session)
+            embeddings.append(emb)
+        except Exception:
+            continue
+
+    if len(embeddings) < 4:
+        return 2  # Not enough data
+
+    embeddings_arr = np.array(embeddings, dtype=np.float32)
+
+    # Try different k values and pick best silhouette score
+    # Bias toward fewer speakers (multiply score by penalty for higher k)
+    best_k = 2
+    best_score = -1.0
+
+    for k in range(2, min(max_speakers + 1, len(embeddings))):
+        try:
+            from scipy.cluster.hierarchy import fcluster, linkage
+            Z = linkage(embeddings_arr, method="average", metric="cosine")
+            labels = fcluster(Z, t=float(k), criterion="maxclust")
+            labels = [int(l) - 1 for l in labels]
+
+            if len(set(labels)) < 2:
+                continue
+
+            score = silhouette_score(embeddings_arr, labels, metric="cosine")
+
+            # Penalise higher k values — prefer simpler explanations
+            # k=2 gets full score, k=3 gets 85%, k=4 gets 70% etc.
+            penalty = 1.0 - (k - 2) * 0.15
+            adjusted_score = score * penalty
+
+            if adjusted_score > best_score:
+                best_score = adjusted_score
+                best_k = k
+        except Exception:
+            continue
+
+    return best_k
+
+
 def cluster_speakers(
     embeddings: np.ndarray,
     n_speakers: int | None = None,
@@ -612,11 +708,12 @@ def diarize(
     embeddings, valid_indices = extract_speaker_embeddings(audio_raw, _VAD_SR, speech_segments)
     print(f"  Embeddings: {embeddings.shape} ({len(valid_indices)} valid of {len(speech_segments)})", file=sys.stderr)
 
-    # Step 6: Force minimum speakers for long meetings
+    # Step 6: Estimate speaker count (pre-pass)
     effective_n = n_speakers
-    if effective_n is None and audio_duration > 300 and len(valid_indices) >= 4:
-        effective_n = _MIN_SPEAKERS_FOR_LONG_AUDIO
-        print(f"  Forcing min {effective_n} speakers (>{audio_duration / 60:.0f}min)", file=sys.stderr)
+    if effective_n is None and audio_duration > 60 and len(valid_indices) >= 4:
+        estimated = estimate_speaker_count(audio_raw, sr=_VAD_SR)
+        effective_n = max(estimated, _MIN_SPEAKERS_FOR_LONG_AUDIO if audio_duration > 300 else 1)
+        print(f"  Speaker count estimate: {estimated} (using {effective_n})", file=sys.stderr)
 
     # Step 7: Cluster with post-merge pass
     speaker_labels = cluster_speakers(embeddings, n_speakers=effective_n)
