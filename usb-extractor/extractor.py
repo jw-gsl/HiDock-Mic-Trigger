@@ -646,7 +646,20 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
 
     if not payloads:
         raise HiDockProtocolError("no file list response received")
-    return parse_query_file_list_payload(payloads, expected_count=expected_count)
+
+    result = parse_query_file_list_payload(payloads, expected_count=expected_count)
+
+    # Warn if we couldn't get all recordings (firmware pagination limit)
+    if expected_count is not None and len(result) < expected_count:
+        missing = expected_count - len(result)
+        import sys
+        print(
+            f"WARNING: Device has {expected_count} recordings but firmware only returned {len(result)}. "
+            f"{missing} newest recordings are hidden. Delete old recordings from the device to free space.",
+            file=sys.stderr,
+        )
+
+    return result
 
 
 def get_file_metadata(dev, request_id: int = 3, timeout_ms: int = 5000) -> dict | None:
@@ -1043,6 +1056,14 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
 
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
+
+        # Warn if firmware truncated the recording list
+        if file_count is not None and len(recordings) < file_count:
+            missing = file_count - len(recordings)
+            payload["warning"] = (
+                f"{missing} newest recordings are hidden due to device firmware limits. "
+                f"Delete old recordings from the device to see them all."
+            )
     except Exception as exc:
         payload["error"] = f"Failed to query device: {exc}"
     finally:
