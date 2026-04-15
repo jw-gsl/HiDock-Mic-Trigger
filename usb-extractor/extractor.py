@@ -593,22 +593,27 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
     except Exception:
         pass
 
+    # Step 1: Collect ALL frames from the initial response.
+    # Some devices (P1) send multiple frames in a single USB transfer,
+    # while others (H1) send one frame then require continuation requests.
     payloads: list[bytes] = []
-    first_payload = read_raw_response_payload(dev, CMD_QUERY_FILE_LIST, request_id, timeout_ms=timeout_ms)
-    if first_payload:
-        payloads.append(first_payload)
-        declared_count = None
-        if len(first_payload) >= 6 and first_payload[:2] == b"\xff\xff":
-            declared_count = struct.unpack(">I", first_payload[2:6])[0]
 
-        # The device has an ~8 KB response buffer.  When the catalog is larger
-        # it truncates mid-record.  Sending a follow-up request whose payload
-        # is the number of fully-parsed records triggers a continuation that
-        # picks up exactly where the first response left off.  We concatenate
-        # all raw payloads so truncated records are reassembled correctly.
+    # Use send_and_collect to get all frames from the initial request
+    frames = send_and_collect(dev, CMD_QUERY_FILE_LIST, request_id, timeout_ms=timeout_ms, max_reads=10)
+    for _cmd, _req, body in frames:
+        if body:
+            payloads.append(body)
+
+    if payloads:
+        declared_count = None
+        if len(payloads[0]) >= 6 and payloads[0][:2] == b"\xff\xff":
+            declared_count = struct.unpack(">I", payloads[0][2:6])[0]
+
+        # Step 2: If we still don't have all records, try continuation requests.
+        # The H1 supports offset-based pagination for large catalogs.
         parsed_so_far = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
         next_req_id = request_id + 1
-        max_continuations = 10  # safety limit
+        max_continuations = 10
         while declared_count is not None and parsed_so_far < declared_count and max_continuations > 0:
             max_continuations -= 1
             try:
@@ -629,16 +634,16 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
                             break
                         continue
 
-                frames, _ = extract_frames(pending)
-                if not frames:
+                cont_frames, _ = extract_frames(pending)
+                if not cont_frames:
                     break
-                body = frames[0][2]
+                body = cont_frames[0][2]
                 if not body:
                     break
                 payloads.append(body)
                 new_count = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
                 if new_count <= parsed_so_far:
-                    break  # no progress
+                    break  # no progress — device doesn't support continuation
                 parsed_so_far = new_count
                 next_req_id += 1
             except (HiDockProtocolError, usb.core.USBError):
