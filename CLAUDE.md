@@ -43,6 +43,11 @@ Items considered but not adopted, with reasoning.
 4. **Critical self-assessment** — after implementing, honestly evaluate quality and document gaps
 5. **Consolidate** — if multiple plans overlap, merge them. One source of truth per topic.
 
+### Default behaviour when planning or researching:
+- **Default: write it to a plan md first.** Create or update `docs/PLAN-<topic>.md` as the primary deliverable — don't just think out loud in chat and lose it.
+- **Then ask the user whether they want it discussed in chat too.** Some users want the plan summarised/debated in the conversation, others only want the file. Ask before producing a long chat write-up — e.g. "Plan is at `docs/PLAN-x.md`. Want me to walk through it in chat, or is the file enough?"
+- This applies to any planning, research, architecture, or design task — not just explicit `/plan` requests.
+
 Plans in `docs/` are the project's memory. They persist across sessions and ensure nothing is forgotten.
 
 ## Development Workflow — IMPORTANT
