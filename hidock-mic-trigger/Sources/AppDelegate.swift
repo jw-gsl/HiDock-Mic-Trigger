@@ -214,6 +214,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         loadMergeGroups()
         importedRecordings = ImportedRecordingsStore.load()
         log("Loaded \(importedRecordings.count) imported recording(s) from \(ImportedRecordingsStore.path)")
+        // Backfill duration for any entries imported before duration probing
+        // was wired up (duration saved as 0).
+        var needsSave = false
+        for i in importedRecordings.indices {
+            if importedRecordings[i].duration <= 0,
+               FileManager.default.fileExists(atPath: importedRecordings[i].outputPath) {
+                let d = ImportedRecordingsStore.probeDuration(at: importedRecordings[i].outputPath)
+                if d > 0 {
+                    let e = importedRecordings[i]
+                    importedRecordings[i] = ImportedRecordingEntry(
+                        name: e.name, outputPath: e.outputPath, originalPath: e.originalPath,
+                        length: e.length, duration: d,
+                        createdAt: e.createdAt, importedAt: e.importedAt
+                    )
+                    needsSave = true
+                    log("Backfilled duration for \(e.name): \(Int(d))s")
+                }
+            }
+        }
+        if needsSave { ImportedRecordingsStore.save(importedRecordings) }
         rebuildSyncEntries()
         let imp = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
         log("After rebuildSyncEntries: syncEntries=\(syncEntries.count) imported=\(imp.count)")
@@ -2572,16 +2592,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let size = (attrs[.size] as? Int) ?? 0
         let mtime = (attrs[.modificationDate] as? Date) ?? Date()
 
+        // Probe duration via AVFoundation — works on every format ffmpeg
+        // handles (mp3, wav, m4a, flac, ogg, mp4, mov). ~100ms for a
+        // 400 MB WAV on Apple Silicon.
+        let duration = ImportedRecordingsStore.probeDuration(at: destURL.path)
+
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
 
-        log("Imported \(source.lastPathComponent) → \(destName) (\(size / 1_048_576) MB)")
+        log("Imported \(source.lastPathComponent) → \(destName) (\(size / 1_048_576) MB, \(Int(duration))s)")
         return ImportedRecordingEntry(
             name: destName,
             outputPath: destURL.path,
             originalPath: source.path,
             length: size,
-            duration: 0,  // filled in later by extracting from ffmpeg/librosa on first transcription
+            duration: duration,
             createdAt: iso.string(from: mtime),
             importedAt: iso.string(from: Date())
         )

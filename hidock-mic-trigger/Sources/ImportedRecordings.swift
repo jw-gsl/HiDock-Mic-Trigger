@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// Persistence + helpers for recordings that the user imported manually from
@@ -95,16 +96,17 @@ enum ImportedRecordingsStore {
 
     /// Build a synthetic HiDockSyncRecording from an imported entry so the
     /// existing recordings table can display it without any schema change.
+    ///
+    /// Dates are emitted in HiDock's `YYYY/MM/DD` / `HH:MM:SS` format so
+    /// sorting interleaves correctly with device-reported recordings —
+    /// otherwise imports would sort to a weird position because `-` and `/`
+    /// collate differently in string comparison.
     static func asSyncRecording(_ entry: ImportedRecordingEntry) -> HiDockSyncRecording {
-        HiDockSyncRecording(
+        let (createDate, createTime) = formatAsHiDockDate(entry.createdAt)
+        return HiDockSyncRecording(
             name: entry.name,
-            createDate: String(entry.createdAt.prefix(10)),  // "YYYY-MM-DD"
-            createTime: entry.createdAt.count >= 19
-                ? String(entry.createdAt[
-                    entry.createdAt.index(entry.createdAt.startIndex, offsetBy: 11)
-                    ..< entry.createdAt.index(entry.createdAt.startIndex, offsetBy: 19)
-                ])
-                : "",
+            createDate: createDate,
+            createTime: createTime,
             length: entry.length,
             duration: entry.duration,
             version: 1,
@@ -117,13 +119,48 @@ enum ImportedRecordingsStore {
             downloadedAt: entry.importedAt,
             lastError: nil,
             status: "imported",
-            humanLength: Self.formatBytes(entry.length)
+            humanLength: formatDuration(entry.duration)
         )
     }
 
-    private static func formatBytes(_ bytes: Int) -> String {
-        let mb = Double(bytes) / 1_048_576
-        if mb >= 1024 { return String(format: "%.1f GB", mb / 1024) }
-        return String(format: "%.0f MB", mb)
+    /// Convert an ISO-8601 timestamp to HiDock's display format.
+    private static func formatAsHiDockDate(_ iso: String) -> (date: String, time: String) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let date = formatter.date(from: iso) else {
+            return ("", "")
+        }
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "yyyy/MM/dd"
+        dateFmt.locale = Locale(identifier: "en_US_POSIX")
+        let timeFmt = DateFormatter()
+        timeFmt.dateFormat = "HH:mm:ss"
+        timeFmt.locale = Locale(identifier: "en_US_POSIX")
+        return (dateFmt.string(from: date), timeFmt.string(from: date))
+    }
+
+    /// Probe an audio / video file with AVFoundation to get its duration
+    /// in seconds. Returns 0 if the file can't be read (unknown codec,
+    /// corrupted, or AVFoundation simply doesn't support it).
+    static func probeDuration(at path: String) -> Double {
+        let url = URL(fileURLWithPath: path)
+        let asset = AVURLAsset(url: url)
+        // Synchronous load is fine here — we're on a background thread
+        // during import, not the main queue.
+        let seconds = CMTimeGetSeconds(asset.duration)
+        return seconds.isFinite && seconds > 0 ? seconds : 0
+    }
+
+    /// Format seconds as HH:MM:SS or MM:SS to match HiDock's humanLength.
+    private static func formatDuration(_ seconds: Double) -> String {
+        guard seconds > 0 else { return "" }
+        let total = Int(seconds)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%d:%02d", minutes, secs)
     }
 }
