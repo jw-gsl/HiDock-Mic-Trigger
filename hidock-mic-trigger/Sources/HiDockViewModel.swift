@@ -149,6 +149,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleAutoStart: () -> Void = {}
     var onSelectMic: (String) -> Void = { _ in }
     var onRefreshSync: () -> Void = {}
+    var onImportAudioFile: () -> Void = {}
     var onPairDock: () -> Void = {}
     var onUnpairDock: () -> Void = {}
     var onChooseRecordingsFolder: () -> Void = {}

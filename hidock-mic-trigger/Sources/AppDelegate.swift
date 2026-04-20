@@ -358,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleAutoStart = { [weak self] in self?.toggleAutoStart() }
         viewModel.onSelectMic = { [weak self] mic in self?.selectMic(mic) }
         viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus() }
+        viewModel.onImportAudioFile = { [weak self] in self?.importAudioFile() }
         viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
         viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }

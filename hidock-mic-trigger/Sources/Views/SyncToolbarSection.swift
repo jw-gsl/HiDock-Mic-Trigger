@@ -40,6 +40,13 @@ struct SyncToolbarSection: View {
                 }
                 .disabled(viewModel.syncBusy)
 
+                Button {
+                    viewModel.onImportAudioFile()
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                }
+                .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
+
                 Spacer()
 
                 Button {
