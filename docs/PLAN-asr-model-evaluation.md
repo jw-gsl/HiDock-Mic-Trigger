@@ -234,7 +234,18 @@ class TranscriptionBackend:
 
 Defer until we see actual demand. Starts getting into "third-party code execution inside the app" territory which needs a security review.
 
-### Proposed UI (Models Manager)
+### Proposed UI (Models Manager) — Option B chosen 2026-04-20
+
+User picked the **full-pipeline-with-descriptor-rows** variant over a models-only list. Rationale: it's a personal-use app for James right now, and he wants the screen to double as a visibility tool for understanding the pipeline. Hard requirement: **descriptor rows must be visibly non-interactive** — no accidental clicks that could break configuration.
+
+Implementation rules:
+
+- **Interactive rows** (selectable models): radio button for mutually-exclusive stages, checkbox for multi-select (aligners), size badge on the right, name in normal weight, description below.
+- **Descriptor rows** (pipeline stages with no model): no radio/checkbox, italic label, subtle grey background, light grey text, cursor stays as default arrow (not pointer), no hover highlight. Visually obvious they're informational, not actionable.
+- **Stage headers**: bold, larger font, numbered (matches the README pipeline diagram so the docs and UI agree).
+- **Grouping flag** in MODEL_REGISTRY: add `pipeline_stage` to each entry (values: `"vad"`, `"asr"`, `"aligner"`, `"diarization"`, or a numbered stage key). Registry becomes the single source of truth for UI ordering.
+- **Stage 4.5 visibility**: collapsed by default, expands only when stage 4 selection is Cohere. Prevents clutter for users on Whisper/Parakeet.
+
 
 ```
 ┌────────────────────────────────────────────┐
