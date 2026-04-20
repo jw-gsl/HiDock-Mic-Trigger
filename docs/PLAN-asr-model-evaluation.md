@@ -130,6 +130,9 @@ Net: nice-to-have, not a must-have. Order of priority:
 - [x] Prototyped `transcribe_parakeet.py` — full backend mirroring Whisper's JSON output contract (segments with start/end/text, _diarized.json, _whisper.json, frontmatter, Whisper-Guard, corrections, diarization, hooks). Installed `parakeet-mlx` 0.5.1 into `transcription-pipeline/.venv`. Import + `--help` verified.
 - [x] Added Parakeet to `shared/models.py` MODEL_REGISTRY with `managed_externally: True` (parakeet-mlx uses HF hub cache, not our MODELS_DIR). Added to `requirements.txt` with `darwin + arm64` marker.
 - [x] Updated `test_model_paths_resolve_to_models_dir` to skip externally-managed entries. All 329 tests passing.
+- [x] 2026-04-20 Documented Cohere-as-third-backend path with forced aligner, flagged MMS-FA CC-BY-NC licence as blocker, identified `torchaudio.functional.forced_align` + wav2vec2-CTC as the commercial-friendly aligner path.
+- [x] Drafted tiered user-extensible-backend design (Whisper-compatible custom models as Tier 1 quick win, wav2vec2-family as Tier 2, arbitrary-architecture plugin system deferred as Tier 3).
+- [x] Sketched Models Manager UI showing backend radio group + custom model list + aligner language sub-management.
 
 ## Planned
 
@@ -140,9 +143,127 @@ Net: nice-to-have, not a must-have. Order of priority:
 - [ ] Spike Cohere + forced aligner as a second backend: use `ctc-forced-aligner` or WhisperX's wav2vec2 CTC aligner to add word-level timestamps to Cohere's text output. Decision: if Parakeet's quality is "good enough" and Cohere+aligner is "marginally better but slower", ship Parakeet only and leave Cohere as a spec waiting for a timestamped variant.
 - [ ] Update About window + README with CC-BY-4.0 attribution for Parakeet.
 - [ ] Update `PARITY.md` — Mac gets Parakeet default, Windows stays on Whisper.
+- [ ] Prototype `transcribe_cohere.py` following the transcribe_parakeet.py pattern. Depends on: Cohere 2B weights (4 GB disk, 5.6 GB RAM).
+- [ ] Write `shared/forced_align.py` wrapping `torchaudio.functional.forced_align` with a per-language wav2vec2 CTC model lookup. Add aligner models to MODEL_REGISTRY as lazy-loaded per-language entries.
+- [ ] Tier 1 custom-model support: "Add Whisper-compatible model" button in Models Manager → text field for HF model ID → writes to `~/HiDock/custom_models.json` → runtime-merged with MODEL_REGISTRY. ~80 lines Python + Swift.
+- [ ] Extend the Models Manager UI to match the sketch above — backend segmented control, custom models list, aligner language sub-management for Cohere.
+
+## Cohere as a third backend (added 2026-04-20)
+
+User now wants Cohere as an option even though it has no timestamps — they're happy to add a forced aligner. This makes Cohere viable but not trivial.
+
+### Architecture: audio → Cohere → text → forced aligner → timestamped segments
+
+```
+MP3  ──► Cohere Transcribe (2B params, ~5.6 GB RAM)
+           │ produces plain text, no timing
+           ▼
+         Forced aligner (wav2vec2-CTC)
+           │ aligns each word to a time range in the original audio
+           ▼
+         Our standard segments format (start/end/text)
+           │
+           ▼
+         Whisper-Guard → Diarization → Transcript writer
+```
+
+### Forced aligner — licence minefield
+
+| Option | Licence | Notes |
+|---|---|---|
+| `ctc-forced-aligner` (Mahmoud Ashraf) with **MMS-FA** | **CC-BY-NC 4.0** ⛔ | Non-commercial. Blocker. |
+| `facebook/wav2vec2-base-960h` | Apache-2.0 ✓ | English only, clean commercial use |
+| `jonatasgrosman/wav2vec2-large-xlsr-53-english` | Apache-2.0 ✓ | English, stronger than base |
+| `jonatasgrosman/wav2vec2-large-xlsr-53-*` (13 other langs) | Apache-2.0 ✓ | One model per language — matches Cohere's 14 languages |
+| `torchaudio.functional.forced_align` | BSD-2-Clause ✓ | The algorithm itself; needs a CTC model to drive it |
+
+**Path**: use the `torchaudio.functional.forced_align` API with a per-language wav2vec2 CTC model. We pre-select the aligner based on Cohere's input language (since Cohere requires pre-specified language anyway, we already have that signal).
+
+### Runtime footprint
+
+- Cohere Transcribe: ~5.6 GB RAM, ~4 GB disk
+- wav2vec2 aligner per language: ~360 MB RAM each, ~1.2 GB disk
+- **Total if all 14 Cohere languages installed**: ~5.6 + ~18 GB disk. Realistically users would only install aligners for languages they actually record in — UI should let them manage this.
+
+### Integration plan
+
+1. `transcribe_cohere.py` — new backend following the transcribe.py contract. Loads Cohere via `transformers`, runs inference, hands the text + raw audio to the aligner stage.
+2. `shared/forced_align.py` — new module wrapping `torchaudio.functional.forced_align` with a wav2vec2 CTC model lookup keyed by language.
+3. MODEL_REGISTRY: one entry for Cohere + one entry per wav2vec2 aligner language (lazily downloaded).
+4. Backend selector in Models Manager: same segmented control as Parakeet, but with an expandable "Installed languages" sub-list for Cohere.
+
+### When to choose Cohere over Whisper or Parakeet
+
+- Non-English recording in one of Cohere's 14 languages, user values top WER over speed
+- English recording where the user has hit a Parakeet limitation (accent, technical vocab) and wants to try the #1 leaderboard model
+- Explicit user opt-in in settings — not the default
+
+## User-extensible backends (new section)
+
+User asked: "a way to allow the input of other models, so other model names that it could go and add and get".
+
+### Tiered approach
+
+**Tier 1 — Whisper-compatible custom model (easy)**
+
+Many ASR models on HuggingFace are Whisper-family fine-tunes: `distil-whisper/distil-large-v3.5`, `openai/whisper-large-v3-turbo` (non-quantised), community fine-tunes for domains/languages. All of these use the same `whisper.load_model()` or `WhisperForConditionalGeneration` interface and produce the same segment shape.
+
+UI: in Models Manager, "Add a Whisper-compatible model" button → text field for HuggingFace model ID → download on confirm. Stored in a user-config file (`~/HiDock/custom_models.json`). Added to MODEL_REGISTRY at runtime.
+
+Implementation: ~80 lines. Reuses the existing whisper loader.
+
+**Tier 2 — CTC / wav2vec2-family custom model (medium)**
+
+Lets users swap the aligner or use a different ASR family without code changes. Needs a type hint from the user ("this is a CTC model" / "this is a Wav2Vec2 model") to pick the right loader.
+
+UI: same "Add model" button, with a backend-family dropdown alongside the model ID field.
+
+**Tier 3 — Arbitrary architecture (hard, don't do yet)**
+
+For models that don't fit any of the backends we've already coded (e.g. a novel streaming architecture, a C/Rust binary like whisper.cpp variants). Would need a plugin system where users can drop a Python module into `transcription-pipeline/backends/` implementing a standard interface:
+
+```python
+class TranscriptionBackend:
+    name: str
+    display_name: str
+    languages: list[str]
+    supports_timestamps: bool
+    def is_available(self) -> bool: ...
+    def transcribe(self, audio_path: Path, **kwargs) -> TranscriptionResult: ...
+```
+
+Defer until we see actual demand. Starts getting into "third-party code execution inside the app" territory which needs a security review.
+
+### Proposed UI (Models Manager)
+
+```
+┌────────────────────────────────────────────┐
+│ Speech Recognition Backend                 │
+│ ( ) Auto (Parakeet for English, Whisper…)  │
+│ (•) Parakeet TDT v2 (MLX)         Installed│
+│ ( ) Whisper large-v3-turbo        Installed│
+│ ( ) Cohere Transcribe 03-2026    Not inst. │
+│     └── Aligner languages: [en] [de] [+]   │
+│ ( ) Custom: …                              │
+│     [+ Add Whisper-compatible model]       │
+├────────────────────────────────────────────┤
+│ Custom models (2):                         │
+│  • distil-whisper/distil-large-v3.5   [×]  │
+│  • Volaris/volaris-whisper-ft        [×]   │
+├────────────────────────────────────────────┤
+│ Voice Detection                            │
+│ (•) Silero VAD       [Switch to TEN VAD]   │
+│                                            │
+│ Speaker Recognition                        │
+│ (•) TitaNet                                │
+│ ( ) CAM++ (12% better, 512-dim)            │
+└────────────────────────────────────────────┘
+```
 
 ## Rejected / Not applicable
 
-- **Cohere Transcribe as a drop-in** — no timestamps. Would require a forced-aligner layer (MMS aligner or wav2vec2-ctc), adding another model, failure mode, and 1–2 GB to the model footprint. Not worth it when Parakeet is already a better fit.
+- **Cohere Transcribe without a forced aligner** — no timestamps, breaks diarization. Only viable with an aligner layer.
+- **`ctc-forced-aligner` with MMS-FA** — CC-BY-NC, non-commercial. Blocker for Volaris distribution.
 - **Parakeet v3** — newer but the ecosystem (`parakeet-mlx`, CoreML builds, attribution practices) is still built around v2. Revisit once v3 MLX ports mature.
 - **Cohere via their hosted API** — violates local-first design.
+- **Plugin system for arbitrary architectures (Tier 3 custom backend)** — deferred until demand justifies the security / code-review work of executing third-party Python modules.
