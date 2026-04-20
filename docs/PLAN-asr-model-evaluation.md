@@ -1,8 +1,8 @@
-# ASR Model Evaluation — Cohere Transcribe vs Parakeet v2 vs Whisper
+# ASR Model Evaluation — Cohere Transcribe vs Parakeet v2 vs Whisper (+ TEN VAD)
 
-Research date: 2026-04-20
+Research date: 2026-04-20 (updated with TEN VAD)
 Branch: `feature/voice-training`
-Sources: HuggingFace Open ASR Leaderboard, Cohere Labs announcement (2026-03-26), NVIDIA Parakeet v2 model card, mlx-community/parakeet-tdt-0.6b-v2, senstella/parakeet-mlx (GitHub), TechCrunch/VentureBeat coverage.
+Sources: HuggingFace Open ASR Leaderboard, Cohere Labs announcement (2026-03-26), NVIDIA Parakeet v2 model card, mlx-community/parakeet-tdt-0.6b-v2, senstella/parakeet-mlx (GitHub), TEN-framework/ten-vad (GitHub + HF), TechCrunch/VentureBeat coverage.
 
 ## Context
 
@@ -85,6 +85,36 @@ We must credit the Parakeet model in any distribution. Plan:
 - `About` window: "Speech recognition: Parakeet TDT 0.6B v2 (NVIDIA, CC-BY-4.0)"
 - `README.md`: credits section
 - `PARITY.md`: note the licence
+
+## VAD replacement: TEN VAD vs Silero (added 2026-04-20)
+
+User also flagged TEN VAD (theten.ai, TEN-framework/ten-vad) as a potential upgrade over Silero.
+
+| | Silero VAD (current) | TEN VAD |
+|---|---|---|
+| Size | ~2 MB ONNX | ~306 KB shared library |
+| Licence | MIT | Apache-2.0 **with additional conditions** (verify before shipping) |
+| Formats | ONNX | ONNX + native C/C++/Python/Java/Go/WASM |
+| Apple Silicon | ONNX on CPU (how we run it) | Pre-built macOS arm64 ✓ |
+| Training data | Multi-domain, 99+ languages | LibriSpeech + GigaSpeech + DNS Challenge |
+| RTF | Baseline | **~32% faster** |
+| Transition latency | Several hundred ms | Frame-level ✓ |
+| Precision/recall | Industry standard | **Superior on LS/GS/DNS benchmarks** per TEN's docs |
+
+**Assessment for our pipeline:** Real but modest win.
+
+We use VAD in two places, both **offline** (not real-time):
+1. Pre-transcription silence stripping (`_replace_silence_with_padding`)
+2. Diarization speech-boundary detection
+
+The latency advantage TEN advertises matters for **conversational AI / voice agents** (their stated target market) — not for our batch processing of an MP3. The precision-recall improvement would slightly reduce false-positive speech segments (breathing, room noise) feeding into diarization, which could marginally improve speaker clustering quality.
+
+Net: nice-to-have, not a must-have. Order of priority:
+1. Parakeet ASR (large WER + speed win)
+2. Better speaker count estimation (already shipped this session)
+3. TEN VAD swap (marginal offline gain, non-trivial re-test cost)
+
+**Licence caveat**: "Apache-2.0 with additional conditions" is not pure Apache-2.0. Before shipping, we need to read the actual LICENSE file and verify the additional conditions are compatible with a desktop app distribution. If conditions include things like "no commercial use without notification" or ad-network requirements (which are the typical "additional conditions" patterns), that's a blocker.
 
 ## Risk and uncertainty
 
