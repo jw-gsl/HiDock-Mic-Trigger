@@ -388,6 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus() }
         viewModel.onImportAudioFile = { [weak self] in self?.importAudioFile() }
         viewModel.onRemoveImport = { [weak self] name in self?.removeImportedRecording(name: name) }
+        viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
         viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
         viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
@@ -2261,7 +2262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["HOME"] = NSHomeDirectory()
             env["PYTHONPATH"] = self.repoRoot
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
-                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:" + existing
             }
             process.environment = env
 
@@ -2647,6 +2650,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func rebuildSyncEntries() {
         mergeImportedIntoSyncEntries()
         viewModel.syncEntries = syncEntries
+    }
+
+    /// Queue a single recording for transcription with a hint that the
+    /// speaker count is known. Bypasses the automatic estimator inside
+    /// diarize_lite, which caps at 2 speakers for quiet group recordings
+    /// where VAD is sparse. The hint flows all the way through to
+    /// clustering as a fixed k.
+    func transcribeWithSpeakerCount(name: String, nSpeakers: Int) {
+        guard let entry = syncEntries.first(where: { $0.recording.name == name }) else {
+            log("transcribeWithSpeakerCount: no entry named \(name)")
+            return
+        }
+        guard entry.recording.downloaded && entry.recording.localExists else {
+            log("transcribeWithSpeakerCount: \(name) not downloaded yet")
+            return
+        }
+        guard ensureTranscriptionReady() else { return }
+
+        var args = ["transcribe", entry.recording.outputPath]
+        if diarizeEnabled { args.append("--diarize") }
+        args.append("--summarize")
+        args.append("--n-speakers")
+        args.append("\(nSpeakers)")
+
+        let timeout = Self.computeTranscriptionTimeout(
+            for: entry.recording.outputPath,
+            knownDuration: entry.recording.duration
+        )
+
+        log("Transcribing \(name) with --n-speakers \(nSpeakers), timeout=\(Int(timeout))s")
+        viewModel.syncStatus = "Transcribing \(name) with \(nSpeakers) speakers..."
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+
+        runTranscription(arguments: args, timeout: timeout) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                self.log("Transcription complete (n_speakers=\(nSpeakers)): \(name)")
+                self.viewModel.syncStatus = "Transcribed \(name)"
+                self.viewModel.syncStatusLevel = .success
+            case .failure(let err):
+                self.log("Transcription failed for \(name): \(err.localizedDescription)")
+                self.viewModel.syncStatus = "Transcription failed: \(err.localizedDescription)"
+                self.viewModel.syncStatusLevel = .error
+            }
+            self.refreshTranscriptionState()
+            self.syncViewModelState()
+        }
     }
 
     /// Remove an imported recording by filename — unlinks the audio file
@@ -3909,6 +3961,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("Model download cancelled")
     }
 
+    /// Compute a transcription timeout based on audio duration when known,
+    /// falling back to file-size heuristics otherwise. Whisper on MPS runs at
+    /// roughly 3–5× real-time; 1.5× audio duration + 10-min slack gives plenty
+    /// of safety margin. Capped at 4 hours so a runaway process can't
+    /// camp on the GPU indefinitely.
+    static func computeTranscriptionTimeout(
+        for path: String, knownDuration: Double = 0,
+    ) -> TimeInterval {
+        if knownDuration > 0 {
+            return min(14400.0, max(600.0, knownDuration * 1.5 + 600.0))
+        }
+        // Fallback: probe via AVFoundation if we didn't get a duration upstream.
+        let probed = ImportedRecordingsStore.probeDuration(at: path)
+        if probed > 0 {
+            return min(14400.0, max(600.0, probed * 1.5 + 600.0))
+        }
+        // Last resort: scale by file size, roughly MP3-calibrated. Overshoots
+        // for WAV/FLAC but better to over-allocate than kill mid-transcription.
+        let fileSizeMB = Double(
+            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+        ) / (1024 * 1024)
+        return min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
+    }
+
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         log("runTranscription: \(arguments.joined(separator: " "))")
         transcriptionDispatchQueue.async {
@@ -3924,7 +4000,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let home = NSHomeDirectory()
             env["HOME"] = home
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
-                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:" + existing
             }
             // Metal / MPS needs access to the GPU frameworks
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -4058,10 +4136,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var transcribeArgs = ["transcribe", mp3Path]
         if diarizeEnabled { transcribeArgs.append("--diarize") }
-        let fileSizeMB = Double(
-            (try? FileManager.default.attributesOfItem(atPath: mp3Path)[.size] as? Int) ?? 0
-        ) / (1024 * 1024)
-        let scaledTimeout = min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
+        // Always pass --summarize; transcribe.py gracefully skips if no LLM
+        // CLI (claude/codex/gemini/ollama) is on PATH. Leaves action_items /
+        // decisions / key_points / tags filled when claude is authed.
+        transcribeArgs.append("--summarize")
+        // Timeout scales by audio duration, not file size — WAV is ~10× bigger
+        // than MP3 for the same audio length, so file-size-based budgets were
+        // wildly overprovisioned. Whisper on MPS runs at ~3–5× real-time, so
+        // 1.5× audio duration + 10min slack is safe. 4-hour cap protects
+        // against runaway processes.
+        let scaledTimeout = Self.computeTranscriptionTimeout(for: mp3Path)
         runTranscription(arguments: transcribeArgs, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionProgress = pct
@@ -4299,16 +4383,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
-
-        // Scale timeout by MP3 size. Whisper large-v3-turbo on MPS processes
-        // audio at roughly 3–5× real-time. A 128kbps MP3 is ~1 MB/min, so
-        // 1 min of audio ≈ 15–20s of compute. Budget 60s per MB + 10 min
-        // slack, capped at 4 hours. Previous fixed 600s timeout was killing
-        // long recordings (e.g. a 6-hour Rec48 at 172 MB needs ~2 hours).
-        let fileSizeMB = Double(
-            (try? FileManager.default.attributesOfItem(atPath: item.path)[.size] as? Int) ?? 0
-        ) / (1024 * 1024)
-        let scaledTimeout = min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
+        args.append("--summarize")  // see transcribeFileDirect for rationale
+        // Prefer duration from the HiDock catalogue / import metadata; falls
+        // back to file-size probing for edge cases where duration is unknown.
+        let itemDuration = pendingTranscriptionQueue.first(where: { $0.path == item.path })
+            .flatMap { queueItem -> Double? in
+                syncEntries.first(where: { $0.recording.outputName == queueItem.filename })?.recording.duration
+            } ?? 0
+        let scaledTimeout = Self.computeTranscriptionTimeout(for: item.path, knownDuration: itemDuration)
         runTranscription(arguments: args, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionLastRealProgress = pct
@@ -4460,7 +4542,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var env = ProcessInfo.processInfo.environment
             env["HOME"] = NSHomeDirectory()
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
-                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:" + existing
             }
             process.environment = env
 

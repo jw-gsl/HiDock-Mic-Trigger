@@ -161,6 +161,11 @@ final class HiDockViewModel: ObservableObject {
     var onRefreshSync: () -> Void = {}
     var onImportAudioFile: () -> Void = {}
     var onRemoveImport: (String) -> Void = { _ in }
+    /// Transcribe a single recording with a user-supplied expected speaker
+    /// count. Overrides the pipeline's automatic density-prior estimate for
+    /// recordings where the user knows how many voices to expect (e.g.
+    /// "this is a 1:1", "this is a 6-person hackathon panel").
+    var onTranscribeWithSpeakerCount: (String, Int) -> Void = { _, _ in }
     var onPairDock: () -> Void = {}
     var onUnpairDock: () -> Void = {}
     var onChooseRecordingsFolder: () -> Void = {}

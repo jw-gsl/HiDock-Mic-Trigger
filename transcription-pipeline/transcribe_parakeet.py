@@ -24,6 +24,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Route SSL verification through the macOS/Linux system trust store so the
+# first-run HuggingFace download works. Python 3.13 + OpenSSL 3.5 is strict
+# about X.509 extensions and rejects some HF CDN certs with the certifi
+# bundle. truststore falls back to the OS keychain which accepts them.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass  # truststore is optional; fall back to default SSL if absent
+
 import config
 from state import load_state, save_state
 
@@ -205,11 +215,10 @@ def transcribe_file(
 
         import json as _json
         write_transcript(
-            text=text,
-            transcript_path=transcript_path,
-            source_audio=mp3_path,
-            model_name=PARAKEET_MODEL_ID,
-            segments=segments,
+            output_path=transcript_path,
+            transcript_text=text,
+            source_path=mp3_path,
+            model=PARAKEET_MODEL_ID,
             diarized_result=diarized_result,
             whisper_segments=segments,
             summary=summary,

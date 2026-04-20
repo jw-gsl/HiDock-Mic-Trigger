@@ -309,11 +309,10 @@ def transcribe_file(
         stage(total_stages, total_stages, "Writing transcript")
         import json as _json
         write_transcript(
-            text=text,
-            transcript_path=transcript_path,
-            source_audio=mp3_path,
-            model_name=COHERE_MODEL_ID,
-            segments=segments,
+            output_path=transcript_path,
+            transcript_text=text,
+            source_path=mp3_path,
+            model=COHERE_MODEL_ID,
             diarized_result=diarized_result,
             whisper_segments=segments,
             summary=summary,

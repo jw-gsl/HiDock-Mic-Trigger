@@ -334,6 +334,21 @@ struct RecordingsTableView: View {
             }
         }
 
+        if entry.recording.downloaded && entry.recording.localExists {
+            Menu {
+                // Presets cover 1:1s, small meetings, and typical group
+                // panels. Auto leaves the density-prior estimator in charge
+                // (current default).
+                ForEach([1, 2, 3, 4, 5, 6, 8, 10], id: \.self) { n in
+                    Button("\(n) speaker\(n == 1 ? "" : "s")") {
+                        viewModel.onTranscribeWithSpeakerCount(entry.recording.name, n)
+                    }
+                }
+            } label: {
+                Label("Transcribe with speaker count…", systemImage: "person.2.wave.2")
+            }
+        }
+
         Divider()
 
         if entry.recording.downloaded && entry.recording.localExists {
