@@ -54,10 +54,20 @@ final class HiDockViewModel: ObservableObject {
     var visibleEntries: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
-            entries = entries.filter { $0.deviceId == filterDeviceId }
+            // Imported recordings are always visible regardless of the device
+            // filter — they aren't "on" any HiDock, so filtering by a specific
+            // device shouldn't hide them.
+            entries = entries.filter {
+                $0.deviceId == filterDeviceId || $0.deviceId == "imported:local"
+            }
         }
         if syncHideDownloaded {
-            entries = entries.filter { !$0.recording.downloaded }
+            // Hide Downloaded is semantically "hide recordings already pulled
+            // off the HiDock so I can focus on new ones to fetch". Imported
+            // files were never on a HiDock — they should stay visible.
+            entries = entries.filter {
+                !$0.recording.downloaded || $0.deviceId == "imported:local"
+            }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording
