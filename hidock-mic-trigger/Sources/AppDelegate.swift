@@ -3564,11 +3564,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func markSyncRecordingsAsDownloaded() {
         let entries = selectedSyncEntries()
         let notDownloaded = entries.filter { !$0.recording.downloaded }
-        guard !notDownloaded.isEmpty else { return }
+        let alreadyHandled = entries.count - notDownloaded.count
+
+        log("Skip: \(entries.count) selected, \(notDownloaded.count) eligible, \(alreadyHandled) already downloaded/skipped")
+
+        guard !notDownloaded.isEmpty else {
+            // Silent no-op was the pre-fix bug. Surface it clearly.
+            if entries.isEmpty {
+                viewModel.syncStatus = "Skip: no recordings selected"
+            } else {
+                viewModel.syncStatus = "Skip: all \(entries.count) selected recordings are already downloaded or skipped"
+            }
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
 
         let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceId)
         let group = DispatchGroup()
         var anyError: String?
+
+        viewModel.syncStatus = "Skipping \(notDownloaded.count) recording(s)..."
+        viewModel.syncStatusLevel = .info
+        syncViewModelState()
 
         for (deviceId, deviceEntries) in byDevice {
             let filenames = deviceEntries.map(\.recording.name)
@@ -3584,10 +3602,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 pid = device?.productId
             }
 
+            log("Skip[\(device?.shortName ?? deviceId)]: mark-downloaded \(filenames.count) file(s), pid=\(pid.map(String.init) ?? "nil")")
             group.enter()
-            runExtractor(arguments: args, productId: pid) { result in
-                if case .failure(let error) = result {
+            runExtractor(arguments: args, productId: pid) { [weak self] result in
+                switch result {
+                case .success(let data):
+                    self?.log("Skip[\(device?.shortName ?? deviceId)]: ok (\(data.count) bytes response)")
+                case .failure(let error):
                     anyError = error.localizedDescription
+                    self?.log("Skip[\(device?.shortName ?? deviceId)]: FAILED — \(error.localizedDescription)")
                 }
                 group.leave()
             }
@@ -3597,6 +3620,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             if let error = anyError {
                 self.showError("Failed to skip recordings:\n\(error)")
+            } else {
+                self.viewModel.syncStatus = "Skipped \(notDownloaded.count) recording(s)"
+                self.viewModel.syncStatusLevel = .success
             }
             self.syncCheckedRecordings.removeAll()
             self.refreshSyncStatus()
@@ -4528,6 +4554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func refreshTranscriptionState() {
         guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
               FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else {
+            log("refreshTranscriptionState: skipping — script=\(FileManager.default.fileExists(atPath: transcriptionScriptPath)), python=\(FileManager.default.isExecutableFile(atPath: transcriptionPythonPath)) at \(transcriptionScriptPath)")
             return
         }
 
@@ -4557,7 +4584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 try process.run()
                 process.waitUntilExit()
             } catch {
-                NSLog("refreshTranscriptionState: failed to run process: %@", error.localizedDescription)
+                self.log("refreshTranscriptionState: failed to run process: \(error.localizedDescription)")
                 return
             }
 
@@ -4565,15 +4592,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if process.terminationStatus != 0 {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 let errMsg = String(data: errData, encoding: .utf8) ?? "unknown error"
-                NSLog("refreshTranscriptionState: process exited %d: %@", process.terminationStatus, errMsg)
+                self.log("refreshTranscriptionState: exit=\(process.terminationStatus), stderr=\(errMsg.prefix(400))")
                 return
             }
             guard let lookup = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else {
-                NSLog("refreshTranscriptionState: failed to decode JSON (%d bytes)", data.count)
+                self.log("refreshTranscriptionState: failed to decode JSON (\(data.count) bytes, first 200 chars=\(String(data: data, encoding: .utf8)?.prefix(200) ?? "?"))")
                 return
             }
 
             DispatchQueue.main.async {
+                self.log("refreshTranscriptionState: got \(lookup.count) entries from status")
+                var matched = 0
                 for i in self.syncEntries.indices {
                     let mp3Name = self.syncEntries[i].recording.outputName
                     if let info = lookup[mp3Name] {
@@ -4583,6 +4612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
                         // Check if summary exists
                         self.syncEntries[i].summaryPath = self.findSummaryPath(for: mp3Name)
+                        if self.syncEntries[i].transcribed { matched += 1 }
                     } else {
                         self.syncEntries[i].transcribed = false
                         self.syncEntries[i].transcriptPath = nil
@@ -4590,6 +4620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].summaryPath = nil
                     }
                 }
+                self.log("refreshTranscriptionState: matched \(matched) transcribed entries out of \(self.syncEntries.count)")
                 self.syncViewModelState()
             }
         }
