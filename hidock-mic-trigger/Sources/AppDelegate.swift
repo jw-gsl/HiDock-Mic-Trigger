@@ -2577,8 +2577,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func importSingleFile(
         _ source: URL, into recordingsURL: URL,
     ) -> ImportedRecordingEntry? {
+        // Read the source's modification time first so we can use it as the
+        // creation date for naming. This keeps the HiDock-style filename
+        // prefix (YYYYMonDD-HHMMSS) meaningful instead of just "now".
+        let sourceAttrs = (try? FileManager.default.attributesOfItem(atPath: source.path)) ?? [:]
+        let sourceMtime = (sourceAttrs[.modificationDate] as? Date) ?? Date()
+
         let destName = ImportedRecordingsStore.uniqueDestinationName(
-            for: source, in: recordingsURL
+            for: source, createdAt: sourceMtime, in: recordingsURL
         )
         let destURL = recordingsURL.appendingPathComponent(destName)
 
@@ -2591,7 +2597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let attrs = (try? FileManager.default.attributesOfItem(atPath: destURL.path)) ?? [:]
         let size = (attrs[.size] as? Int) ?? 0
-        let mtime = (attrs[.modificationDate] as? Date) ?? Date()
+        let mtime = sourceMtime
 
         // Probe duration via AVFoundation — works on every format ffmpeg
         // handles (mp3, wav, m4a, flac, ogg, mp4, mov). ~100ms for a

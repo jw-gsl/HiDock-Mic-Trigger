@@ -70,14 +70,21 @@ enum ImportedRecordingsStore {
     }
 
     /// Compute a collision-free destination filename inside the recordings
-    /// folder. Prefixes with `imported-` so imported files sort separately
-    /// from device-downloaded ones (which start with dates like `2026Apr…`).
+    /// folder. Uses HiDock's filename convention — `YYYYMonDD-HHMMSS-<stem>.<ext>`
+    /// — so imports sort and display alongside device recordings naturally.
+    /// Example: `2026Apr17-130532-AiAccTrans.wav`.
     static func uniqueDestinationName(
-        for sourceURL: URL, in recordingsDir: URL,
+        for sourceURL: URL, createdAt: Date, in recordingsDir: URL,
     ) -> String {
         let stem = sourceURL.deletingPathExtension().lastPathComponent
         let ext = sourceURL.pathExtension.lowercased()
-        let base = "imported-\(stem).\(ext)"
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMMdd-HHmmss"
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        let prefix = fmt.string(from: createdAt)
+
+        let base = "\(prefix)-\(stem).\(ext)"
         let baseURL = recordingsDir.appendingPathComponent(base)
         if !FileManager.default.fileExists(atPath: baseURL.path) {
             return base
@@ -85,7 +92,7 @@ enum ImportedRecordingsStore {
         // Collision — append -2, -3, … until we find a free slot.
         var i = 2
         while true {
-            let candidate = "imported-\(stem)-\(i).\(ext)"
+            let candidate = "\(prefix)-\(stem)-\(i).\(ext)"
             let url = recordingsDir.appendingPathComponent(candidate)
             if !FileManager.default.fileExists(atPath: url.path) {
                 return candidate
