@@ -126,16 +126,20 @@ Net: nice-to-have, not a must-have. Order of priority:
 
 - [x] 2026-04-20 Web research on both models (HF Open ASR Leaderboard, Cohere announcement, Parakeet model card, MLX port ecosystem).
 - [x] Flagged Cohere Transcribe's missing timestamps as a pipeline blocker.
+- [x] Documented TEN VAD as a low-priority future VAD upgrade (licence caveat noted).
+- [x] Prototyped `transcribe_parakeet.py` — full backend mirroring Whisper's JSON output contract (segments with start/end/text, _diarized.json, _whisper.json, frontmatter, Whisper-Guard, corrections, diarization, hooks). Installed `parakeet-mlx` 0.5.1 into `transcription-pipeline/.venv`. Import + `--help` verified.
+- [x] Added Parakeet to `shared/models.py` MODEL_REGISTRY with `managed_externally: True` (parakeet-mlx uses HF hub cache, not our MODELS_DIR). Added to `requirements.txt` with `darwin + arm64` marker.
+- [x] Updated `test_model_paths_resolve_to_models_dir` to skip externally-managed entries. All 329 tests passing.
 
 ## Planned
 
-- [ ] Prototype: install `parakeet-mlx` in `transcription-pipeline/.venv`, write a minimal `transcribe_parakeet.py` that mimics `transcribe.py`'s output contract (same `segments` shape with `start`/`end`/`text`), run it against Rec58 and compare WER and wall-clock to Whisper.
-- [ ] Wire a `transcribe_backend` setting into `config.py` and AppDelegate's transcription subprocess spawner.
-- [ ] Add a backend selector in the Models Manager dialog (or Settings panel).
-- [ ] Add Parakeet to `shared/models.py` MODEL_REGISTRY so it shows up in the UI with download status.
-- [ ] Update About window + README with CC-BY-4.0 attribution.
+- [ ] **Benchmark Parakeet vs Whisper on 5 representative recordings** (1:1, small group, large group, short, long). Compare WER on a known-good passage + wall-clock time. This is the decision gate — if Parakeet clearly wins on real HiDock recordings, proceed with rollout. If it's a wash on accuracy but wins on speed, still proceed. If it loses on accuracy for noisy group audio, demote to opt-in.
+- [ ] Wire a `transcribe_backend` setting into `config.py` and AppDelegate's transcription subprocess spawner — routes to `transcribe.py` vs `transcribe_parakeet.py` based on backend choice + language detection.
+- [ ] **Models UI gap**: the Models Manager checks `installed` by looking at `MODELS_DIR / filename`. Parakeet's managed-externally cache means it will always show "Not installed". Either add an `is_installed(key)` function that understands external caches, or add a one-time post-install hook that symlinks the HF cache into MODELS_DIR for display purposes.
+- [ ] Add a backend selector UI — probably in Models Manager as radio buttons or a segmented control at the top, since the user's mental model is "which speech recognition model am I using".
+- [ ] Spike Cohere + forced aligner as a second backend: use `ctc-forced-aligner` or WhisperX's wav2vec2 CTC aligner to add word-level timestamps to Cohere's text output. Decision: if Parakeet's quality is "good enough" and Cohere+aligner is "marginally better but slower", ship Parakeet only and leave Cohere as a spec waiting for a timestamped variant.
+- [ ] Update About window + README with CC-BY-4.0 attribution for Parakeet.
 - [ ] Update `PARITY.md` — Mac gets Parakeet default, Windows stays on Whisper.
-- [ ] Benchmark Parakeet vs Whisper on 5 representative recordings (1:1, small group, large group, short, long) — measure WER manually on a known-good passage and record wall-clock.
 
 ## Rejected / Not applicable
 

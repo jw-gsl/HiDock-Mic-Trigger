@@ -71,6 +71,10 @@ def test_get_model_status_not_installed():
 
 def test_model_paths_resolve_to_models_dir():
     for key, info in MODEL_REGISTRY.items():
+        # Skip models managed by external caches (e.g. parakeet-mlx uses
+        # HuggingFace's hub cache, not our MODELS_DIR).
+        if info.get("managed_externally"):
+            continue
         expected = MODELS_DIR / info["filename"]
         assert expected.parent == MODELS_DIR
 

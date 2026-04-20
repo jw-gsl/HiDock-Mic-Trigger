@@ -46,12 +46,25 @@ SPEAKER_EMBED_URL = SPEAKER_EMBED_MODELS[SPEAKER_EMBED_MODEL]["url"]
 
 MODEL_REGISTRY = {
     "whisper": {
-        "name": "Speech Recognition (Whisper)",
+        "name": "Speech Recognition — Whisper",
         "filename": "ggml-large-v3-turbo-q5_0.bin",
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
         "size_mb": 547,
         "required": True,
-        "description": "Transcribes speech to text. Required for transcription.",
+        "description": "OpenAI Whisper large-v3-turbo, 99 languages. Default and fallback for non-English audio.",
+    },
+    "parakeet": {
+        "name": "Speech Recognition — Parakeet TDT v2 (MLX)",
+        # Managed by parakeet-mlx via HuggingFace hub cache, not MODELS_DIR.
+        # filename is informational for the UI; actual weights live under
+        # ~/.cache/huggingface/hub/ and are pulled on first transcription.
+        "filename": "mlx-community--parakeet-tdt-0.6b-v2",
+        "url": "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2",
+        "size_mb": 1200,
+        "required": False,
+        "platform": "darwin-arm64",
+        "managed_externally": True,
+        "description": "NVIDIA Parakeet TDT 0.6B v2 via MLX. English only, ~60× real-time on Apple Silicon. Attribution: CC-BY-4.0.",
     },
     "silero_vad": {
         "name": "Voice Detection (Silero VAD)",

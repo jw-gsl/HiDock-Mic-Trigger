@@ -1,7 +1,11 @@
-# Core transcription
+# Core transcription — Whisper (multilingual default + non-English fallback)
 openai-whisper>=20240930
 torch>=2.1
 torchaudio>=2.1
+
+# Parakeet TDT v2 MLX backend (English-only, Apple Silicon only, faster than Whisper)
+# Falls back to Whisper on non-Apple-Silicon platforms or non-English audio.
+parakeet-mlx>=0.5.0; sys_platform == "darwin" and platform_machine == "arm64"
 
 # Folder watching
 watchdog>=4.0
