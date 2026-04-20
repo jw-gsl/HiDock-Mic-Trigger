@@ -11,6 +11,18 @@ struct ModelStatus: Identifiable {
     var progress: Double = 0  // 0..1
 }
 
+/// Format a model size in human-readable form — switches to GB once the
+/// value crosses 1024 MB so we don't show users "1200 MB" when "1.2 GB"
+/// reads more naturally.
+func formatSize(mb: Int) -> String {
+    if mb >= 1024 {
+        let gb = Double(mb) / 1024.0
+        // One decimal for sub-10 GB, whole number above.
+        return gb < 10 ? String(format: "%.1f GB", gb) : "\(Int(gb.rounded())) GB"
+    }
+    return "\(mb) MB"
+}
+
 struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
@@ -101,7 +113,7 @@ struct ModelRowView: View {
                     Text(status.name)
                         .font(.headline)
                     Spacer()
-                    Text("\(status.sizeMB) MB")
+                    Text(formatSize(mb: status.sizeMB))
                         .font(.callout)
                         .foregroundColor(.secondary)
                 }
