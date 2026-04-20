@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,42 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
+
+# Tracks the currently in-flight transcription so the SIGTERM handler can
+# flip its state from "in_progress" to "failed" before the process exits.
+# Without this, a timeout kill leaves state stuck in "in_progress" and the
+# app can never re-queue the recording. Set by transcribe_file, cleared on
+# completion.
+_IN_FLIGHT: dict[str, str] | None = None
+
+
+def _sigterm_handler(signum, frame):
+    """Mark the in-flight transcription as failed before exiting.
+
+    Called when the parent process (Swift app) terminates us due to timeout.
+    Updating the state here means a re-queue from the UI will actually run,
+    instead of seeing stale 'in_progress' and either skipping or deadlocking.
+    """
+    global _IN_FLIGHT
+    try:
+        if _IN_FLIGHT is not None:
+            state = load_state()
+            key = _IN_FLIGHT["key"]
+            existing = state["transcriptions"].get(key, {})
+            state["transcriptions"][key] = {
+                **existing,
+                "status": "failed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "last_error": f"Terminated by signal {signum} (likely timeout)",
+            }
+            save_state(state)
+    except Exception:
+        pass
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT, _sigterm_handler)
 
 
 # ── Safe event logging (non-fatal) ───────────────────────────────────────────
@@ -103,6 +140,11 @@ def transcribe_file(
         "last_error": None,
     }
     save_state(state)
+
+    # Register with the SIGTERM handler so state flips to "failed" instead of
+    # staying stuck at "in_progress" if the parent app kills us via timeout.
+    global _IN_FLIGHT
+    _IN_FLIGHT = {"key": entry_key}
 
     start_time = time.monotonic()
     try:
@@ -298,6 +340,7 @@ def transcribe_file(
 
         progress(100)
 
+        _IN_FLIGHT = None
         return {
             "file": str(mp3_path),
             "transcript_path": str(transcript_path),
@@ -324,6 +367,7 @@ def transcribe_file(
         }
         save_state(state)
 
+        _IN_FLIGHT = None
         return {
             "file": str(mp3_path),
             "transcript_path": None,

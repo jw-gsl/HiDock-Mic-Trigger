@@ -3872,7 +3872,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var transcribeArgs = ["transcribe", mp3Path]
         if diarizeEnabled { transcribeArgs.append("--diarize") }
-        runTranscription(arguments: transcribeArgs, onProgress: { [weak self] pct in
+        let fileSizeMB = Double(
+            (try? FileManager.default.attributesOfItem(atPath: mp3Path)[.size] as? Int) ?? 0
+        ) / (1024 * 1024)
+        let scaledTimeout = min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
+        runTranscription(arguments: transcribeArgs, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionProgress = pct
             self.viewModel.syncStatus = "Transcribing \(filename) — \(pct)%"
@@ -4109,7 +4113,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
-        runTranscription(arguments: args, onProgress: { [weak self] pct in
+
+        // Scale timeout by MP3 size. Whisper large-v3-turbo on MPS processes
+        // audio at roughly 3–5× real-time. A 128kbps MP3 is ~1 MB/min, so
+        // 1 min of audio ≈ 15–20s of compute. Budget 60s per MB + 10 min
+        // slack, capped at 4 hours. Previous fixed 600s timeout was killing
+        // long recordings (e.g. a 6-hour Rec48 at 172 MB needs ~2 hours).
+        let fileSizeMB = Double(
+            (try? FileManager.default.attributesOfItem(atPath: item.path)[.size] as? Int) ?? 0
+        ) / (1024 * 1024)
+        let scaledTimeout = min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
+        runTranscription(arguments: args, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionLastRealProgress = pct
             self.transcriptionProgress = pct
