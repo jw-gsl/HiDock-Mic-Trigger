@@ -198,6 +198,9 @@ struct HiDockSyncRecordingEntry: Identifiable {
     }
 
     var statusText: String {
+        // Imported files come from outside the HiDock — don't label them as
+        // "Downloaded" (semantically wrong and visually indistinguishable).
+        if deviceId == "imported:local" { return "Imported" }
         if recording.downloaded && recording.localExists { return "Downloaded" }
         if recording.downloaded && !recording.localExists { return "Skipped" }
         if recording.lastError != nil { return "Failed" }
@@ -205,6 +208,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
     }
 
     var statusLevel: StatusLevel {
+        if deviceId == "imported:local" { return .warning }  // orange — distinct from green Downloaded
         if recording.downloaded && recording.localExists { return .success }
         if recording.downloaded && !recording.localExists { return .info }
         if recording.lastError != nil { return .error }

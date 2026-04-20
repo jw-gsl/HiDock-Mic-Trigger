@@ -213,7 +213,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         loadCachedRecordings()
         loadMergeGroups()
         importedRecordings = ImportedRecordingsStore.load()
+        log("Loaded \(importedRecordings.count) imported recording(s) from \(ImportedRecordingsStore.path)")
         rebuildSyncEntries()
+        let imp = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
+        log("After rebuildSyncEntries: syncEntries=\(syncEntries.count) imported=\(imp.count)")
+        if let first = imp.first {
+            log("First imported entry: name=\(first.recording.name), deviceId=\(first.deviceId), downloaded=\(first.recording.downloaded), localExists=\(first.recording.localExists), outputPath=\(first.recording.outputPath)")
+        }
+        let vis = viewModel.visibleEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
+        log("viewModel.visibleEntries imported count = \(vis.count) (filter: hideDownloaded=\(viewModel.syncHideDownloaded), deviceFilter=\(viewModel.syncFilterDeviceId ?? "nil"))")
         showSyncWindow()
 
         // Show onboarding wizard on first run
@@ -3049,6 +3057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Sync Actions
 
     private func renderSyncStatus(_ status: HiDockSyncStatusResponse, device: HiDockPairedDevice) {
+        let importedBefore = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }.count
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         syncDeviceConnected[device.deviceId] = status.connected
@@ -3056,6 +3065,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for recording in status.recordings {
             syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: device.productId, deviceId: device.deviceId, deviceName: device.cleanName))
         }
+        let importedAfter = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }.count
+        log("renderSyncStatus[\(device.shortName)]: \(status.recordings.count) device recs, imported before/after = \(importedBefore)/\(importedAfter), total syncEntries=\(syncEntries.count)")
         let validNames = Set(syncEntries.map(\.recording.name))
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
 
