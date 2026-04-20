@@ -3069,9 +3069,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 } else {
-                    let message = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? "Extractor failed"
+                    let raw = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? ""
+                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Empty-stderr non-zero exits are most often a silent USB
+                    // disconnect or the device being busy recording. Surface
+                    // something actionable instead of a bare blank line.
+                    let message = trimmed.isEmpty
+                        ? "Device not responding — unplug/replug, or wait if actively recording (exit \(process.terminationStatus))"
+                        : trimmed
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
-                        NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        NSLocalizedDescriptionKey: message
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 }
@@ -3609,15 +3616,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
 
         // Apply transcription-skip immediately (no subprocess needed).
+        // Use outputName (MP3 filename) so it matches the key used by
+        // refreshTranscriptionState's lookup from transcribe.py status.
+        // The on-device `recording.name` is a .hda filename and wouldn't match.
         if !toSkipTranscription.isEmpty {
             for entry in toSkipTranscription {
-                skippedTranscriptions.insert(entry.recording.name)
+                skippedTranscriptions.insert(entry.recording.outputName)
             }
             SkippedTranscriptionsStore.save(skippedTranscriptions)
-            // Reflect on in-memory entries so the UI updates without waiting
-            // for a refresh round-trip.
             for i in syncEntries.indices {
-                if skippedTranscriptions.contains(syncEntries[i].recording.name) {
+                if skippedTranscriptions.contains(syncEntries[i].recording.outputName) {
                     syncEntries[i].transcriptionSkipped = true
                 }
             }
@@ -3698,14 +3706,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        // Un-skip the transcription side immediately.
+        // Un-skip the transcription side immediately. MP3 name (outputName)
+        // is the canonical key — mirrors the insert path.
         if !toUnskipTranscription.isEmpty {
             for entry in toUnskipTranscription {
-                skippedTranscriptions.remove(entry.recording.name)
+                skippedTranscriptions.remove(entry.recording.outputName)
             }
             SkippedTranscriptionsStore.save(skippedTranscriptions)
             for i in syncEntries.indices {
-                if !skippedTranscriptions.contains(syncEntries[i].recording.name) {
+                if !skippedTranscriptions.contains(syncEntries[i].recording.outputName) {
                     syncEntries[i].transcriptionSkipped = false
                 }
             }
