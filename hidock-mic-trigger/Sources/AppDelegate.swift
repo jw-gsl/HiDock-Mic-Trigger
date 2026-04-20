@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import CoreAudio
+import UniformTypeIdentifiers
 import UserNotifications
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
     private var terminalWindow: NSWindow?
+    private var importedRecordings: [ImportedRecordingEntry] = []
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -210,6 +212,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         previousDeviceNames = Set(getInputDeviceNames())
         loadCachedRecordings()
         loadMergeGroups()
+        importedRecordings = ImportedRecordingsStore.load()
+        rebuildSyncEntries()
         showSyncWindow()
 
         // Show onboarding wizard on first run
@@ -839,6 +843,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         terminalItem.keyEquivalentModifierMask = [.command, .shift]
         terminalItem.target = self
         menu.addItem(terminalItem)
+        let importItem = NSMenuItem(title: "Import Audio File...", action: #selector(importAudioFileMenu), keyEquivalent: "i")
+        importItem.keyEquivalentModifierMask = [.command, .shift]
+        importItem.target = self
+        menu.addItem(importItem)
         let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
         feedbackItem.target = self
         menu.addItem(feedbackItem)
@@ -2481,6 +2489,123 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         terminalWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Import Audio File
+
+    @objc private func importAudioFileMenu() {
+        importAudioFile()
+    }
+
+    /// Present a file picker and import the chosen audio/video file into
+    /// `~/HiDock/Recordings/`. On success the new entry is persisted in
+    /// `imported_recordings.json` and added to the recordings table under
+    /// a virtual "Imported" device, ready to download-less transcribe.
+    private func importAudioFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Import audio file"
+        panel.prompt = "Import"
+        panel.message = "Choose an audio or video file to import. ffmpeg extracts the audio track automatically for video formats."
+        panel.allowedContentTypes = IMPORT_ALLOWED_EXTENSIONS.compactMap {
+            UTType(filenameExtension: $0)
+        }
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.resolvesAliases = true
+
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+
+        guard let recordingsFolder = syncOutputFolder ?? defaultRecordingsFolder() else {
+            log("importAudioFile: no recordings folder configured")
+            return
+        }
+        let recordingsURL = URL(fileURLWithPath: recordingsFolder)
+        try? FileManager.default.createDirectory(
+            at: recordingsURL, withIntermediateDirectories: true
+        )
+
+        var added = 0
+        for source in panel.urls {
+            if let entry = importSingleFile(source, into: recordingsURL) {
+                importedRecordings.append(entry)
+                added += 1
+            }
+        }
+        if added > 0 {
+            ImportedRecordingsStore.save(importedRecordings)
+            rebuildSyncEntries()
+            viewModel.syncStatus = "Imported \(added) file\(added == 1 ? "" : "s")"
+            viewModel.syncStatusLevel = .success
+            syncViewModelState()
+            refreshTranscriptionState()
+        }
+    }
+
+    /// Copy a single source file into the recordings folder, gather its
+    /// basic metadata, and return a persistable ImportedRecordingEntry.
+    private func importSingleFile(
+        _ source: URL, into recordingsURL: URL,
+    ) -> ImportedRecordingEntry? {
+        let destName = ImportedRecordingsStore.uniqueDestinationName(
+            for: source, in: recordingsURL
+        )
+        let destURL = recordingsURL.appendingPathComponent(destName)
+
+        do {
+            try FileManager.default.copyItem(at: source, to: destURL)
+        } catch {
+            log("importSingleFile: failed to copy \(source.path) → \(destURL.path): \(error.localizedDescription)")
+            return nil
+        }
+
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: destURL.path)) ?? [:]
+        let size = (attrs[.size] as? Int) ?? 0
+        let mtime = (attrs[.modificationDate] as? Date) ?? Date()
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+
+        log("Imported \(source.lastPathComponent) → \(destName) (\(size / 1_048_576) MB)")
+        return ImportedRecordingEntry(
+            name: destName,
+            outputPath: destURL.path,
+            originalPath: source.path,
+            length: size,
+            duration: 0,  // filled in later by extracting from ffmpeg/librosa on first transcription
+            createdAt: iso.string(from: mtime),
+            importedAt: iso.string(from: Date())
+        )
+    }
+
+    private func defaultRecordingsFolder() -> String? {
+        "\(NSHomeDirectory())/HiDock/Recordings"
+    }
+
+    /// Rebuild syncEntries by merging device-reported recordings with
+    /// persisted imported recordings. Called after each import and on
+    /// startup so the table always shows both sources.
+    private func mergeImportedIntoSyncEntries() {
+        // Remove any existing imported entries, then append fresh ones from
+        // the persisted list. This keeps device-reported entries untouched.
+        syncEntries.removeAll { $0.deviceId == IMPORTED_DEVICE_ID }
+        let stableImportedPid = Int(truncatingIfNeeded: IMPORTED_DEVICE_ID.hashValue)
+        for entry in importedRecordings {
+            let rec = ImportedRecordingsStore.asSyncRecording(entry)
+            let sync = HiDockSyncRecordingEntry(
+                recording: rec,
+                deviceProductId: stableImportedPid,
+                deviceId: IMPORTED_DEVICE_ID,
+                deviceName: IMPORTED_DEVICE_NAME
+            )
+            syncEntries.append(sync)
+        }
+    }
+
+    /// Called by importAudioFile + on startup to refresh the table.
+    private func rebuildSyncEntries() {
+        mergeImportedIntoSyncEntries()
+        viewModel.syncEntries = syncEntries
     }
 
     // MARK: - Device Manager

@@ -13,6 +13,7 @@
 		2FD3A01462FA0F2788F4C61A /* MicTriggerSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */; };
 		32CB8DC2FB8F5920A75F9D12 /* VoiceLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */; };
 		332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */; };
+		4DAF4865542482004C90F074 /* ImportedRecordings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */; };
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
 		59E784A93E779D477255B352 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 2784F8780F6B93CA6AB8AD20 /* SwiftTerm */; };
 		7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */; };
@@ -67,6 +68,7 @@
 		95B0A8C5446AA42C053B684F /* ModelManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManagerView.swift; sourceTree = "<group>"; };
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
 		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
+		A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedRecordings.swift; sourceTree = "<group>"; };
 		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E27867D05F3E255C858BC3F1 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 				640A7BCEAB107C1993E023E0 /* AppDelegate.swift */,
 				2588C13D72780DEF82479DD3 /* Helpers.swift */,
 				9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */,
+				A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */,
 				8CDAD4DE368D4BD1A70444DB /* main.swift */,
 				ED5594D4170BD809E24E4CAC /* Models.swift */,
 				A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */,
@@ -293,6 +296,7 @@
 				E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */,
 				D0DA62924A664A5011685A7A /* Helpers.swift in Sources */,
 				8F4F17F9FC81801F1A855275 /* HiDockViewModel.swift in Sources */,
+				4DAF4865542482004C90F074 /* ImportedRecordings.swift in Sources */,
 				9F88469E24E4E75401A1B681 /* MainWindowView.swift in Sources */,
 				2FD3A01462FA0F2788F4C61A /* MicTriggerSection.swift in Sources */,
 				04DBDCEC87C45FE3A518819A /* ModelManagerView.swift in Sources */,
