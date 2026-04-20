@@ -79,6 +79,7 @@ def load_whisper_model():
 
 def transcribe_file(
     mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
+    n_speakers: int | None = None,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
     from shared.transcript_writer import write_transcript
@@ -180,7 +181,8 @@ def transcribe_file(
             try:
                 from shared.diarize_lite import diarize as run_diarize
                 diarized_result = run_diarize(
-                    str(mp3_path), result.get("segments", [])
+                    str(mp3_path), result.get("segments", []),
+                    n_speakers=n_speakers,
                 )
             except ImportError:
                 print("diarize_lite module not available, skipping diarization", file=sys.stderr)
@@ -361,6 +363,7 @@ def cmd_transcribe(args):
     try:
         result = transcribe_file(
             mp3_path, diarize=args.diarize, summarize=args.summarize,
+            n_speakers=getattr(args, "n_speakers", None),
         )
     finally:
         release_lock(lock)
@@ -401,6 +404,7 @@ def cmd_transcribe_batch(args):
             progress(pct_base)
             result = transcribe_file(
                 mp3_path, model=model, diarize=args.diarize, summarize=args.summarize,
+                n_speakers=getattr(args, "n_speakers", None),
             )
             results.append(result)
     finally:
@@ -524,11 +528,13 @@ def main():
     p_transcribe.add_argument("mp3_path", help="Path to audio file")
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
+    p_transcribe.add_argument("--n-speakers", type=int, help="Hint: expected number of speakers (improves diarization accuracy)")
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
     p_batch.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_batch.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
+    p_batch.add_argument("--n-speakers", type=int, help="Hint: expected number of speakers (improves diarization accuracy)")
     p_batch.set_defaults(func=cmd_transcribe_batch)
 
     p_rediarize = sub.add_parser("rediarize", help="Re-run speaker diarization without re-transcribing")

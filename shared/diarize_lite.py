@@ -278,21 +278,89 @@ def extract_speaker_embeddings(
 
 # ── Clustering with running-average templates + post-merge ──────────────────
 
+def _compute_density_prior(
+    speech_segs: list[tuple[float, float]],
+    audio_duration_s: float,
+    embeddings: np.ndarray | None = None,
+) -> tuple[int, int]:
+    """Compute a (min_k, preferred_k) prior for speaker count from turn-taking.
+
+    Uses two signals that are cheap to compute and strong evidence of group size:
+      1. VAD segments per minute — high density of short bursts implies many
+         speakers taking short turns.
+      2. Embedding spread (optional) — if pairwise distances among a sample of
+         embeddings cluster into a wide spread, that's strong evidence of
+         multiple distinct voice identities.
+
+    Returns (min_k, preferred_k): a floor for clustering, and the value we'd
+    bias silhouette scoring toward.
+    """
+    if audio_duration_s < 60 or len(speech_segs) < 4:
+        return (1, 2)
+
+    vad_per_min = len(speech_segs) / max(audio_duration_s / 60.0, 1.0)
+    mean_seg_dur = np.mean([e - s for s, e in speech_segs])
+
+    # Turn-taking density score (higher = more conversational)
+    # A 1:1 tends to have ~5–10 segs/min with long segs (~6–12s avg).
+    # A group of 6+ tends to have 20+ segs/min with short segs (<3s avg).
+    if vad_per_min >= 30 and mean_seg_dur < 2.5:
+        density_prior = 6
+    elif vad_per_min >= 20 and mean_seg_dur < 3.5:
+        density_prior = 5
+    elif vad_per_min >= 12 and mean_seg_dur < 5.0:
+        density_prior = 4
+    elif vad_per_min >= 8:
+        density_prior = 3
+    else:
+        density_prior = 2
+
+    # Embedding spread refinement — if we have embeddings, use pairwise cosine
+    # distance to refine the prior. High spread → bump prior up.
+    if embeddings is not None and len(embeddings) >= 6:
+        # Sample pairwise distances (not all, to stay cheap on big arrays)
+        sample = embeddings[:: max(1, len(embeddings) // 20)][:20]
+        dists = []
+        for i in range(len(sample)):
+            for j in range(i + 1, len(sample)):
+                a, b = sample[i], sample[j]
+                cos_sim = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+                dists.append(1.0 - cos_sim)
+        if dists:
+            # Top-decile distance — how different are the most dissimilar pairs?
+            top_decile = float(np.percentile(dists, 90))
+            spread_ratio = float(np.mean(dists))
+            # Neural embeddings: distance ~0.1 = same speaker, ~0.5+ = different
+            if top_decile > 0.6 and spread_ratio > 0.35:
+                density_prior = max(density_prior, 5)
+            elif top_decile > 0.5 and spread_ratio > 0.28:
+                density_prior = max(density_prior, 4)
+            elif top_decile > 0.4 and spread_ratio > 0.22:
+                density_prior = max(density_prior, 3)
+
+    # Floor is the prior minus 1 — we'd rather slightly under-cluster than force
+    # a speaker count we're not confident in. The preferred value guides scoring.
+    min_k = max(2, density_prior - 1)
+    return (min_k, density_prior)
+
+
 def estimate_speaker_count(
     audio: np.ndarray, sr: int = 16000,
-    max_speakers: int = 6, n_samples: int = 30,
+    max_speakers: int = 10, n_samples: int = 60,
 ) -> int:
-    """Estimate the number of speakers by sampling points across the audio.
+    """Estimate the number of speakers using VAD density + embedding spread.
 
-    Takes ~5 seconds. Extracts embeddings from spread-out points,
-    then tries k=2..max_speakers clustering and picks the best
-    silhouette score.
+    Takes ~5–10 seconds. Combines:
+      - Turn-taking density (VAD segs/min, mean segment duration)
+      - Embedding spread (pairwise cosine distance across sampled clips)
+      - Silhouette scoring on k=2..max_speakers, with a bell-curve penalty
+        centred on the density-derived prior.
 
     Args:
         audio: Full audio array.
         sr: Sample rate.
-        max_speakers: Maximum speakers to test.
-        n_samples: Number of sample points to extract.
+        max_speakers: Maximum speakers to test (default 10, up from 6).
+        n_samples: Number of sample points to extract (default 60, up from 30).
 
     Returns:
         Estimated number of speakers (minimum 2).
@@ -313,9 +381,14 @@ def estimate_speaker_count(
     # Merge adjacent speech for more stable clips
     speech_segs = _merge_adjacent_speech(speech_segs)
 
-    # Pick up to n_samples speech segments, spread across the meeting
-    step = max(1, len(speech_segs) // n_samples)
-    selected = speech_segs[::step][:n_samples]
+    # Scale samples to recording length — long recordings need more data points
+    target_samples = n_samples
+    if audio_duration > 1800:  # >30 min
+        target_samples = max(n_samples, 100)
+
+    # Pick up to target_samples speech segments, spread across the meeting
+    step = max(1, len(speech_segs) // target_samples)
+    selected = speech_segs[::step][:target_samples]
 
     # Extract embeddings from speech segments (use original audio for quality)
     speaker_session = _load_speaker_embed_model()
@@ -343,12 +416,17 @@ def estimate_speaker_count(
 
     embeddings_arr = np.array(embeddings, dtype=np.float32)
 
-    # Try different k values and pick best silhouette score
-    # Bias toward fewer speakers (multiply score by penalty for higher k)
-    best_k = 2
-    best_score = -1.0
+    # Compute density-based prior (uses VAD pattern + embedding spread)
+    min_k, preferred_k = _compute_density_prior(speech_segs, audio_duration, embeddings_arr)
 
-    for k in range(2, min(max_speakers + 1, len(embeddings))):
+    # Try different k values with bell-curve penalty centred on preferred_k.
+    # Previously a flat penalty that favoured k<=4 regardless of content;
+    # now the penalty follows our density-derived expectation.
+    best_k = preferred_k
+    best_score = -1.0
+    k_upper = min(max_speakers + 1, len(embeddings))
+
+    for k in range(min_k, k_upper):
         try:
             from scipy.cluster.hierarchy import fcluster, linkage
             Z = linkage(embeddings_arr, method="average", metric="cosine")
@@ -360,15 +438,15 @@ def estimate_speaker_count(
 
             score = silhouette_score(embeddings_arr, labels, metric="cosine")
 
-            # Slight bias toward MORE speakers (over-segment then merge)
-            # Industry consensus: easier to merge than to split
-            # k=2 gets 90%, k=3 gets full score, k=4 gets 95% etc.
-            if k == 2:
-                penalty = 0.90
-            elif k <= 4:
+            # Bell-curve penalty: maximum weight at preferred_k, falls off
+            # gradually on both sides. Tolerates ±2 from prior without penalty.
+            distance_from_prior = abs(k - preferred_k)
+            if distance_from_prior <= 1:
                 penalty = 1.0
+            elif distance_from_prior <= 2:
+                penalty = 0.95
             else:
-                penalty = 1.0 - (k - 4) * 0.1  # Penalise above 4
+                penalty = max(0.5, 1.0 - (distance_from_prior - 2) * 0.08)
             adjusted_score = score * penalty
 
             if adjusted_score > best_score:
@@ -377,7 +455,9 @@ def estimate_speaker_count(
         except Exception:
             continue
 
-    return best_k
+    # Never return below the density floor — this is the main fix for group
+    # recordings where silhouette was collapsing to k=2.
+    return max(best_k, min_k)
 
 
 def cluster_speakers(
@@ -718,8 +798,19 @@ def diarize(
     effective_n = n_speakers
     if effective_n is None and audio_duration > 60 and len(valid_indices) >= 4:
         estimated = estimate_speaker_count(audio_raw, sr=_VAD_SR)
-        effective_n = max(estimated, _MIN_SPEAKERS_FOR_LONG_AUDIO if audio_duration > 300 else 1)
-        print(f"  Speaker count estimate: {estimated} (using {effective_n})", file=sys.stderr)
+        # Use density-based floor for long recordings — combines VAD turn-taking
+        # with embedding spread. Short recordings keep a minimum of 1.
+        if audio_duration > 300 and len(embeddings) >= 6:
+            floor_min_k, _ = _compute_density_prior(speech_segments, audio_duration, embeddings)
+            effective_n = max(estimated, floor_min_k)
+        else:
+            effective_n = max(estimated, _MIN_SPEAKERS_FOR_LONG_AUDIO if audio_duration > 300 else 1)
+        vad_per_min_log = len(speech_segments) / max(audio_duration / 60.0, 1.0)
+        print(
+            f"  Speaker count estimate: {estimated} (using {effective_n}, "
+            f"vad/min={vad_per_min_log:.1f}, dur={audio_duration:.0f}s)",
+            file=sys.stderr,
+        )
 
     # Step 7: Cluster with post-merge pass
     speaker_labels = cluster_speakers(embeddings, n_speakers=effective_n)
