@@ -387,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onSelectMic = { [weak self] mic in self?.selectMic(mic) }
         viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus() }
         viewModel.onImportAudioFile = { [weak self] in self?.importAudioFile() }
+        viewModel.onRemoveImport = { [weak self] name in self?.removeImportedRecording(name: name) }
         viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
         viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
@@ -2640,6 +2641,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func rebuildSyncEntries() {
         mergeImportedIntoSyncEntries()
         viewModel.syncEntries = syncEntries
+    }
+
+    /// Remove an imported recording by filename — unlinks the audio file
+    /// from ~/HiDock/Recordings/, drops the entry from the JSON, and
+    /// refreshes the table. No-op for non-imported names.
+    func removeImportedRecording(name: String) {
+        guard let entry = importedRecordings.first(where: { $0.name == name }) else {
+            log("removeImportedRecording: no entry named \(name)")
+            return
+        }
+        try? FileManager.default.removeItem(atPath: entry.outputPath)
+        importedRecordings.removeAll { $0.name == name }
+        ImportedRecordingsStore.save(importedRecordings)
+        syncCheckedRecordings.remove(name)
+        rebuildSyncEntries()
+        syncViewModelState()
+        log("Removed import: \(name)")
     }
 
     // MARK: - Device Manager

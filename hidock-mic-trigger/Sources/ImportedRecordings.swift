@@ -119,7 +119,7 @@ enum ImportedRecordingsStore {
             downloadedAt: entry.importedAt,
             lastError: nil,
             status: "imported",
-            humanLength: formatDuration(entry.duration)
+            humanLength: formatBytes(entry.length)
         )
     }
 
@@ -151,16 +151,11 @@ enum ImportedRecordingsStore {
         return seconds.isFinite && seconds > 0 ? seconds : 0
     }
 
-    /// Format seconds as HH:MM:SS or MM:SS to match HiDock's humanLength.
-    private static func formatDuration(_ seconds: Double) -> String {
-        guard seconds > 0 else { return "" }
-        let total = Int(seconds)
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        let secs = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, secs)
-        }
-        return String(format: "%d:%02d", minutes, secs)
+    /// Format bytes as a human-readable size, matching HiDock's extractor
+    /// output (which uses `human_size(length)` producing e.g. "396.2 MB").
+    private static func formatBytes(_ bytes: Int) -> String {
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1024 { return String(format: "%.2f GB", mb / 1024) }
+        return String(format: "%.1f MB", mb)
     }
 }

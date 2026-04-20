@@ -369,5 +369,14 @@ struct RecordingsTableView: View {
                 }
             }
         }
+
+        if entry.deviceId == "imported:local" {
+            Divider()
+            Button(role: .destructive) {
+                viewModel.onRemoveImport(entry.recording.name)
+            } label: {
+                Label("Remove Import", systemImage: "trash")
+            }
+        }
     }
 }
