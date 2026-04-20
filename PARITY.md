@@ -150,6 +150,7 @@ Last reviewed: 2026-04-05
 | Show Logs | Cmd+L | — | macOS only | Opens log files |
 | Show Status | Cmd+I | — | macOS only | Shows sync window |
 | Send Feedback | Cmd+F | — | macOS only | Via menu |
+| Terminal... | Cmd+Shift+T | — | macOS only | Embedded PTY (SwiftTerm) for CLI auth (e.g. `claude auth login`) |
 | Appearance menu | Menu bar submenu | Help menu submenu | Both | |
 | Help > About | macOS standard | QMessageBox | Both | |
 | Help > Check for Updates | Menu bar | Help menu | Both | |

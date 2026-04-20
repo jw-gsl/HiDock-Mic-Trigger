@@ -14,6 +14,7 @@
 		32CB8DC2FB8F5920A75F9D12 /* VoiceLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */; };
 		332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */; };
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
+		59E784A93E779D477255B352 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 2784F8780F6B93CA6AB8AD20 /* SwiftTerm */; };
 		7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */; };
 		7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */; };
 		80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */; };
@@ -26,6 +27,7 @@
 		AD84D7F268B99977690E39B6 /* CoworkPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3EB96FF645902287442733 /* CoworkPromptView.swift */; };
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
+		C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27867D05F3E255C858BC3F1 /* TerminalView.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
 		DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 820C64D02A011DC869B43307 /* TranscriptViewerView.swift */; };
 		E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */; };
@@ -67,12 +69,24 @@
 		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		E27867D05F3E255C858BC3F1 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		ED5594D4170BD809E24E4CAC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackHistoryView.swift; sourceTree = "<group>"; };
 		F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionQueueView.swift; sourceTree = "<group>"; };
 		FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncHeaderSection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		71336BBCCD86E0E58F0430B8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				59E784A93E779D477255B352 /* SwiftTerm in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		069FA42684CEB8AD8A4040FF /* Tests */ = {
@@ -122,6 +136,7 @@
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
 				FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */,
 				3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */,
+				E27867D05F3E255C858BC3F1 /* TerminalView.swift */,
 				F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */,
 				820C64D02A011DC869B43307 /* TranscriptViewerView.swift */,
 				8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */,
@@ -168,6 +183,7 @@
 				1379B50CC7CFED673B7DF228 /* Run Python Tests */,
 				B8B35C05E704237791E8FFDC /* Sources */,
 				9D47208B9B2A0D651E37F96B /* Resources */,
+				71336BBCCD86E0E58F0430B8 /* Frameworks */,
 				C71B15550AF6F083AD0590FE /* Deploy to Applications */,
 			);
 			buildRules = (
@@ -176,6 +192,7 @@
 			);
 			name = "hidock-mic-trigger";
 			packageProductDependencies = (
+				2784F8780F6B93CA6AB8AD20 /* SwiftTerm */,
 			);
 			productName = "hidock-mic-trigger";
 			productReference = AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */;
@@ -200,6 +217,9 @@
 			);
 			mainGroup = 395C21CA479F546E2F018216;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				06F7022EE6FDFC866B7CC01A /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+			);
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
@@ -282,6 +302,7 @@
 				332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */,
 				7417A5561075901480572E29 /* SyncHeaderSection.swift in Sources */,
 				9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */,
+				C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */,
 				DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */,
 				80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */,
 				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,
@@ -531,6 +552,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		06F7022EE6FDFC866B7CC01A /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.13.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2784F8780F6B93CA6AB8AD20 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 06F7022EE6FDFC866B7CC01A /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = DAF9D8607B4AF4D05DE02267 /* Project object */;
 }

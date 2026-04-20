@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var modelManagerWindow: NSWindow?
     private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
+    private var terminalWindow: NSWindow?
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -834,6 +835,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let modelManagerItem = NSMenuItem(title: "Models...", action: #selector(openModelManagerMenu), keyEquivalent: "")
         modelManagerItem.target = self
         menu.addItem(modelManagerItem)
+        let terminalItem = NSMenuItem(title: "Terminal...", action: #selector(openTerminalMenu), keyEquivalent: "t")
+        terminalItem.keyEquivalentModifierMask = [.command, .shift]
+        terminalItem.target = self
+        menu.addItem(terminalItem)
         let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
         feedbackItem.target = self
         menu.addItem(feedbackItem)
@@ -2440,6 +2445,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } catch {
             log("Failed to rename speaker '\(oldName)': \(error)")
         }
+    }
+
+    // MARK: - Terminal
+
+    @objc private func openTerminalMenu() {
+        openTerminal(initialCommand: nil)
+    }
+
+    /// Open an embedded PTY terminal window. Optionally start with a command
+    /// pre-filled (e.g. `claude auth login`) — the shell drops back to an
+    /// interactive prompt once the command completes so the user can keep
+    /// typing.
+    func openTerminal(initialCommand: String? = nil) {
+        if let existing = terminalWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let view = EmbeddedTerminalView(initialCommand: initialCommand)
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 500),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Terminal"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 600, height: 320)
+        win.contentView = NSHostingView(rootView: view)
+
+        terminalWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Device Manager
