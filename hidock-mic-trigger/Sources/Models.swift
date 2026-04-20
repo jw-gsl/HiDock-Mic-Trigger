@@ -184,8 +184,13 @@ struct HiDockSyncRecordingEntry: Identifiable {
     var transcriptPath: String? = nil
     var speakersTagged: Bool = false
     var summaryPath: String? = nil
+    /// User explicitly opted out of transcribing this recording. The file
+    /// is downloaded but they don't want it in the transcription queue.
+    /// Independent of `transcribed` — if false and skipped is true, the
+    /// UI shows "Skipped" and auto-transcribe filters it out.
+    var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -195,22 +200,25 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.transcriptPath = transcriptPath
         self.speakersTagged = speakersTagged
         self.summaryPath = summaryPath
+        self.transcriptionSkipped = transcriptionSkipped
     }
 
     var statusText: String {
         // Imported files come from outside the HiDock — don't label them as
         // "Downloaded" (semantically wrong and visually indistinguishable).
         if deviceId == "imported:local" { return "Imported" }
-        if recording.downloaded && recording.localExists { return "Downloaded" }
         if recording.downloaded && !recording.localExists { return "Skipped" }
+        if transcriptionSkipped { return "Skipped" }  // downloaded-but-won't-transcribe
+        if recording.downloaded && recording.localExists { return "Downloaded" }
         if recording.lastError != nil { return "Failed" }
         return "On device"
     }
 
     var statusLevel: StatusLevel {
         if deviceId == "imported:local" { return .warning }  // orange — distinct from green Downloaded
+        if recording.downloaded && !recording.localExists { return .info }  // download-skipped
+        if transcriptionSkipped { return .info }                            // transcription-skipped
         if recording.downloaded && recording.localExists { return .success }
-        if recording.downloaded && !recording.localExists { return .info }
         if recording.lastError != nil { return .error }
         return .secondary
     }

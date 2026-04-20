@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var deviceManagerWindow: NSWindow?
     private var terminalWindow: NSWindow?
     private var importedRecordings: [ImportedRecordingEntry] = []
+    /// Filenames the user has opted out of transcribing. Persisted to
+    /// ~/HiDock/skipped_transcriptions.json; loaded at launch.
+    private var skippedTranscriptions: Set<String> = []
     let viewModel = HiDockViewModel()
 
     private var syncOutputFolder: String?
@@ -214,6 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         loadMergeGroups()
         importedRecordings = ImportedRecordingsStore.load()
         log("Loaded \(importedRecordings.count) imported recording(s) from \(ImportedRecordingsStore.path)")
+        skippedTranscriptions = SkippedTranscriptionsStore.load()
+        log("Loaded \(skippedTranscriptions.count) skipped-transcription filename(s)")
         // Backfill duration for any entries imported before duration probing
         // was wired up (duration saved as 0).
         var needsSave = false
@@ -3561,32 +3566,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    /// Skip handles two distinct "I don't want to deal with this" intents,
+    /// routing by the recording's current state:
+    ///
+    /// 1. **Not downloaded** → extractor `mark-downloaded` so the HiDock
+    ///    catalogue treats it as handled (auto-download ignores it).
+    /// 2. **Downloaded but not transcribed** → add to
+    ///    `~/HiDock/skipped_transcriptions.json` so auto-transcribe filters
+    ///    it out. The audio file stays on disk — the user can unskip and
+    ///    transcribe later.
+    ///
+    /// Already-transcribed recordings are no-ops (they're done — Skip is
+    /// redundant). Imports can only be skipped from transcription, not
+    /// from download (they have no "download" concept).
     private func markSyncRecordingsAsDownloaded() {
         let entries = selectedSyncEntries()
-        let notDownloaded = entries.filter { !$0.recording.downloaded }
-        let alreadyHandled = entries.count - notDownloaded.count
+        let toSkipDownload = entries.filter { !$0.recording.downloaded }
+        let toSkipTranscription = entries.filter {
+            $0.recording.downloaded
+            && $0.recording.localExists
+            && !$0.transcribed
+            && !$0.transcriptionSkipped
+        }
+        let alreadyHandled = entries.count - toSkipDownload.count - toSkipTranscription.count
 
-        log("Skip: \(entries.count) selected, \(notDownloaded.count) eligible, \(alreadyHandled) already downloaded/skipped")
+        log("Skip: \(entries.count) selected → \(toSkipDownload.count) skip-download, \(toSkipTranscription.count) skip-transcription, \(alreadyHandled) already handled")
 
-        guard !notDownloaded.isEmpty else {
-            // Silent no-op was the pre-fix bug. Surface it clearly.
+        // Bail with a clear message if nothing is actionable.
+        guard !toSkipDownload.isEmpty || !toSkipTranscription.isEmpty else {
             if entries.isEmpty {
                 viewModel.syncStatus = "Skip: no recordings selected"
             } else {
-                viewModel.syncStatus = "Skip: all \(entries.count) selected recordings are already downloaded or skipped"
+                viewModel.syncStatus = "Skip: all \(entries.count) selected are already transcribed or skipped"
             }
             viewModel.syncStatusLevel = .warning
             syncViewModelState()
             return
         }
 
-        let byDevice = Dictionary(grouping: notDownloaded, by: \.deviceId)
-        let group = DispatchGroup()
-        var anyError: String?
-
-        viewModel.syncStatus = "Skipping \(notDownloaded.count) recording(s)..."
+        viewModel.syncStatus = "Skipping \(toSkipDownload.count + toSkipTranscription.count) recording(s)..."
         viewModel.syncStatusLevel = .info
         syncViewModelState()
+
+        // Apply transcription-skip immediately (no subprocess needed).
+        if !toSkipTranscription.isEmpty {
+            for entry in toSkipTranscription {
+                skippedTranscriptions.insert(entry.recording.name)
+            }
+            SkippedTranscriptionsStore.save(skippedTranscriptions)
+            // Reflect on in-memory entries so the UI updates without waiting
+            // for a refresh round-trip.
+            for i in syncEntries.indices {
+                if skippedTranscriptions.contains(syncEntries[i].recording.name) {
+                    syncEntries[i].transcriptionSkipped = true
+                }
+            }
+            log("Skip-transcription: recorded \(toSkipTranscription.count) filename(s) in \(SkippedTranscriptionsStore.path)")
+        }
+
+        guard !toSkipDownload.isEmpty else {
+            // Only transcription-skip was performed — no extractor work needed.
+            viewModel.syncStatus = "Skipped \(toSkipTranscription.count) recording(s) from transcription"
+            viewModel.syncStatusLevel = .success
+            syncCheckedRecordings.removeAll()
+            syncViewModelState()
+            return
+        }
+
+        // Skip-download path: dispatch to extractor per device.
+        let byDevice = Dictionary(grouping: toSkipDownload, by: \.deviceId)
+        let group = DispatchGroup()
+        var anyError: String?
 
         for (deviceId, deviceEntries) in byDevice {
             let filenames = deviceEntries.map(\.recording.name)
@@ -3602,15 +3652,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 pid = device?.productId
             }
 
-            log("Skip[\(device?.shortName ?? deviceId)]: mark-downloaded \(filenames.count) file(s), pid=\(pid.map(String.init) ?? "nil")")
+            log("Skip-download[\(device?.shortName ?? deviceId)]: mark-downloaded \(filenames.count) file(s), pid=\(pid.map(String.init) ?? "nil")")
             group.enter()
             runExtractor(arguments: args, productId: pid) { [weak self] result in
                 switch result {
                 case .success(let data):
-                    self?.log("Skip[\(device?.shortName ?? deviceId)]: ok (\(data.count) bytes response)")
+                    self?.log("Skip-download[\(device?.shortName ?? deviceId)]: ok (\(data.count) bytes)")
                 case .failure(let error):
                     anyError = error.localizedDescription
-                    self?.log("Skip[\(device?.shortName ?? deviceId)]: FAILED — \(error.localizedDescription)")
+                    self?.log("Skip-download[\(device?.shortName ?? deviceId)]: FAILED — \(error.localizedDescription)")
                 }
                 group.leave()
             }
@@ -3621,7 +3671,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let error = anyError {
                 self.showError("Failed to skip recordings:\n\(error)")
             } else {
-                self.viewModel.syncStatus = "Skipped \(notDownloaded.count) recording(s)"
+                let total = toSkipDownload.count + toSkipTranscription.count
+                self.viewModel.syncStatus = "Skipped \(total) recording(s)"
                 self.viewModel.syncStatusLevel = .success
             }
             self.syncCheckedRecordings.removeAll()
@@ -3629,12 +3680,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Unskip mirrors Skip: undoes whichever kind of skip is on the entry.
+    /// For skip-download (file isn't local), calls the extractor's
+    /// unmark-downloaded. For skip-transcription (file is local),
+    /// removes the name from the skipped-transcriptions JSON.
     private func unmarkSyncRecordingsAsDownloaded() {
         let entries = selectedSyncEntries()
-        let downloaded = entries.filter { $0.recording.downloaded }
-        guard !downloaded.isEmpty else { return }
+        let toUnskipDownload = entries.filter {
+            $0.recording.downloaded && !$0.recording.localExists
+        }
+        let toUnskipTranscription = entries.filter { $0.transcriptionSkipped }
 
-        let byDevice = Dictionary(grouping: downloaded, by: \.deviceId)
+        guard !toUnskipDownload.isEmpty || !toUnskipTranscription.isEmpty else {
+            viewModel.syncStatus = "Unskip: no skipped recordings in selection"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+
+        // Un-skip the transcription side immediately.
+        if !toUnskipTranscription.isEmpty {
+            for entry in toUnskipTranscription {
+                skippedTranscriptions.remove(entry.recording.name)
+            }
+            SkippedTranscriptionsStore.save(skippedTranscriptions)
+            for i in syncEntries.indices {
+                if !skippedTranscriptions.contains(syncEntries[i].recording.name) {
+                    syncEntries[i].transcriptionSkipped = false
+                }
+            }
+            log("Unskip-transcription: removed \(toUnskipTranscription.count) filename(s)")
+        }
+
+        guard !toUnskipDownload.isEmpty else {
+            viewModel.syncStatus = "Un-skipped \(toUnskipTranscription.count) recording(s) from transcription"
+            viewModel.syncStatusLevel = .success
+            syncCheckedRecordings.removeAll()
+            syncViewModelState()
+            return
+        }
+
+        let byDevice = Dictionary(grouping: toUnskipDownload, by: \.deviceId)
         let group = DispatchGroup()
         var anyError: String?
 
@@ -3844,7 +3930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if self.syncAutoTranscribe, ensureTranscriptionReady() {
                 // Refresh entries first to get latest state
                 let untranscribed = self.syncEntries
-                    .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
+                    .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
                     .map(\.recording.outputPath)
                 if !untranscribed.isEmpty {
                     self.log("Auto-transcribe: \(untranscribed.count) untranscribed recording(s) found")
@@ -4539,7 +4625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func transcribeAllRecordings() {
         guard ensureTranscriptionReady() else { return }
         let paths = viewModel.visibleEntries
-            .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed }
+            .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
             .map(\.recording.outputPath)
 
         guard !paths.isEmpty else {
@@ -4619,6 +4705,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].speakersTagged = false
                         self.syncEntries[i].summaryPath = nil
                     }
+                    // Apply the transcription-skip flag from the user's
+                    // persisted opt-out list, regardless of transcription state.
+                    self.syncEntries[i].transcriptionSkipped =
+                        self.skippedTranscriptions.contains(mp3Name)
                 }
                 self.log("refreshTranscriptionState: matched \(matched) transcribed entries out of \(self.syncEntries.count)")
                 self.syncViewModelState()

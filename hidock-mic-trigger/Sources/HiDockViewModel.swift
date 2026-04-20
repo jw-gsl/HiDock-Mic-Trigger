@@ -131,10 +131,15 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var anySelectedMarkedOnly: Bool {
-        // "Marked" = downloaded flag set but file doesn't exist locally (skipped)
+        // Unskip applies to either:
+        //  1. download-skipped (downloaded flag set but file absent), or
+        //  2. transcription-skipped (user opted out of transcribing a
+        //     locally-present recording).
         guard hasSelection else { return false }
         return syncEntries.contains {
-            syncCheckedRecordings.contains($0.recording.name) && $0.recording.downloaded && !$0.recording.localExists
+            guard syncCheckedRecordings.contains($0.recording.name) else { return false }
+            let downloadSkipped = $0.recording.downloaded && !$0.recording.localExists
+            return downloadSkipped || $0.transcriptionSkipped
         }
     }
 
