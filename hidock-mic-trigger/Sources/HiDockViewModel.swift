@@ -9,6 +9,12 @@ final class HiDockViewModel: ObservableObject {
     @Published var selectedMicName: String?
     @Published var autoStartOnLaunch = true
     @Published var availableMics: [String] = []
+    /// The mic-trigger's ffmpeg is currently streaming from a HiDock —
+    /// meaning the HiDock is actively recording. Set/cleared when the
+    /// trigger CLI emits 'IN USE' / 'NOT IN USE' lines. The HiDock's
+    /// USB data endpoint is unreachable while this is true, so data
+    /// queries will fail until the stream stops.
+    @Published var hidockRecordingActive: Bool = false
 
     // MARK: - Sync State
     @Published var syncStatus: String = "Not loaded"

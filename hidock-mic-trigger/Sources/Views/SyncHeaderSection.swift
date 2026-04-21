@@ -29,6 +29,23 @@ struct SyncHeaderSection: View {
                     Text(viewModel.syncStatus)
                         .font(.body.weight(.medium))
                 }
+                // Recording indicator — only while the mic-trigger's
+                // ffmpeg is actively streaming from a HiDock. This is the
+                // same state that makes USB data queries fail, so seeing
+                // it explains 'H1 unreachable' in one glance.
+                if viewModel.hidockRecordingActive {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                        Text("Recording")
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.red)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.red.opacity(0.08), in: Capsule())
+                }
                 Spacer()
                 Text(viewModel.syncSummary)
                     .font(.caption)

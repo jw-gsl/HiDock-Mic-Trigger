@@ -220,6 +220,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         loadMergeGroups()
         importedRecordings = ImportedRecordingsStore.load()
         log("Loaded \(importedRecordings.count) imported recording(s) from \(ImportedRecordingsStore.path)")
+        // Initial recording-state probe — the trigger child may already have
+        // been running (if the app was relaunched mid-session), in which case
+        // we need to pick up 'recording' state without waiting for the next
+        // mic in/out transition.
+        viewModel.hidockRecordingActive = Self.probeFFmpegHoldingHiDock()
         skippedTranscriptions = SkippedTranscriptionsStore.load()
         log("Loaded \(skippedTranscriptions.count) skipped-transcription filename(s)")
         // Backfill duration for any entries imported before duration probing
@@ -598,9 +603,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if line.contains("IN USE") && line.contains("holding HiDock") {
                 log("Trigger: USB mic in use, HiDock recording started")
                 postNotification(title: "HiDock Recording Started", body: "USB mic is in use — HiDock input held open.")
+                DispatchQueue.main.async {
+                    self.viewModel.hidockRecordingActive = true
+                }
             } else if line.contains("NOT IN USE") && line.contains("releasing HiDock") {
                 log("Trigger: USB mic idle, HiDock recording stopped")
                 postNotification(title: "HiDock Recording Stopped", body: "USB mic went idle — HiDock input released.")
+                DispatchQueue.main.async {
+                    self.viewModel.hidockRecordingActive = false
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                     guard let self = self, self.syncPaired, !self.syncBusy else { return }
                     self.log("Auto-refreshing sync after mic release")
@@ -1308,6 +1319,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.stoppingIntentionally = false
                 self?.crashCount = 0
                 self?.stopUptimeTimer()
+                // Trigger child gone → no ffmpeg → HiDock not being held.
+                self?.viewModel.hidockRecordingActive = false
                 self?.updateMenuState()
             }
         }
@@ -4449,6 +4462,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.modelDownloadProgress = 0
         viewModel.modelDownloadStatus = ""
         log("Model download cancelled")
+    }
+
+    /// Return true if some ffmpeg process currently has a HiDock audio
+    /// device open. Used as an initial-state probe on app launch so the
+    /// 'Recording' pill reflects reality immediately rather than waiting
+    /// for the next mic in/out transition from the trigger child.
+    static func probeFFmpegHoldingHiDock() -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        task.arguments = ["-f", "ffmpeg.*HiDock"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return false
+        }
+        // pgrep exits 0 when at least one match is found.
+        return task.terminationStatus == 0
     }
 
     /// Compute a transcription timeout based on audio duration when known,
