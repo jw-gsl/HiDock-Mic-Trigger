@@ -197,7 +197,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncPairedDevices: [HiDockPairedDevice] {
         get {
             guard let data = UserDefaults.standard.data(forKey: syncPairedDevicesKey) else { return [] }
-            return (try? JSONDecoder().decode([HiDockPairedDevice].self, from: data)) ?? []
+            let all = (try? JSONDecoder().decode([HiDockPairedDevice].self, from: data)) ?? []
+            // Drop USB-enumeration stubs that may have been auto-paired in
+            // older builds. Matches the guard in autoConnectSyncIfPaired so
+            // we don't re-surface phantoms on every relaunch.
+            return all.filter { d in
+                let lc = d.displayName.lowercased()
+                if d.deviceType == .hidock {
+                    if lc.contains("stub") { return false }
+                    if d.productId == 0 || d.productId == 0xFF00 { return false }
+                }
+                return true
+            }
         }
         set {
             let data = try? JSONEncoder().encode(newValue)
@@ -1424,6 +1435,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                let response = try? JSONDecoder().decode(HiDockDeviceListResponse.self, from: data) {
                 let alreadyPaired = Set(self.syncPairedDevices.map(\.deviceId))
                 for device in response.devices where !alreadyPaired.contains("hidock:\(device.productId)") {
+                    // Reject USB-enumeration stubs that briefly appear when a
+                    // device is still negotiating its descriptors. 'USB STUB'
+                    // is the placeholder displayName used by some USB
+                    // subsystems during enumeration; productId 65280 (0xFF00)
+                    // is a well-known 'unconfigured' marker. Auto-pairing
+                    // these leaves a phantom device in the paired list that
+                    // never connects.
+                    let lcName = device.displayName.lowercased()
+                    if lcName.contains("usb stub") || lcName.contains("stub") || device.productId == 0 || device.productId == 0xFF00 {
+                        self.log("Skipping auto-pair for enumeration stub: \(device.displayName) (pid: \(device.productId))")
+                        continue
+                    }
                     let pairedDevice = HiDockPairedDevice(productId: device.productId, displayName: device.displayName)
                     var devices = self.syncPairedDevices
                     devices.append(pairedDevice)

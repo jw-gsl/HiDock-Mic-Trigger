@@ -101,7 +101,10 @@ struct DeviceCardView: View {
 
     private var titleRow: some View {
         HStack(spacing: 8) {
-            Text(device.displayName)
+            // cleanName strips the raw USB product string (e.g.
+            // "actions-BOS-000") and surfaces the human "HiDock H1" form.
+            // displayName would show the raw string.
+            Text(device.cleanName)
                 .font(.headline)
             stateChip
         }
