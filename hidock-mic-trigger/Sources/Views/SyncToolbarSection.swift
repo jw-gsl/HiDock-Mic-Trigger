@@ -135,11 +135,36 @@ struct SyncToolbarSection: View {
                 .tint(viewModel.syncFilterDeviceId == nil ? .accentColor : nil)
 
                 ForEach(viewModel.syncPairedDevices, id: \.deviceId) { device in
-                    Button(device.shortName) {
-                        viewModel.onFilterByDevice(device.deviceId)
+                    let connected = viewModel.syncDeviceConnected[device.deviceId] ?? false
+                    let unreachable = viewModel.syncDeviceLastError[device.deviceId] != nil
+                    HStack(spacing: 2) {
+                        Button {
+                            viewModel.onFilterByDevice(device.deviceId)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(unreachable ? Color.orange : (connected ? Color.green : Color.gray))
+                                    .frame(width: 6, height: 6)
+                                Text(device.shortName)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(viewModel.syncFilterDeviceId == device.deviceId ? .accentColor : nil)
+                        // Reconnect affordance: always present, but the
+                        // arrow turns orange when the device's last query
+                        // failed so it stands out as the next logical
+                        // action. Clicking runs a fresh status probe.
+                        Button {
+                            viewModel.onReconnectDevice(device.deviceId)
+                        } label: {
+                            Image(systemName: "arrow.clockwise.circle\(unreachable ? ".fill" : "")")
+                                .foregroundColor(unreachable ? .orange : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(unreachable
+                            ? "\(device.shortName) is unreachable — try reconnecting"
+                            : "Reconnect \(device.shortName)")
                     }
-                    .buttonStyle(.bordered)
-                    .tint(viewModel.syncFilterDeviceId == device.deviceId ? .accentColor : nil)
                 }
 
                 Spacer()

@@ -256,6 +256,11 @@ final class HiDockViewModel: ObservableObject {
     /// removed entirely (file + JSON entry); downloaded HiDock recordings
     /// have their local MP3 deleted but the device copy is preserved.
     var onRemoveSelected: () -> Void = {}
+    /// Force a fresh status query against one specific device. Clears
+    /// any stale 'unreachable' flag and re-runs the extractor. Useful
+    /// when a device recovers from a USB stall and the user wants to
+    /// pick it up without waiting for the next auto-refresh cycle.
+    var onReconnectDevice: (String) -> Void = { _ in }
     var onPairDock: () -> Void = {}
     var onUnpairDock: () -> Void = {}
     var onChooseRecordingsFolder: () -> Void = {}

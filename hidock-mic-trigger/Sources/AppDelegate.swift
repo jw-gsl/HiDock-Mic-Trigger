@@ -399,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
+        viewModel.onReconnectDevice = { [weak self] deviceId in self?.reconnectDevice(deviceId: deviceId) }
         viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
         viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
@@ -2875,6 +2876,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Re-query a single device's status, bypassing the usual batch flow
+    /// and clearing any stale 'unreachable' flag before we try. If the
+    /// device is still stuck, the error is recorded again so the UI can
+    /// keep showing the warning. If it comes back, normal operation
+    /// resumes immediately.
+    func reconnectDevice(deviceId: String) {
+        guard let device = syncPairedDevices.first(where: { $0.deviceId == deviceId }) else {
+            log("reconnectDevice: no paired device with id \(deviceId)")
+            return
+        }
+        log("reconnectDevice: \(device.shortName) (\(deviceId))")
+
+        // Optimistic clear so the 'unreachable' banner disappears while
+        // the probe runs. If the probe fails, renderSyncStatus-style
+        // failure handling will re-set it.
+        syncDeviceLastError.removeValue(forKey: deviceId)
+        viewModel.syncStatus = "Reconnecting \(device.shortName)..."
+        viewModel.syncStatusLevel = .info
+        syncViewModelState()
+
+        let args: [String]
+        let pid: Int?
+        if device.deviceType == .volume {
+            args = ["volume-status", "--volume-name", device.volumeName ?? "", "--timeout-ms", "5000"]
+            pid = nil
+        } else {
+            args = ["status", "--timeout-ms", "5000"]
+            pid = device.productId
+        }
+
+        runExtractor(arguments: args, productId: pid) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let data):
+                do {
+                    let payload = try JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data)
+                    self.renderSyncStatus(payload, device: device)
+                    self.viewModel.syncStatus = "\(device.shortName) reconnected"
+                    self.viewModel.syncStatusLevel = .success
+                    self.refreshTranscriptionState()
+                } catch {
+                    self.viewModel.syncStatus = "\(device.shortName): decode error"
+                    self.viewModel.syncStatusLevel = .error
+                    self.syncDeviceLastError[deviceId] = ("decode error: \(error.localizedDescription)", Date())
+                }
+            case .failure(let error):
+                let desc = error.localizedDescription
+                let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
+                self.log("reconnectDevice[\(device.shortName)] failed: \(shortDesc)")
+                self.syncDeviceLastError[deviceId] = (shortDesc, Date())
+                self.syncDeviceConnected[deviceId] = false
+                self.viewModel.syncStatus = "\(device.shortName): still unreachable — \(shortDesc)"
+                self.viewModel.syncStatusLevel = .error
+            }
+            self.syncViewModelState()
+        }
+    }
+
     /// Unified Remove for the currently-checked selection. Handles mixed
     /// selections sensibly: imports are removed entirely (file + JSON),
     /// downloaded HiDock recordings have their local MP3 deleted but the
@@ -3653,6 +3712,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     // summary so the UI tells the user why their latest
                     // recordings aren't showing.
                     self.syncDeviceLastError[device.deviceId] = (shortDesc, Date())
+                    // A failed status query means the device isn't usable
+                    // right now, even if the last successful query said
+                    // 'connected'. Flip the flag so the UI doesn't lie.
+                    self.syncDeviceConnected[device.deviceId] = false
                 }
                 group.leave()
             }
