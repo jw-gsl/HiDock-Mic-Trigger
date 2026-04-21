@@ -392,6 +392,18 @@ struct RecordingsTableView: View {
             } label: {
                 Label("Remove Import", systemImage: "trash")
             }
+        } else if entry.recording.downloaded && entry.recording.localExists {
+            // HiDock recordings: offer to delete only the local copy.
+            // Deleting from the device itself isn't supported yet —
+            // the HiDock USB protocol we've reverse-engineered doesn't
+            // include a delete command. Users can delete on-device
+            // recordings through the HiNotes app.
+            Divider()
+            Button(role: .destructive) {
+                viewModel.onDeleteLocalCopy(entry.recording.name)
+            } label: {
+                Label("Delete Local Copy", systemImage: "trash")
+            }
         }
     }
 }

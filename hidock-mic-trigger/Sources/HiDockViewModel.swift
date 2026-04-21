@@ -171,6 +171,9 @@ final class HiDockViewModel: ObservableObject {
     /// recordings where the user knows how many voices to expect (e.g.
     /// "this is a 1:1", "this is a 6-person hackathon panel").
     var onTranscribeWithSpeakerCount: (String, Int) -> Void = { _, _ in }
+    /// Delete the locally-downloaded MP3 for a recording (keeps the device
+    /// copy intact). Next device refresh will show it as "On device" again.
+    var onDeleteLocalCopy: (String) -> Void = { _ in }
     var onPairDock: () -> Void = {}
     var onUnpairDock: () -> Void = {}
     var onChooseRecordingsFolder: () -> Void = {}

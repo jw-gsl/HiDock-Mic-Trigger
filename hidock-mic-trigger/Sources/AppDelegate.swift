@@ -394,6 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onImportAudioFile = { [weak self] in self?.importAudioFile() }
         viewModel.onRemoveImport = { [weak self] name in self?.removeImportedRecording(name: name) }
         viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
+        viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
         viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
@@ -883,6 +884,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         importItem.keyEquivalentModifierMask = [.command, .shift]
         importItem.target = self
         menu.addItem(importItem)
+        let firmwareItem = NSMenuItem(title: "Check for Firmware Updates...", action: #selector(openFirmwarePage), keyEquivalent: "")
+        firmwareItem.target = self
+        menu.addItem(firmwareItem)
         let feedbackItem = NSMenuItem(title: "Send Feedback...", action: #selector(sendFeedback), keyEquivalent: "f")
         feedbackItem.target = self
         menu.addItem(feedbackItem)
@@ -2529,6 +2533,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // MARK: - Firmware
+
+    /// HiDock firmware updates are distributed through the vendor's HiNotes
+    /// app and their firmwares page. We don't have a device-side protocol
+    /// command for querying version or triggering an OTA — the USB protocol
+    /// we've implemented only covers file listing and transfer. This menu
+    /// item provides the clearest path: open the vendor's firmwares page
+    /// so the user can check what's current and grab HiNotes if they want
+    /// to apply it.
+    @objc private func openFirmwarePage() {
+        guard let url = URL(string: "https://www.hidock.com/pages/firmwares") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     // MARK: - Import Audio File
 
     @objc private func importAudioFileMenu() {
@@ -2703,6 +2721,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             self.refreshTranscriptionState()
             self.syncViewModelState()
+        }
+    }
+
+    /// Delete the downloaded MP3 for a HiDock recording while leaving the
+    /// on-device copy intact. After this, Refresh will show the entry as
+    /// 'On device' again. Useful for reclaiming disk space without touching
+    /// the device — which is all we can safely do today, since the HiDock
+    /// USB protocol commands we've implemented don't include a delete
+    /// operation (that would need protocol reverse-engineering).
+    func deleteLocalCopy(name: String) {
+        guard let entry = syncEntries.first(where: { $0.recording.name == name }) else {
+            log("deleteLocalCopy: no entry named \(name)")
+            return
+        }
+        // Never destructive on imports — they don't have a device copy to
+        // fall back to. Use Remove Import for those.
+        guard entry.deviceId != IMPORTED_DEVICE_ID else {
+            log("deleteLocalCopy: refusing to delete an imported entry (use Remove Import)")
+            viewModel.syncStatus = "Use Remove Import for imported recordings"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+        let path = entry.recording.outputPath
+        guard FileManager.default.fileExists(atPath: path) else {
+            log("deleteLocalCopy: file already absent at \(path)")
+            viewModel.syncStatus = "Local copy already absent"
+            viewModel.syncStatusLevel = .info
+            syncViewModelState()
+            return
+        }
+
+        // Confirmation — this is destructive on disk even though the
+        // device copy survives.
+        let alert = NSAlert()
+        alert.messageText = "Delete local copy of \(entry.recording.outputName)?"
+        alert.informativeText = "The MP3 will be removed from \(entry.recording.outputPath). The recording stays on the HiDock and can be re-downloaded any time."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete Local Copy")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try FileManager.default.removeItem(atPath: path)
+            // Also unmark in the extractor state so the device catalogue
+            // reports it as "not downloaded" again, matching reality.
+            let device = syncPairedDevices.first { $0.deviceId == entry.deviceId }
+            var args: [String]
+            let pid: Int?
+            if let device = device, device.deviceType == .volume {
+                args = ["unmark-downloaded", "--volume-name", device.volumeName ?? "", entry.recording.name]
+                pid = nil
+            } else {
+                args = ["unmark-downloaded", entry.recording.name]
+                pid = device?.productId
+            }
+            runExtractor(arguments: args, productId: pid) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.refreshSyncStatus()
+                }
+            }
+            log("deleteLocalCopy: unlinked \(path)")
+            viewModel.syncStatus = "Deleted local copy of \(entry.recording.outputName)"
+            viewModel.syncStatusLevel = .success
+            syncViewModelState()
+        } catch {
+            log("deleteLocalCopy: failed — \(error.localizedDescription)")
+            showError("Failed to delete local copy:\n\(error.localizedDescription)")
         }
     }
 
