@@ -2877,10 +2877,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Re-query a single device's status, bypassing the usual batch flow
-    /// and clearing any stale 'unreachable' flag before we try. If the
-    /// device is still stuck, the error is recorded again so the UI can
-    /// keep showing the warning. If it comes back, normal operation
-    /// resumes immediately.
+    /// and clearing any stale 'unreachable' flag before we try.
+    ///
+    /// Critical detail for HiDock hardware: the mic-trigger spawns an
+    /// `ffmpeg` child that holds the HiDock's USB audio interface open
+    /// (so physical button-press recording works). While that's streaming,
+    /// the firmware refuses data queries and the extractor hangs until
+    /// our 30-second timeout kills it. Before any reconnect probe we
+    /// stop the trigger if it's running, run the probe, then restart the
+    /// trigger if it was running before. Users get automatic recovery
+    /// without having to know the mic-trigger is fighting them.
     func reconnectDevice(deviceId: String) {
         guard let device = syncPairedDevices.first(where: { $0.deviceId == deviceId }) else {
             log("reconnectDevice: no paired device with id \(deviceId)")
@@ -2888,14 +2894,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("reconnectDevice: \(device.shortName) (\(deviceId))")
 
-        // Optimistic clear so the 'unreachable' banner disappears while
-        // the probe runs. If the probe fails, renderSyncStatus-style
-        // failure handling will re-set it.
         syncDeviceLastError.removeValue(forKey: deviceId)
         viewModel.syncStatus = "Reconnecting \(device.shortName)..."
         viewModel.syncStatusLevel = .info
         syncViewModelState()
 
+        // Only HiDock devices are subject to the ffmpeg-audio-lock issue.
+        // Volume devices are just mounted filesystems — safe to query
+        // without touching the mic trigger.
+        let triggerWasRunning = device.deviceType == .hidock && process != nil
+        if triggerWasRunning {
+            log("reconnectDevice: pausing mic trigger to free H1 audio interface")
+            stopTrigger()
+            // ffmpeg exits synchronously on SIGTERM but the HiDock firmware
+            // needs a short moment to release the USB endpoint before the
+            // next query will succeed. 800ms is empirically enough on M-series.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runReconnectProbe(device: device, restartTriggerAfter: true)
+            }
+        } else {
+            runReconnectProbe(device: device, restartTriggerAfter: false)
+        }
+    }
+
+    private func runReconnectProbe(
+        device: HiDockPairedDevice, restartTriggerAfter: Bool,
+    ) {
         let args: [String]
         let pid: Int?
         if device.deviceType == .volume {
@@ -2919,16 +2943,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 } catch {
                     self.viewModel.syncStatus = "\(device.shortName): decode error"
                     self.viewModel.syncStatusLevel = .error
-                    self.syncDeviceLastError[deviceId] = ("decode error: \(error.localizedDescription)", Date())
+                    self.syncDeviceLastError[device.deviceId] = ("decode error: \(error.localizedDescription)", Date())
                 }
             case .failure(let error):
                 let desc = error.localizedDescription
                 let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
                 self.log("reconnectDevice[\(device.shortName)] failed: \(shortDesc)")
-                self.syncDeviceLastError[deviceId] = (shortDesc, Date())
-                self.syncDeviceConnected[deviceId] = false
+                self.syncDeviceLastError[device.deviceId] = (shortDesc, Date())
+                self.syncDeviceConnected[device.deviceId] = false
                 self.viewModel.syncStatus = "\(device.shortName): still unreachable — \(shortDesc)"
                 self.viewModel.syncStatusLevel = .error
+            }
+            // Restart the mic trigger we stopped so the user doesn't
+            // silently lose recording capability after a reconnect probe.
+            if restartTriggerAfter {
+                self.log("reconnectDevice: restarting mic trigger")
+                self.startTrigger()
             }
             self.syncViewModelState()
         }
