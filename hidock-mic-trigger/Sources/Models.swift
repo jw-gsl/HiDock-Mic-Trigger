@@ -19,6 +19,13 @@ struct HiDockSyncRecording: Codable {
     let humanLength: String
 }
 
+struct HiDockStorageStats: Codable {
+    let totalFiles: Int
+    let returnedFiles: Int
+    let totalBytesReturned: Int
+    let truncated: Bool
+}
+
 struct HiDockSyncStatusResponse: Codable {
     let connected: Bool
     let outputDir: String
@@ -26,6 +33,7 @@ struct HiDockSyncStatusResponse: Codable {
     let configPath: String
     let recordings: [HiDockSyncRecording]
     let error: String?
+    let storage: HiDockStorageStats?
 }
 
 struct HiDockSyncDownloadResult: Codable {

@@ -1062,6 +1062,18 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
 
+        # Storage stats — the HiDock USB protocol we've implemented doesn't
+        # expose a 'free space' query, so we derive usage from summed file
+        # sizes. If the firmware truncated the list, the sum is a minimum
+        # bound — we flag that to the client.
+        total_bytes = sum(int(r.get("length", 0)) for r in recordings)
+        payload["storage"] = {
+            "totalFiles": file_count if file_count is not None else len(recordings),
+            "returnedFiles": len(recordings),
+            "totalBytesReturned": total_bytes,
+            "truncated": file_count is not None and len(recordings) < file_count,
+        }
+
         # Warn if firmware truncated the recording list
         if file_count is not None and len(recordings) < file_count:
             missing = file_count - len(recordings)

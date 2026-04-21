@@ -35,6 +35,20 @@ struct SyncHeaderSection: View {
                     .foregroundColor(.secondary)
             }
 
+            // Per-device storage row. `+` suffix on a size means the device
+            // firmware truncated the list, so the real usage is higher.
+            if !viewModel.storageSummary.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "externaldrive")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(viewModel.storageSummary)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            }
+
             // Folder paths + download buttons on same row
             HStack(spacing: 12) {
                 if let folder = viewModel.syncOutputFolder {

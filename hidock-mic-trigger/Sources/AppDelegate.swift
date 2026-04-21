@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceId: String? = nil
     private var syncDeviceConnected: [String: Bool] = [:]
+    private var syncDeviceStorage: [String: HiDockStorageStats] = [:]
     private var syncBusy = false
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
@@ -395,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRemoveImport = { [weak self] name in self?.removeImportedRecording(name: name) }
         viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
+        viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
         viewModel.onPairDock = { [weak self] in self?.pairSyncDock() }
         viewModel.onUnpairDock = { [weak self] in self?.unpairSyncDock() }
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
@@ -527,6 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
         viewModel.syncDeviceConnected = syncDeviceConnected
+        viewModel.syncDeviceStorage = syncDeviceStorage
         viewModel.syncOutputFolder = syncOutputFolder
         viewModel.syncTranscriptFolder = syncTranscriptFolder
         viewModel.transcriptionBusy = transcriptionBusy
@@ -2792,6 +2795,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Unified Remove for the currently-checked selection. Handles mixed
+    /// selections sensibly: imports are removed entirely (file + JSON),
+    /// downloaded HiDock recordings have their local MP3 deleted but the
+    /// device copy is preserved. Shows a single confirmation listing the
+    /// total damage.
+    func removeSelected() {
+        let entries = selectedSyncEntries()
+        guard !entries.isEmpty else {
+            viewModel.syncStatus = "Remove: no recordings selected"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+
+        let imports = entries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
+        let localCopies = entries.filter {
+            $0.deviceId != IMPORTED_DEVICE_ID
+            && $0.recording.downloaded
+            && $0.recording.localExists
+        }
+        let nothingToDo = entries.count - imports.count - localCopies.count
+
+        guard !imports.isEmpty || !localCopies.isEmpty else {
+            viewModel.syncStatus = "Remove: \(nothingToDo) selected recording(s) have no local copy to remove"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Remove \(imports.count + localCopies.count) recording(s)?"
+        var info: [String] = []
+        if !imports.isEmpty {
+            info.append("\(imports.count) imported file(s) will be deleted entirely.")
+        }
+        if !localCopies.isEmpty {
+            info.append("\(localCopies.count) local MP3 file(s) will be deleted. Device copies are preserved and can be re-downloaded.")
+        }
+        if nothingToDo > 0 {
+            info.append("\(nothingToDo) selected item(s) have nothing to remove (on-device only) and will be ignored.")
+        }
+        alert.informativeText = info.joined(separator: "\n\n")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // Imports: drop file + JSON entry. Skip the per-item confirmation
+        // since we just got a bulk one.
+        for entry in imports {
+            let name = entry.recording.name
+            if let im = importedRecordings.first(where: { $0.name == name }) {
+                try? FileManager.default.removeItem(atPath: im.outputPath)
+            }
+            importedRecordings.removeAll { $0.name == name }
+            syncCheckedRecordings.remove(name)
+        }
+        if !imports.isEmpty {
+            ImportedRecordingsStore.save(importedRecordings)
+        }
+
+        // HiDock local copies: delete MP3, unmark so catalogue reflects it.
+        let group = DispatchGroup()
+        for entry in localCopies {
+            try? FileManager.default.removeItem(atPath: entry.recording.outputPath)
+            let device = syncPairedDevices.first { $0.deviceId == entry.deviceId }
+            var args: [String]
+            let pid: Int?
+            if let device = device, device.deviceType == .volume {
+                args = ["unmark-downloaded", "--volume-name", device.volumeName ?? "", entry.recording.name]
+                pid = nil
+            } else {
+                args = ["unmark-downloaded", entry.recording.name]
+                pid = device?.productId
+            }
+            group.enter()
+            runExtractor(arguments: args, productId: pid) { _ in group.leave() }
+        }
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            self.syncCheckedRecordings.removeAll()
+            let total = imports.count + localCopies.count
+            self.viewModel.syncStatus = "Removed \(total) recording(s)"
+            self.viewModel.syncStatusLevel = .success
+            self.rebuildSyncEntries()
+            self.refreshSyncStatus()
+        }
+    }
+
     /// Remove an imported recording by filename — unlinks the audio file
     /// from ~/HiDock/Recordings/, drops the entry from the JSON, and
     /// refreshes the table. No-op for non-imported names.
@@ -2844,6 +2937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncDeviceConnected.removeValue(forKey: device.deviceId)
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncDeviceConnected = syncDeviceConnected
+        viewModel.syncDeviceStorage = syncDeviceStorage
         viewModel.syncPaired = !syncPairedDevices.isEmpty
         log("Forgot device: \(device.cleanName) (\(device.deviceId))")
         updateMenuSyncStatus(connected: syncDeviceConnected.values.contains(true))
@@ -3260,6 +3354,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         syncDeviceConnected[device.deviceId] = status.connected
+        if let stats = status.storage {
+            syncDeviceStorage[device.deviceId] = stats
+            let gb = Double(stats.totalBytesReturned) / 1_073_741_824
+            let caveat = stats.truncated ? " (firmware truncated list, actual usage higher)" : ""
+            log("Storage[\(device.shortName)]: \(stats.totalFiles) files, \(String(format: "%.2f", gb)) GB used\(caveat)")
+        }
         syncEntries.removeAll { $0.deviceId == device.deviceId }
         for recording in status.recordings {
             syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: device.productId, deviceId: device.deviceId, deviceName: device.cleanName))

@@ -3,6 +3,8 @@
 Ideas raised during development that haven't been implemented yet.
 Grouped by area with priority assessment.
 
+> See also: `PLAN-hinotes-web-feature-mining-2026-04-21.md` — features discovered by mining the hinotes.hidock.com web app bundle (2026-04-21). Several ideas below are re-surfaced and cross-referenced there.
+
 ---
 
 ## Voice & Speaker Recognition

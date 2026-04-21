@@ -81,6 +81,14 @@ struct SyncToolbarSection: View {
                 }
                 .disabled(viewModel.syncBusy || viewModel.syncCheckedRecordings.count != 1)
 
+                Button {
+                    viewModel.onRemoveSelected()
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+                .help("Remove imported files entirely, delete local copies of downloaded HiDock recordings. Device copies are preserved.")
+                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+
                 Toggle("Speaker Labels", isOn: Binding(
                     get: { viewModel.diarizeEnabled },
                     set: { _ in viewModel.onToggleDiarize() }

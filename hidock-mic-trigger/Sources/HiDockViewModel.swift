@@ -163,6 +163,25 @@ final class HiDockViewModel: ObservableObject {
     var onStopTrigger: () -> Void = {}
     var onToggleAutoStart: () -> Void = {}
     var onSelectMic: (String) -> Void = { _ in }
+    /// Per-device storage summary, keyed by deviceId. Summed recording
+    /// sizes from the device catalogue — a minimum bound when firmware
+    /// truncation flag is set.
+    @Published var syncDeviceStorage: [String: HiDockStorageStats] = [:]
+
+    /// Human-readable summary shown in the status header, e.g.
+    /// "H1: 3.2 GB · P1: 1.1 GB". Empty string if nothing usable.
+    var storageSummary: String {
+        let parts = syncPairedDevices.compactMap { device -> String? in
+            guard let stats = syncDeviceStorage[device.deviceId] else { return nil }
+            let gb = Double(stats.totalBytesReturned) / 1_073_741_824
+            let mb = Double(stats.totalBytesReturned) / 1_048_576
+            let size = gb >= 1 ? String(format: "%.1f GB", gb) : String(format: "%.0f MB", mb)
+            let flag = stats.truncated ? "+" : ""
+            return "\(device.shortName): \(size)\(flag) (\(stats.totalFiles) files)"
+        }
+        return parts.joined(separator: " · ")
+    }
+
     var onRefreshSync: () -> Void = {}
     var onImportAudioFile: () -> Void = {}
     var onRemoveImport: (String) -> Void = { _ in }
@@ -174,6 +193,10 @@ final class HiDockViewModel: ObservableObject {
     /// Delete the locally-downloaded MP3 for a recording (keeps the device
     /// copy intact). Next device refresh will show it as "On device" again.
     var onDeleteLocalCopy: (String) -> Void = { _ in }
+    /// Unified Remove for the currently-checked selection. Imports are
+    /// removed entirely (file + JSON entry); downloaded HiDock recordings
+    /// have their local MP3 deleted but the device copy is preserved.
+    var onRemoveSelected: () -> Void = {}
     var onPairDock: () -> Void = {}
     var onUnpairDock: () -> Void = {}
     var onChooseRecordingsFolder: () -> Void = {}
