@@ -259,6 +259,21 @@ def transcribe_file(
             summary=summary,
         )
 
+        # Emit a paired .srt alongside the .md whenever we have timed segments.
+        # Prefer diarized output (speaker labels in cues) and fall back to the
+        # plain Whisper segments when diarization is off or failed. Writing is
+        # a no-op if there are no timings at all.
+        try:
+            from shared.srt_writer import srt_path_for, write_srt
+            write_srt(
+                srt_path_for(transcript_path),
+                diarized_result=diarized_result,
+                whisper_segments=result.get("segments", []) if not diarized_result else None,
+            )
+        except Exception as e:
+            # SRT is a best-effort sidecar; never let it break the main transcript.
+            print(f"SRT export failed (non-fatal): {e}", file=sys.stderr)
+
         # Save the original Whisper micro-segments (for re-diarization)
         import json as _json
         whisper_raw_path = transcript_path.with_name(

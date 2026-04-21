@@ -365,6 +365,11 @@ struct RecordingsTableView: View {
             } label: {
                 Label("Open Transcript", systemImage: "doc.text")
             }
+            Button {
+                viewModel.onExportSRT(path)
+            } label: {
+                Label("Export as SRT…", systemImage: "captions.bubble")
+            }
         }
 
         if entry.recording.downloaded && entry.recording.localExists {

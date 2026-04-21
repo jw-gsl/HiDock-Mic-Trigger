@@ -3,7 +3,7 @@
 Cross-platform feature tracking for macOS (Swift/AppKit) and Windows (Python/PyQt6).
 **Update this file whenever a feature is added, changed, or removed on either platform.**
 
-Last reviewed: 2026-04-05
+Last reviewed: 2026-04-21
 
 ## How to use this file
 
@@ -41,7 +41,8 @@ Last reviewed: 2026-04-05
 | Connection status badge | "Connected" badge | "Connected" badge | Both | |
 | Device type badge | Type label | Type label | Both | |
 | Forget device button | Per-device button | Per-device button | Both | |
-| Device icons | SF Symbols | Unicode emoji | Both | Platform-appropriate |
+| Device icons | SF Symbols + P1/H1 glyph SVGs + H1 for H1e | Unicode emoji + P1/H1 glyph SVGs + H1 for H1e | Both | Bespoke glyphs from `assets/device-images/`, emoji/SF Symbol fallback for unknown SKUs and volumes |
+| Connected badge icon | `DeviceGlyphConnected` asset | `connected_glyph.svg` via QPixmap | Both | Small green tick + "Connected" text |
 
 ## Recording Table
 
@@ -56,6 +57,7 @@ Last reviewed: 2026-04-05
 | Context menu: Transcribe | Right-click | Right-click | Both | |
 | Context menu: Show in Finder / Open File Location | Right-click | Right-click | Both | |
 | Context menu: Open Transcript | Right-click | Right-click | Both | |
+| Context menu: Export as SRT... | Right-click | Right-click | Both | Copies paired `.srt` or regenerates via `shared.srt_writer` CLI |
 | Double-click to open file | Opens in Finder | Opens file location | Both | |
 
 ## Recording Toolbar
@@ -94,6 +96,8 @@ Last reviewed: 2026-04-05
 | Rename speakers in transcript | Click to edit | Click to rename | Both | |
 | Speaker enrollment on rename | Automatic | Subprocess call | Both | |
 | Transcription complete notification | User notification with actions | Tray notification | Both | macOS has "Open Transcript" / "Show in Finder" actions |
+| Auto-emit `.srt` beside `.md` on transcription | `transcribe.py` (shared pipeline) | `transcribe.py` (shared pipeline) | Both | Shared `shared/srt_writer.py`. Speaker labels included when diarized. |
+| Export as SRT (context menu) | `onExportSRT` → `NSSavePanel` → copy/regenerate | `_ctx_export_srt` → `QFileDialog` → copy/regenerate | Both | Regenerates from `_diarized.json` / `_whisper.json` for legacy transcripts that predate auto-emit. |
 
 ## Voice Library
 

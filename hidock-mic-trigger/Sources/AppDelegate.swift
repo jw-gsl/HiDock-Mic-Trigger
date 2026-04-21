@@ -45,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncFilterDeviceId: String? = nil
     private var syncDeviceConnected: [String: Bool] = [:]
     private var syncDeviceStorage: [String: HiDockStorageStats] = [:]
+    private var syncDeviceLastError: [String: (String, Date)] = [:]
+    private var syncDeviceLastOK: [String: Date] = [:]
     private var syncBusy = false
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
@@ -424,6 +426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRevealTranscript = { [weak self] path in
             self?.openTranscriptViewer(transcriptMdPath: path)
         }
+        viewModel.onExportSRT = { [weak self] path in
+            self?.exportSRT(transcriptMdPath: path)
+        }
         viewModel.onOpenTranscriptViewer = { [weak self] path in
             self?.openTranscriptViewer(transcriptMdPath: path)
         }
@@ -530,6 +535,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPaired = syncPaired
         viewModel.syncDeviceConnected = syncDeviceConnected
         viewModel.syncDeviceStorage = syncDeviceStorage
+        viewModel.syncDeviceLastError = syncDeviceLastError
+        viewModel.syncDeviceLastOK = syncDeviceLastOK
         viewModel.syncOutputFolder = syncOutputFolder
         viewModel.syncTranscriptFolder = syncTranscriptFolder
         viewModel.transcriptionBusy = transcriptionBusy
@@ -2424,6 +2431,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return "/usr/bin/python3"
     }
 
+    /// Save an .srt subtitle file for a transcript.
+    ///
+    /// Prefers the paired `.srt` that `transcribe.py` now auto-emits alongside
+    /// the `.md`. For legacy transcripts that predate auto-emit, regenerates
+    /// from the `_diarized.json` / `_whisper.json` sidecar via the shared
+    /// `srt_writer` CLI. Shows an alert if no timed segments exist.
+    private func exportSRT(transcriptMdPath: String) {
+        let mdURL = URL(fileURLWithPath: transcriptMdPath)
+        let pairedSRT = mdURL.deletingPathExtension().appendingPathExtension("srt")
+        let stem = mdURL.deletingPathExtension().lastPathComponent
+        let dir = mdURL.deletingLastPathComponent()
+        let diarizedJSON = dir.appendingPathComponent("\(stem)_diarized.json")
+        let whisperJSON = dir.appendingPathComponent("\(stem)_whisper.json")
+
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.init(filenameExtension: "srt") ?? .data]
+        savePanel.nameFieldStringValue = "\(stem).srt"
+        savePanel.title = "Export SRT"
+        savePanel.prompt = "Export"
+
+        guard savePanel.runModal() == .OK, let destURL = savePanel.url else { return }
+
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: pairedSRT.path) {
+                // Fast path: just copy the .srt that transcribe.py already wrote.
+                if fm.fileExists(atPath: destURL.path) {
+                    try fm.removeItem(at: destURL)
+                }
+                try fm.copyItem(at: pairedSRT, to: destURL)
+            } else {
+                // Legacy: regenerate from whichever sidecar we have.
+                let sourceJSON: URL
+                if fm.fileExists(atPath: diarizedJSON.path) {
+                    sourceJSON = diarizedJSON
+                } else if fm.fileExists(atPath: whisperJSON.path) {
+                    sourceJSON = whisperJSON
+                } else {
+                    showSRTErrorAlert(message: "No timed segments are available for this transcript. Re-transcribe it to generate an SRT.")
+                    return
+                }
+
+                let sharedDir = bundledResourcesRoot.map { "\($0)/shared" } ?? "\(repoRoot)/shared"
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+                process.arguments = ["-m", "shared.srt_writer", sourceJSON.path, destURL.path]
+                var env = ProcessInfo.processInfo.environment
+                env["PYTHONPATH"] = "\(sharedDir)/.." + (env["PYTHONPATH"].map { ":\($0)" } ?? "")
+                process.environment = env
+                let errPipe = Pipe()
+                process.standardError = errPipe
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus != 0 {
+                    let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    showSRTErrorAlert(message: err.isEmpty ? "SRT generation failed." : err)
+                    return
+                }
+            }
+            NSWorkspace.shared.activateFileViewerSelecting([destURL])
+        } catch {
+            showSRTErrorAlert(message: "Could not write SRT: \(error.localizedDescription)")
+        }
+    }
+
+    private func showSRTErrorAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Export as SRT"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
     private func voiceLibraryScriptPath() -> String {
         let sharedDir: String
         if let root = bundledResourcesRoot {
@@ -2938,6 +3018,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncDeviceConnected = syncDeviceConnected
         viewModel.syncDeviceStorage = syncDeviceStorage
+        viewModel.syncDeviceLastError = syncDeviceLastError
+        viewModel.syncDeviceLastOK = syncDeviceLastOK
         viewModel.syncPaired = !syncPairedDevices.isEmpty
         log("Forgot device: \(device.cleanName) (\(device.deviceId))")
         updateMenuSyncStatus(connected: syncDeviceConnected.values.contains(true))
@@ -3354,6 +3436,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         syncDeviceConnected[device.deviceId] = status.connected
+        if status.connected {
+            syncDeviceLastOK[device.deviceId] = Date()
+            syncDeviceLastError.removeValue(forKey: device.deviceId)
+        }
         if let stats = status.storage {
             syncDeviceStorage[device.deviceId] = stats
             let gb = Double(stats.totalBytesReturned) / 1_073_741_824
@@ -3563,6 +3649,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
                     self.log("Sync status error for \(device.cleanName): \(shortDesc)")
                     deviceErrors[device.cleanName] = shortDesc
+                    // Surface per-device unreachability in the storage
+                    // summary so the UI tells the user why their latest
+                    // recordings aren't showing.
+                    self.syncDeviceLastError[device.deviceId] = (shortDesc, Date())
                 }
                 group.leave()
             }

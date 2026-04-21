@@ -168,6 +168,16 @@ final class HiDockViewModel: ObservableObject {
     /// truncation flag is set.
     @Published var syncDeviceStorage: [String: HiDockStorageStats] = [:]
 
+    /// Per-device last-error timestamp and message. When a status query
+    /// fails (extractor timeout, USB EIO, access denied) we record the
+    /// reason here so the storage summary can flag "H1: unreachable" and
+    /// the user knows why new recordings aren't showing up even though
+    /// the existing list looks fine.
+    @Published var syncDeviceLastError: [String: (String, Date)] = [:]
+    /// Per-device last-successful-query timestamp. Pair with lastError to
+    /// decide whether to show "unreachable" vs normal storage line.
+    @Published var syncDeviceLastOK: [String: Date] = [:]
+
     /// Known on-device storage capacities in bytes, keyed by product
     /// short-name. Sourced from HiDock's published product specs and
     /// user-verified on a real device. Used to compute free space since
@@ -185,6 +195,23 @@ final class HiDockViewModel: ObservableObject {
     /// Empty string if nothing usable.
     var storageSummary: String {
         let parts = syncPairedDevices.compactMap { device -> String? in
+            // If the device's last query failed AND hasn't recovered since,
+            // surface that prominently. Preserves the last-known stats as
+            // context so the user knows what state the catalogue is frozen
+            // at — not a silent staleness.
+            if let (errMsg, errAt) = syncDeviceLastError[device.deviceId],
+               (syncDeviceLastOK[device.deviceId].map { $0 < errAt } ?? true) {
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm"
+                let when = f.string(from: errAt)
+                let short = errMsg.split(separator: "—").first.map(String.init)?
+                    .trimmingCharacters(in: .whitespaces) ?? errMsg
+                if let stats = syncDeviceStorage[device.deviceId] {
+                    let gb = Double(stats.totalBytesReturned) / 1_073_741_824
+                    return "\(device.shortName): ⚠ \(short) @ \(when) — last seen \(String(format: "%.1f GB", gb)) (\(stats.totalFiles) files)"
+                }
+                return "\(device.shortName): ⚠ \(short) @ \(when)"
+            }
             guard let stats = syncDeviceStorage[device.deviceId] else { return nil }
             let usedBytes = Int64(stats.totalBytesReturned)
             let usedGB = Double(usedBytes) / 1_073_741_824
@@ -252,6 +279,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
+    var onExportSRT: (String) -> Void = { _ in }
     var onOpenTranscriptViewer: (String) -> Void = { _ in }
     var onSendFeedback: () -> Void = {}
     var onShowFeedbackHistory: () -> Void = {}

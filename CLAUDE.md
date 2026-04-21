@@ -66,9 +66,9 @@ Plans in `docs/` are the project's memory. They persist across sessions and ensu
 **After any feature change, update `PARITY.md`** — the cross-platform feature checklist. This is the source of truth for what exists on each platform. The PR template includes a parity checkbox as a reminder.
 
 ### For testing on Mac:
-- Build with **Debug** configuration — deploys to `~/Applications/HiDock Mic Trigger Dev.app` (orange icon, "DEV" label)
-- Debug builds never touch the production app at `/Applications/`
-- The production app continues running while you test
+- Build with **Debug** configuration — deploys to `/Applications/HiDock Mic Trigger.app` (same location as Release)
+- There is only one app bundle on the machine (no Dev.app split): a build kills the running instance, replaces the app, re-signs, and relaunches via the "Deploy to Applications" post-build script
+- Debug still defines the `DEBUG` Swift compile flag so `#if DEBUG` blocks work as expected
 
 ### For testing Windows changes:
 - Push the feature branch, then the user can build locally or wait for PR merge to trigger CI
@@ -87,48 +87,23 @@ The main app is `hidock-mic-trigger/` — a Swift desktop app with menu bar inte
 
 ```bash
 cd hidock-mic-trigger
-xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Release -derivedDataPath /tmp/hidock-build
+xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug -derivedDataPath /tmp/hidock-build
 ```
 
-### Deploy after ANY code change
+(Use `-configuration Release` for optimised production builds. Both configurations deploy to the same location.)
 
-After building, you MUST complete these steps to avoid stale app copies running:
+### Deploy
 
-1. **Kill running instances:**
-   ```bash
-   pkill -f "hidock-mic-trigger" || true
-   ```
+Deploy is **automatic** — the target's "Deploy to Applications" post-build script runs after every local `xcodebuild` (skipped when `CI=true`). It:
 
-2. **Remove ALL old copies** (the app has historically ended up in multiple locations):
-   ```bash
-   rm -rf "/Applications/HiDock Mic Trigger.app"
-   rm -rf "/Applications/hidock-mic-trigger.app"
-   rm -rf ~/Applications/"HiDock Mic Trigger.app"
-   ```
+1. Kills running `hidock-mic-trigger` processes
+2. Removes stale copies (`/Applications/HiDock Mic Trigger.app`, legacy `HiDock Mic Trigger Dev.app`, old lowercase `hidock-mic-trigger.app`, and any `~/Applications/` duplicates)
+3. Copies the fresh build to `/Applications/HiDock Mic Trigger.app`
+4. Re-signs with `codesign --force --deep --sign -`
+5. Registers with LaunchServices (`lsregister`)
+6. Relaunches via `open`
 
-3. **Install the fresh build to /Applications/ only:**
-   ```bash
-   # Note: the build output may be named "hidock-mic-trigger.app" — rename it
-   cp -R "/tmp/hidock-build/Build/Products/Release/hidock-mic-trigger.app" "/Applications/HiDock Mic Trigger.app"
-   ```
-
-4. **Re-sign the app:**
-   ```bash
-   codesign --force --sign - "/Applications/HiDock Mic Trigger.app/Contents/MacOS/hidock-mic-trigger"
-   codesign --force --sign - "/Applications/HiDock Mic Trigger.app"
-   ```
-
-5. **Register with Launchpad:**
-   ```bash
-   /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "/Applications/HiDock Mic Trigger.app"
-   ```
-
-6. **Relaunch:**
-   ```bash
-   open -a "/Applications/HiDock Mic Trigger.app"
-   ```
-
-**IMPORTANT:** The canonical install location is `/Applications/HiDock Mic Trigger.app`. Never install to `~/Applications/` or use the old bundle name `hidock-mic-trigger.app`. The LaunchAgent (`~/Library/LaunchAgents/com.hidock.tools.mic-trigger.plist`) is configured to launch from `/Applications/` at login.
+**IMPORTANT:** The canonical install location is `/Applications/HiDock Mic Trigger.app`. Debug and Release share the same bundle id (`com.hidock.tools.hidock-mic-trigger`), same app icon, and same install location — there is no separate Dev.app. The LaunchAgent (`~/Library/LaunchAgents/com.hidock.tools.mic-trigger.plist`) is configured to launch from `/Applications/` at login.
 
 ## Project Structure
 

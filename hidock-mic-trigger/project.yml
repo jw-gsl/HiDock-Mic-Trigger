@@ -40,56 +40,36 @@ targets:
             echo "note: Skipping deploy on CI"
             exit 0
           fi
-          if [ "$CONFIGURATION" = "Release" ]; then
-            APP_NAME="HiDock Mic Trigger.app"
-            INSTALL_DIR="/Applications"
-            BUILT_APP="$BUILT_PRODUCTS_DIR/$APP_NAME"
 
-            if [ -d "$BUILT_APP" ]; then
-              # Kill running instance
-              pkill -f "hidock-mic-trigger" 2>/dev/null || true
-              sleep 1
+          APP_NAME="HiDock Mic Trigger.app"
+          INSTALL_DIR="/Applications"
+          # Build output name may differ from the install name; find the .app.
+          BUILT_APP=$(find "$BUILT_PRODUCTS_DIR" -maxdepth 1 -name "*.app" -type d | head -1)
 
-              # Remove any stale copies
-              rm -rf "$INSTALL_DIR/$APP_NAME"
-              rm -rf "$INSTALL_DIR/hidock-mic-trigger.app"
-              rm -rf "$HOME/Applications/$APP_NAME"
-
-              # Install fresh build and re-sign
-              cp -R "$BUILT_APP" "$INSTALL_DIR/$APP_NAME"
-              codesign --force --sign - "$INSTALL_DIR/$APP_NAME"
-
-              # Relaunch
-              open -a "$INSTALL_DIR/$APP_NAME"
-              echo "Deployed $APP_NAME to $INSTALL_DIR"
-            else
-              echo "warning: Built app not found at $BUILT_APP"
-            fi
-          elif [ "$CONFIGURATION" = "Debug" ]; then
-            # Debug builds deploy to /Applications as a separate dev app
-            DEV_NAME="HiDock Mic Trigger Dev.app"
-            DEV_DIR="/Applications"
-            # Find the .app in the build output (name varies by config)
-            BUILT_APP=$(find "$BUILT_PRODUCTS_DIR" -maxdepth 1 -name "*.app" -type d | head -1)
-
-            if [ -n "$BUILT_APP" ] && [ -d "$BUILT_APP" ]; then
-              # Kill dev instance only (match by Dev.app path)
-              pkill -f "HiDock Mic Trigger Dev.app" 2>/dev/null || true
-              sleep 1
-
-              # Clean up old location
-              rm -rf "$HOME/Applications/$DEV_NAME"
-              rm -rf "$DEV_DIR/$DEV_NAME"
-              cp -R "$BUILT_APP" "$DEV_DIR/$DEV_NAME"
-              codesign --force --deep --sign - "$DEV_DIR/$DEV_NAME"
-              /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "$DEV_DIR/$DEV_NAME"
-
-              open -a "$DEV_DIR/$DEV_NAME"
-              echo "Deployed dev build to $DEV_DIR/$DEV_NAME"
-            else
-              echo "warning: Built app not found at $BUILT_APP"
-            fi
+          if [ -z "$BUILT_APP" ] || [ ! -d "$BUILT_APP" ]; then
+            echo "warning: Built app not found under $BUILT_PRODUCTS_DIR"
+            exit 0
           fi
+
+          # Kill running instance
+          pkill -f "hidock-mic-trigger" 2>/dev/null || true
+          sleep 1
+
+          # Remove stale copies (including the legacy Dev.app split and the
+          # old lowercase bundle name, neither of which we ship any more).
+          rm -rf "$INSTALL_DIR/$APP_NAME"
+          rm -rf "$INSTALL_DIR/HiDock Mic Trigger Dev.app"
+          rm -rf "$INSTALL_DIR/hidock-mic-trigger.app"
+          rm -rf "$HOME/Applications/$APP_NAME"
+          rm -rf "$HOME/Applications/HiDock Mic Trigger Dev.app"
+
+          # Install fresh build and re-sign
+          cp -R "$BUILT_APP" "$INSTALL_DIR/$APP_NAME"
+          codesign --force --deep --sign - "$INSTALL_DIR/$APP_NAME"
+          /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "$INSTALL_DIR/$APP_NAME"
+
+          open -a "$INSTALL_DIR/$APP_NAME"
+          echo "Deployed $APP_NAME ($CONFIGURATION) to $INSTALL_DIR"
         basedOnDependencyAnalysis: false
     sources:
       - Sources
@@ -99,14 +79,14 @@ targets:
       INFOPLIST_KEY_NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
       PRODUCT_NAME: HiDock Mic Trigger
       EXECUTABLE_NAME: hidock-mic-trigger
+      # Debug and Release share bundle id, icon, and install location so there
+      # is only ever one "HiDock Mic Trigger.app" on the machine. Debug still
+      # gets the DEBUG compile flag (standard for SwiftUI #if DEBUG checks).
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      PRODUCT_BUNDLE_IDENTIFIER: com.hidock.tools.hidock-mic-trigger
       configs:
         Debug:
-          ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDev
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG DEV_BUILD
-          PRODUCT_BUNDLE_IDENTIFIER: com.hidock.tools.hidock-mic-trigger-dev
-        Release:
-          ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-          PRODUCT_BUNDLE_IDENTIFIER: com.hidock.tools.hidock-mic-trigger
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
     info:
       path: Info.plist
       properties:

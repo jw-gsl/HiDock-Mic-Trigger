@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// Converts a raw sync error string into a user-friendly description.
 func syncErrorDescription(_ error: String) -> String {
@@ -47,33 +48,64 @@ func shortenMicName(_ name: String) -> String {
 
 /// Returns an SF Symbol name for a device based on its type and short name.
 /// H1 = docking station with speaker, P1 = handheld recorder, volume = external drive.
+/// Falls back through the shared `hidockSKU` matcher so "HiDock P1" doesn't
+/// mis-match on the word "dock".
 func hidockDeviceIcon(_ shortName: String, deviceType: DeviceType = .hidock) -> String {
     if deviceType == .volume {
         return "externaldrive"
     }
-    let name = shortName.lowercased()
-    if name.contains("h1") || name.contains("dock") {
-        return "hifispeaker"       // docking station / speaker
+    switch hidockSKU(for: shortName, deviceType: deviceType) {
+    case .h1, .h1e: return "hifispeaker"
+    case .p1:       return "waveform.and.mic"
+    case .none:     return "externaldrive.connected.to.line.below"
     }
-    if name.contains("p1") || name.contains("portable") {
-        return "waveform.and.mic"  // handheld recorder / dictaphone
-    }
-    return "externaldrive.connected.to.line.below"  // generic USB device
 }
 
 /// Returns a Unicode emoji/symbol for a device type (for text-only contexts like menu bar).
 func hidockDeviceEmoji(_ shortName: String, deviceType: DeviceType = .hidock) -> String {
     if deviceType == .volume {
-        return "💾"  // external drive
+        return "💾"
     }
+    switch hidockSKU(for: shortName, deviceType: deviceType) {
+    case .h1, .h1e: return "🔊"
+    case .p1:       return "🎙️"
+    case .none:     return "🔌"
+    }
+}
+
+/// Which HiDock SKU a device corresponds to based on its short name.
+/// Returns nil for generic USB volumes and unrecognised HiDock SKUs.
+enum HiDockSKU {
+    case p1, h1, h1e
+}
+
+func hidockSKU(for shortName: String, deviceType: DeviceType = .hidock) -> HiDockSKU? {
+    guard deviceType == .hidock else { return nil }
     let name = shortName.lowercased()
-    if name.contains("h1") || name.contains("dock") {
-        return "🔊"  // speaker / dock
+    // Match on explicit model tokens. Check H1e before H1 since "h1e" contains
+    // "h1"; never match "dock" alone because "HiDock P1" contains it too.
+    if name.contains("h1e") { return .h1e }
+    if name.contains("h1") { return .h1 }
+    if name.contains("p1") { return .p1 }
+    return nil
+}
+
+/// Returns an asset-catalog glyph for a HiDock SKU, or nil if we don't ship a
+/// bespoke glyph for this device (caller should fall back to `hidockDeviceIcon`).
+/// Pass `recording: true` to get the "device-is-live" photographic variant.
+func hidockDeviceImage(_ shortName: String, deviceType: DeviceType = .hidock, recording: Bool = false) -> Image? {
+    guard let sku = hidockSKU(for: shortName, deviceType: deviceType) else { return nil }
+    if recording {
+        switch sku {
+        case .p1:  return Image("DeviceRecordingP1")
+        case .h1:  return Image("DeviceRecordingH1")
+        case .h1e: return Image("DeviceRecordingH1e")
+        }
     }
-    if name.contains("p1") || name.contains("portable") {
-        return "🎙️"  // microphone / recorder
+    switch sku {
+    case .p1:         return Image("DeviceGlyphP1")
+    case .h1, .h1e:   return Image("DeviceGlyphH1") // glyph is shared between H1 and H1e
     }
-    return "🔌"  // generic device
 }
 
 /// Sanitizes a HiDock device name: removes serial numbers in brackets/parentheses

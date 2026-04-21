@@ -284,7 +284,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# Skip deploy on CI (GitHub Actions sets CI=true)\nif [ \"$CI\" = \"true\" ]; then\n  echo \"note: Skipping deploy on CI\"\n  exit 0\nfi\nif [ \"$CONFIGURATION\" = \"Release\" ]; then\n  APP_NAME=\"HiDock Mic Trigger.app\"\n  INSTALL_DIR=\"/Applications\"\n  BUILT_APP=\"$BUILT_PRODUCTS_DIR/$APP_NAME\"\n\n  if [ -d \"$BUILT_APP\" ]; then\n    # Kill running instance\n    pkill -f \"hidock-mic-trigger\" 2>/dev/null || true\n    sleep 1\n\n    # Remove any stale copies\n    rm -rf \"$INSTALL_DIR/$APP_NAME\"\n    rm -rf \"$INSTALL_DIR/hidock-mic-trigger.app\"\n    rm -rf \"$HOME/Applications/$APP_NAME\"\n\n    # Install fresh build and re-sign\n    cp -R \"$BUILT_APP\" \"$INSTALL_DIR/$APP_NAME\"\n    codesign --force --sign - \"$INSTALL_DIR/$APP_NAME\"\n\n    # Relaunch\n    open -a \"$INSTALL_DIR/$APP_NAME\"\n    echo \"Deployed $APP_NAME to $INSTALL_DIR\"\n  else\n    echo \"warning: Built app not found at $BUILT_APP\"\n  fi\nelif [ \"$CONFIGURATION\" = \"Debug\" ]; then\n  # Debug builds deploy to /Applications as a separate dev app\n  DEV_NAME=\"HiDock Mic Trigger Dev.app\"\n  DEV_DIR=\"/Applications\"\n  # Find the .app in the build output (name varies by config)\n  BUILT_APP=$(find \"$BUILT_PRODUCTS_DIR\" -maxdepth 1 -name \"*.app\" -type d | head -1)\n\n  if [ -n \"$BUILT_APP\" ] && [ -d \"$BUILT_APP\" ]; then\n    # Kill dev instance only (match by Dev.app path)\n    pkill -f \"HiDock Mic Trigger Dev.app\" 2>/dev/null || true\n    sleep 1\n\n    # Clean up old location\n    rm -rf \"$HOME/Applications/$DEV_NAME\"\n    rm -rf \"$DEV_DIR/$DEV_NAME\"\n    cp -R \"$BUILT_APP\" \"$DEV_DIR/$DEV_NAME\"\n    codesign --force --deep --sign - \"$DEV_DIR/$DEV_NAME\"\n    /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f \"$DEV_DIR/$DEV_NAME\"\n\n    open -a \"$DEV_DIR/$DEV_NAME\"\n    echo \"Deployed dev build to $DEV_DIR/$DEV_NAME\"\n  else\n    echo \"warning: Built app not found at $BUILT_APP\"\n  fi\nfi\n";
+			shellScript = "# Skip deploy on CI (GitHub Actions sets CI=true)\nif [ \"$CI\" = \"true\" ]; then\n  echo \"note: Skipping deploy on CI\"\n  exit 0\nfi\n\nAPP_NAME=\"HiDock Mic Trigger.app\"\nINSTALL_DIR=\"/Applications\"\n# Build output name may differ from the install name; find the .app.\nBUILT_APP=$(find \"$BUILT_PRODUCTS_DIR\" -maxdepth 1 -name \"*.app\" -type d | head -1)\n\nif [ -z \"$BUILT_APP\" ] || [ ! -d \"$BUILT_APP\" ]; then\n  echo \"warning: Built app not found under $BUILT_PRODUCTS_DIR\"\n  exit 0\nfi\n\n# Kill running instance\npkill -f \"hidock-mic-trigger\" 2>/dev/null || true\nsleep 1\n\n# Remove stale copies (including the legacy Dev.app split and the\n# old lowercase bundle name, neither of which we ship any more).\nrm -rf \"$INSTALL_DIR/$APP_NAME\"\nrm -rf \"$INSTALL_DIR/HiDock Mic Trigger Dev.app\"\nrm -rf \"$INSTALL_DIR/hidock-mic-trigger.app\"\nrm -rf \"$HOME/Applications/$APP_NAME\"\nrm -rf \"$HOME/Applications/HiDock Mic Trigger Dev.app\"\n\n# Install fresh build and re-sign\ncp -R \"$BUILT_APP\" \"$INSTALL_DIR/$APP_NAME\"\ncodesign --force --deep --sign - \"$INSTALL_DIR/$APP_NAME\"\n/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f \"$INSTALL_DIR/$APP_NAME\"\n\nopen -a \"$INSTALL_DIR/$APP_NAME\"\necho \"Deployed $APP_NAME ($CONFIGURATION) to $INSTALL_DIR\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -376,16 +376,16 @@
 		7BE964A4FC4DA1CE3ED0067F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIconDev;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger-dev";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hidock.tools.hidock-mic-trigger";
 				SDKROOT = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG DEV_BUILD";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 			};
 			name = Debug;
 		};
