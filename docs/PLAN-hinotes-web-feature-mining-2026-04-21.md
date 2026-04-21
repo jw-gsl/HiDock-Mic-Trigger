@@ -1,209 +1,228 @@
-# HiNotes Web App — Source Mining for Device Images & Feature Ideas
+# HiNotes Web App — Source Mining, Image Integration, Feature Triage
 Research date: 2026-04-21
+Last updated: 2026-04-21 (critical assessment added after user review)
+
 Sources:
 - `view-source:https://hinotes.hidock.com/device/HDP1252401895/files` (P1 device view)
 - `view-source:https://hinotes.hidock.com/device/HDH1243702884/files` (H1 device view)
-- Both URLs serve the same SPA shell (`/` entrypoint). The device-specific content renders client-side after auth; the two URLs produced identical 5807-byte shells. All evidence below was extracted from the public JS/CSS/asset bundle that the shell loads:
+- Both URLs serve the same SPA shell (5807-byte HTML); device-specific content renders client-side after auth. All evidence extracted from the public JS/CSS/asset bundle:
   - `/assets/js/index-Q4GamRhg.js` (~8.4 MB main bundle)
   - `/assets/js/vendor-i18n-Dw3JUflX.js`
   - `/assets/js/vendor-{react,utils,state}-*.js`
   - `/assets/css/index-DjqBGdZz.css` (~920 KB)
   - `/static/manifest.json`
-- Extraction method: grep for asset paths (`/assets/**`, `/static/**`) and for quoted UI strings (`"[A-Z]...[a-z]"`) inside the minified JS. See `/tmp/hinotes_bundle/` on this machine for the raw downloaded files, `/tmp/hinotes_assets.txt` for the asset list, and `/tmp/hinotes_refined.txt` for the filtered feature-string list.
-
-> Note on scope: the JS bundle ships a TypeScript language service (used in a power-user editor somewhere in the app), which pollutes naive grep output with compiler error messages. The extraction below strips those.
+- Extraction method: grep for asset paths (`/assets/**`, `/static/**`) and quoted UI strings in the minified JS. Raw files preserved at `/tmp/hinotes_bundle/` (non-repo).
+- Product imagery now vendored into the repo at `assets/device-images/` — see table below.
 
 ## Current State
-HiNotes is HiDock's web companion for the P1 and H1 recorders. The repo here (`hidock-tools`) builds native Mac + Windows desktop apps that do the same core job (device sync + transcription + summary) but with a much narrower feature set. This plan catalogues (a) the device imagery that exists in the web bundle so we can reuse it if licensing allows, and (b) features visible in the web app that aren't in our desktop apps yet — so they can be triaged against the existing backlog.
+HiNotes is HiDock's web companion for the P1 and H1 recorders. The repo here (`hidock-tools`) builds native Mac + Windows desktop apps that cover the same core job (device sync + transcription + summary) with a much narrower feature set. This plan:
+1. Catalogues the device imagery we've vendored into the repo.
+2. Plans how to wire the small glyphs / recording PNGs into the existing `hidockDeviceIcon()` helper on macOS and the emoji-based equivalent on Windows so the user sees which device is connected.
+3. Triages the full feature set visible in the web app against what we actually want in our desktop apps, with a yes/no/later verdict per item.
 
 ---
 
-## Device Images — Confirmed Present
+## Device Images — Vendored into `assets/device-images/`
 
-All paths below returned HTTP 200 with real image payload when fetched directly. Download sizes noted where verified (✔ = downloaded and saved to `/tmp/hinotes_bundle/device_images/`).
+All files downloaded from hinotes.hidock.com to `/Users/jameswhiting/_git/hidock-tools/assets/device-images/`. Renamed to clean filenames (dropped the Vite content hashes).
 
-### P1 product imagery
-| Purpose | Asset path |
-|---------|-----------|
-| Front render (studio) | `/assets/png/P1_front-DC4xV_ds.png` ✔ 62 KB |
-| Recording hero / marketing | `/assets/png/p1_recording-BsN2DDsb.png` ✔ 3.8 KB |
-| Generic body render | `/assets/png/p1-m6HM9-a8.png` |
-| P1 mini recording | `/assets/png/p1mini_recording-BSWl6EMr.png` |
-| Device glyph (UI icon) | `/static/svg/device/P1.svg` ✔ — 20×20 line-art of a cassette-style recorder |
+| File | Size | Content | Use in our apps |
+|------|------|---------|-----------------|
+| `P1_glyph.svg` | 1.7 KB | 20×20 line-art of a handheld recorder with speaker grille | **Ship** — replace SF Symbol / emoji in Device Manager rows and menu bar |
+| `H1_glyph.svg` | 2.9 KB | 20×20 line-art of a dock + round earphone | **Ship** — same role as P1 glyph |
+| `connected_glyph.svg` | 0.7 KB | 14×14 green tick-in-circle | **Ship** — replace the "Connected" text badge with an icon+text chip |
+| `P1_recording.png` | 3.8 KB | Tiny PNG of P1 with red recording LED | **Ship** — "device is live / recording" badge |
+| `H1_recording.png` | 5.4 KB | Tiny PNG of H1 dock with red LED | **Ship** — same role |
+| `H1e_recording.png` | 5.7 KB | Tiny PNG of H1e earbud variant with red LED | **Ship if/when we support H1e** |
+| `P1mini_recording.png` | 3.5 KB | Tiny PNG of P1 mini variant | Speculative — we haven't seen a P1 mini in the wild |
+| `P1_front.png` | 62 KB | Full studio render of P1 | Optional — product detail view only |
+| `P1_alt.png` | 24 KB | Alt P1 render | Optional |
+| `H1_front.png` | 194 KB | Full studio render of H1 | Optional |
+| `H1_front_alt.png` | 204 KB | Alt front render | Redundant with `H1_front.png` |
+| `H1_back.png` / `H1_left.png` / `H1_rear.png` / `H1_side.png` | 57–123 KB each | Rotational renders | Only needed if we build a product tour |
+| `H1_earphone.png` / `H1_earphone_alt.png` | 36 KB each | H1 earbud renders | Only needed if we ship H1e support |
+| `H1_black.png` | 80 KB | Black colourway | Only needed if we expose colourway |
+| `H1_bg.png` | 1.5 MB | Marketing wallpaper | **Don't ship** — kept for reference only. Consider deleting if we want a lighter repo. |
 
-### H1 product imagery
-| Purpose | Asset path |
-|---------|-----------|
-| Front render | `/assets/png/H1_front-BQ3b_Ken.png` ✔ 194 KB |
-| Back render | `/assets/png/H1_back-DkefKLBk.png` |
-| Left view | `/assets/png/H1_left-5Uiki-Op.png` |
-| Earphone variant (earbuds) | `/assets/png/H1_earphone-DtI9lg4u.png` |
-| Black variant | `/assets/png/h1_black-Cae64RPX.png` |
-| Background / hero | `/assets/png/h1_bg-CYDK52Xt.png` |
-| Recording hero | `/assets/png/h1_recording-Ci0TjHTJ.png` |
-| Alt front (lowercase family) | `/assets/png/h1-front-BaVQ8ntI.png` |
-| Alt rear | `/assets/png/h1-rear-DUzlKM3B.png` |
-| Alt side | `/assets/png/h1-side-kARJR1Yg.png` |
-| Alt earphone shot | `/assets/png/h1-earphone-6ohrNv5_.png` |
-| **H1e** recording hero (earbud SKU) | `/assets/png/h1e_recording-SYf-JIKs.png` ✔ 5.7 KB |
-| Device glyph (UI icon) | `/static/svg/device/H1.svg` ✔ |
-
-**Implication:** there is evidence of an **H1e** SKU (an earbud/earphone-centric variant of H1) that our device identity system doesn't currently distinguish. Our `deviceId` convention is `hidock:<productId>` so any SKU split would surface naturally as long as the productId differs — worth double-checking against the P1/H1 products we're already pairing.
-
-### Feature / marketing artwork (could seed a marketing-style "What's new" screen or docs)
-- `/assets/png/feature-transcription-DyWAa7kL.png`
-- `/assets/png/feature-summary-BPAJUZKm.png`
-- `/assets/png/feature-voicemark-wpxeZRJG.png`
-- `/assets/png/feature-organization-D0mExzMZ.png`
-- `/assets/png/feature-retrieval-CnSXt9qM.png`
-- `/assets/png/scroll-speaker-BSmj_2pn.png`
-- `/assets/png/scroll-summary-D9BPM1Bc.png`
-- `/assets/png/scroll-translate-CKcrbBYI.jpg`
-- `/assets/png/scroll-collaboration-BCmfaQxE.png`
-- `/assets/png/timetick-BxXyiVxI.png`
-- `/assets/png/transcription-section-CipUp-mz.png`
-- `/assets/png/view-note-C-gjWleT.png`
-- `/assets/png/productive-BVGl41sk.png`, `/assets/png/unlimited-CWCjr4T-.png`, `/assets/png/pro-9IP764bL.png`
-
-**Re-use caution:** these are HiDock's copyrighted marketing assets. Safe to display in-app if we're rendering the device's actual product image in our Device Manager (same licensing relationship as if users pair a HiDock) — but **should not** be redistributed in screenshots or docs without checking. The SVG device glyphs (`/static/svg/device/{P1,H1}.svg`) are generic line-art and low-risk for reuse.
+**Licensing caveat.** These are HiDock's copyrighted product images. Our apps are companion software for HiDock hardware, which is the same relationship their own web app has, so rendering the device glyph alongside a paired device is a defensible use. That said:
+- The small glyphs (`*_glyph.svg`) are generic line-art and the lowest-risk assets. **Default to shipping these first.**
+- The recording PNGs (`*_recording.png`) are photographic-style renders; lower-risk than the big studio shots but still HiDock's artwork. Worth a note in the README crediting HiDock.
+- The full-resolution studio renders (`*_front.png`, `*_back.png`, etc.) should not be shipped in screenshots, marketing pages, or social cards without HiDock's OK.
 
 ---
 
-## Hardware Features Revealed by UI Copy
+## Integrating the Glyphs + Recording Badges into Our UI
 
-Strings found in the bundle that describe physical-device behaviour we can take as ground truth for how HiDock hardware actually works. Useful for onboarding copy, tooltips, and for knowing what extractor telemetry we might be able to surface:
+The hooks already exist on both platforms, so this is a swap, not new plumbing.
 
-- **Long-press the HiDock button to start recording; light turns cyan.** Short-press during recording adds a **VoiceMark**.
-- **BlueCatch button** (named component on H1/earphone unit): single press to connect Bluetooth earphones; long-press to disconnect.
-- **Red button / Noise Cancellation slider**: "enabled when button is pushed down"; user can toggle noise cancellation on/off with a physical control.
-- **OTA firmware updates** ("HiDock disconnected, OTA upgrade failed"; "Your device is already up to date.").
-- **USB-A passthrough** for keyboard/mouse ("USB-A for Keyboard and Mouse Connection") — the P1 appears to be a docking station with data passthrough.
-- **Auto-record all phone calls** as a device-level setting.
-- **Recording quality** tiers: "Recommend for calls and most recordings" vs "Recommend for music or other high quality recording applications" — implies ≥2 bitrate/format profiles.
-- **Private vs Public device**: "A private device connects only to your account. A public device is accessible to others." — account-scoped pairing model, not currently a concept in our apps.
-- **Factory Reset**: "Erase all recordings, reset settings, and disassociate this device."
-- **Time sync with computer**: device clock is synced over USB.
+### macOS (Swift / SwiftUI)
+
+Current state, `hidock-mic-trigger/Sources/Helpers.swift:50`:
+```swift
+func hidockDeviceIcon(_ shortName: String, deviceType: DeviceType = .hidock) -> String {
+    // returns an SF Symbol name: "hifispeaker" for H1, "waveform.and.mic" for P1
+}
+```
+Used at `DeviceManagerView.swift:167` via `Image(systemName: deviceIcon)`.
+
+**Integration steps (blocks, not hours):**
+1. Add `P1`, `H1`, `H1e`, `Connected`, `P1Recording`, `H1Recording`, `H1eRecording` image sets to `hidock-mic-trigger/Assets.xcassets/`. Each imageset gets a `Contents.json` with the SVG/PNG as universal asset.
+2. Add a sibling helper `hidockDeviceImage(shortName:deviceType:recording:) -> Image?` that returns the bespoke asset when the short name matches a known SKU, otherwise `nil`.
+3. Update `DeviceCardView` so: if `hidockDeviceImage(...)` returns an `Image`, render that at ~24pt; otherwise fall back to the existing SF Symbol. **Fallback is important** — we shouldn't break UI for USB volume devices or any future SKU.
+4. Update the menu bar attribution (`hidockDeviceEmoji`): keep returning emoji for text-only menu bar contexts — the menu bar can't render images inside a text menu item reliably. No regression there.
+5. Add a "recording now" overlay: when `ViewModel.deviceIsRecording(productId)` is true, swap the glyph for `*_recording.png` (or overlay a red dot). Our extractor already polls device status — this state exists, we just don't visualise it.
+
+### Windows (PyQt6)
+
+Current state, `Windows-App/ui/device_manager_dialog.py:102`:
+```python
+def _update_icon(self):
+    # Unicode emoji: 🎙 (mic), 🔊 (speaker), 💾 (drive), 🔌 (plug)
+```
+
+**Integration steps:**
+1. Create `Windows-App/resources/device-images/` and copy (or symlink from build script) the same seven small assets. Leaving the source of truth at the repo-root `assets/device-images/` path and copying at build time avoids drift.
+2. Replace `self.icon_label.setText(emoji)` with `self.icon_label.setPixmap(QPixmap(path).scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation))` when a known SKU image is available; fall back to emoji otherwise.
+3. Add the same "recording" swap as macOS when the device reports an active recording.
+4. Keep the emoji path as the fallback so dark-mode / high-DPI / missing-file cases degrade gracefully.
+
+### Surface areas that benefit
+1. **Device Manager rows** — main win. Today a 🎙 emoji vs a tiny P1 line-drawing is the difference between "generic device" and "this is my recorder".
+2. **Main window header / status chip** — when a device is paired and connected, show `connected_glyph.svg` + short name + device glyph instead of plain text.
+3. **Menu bar / tray tooltip (hover text only)** — keep emoji.
+4. **Onboarding step 2 ("Connect")** — show the glyph of each supported SKU so the user knows what to plug in.
+5. **Recording toolbar** — when the device is actively recording, swap to `*_recording.png` so there's an unmistakable live indicator.
+
+### H1e SKU — open question
+The web bundle contains `h1e_recording.png`, which means HiDock ships (or ships soon) an earbud-form-factor H1 variant. Our device identity is `hidock:<productId>` and the SKU fork is probably a different productId. Before implementing we should:
+- Inspect whether our paired devices have ever reported anything other than productId `45068`.
+- If yes, add the new PID to `hidockDeviceIcon()`'s name-matcher.
+- If no, leave `H1e_recording.png` in the repo but don't wire it into the matcher until we actually see one on a user's USB bus.
 
 ---
 
-## Features Present in HiNotes Web — Candidates for Our Desktop Apps
+## Feature Triage — Critically Assessed
 
-Cross-referenced against `PARITY.md`, `docs/PLAN-feature-overview.md`, and `docs/PLAN-unimplemented-ideas.md`. Status column legend:
-- `NEW` — not tracked anywhere in our plans
-- `BACKLOG` — already in `PLAN-unimplemented-ideas.md` or similar
-- `BACKEND-ONLY` — built in `shared/` but no UI (per `PLAN-feature-overview.md`)
-- `DONE` — already shipped in at least one platform
+User directions recorded during review:
+- **Live translation — NO** (confirmed by user).
+- **Dedicated to-do view — NO** (user will handle todos in a separate cowork app).
+- **Storage warnings — YES**.
+- **Multi-format export — sceptical** (user asked me to critically assess).
+
+Legend:
+- 🟢 **Ship** — worth building, reasoning below.
+- 🟡 **Later** — plausible, not blocking — park in the backlog with a trigger condition.
+- 🔴 **Skip** — actively rejected or unjustifiable for our scope.
+
+### Device management & hardware
+
+| Item | Verdict | Reasoning |
+|------|---------|-----------|
+| **Device glyphs + recording badge** (this plan's integration section) | 🟢 | Low-risk polish that directly uses assets we now vendor. Replaces emoji with the real thing. |
+| **Storage almost full / low storage banner** | 🟢 | We already poll device storage in the extractor; surfacing a banner when free-space < threshold is a small patch to the main window status area. User explicitly said yes. Needs a tunable threshold (suggest 10% or 200 MB, whichever comes first — **this threshold is a guess; validate against a real HiDock device before shipping**). |
+| **Recording-start tray notification** | 🟢 | Extractor status poll already knows when a new recording appears. Firing a tray / UNUserNotification on first-seen is one-screen of code on each platform. Satisfies the "passive awareness" slot without the user having to look. |
+| **Auto-transfer when recording complete** | 🟢 (already have) | We have auto-download on refresh + auto-download-new. Pure alignment check — no new work. |
+| **Factory reset / disassociate device** | 🟡 | Matches a real user need (giving a device away, resetting before return), but implementing "erase all recordings on the device" safely needs confirmation of the extractor command surface. Put behind a multi-confirm dialog when we do build it. |
+| **Public vs Private device** | 🔴 | Only meaningful with a cloud account concept we don't have and don't plan to add. |
+| **OTA firmware update from our app** | 🔴 | We don't own the firmware distribution. Would need HiDock cooperation. Not our mission. |
+| **Bluetooth earbud pair from our app** | 🔴 | macOS / Windows both let users pair BT devices at the OS level. Duplicating that in-app is UX noise. |
+| **Auto-record all phone calls** | 🔴 | Device-level setting on the hardware — not something the desktop app should expose. |
 
 ### Transcript & recording interaction
 
-| Feature | Evidence (strings) | Status | Notes |
-|---------|-------------------|--------|-------|
-| **VoiceMark** — user-generated in-recording markers | "Short-press to add a VoiceMark during recording.", "Show/Hide VoiceMark", "VoiceMark with Highlights" | NEW | Device button press already emits an event; extractor may already have access to marker timestamps in the recording metadata. Worth confirming by inspecting a recording's on-device file format — if present, we could render marker pins on our waveform and in the transcript. |
-| Full-text search across all transcripts | "Search Whispers", "Access specific notes instantly with the search field", "Find and Replace in this Note", "Find in a summary" | BACKLOG | `PLAN-unimplemented-ideas.md → Transcript Search`. Knowledge graph (FTS5) is built in `shared/knowledge.py` but has no UI — connect those two tasks. |
-| Find + Replace within a single transcript | "Find and Replace in this Note" | NEW | Discrete sub-task from global search. |
-| **Re-summarize** on demand | "Re-summarize", "Rate This Summary", "How do you rate this summary?" | NEW | User feedback → regenerate. We have summarization in `shared/summarize.py` but no regenerate-with-feedback loop. |
-| Summary style picker | "Choose your summary style", "Customize Summary", "Tailored Summary Templates", "Summary with action items", "Psychotherapy Note" (example specialised template) | BACKLOG-adjacent | Our summarize.py has one prompt; HiNotes ships specialised templates per meeting type. Extend summarize.py with selectable templates + a UI picker. |
-| Note templates with test-on-existing-note preview | "Note Templates", "Select a Note to Test the Template", "Please instruct instructions for this note. Include at least three examples." | NEW | Natural extension of the summary-style picker. |
-| **Live/full translation** of transcript + summary | "Start/End Translation", "Choose a Language To Translate into", "Translate in Seconds", "Summary translation", "Keep Translating?", "Primary language for better accuracy. Other languages will also be translated." | NEW | We have i18n in the UI (en/zh/ja) but no translation of content. Could route through existing LLM call. |
-| Speaker memory across meetings | "Speaker memory", "Required for speaker identification" | DONE | Our voice library + `voice_training.py` already does this. Align terminology and surface it in onboarding. |
-| Merge multiple recordings into a single note | "Failed to merge whisper notes" | Partial | We have audio-file merge (`PLAN-feature-overview` Merge recordings) — extend to merge transcripts + summaries too. |
-| Retry failed transcription | "Failed to retry whisper.", "Click to retry" | DONE | Right-click → Retry already works. |
+| Item | Verdict | Reasoning |
+|------|---------|-----------|
+| **VoiceMark capture + render** | 🟢 | If the device writes marker timestamps into the recording file, we can show them as pins on the waveform and clickable anchors in the transcript. **Requires a spike first**: download a recording made with VoiceMark presses and inspect the binary for marker chunks. Worth a small investigation plan before committing to UI. |
+| **Full-text transcript search UI** | 🟢 | `shared/knowledge.py` already has FTS5. This is a UI-only task against existing backend — high leverage. Already in `PLAN-unimplemented-ideas.md` under "Transcript Search". |
+| **Find + Replace within a single transcript** | 🟡 | Useful niche. Small surface. Park until someone asks. |
+| **Re-summarize on demand + rate summary** | 🟢 | Users who care about summary quality want a "that was bad, try again" button. Backend already supports re-running summarize; UI is a button + optional rating capture. |
+| **Template-based summaries (Note Templates)** | 🟢 | HiNotes's "Psychotherapy Note" / "Summary with action items" templates imply a selectable-prompt system. Extending `shared/summarize.py` with a prompt registry + UI picker is modest work and a real quality unlock for users with niche meeting types. |
+| **Live / full translation of transcript + summary** | 🔴 | **User rejected.** Noted: not a priority for this user base. |
+| **Speaker memory across meetings** | 🟢 (already have) | Our voice library already does this. Surface it more clearly in onboarding copy — terminology alignment with HiNotes helps. |
+| **Merge multiple recordings into one note** | 🟡 | We already merge audio files. Extending to merged-transcript output is plausible. Not urgent. |
+| **Retry failed transcription** | 🟢 (already have) | Right-click → Retry already works. |
 
 ### Notes, todos, and organisation
 
-| Feature | Evidence | Status | Notes |
-|---------|----------|--------|-------|
-| **Automatic To-Do extraction from notes + todo manager** | "Add To-Dos manually, or they'll be created automatically from your notes.", "Failed to fetch open todos", "Search To-Do", "No archived To-Dos", "Failed to update todo smart label" | BACKEND-ONLY | `shared/intelligence.py` does commitment tracking and `shared/knowledge.py` has action items. Currently no UI. This is the single biggest product gap vs HiNotes. |
-| **Folders + Tags** for transcripts | "Folders and Tags", "Move to Folder", "Smart folder", "Add Folder", "Folder deleted" | NEW | Our recordings table is flat. Could add a sidebar tree. |
-| **Archive / Unarchive** workflow | "Archive", "Archived", "Unarchived", "Undo archive failed:", "Your archived items will appear here." | NEW | Distinct from Delete — soft-hide old recordings. |
-| Password-protect an individual note | "Protect with Password", "You need a password to access this content." | NEW | Niche; consider only if legal/compliance asks. |
-| Rich note editor (BlockNote) with blocks, code, tables, toggles, emoji, audio embeds | "BlockNoteEditor", "Table with editable cells", "Code block with syntax highlighting", "Embedded audio with caption", "Toggle Heading/List", "Search for and insert an emoji" | NEW (large) | Big lift. Probably skip — our transcripts live as plain markdown and can be edited by the user's editor of choice. |
-| Outline view | "Outline" | NEW | Cheap to add — regex pass over headings. |
-| Unread-note indicator | "Unread note" | NEW | Track first-open state per transcript. |
+| Item | Verdict | Reasoning |
+|------|---------|-----------|
+| **Automatic To-Do extraction + dedicated todo view** | 🔴 | **User rejected for this app.** Todos will live in the separate cowork app. However: `shared/knowledge.py` already extracts action items into frontmatter, and `shared/intelligence.py` does commitment tracking — those stay. We just don't surface a todo UI here. **Action:** make sure the action-item metadata in the transcript markdown frontmatter is stable enough that cowork can consume it. Worth a small coordination check before cowork starts on this. |
+| **Folders + Tags for transcripts** | 🟡 | The flat recordings table is going to hurt once users hit 200+ recordings. Tags are especially cheap — use whatever tags `summarize.py` already emits into frontmatter as a filter chip row. Park until recordings-table scale becomes a real complaint. |
+| **Archive / Unarchive** | 🟡 | Pairs naturally with Folders+Tags. Same trigger condition. |
+| **Password-protect a single note** | 🔴 | Niche compliance feature. Our files are on the user's disk; OS-level FileVault / BitLocker is the right level. |
+| **Rich editor (BlockNote)** | 🔴 | Huge lift for minor value. Transcripts are `.md`; users bring their own editor. Not our job to be Notion. |
+| **Outline view** | 🟡 | Regex-over-headings is trivial. Only worth doing if someone actually opens big transcripts in-app. |
+| **Unread-note indicator** | 🔴 | Low signal. Our current "you haven't opened this" state is the modification time. |
 
-### Integrations
+### Export & integrations
 
-| Feature | Evidence | Status | Notes |
-|---------|----------|--------|-------|
-| **Calendar integration — read events to enrich summaries** | "Connect Outlook and Teams for smarter summaries.", "Connect Your Calendar", "Read all scheduled calendar events to optimize the accuracy of note summaries.", "This calendar account is already connected to another HiNotes account." | NEW | We can hit the same idea locally on macOS via `EventKit` (no auth flow needed) — pipe calendar events from around the recording time into the summarize prompt. Big quality win for low effort. |
-| **Calendar integration — write events from notes** | "Allow HiNotes to automatically extract pending meeting schedules from your notes and send them to your calendar.", "Event Generated by HiNotes:", "Add to Calendar", "Added to Calendar." | NEW | LLM extracts scheduled follow-ups → `.ics` or EventKit write. |
-| **Google Calendar / Outlook / Microsoft Calendar / Work Calendar / Google Meeting** connectors | "Google Calendar", "Outlook Calendar", "Microsoft Calendar", "Work Calendar", "Google Meeting" | NEW | On Mac: use EventKit (unified). On Windows: MAPI / Graph API. Lower priority than local calendar read. |
-| **Send to Notion / Google Docs / OneNote** | "Send to Notion", "Sent to Notion successfully.", "Note sent to Google Docs.", "Note sent to OneNote.", "Integration with Google, Microsoft OneNote and Notion" | NEW | Our current export is `.md` file only. Add share targets. |
-| **Multi-format export** | "Export notes in TXT, CSV, SRT, Markdown, Word, and PDF" | Partial | We produce `.md`. Add SRT + PDF + Word for practical wins. SRT falls straight out of diarized segments. |
-| Include timestamps / speaker names toggle on export | "Include speaker names", "Include timestamps" | NEW | Trivial once export options dialog exists. |
+| Item | Verdict | Reasoning |
+|------|---------|-----------|
+| **Multi-format export — SRT, PDF, Word, CSV** | 🟡 with a caveat | **User pushback noted.** My honest take: **SRT is the only one of these with a clear use case** — it drops out of diarized segments for free and lets users caption recorded video. PDF and Word are solved by "Export as PDF" in any markdown viewer, and CSV for transcripts is a weird fit. Verdict: **ship SRT, skip the rest** unless users actually ask. That downgrades this from "whole multi-format export feature" to "add SRT as an export option next to the existing .md" — a small change. |
+| **Include timestamps / speaker names export toggles** | 🟡 | Only matters once SRT (or any second format) lands. |
+| **Send to Notion / Google Docs / OneNote** | 🔴 | Each target is an OAuth integration with its own maintenance tax. For the small number of users who want this, copy/paste from the `.md` file works. Defer unless explicitly requested. |
+| **Calendar read — pull events around recording time for richer summary context** | 🟢 | Biggest quality win in the whole list. On macOS: EventKit is local and requires only a one-time permission, no OAuth. On Windows: Outlook MAPI or Graph (if Office 365). **Macro impact:** summaries that know "this was a 1:1 with Dave" are qualitatively better than summaries that don't. Worth its own plan. |
+| **Calendar write — create events from notes** | 🟡 | Natural pair with calendar read. Lower priority because extracting durable events from casual notes is LLM-quality-dependent and easy to get wrong. Ship read first, see if users want write. |
+| **Apple / Google sign-in / GDPR deletion / Quota / Billing** | 🔴 | All cloud-account concerns; we're local-first. |
+| **i18n (zh / ja / en)** | 🟡 | Our Swift app is en-only. Only worth doing if demand surfaces. |
 
-### Device management
+### Polish
 
-| Feature | Evidence | Status | Notes |
-|---------|----------|--------|-------|
-| **OTA firmware update** from the app | "OTA Update and Device Management", "Over-the-air firmware updates for your devices.", "Your device is already up to date." | NEW | Big initiative — likely blocked by HiDock's firmware distribution mechanism. **Estimate — not confirmed:** we don't ship firmware; this might require cooperation from HiDock. Flag as research-first. |
-| **Bluetooth device pair from app** (for H1e earbuds and similar) | "Bluetooth Pairing Button", "Scan and connect to your Bluetooth earphones", "Nearby Devices", "Pair Now", "Pair your headphones" | NEW | macOS: CoreBluetooth; Windows: WinRT Bluetooth APIs. Only worth doing if our apps are the primary way users set up earbuds. |
-| **Factory reset / disassociate device** | "Factory Reset This Device?", "Yes, Disassociate This Device", "This will erase all recordings and whispers, reset all settings, and disassociate this device from your account." | NEW | Safety-critical — needs multi-confirm. |
-| Public vs Private device | "A private device connects only to your account. A public device is accessible to others.", "This device is publicly accessible." | NEW | Only meaningful if we also have account/cloud concept — currently we don't. Park. |
-| Storage almost full / low warnings | "Low storage space", "Storage almost full", "Storage is completely full." | NEW | We already read device storage stats; adding a low-storage banner is cheap. |
-| Auto-transfer on recording complete | "Automatically transfer new recordings when recording is complete" | DONE | We have auto-download on refresh + auto-download-new. Alignment check only. |
-| Notify when recording starts on device | "Notify About Recording", "Recording Started" | NEW | Extractor status poll already knows — add a tray notification. |
-
-### Account, billing, quota
-
-| Feature | Evidence | Status | Notes |
-|---------|----------|--------|-------|
-| Membership / Pro / Unlimited / Lifetime Pro tiers + pricing UI | "Choose Your Membership Plan", "Buy Pro", "Buy Unlimited", "Lifetime Unlimited Pro", "Select Pro Quota Pack", "Renew Subscription", "Pay-as-you-use, quota-based" | N/A | Our apps are local-only. Parking — different business model. |
-| Free-quota redemption codes | "Use the code provided to you to get free quota.", "You have already claimed the free quota." | N/A | Same. |
-
-### Misc polish
-
-| Feature | Evidence | Notes |
-|---------|----------|-------|
-| Onboarding: "Connect Device", "Pair Now", 5-step wizard | "Connect HiDock to transfer recordings, or upload audio to get started.", "Connect your HiDock device to unlock membership benefits" | Our onboarding wizard exists (PARITY.md) — useful copy reference. |
-| Rich empty states with illustrations | `/assets/svg/empty_archived`, `/assets/svg/empty_completed`, etc. | Cheap polish — we use basic empty text. |
-| Apple / Google sign-in | "Sign In with Google", "Apple sign in", `apple_logo.svg`, `google_logo.svg` | N/A for local apps. |
-| GDPR / data deletion flow | "GDPR Compliance", "Restore HiNotes Account and Data", "If you choose to delete a meeting note from your HiNotes account, it will be permanently and irreversibly removed…" | N/A — local files. |
-| i18n: en / zh / ja | Bundle shipping `lang-en/zh/ja` images + bootstrap lang detector | Our Swift app is en-only AFAIK — could extend if demand. |
+| Item | Verdict | Reasoning |
+|------|---------|-----------|
+| **Illustrated empty states** (`empty_archived.svg`, `empty_completed.svg` etc.) | 🟡 | Cheap polish. Do it when we tidy the empty states anyway. |
+| **Onboarding copy alignment with HiNotes** | 🟢 | Our onboarding is already 5 steps (per PARITY.md). Re-using HiNotes's proven copy for "Long-press the HiDock button until the light turns cyan" etc. is better than the fiction we'd write ourselves. No code change — just copy. |
 
 ---
 
 ## Completed
-- [x] Downloaded HTML shell + main JS bundle + vendor chunks + CSS + PWA manifest from hinotes.hidock.com
-- [x] Extracted and catalogued 145 asset paths (mostly `/assets/png/**` and `/assets/svg/**`)
-- [x] Verified P1 and H1 product imagery exists and is fetchable (sample downloads saved to `/tmp/hinotes_bundle/device_images/`)
-- [x] Extracted ~1400 feature-related UI strings from the minified JS and filtered out TypeScript compiler noise
-- [x] Cross-referenced findings against `PARITY.md`, `PLAN-feature-overview.md`, `PLAN-unimplemented-ideas.md`
+- [x] Downloaded HTML shell + main JS + vendor chunks + CSS + PWA manifest from hinotes.hidock.com
+- [x] Catalogued 145 asset paths and extracted ~1400 feature-related UI strings (TypeScript compiler noise filtered)
+- [x] Vendored 17 P1 / H1 / H1e images + 3 glyph SVGs into `assets/device-images/`
+- [x] Traced existing device-icon plumbing on both platforms (`hidockDeviceIcon()` in Swift, `_update_icon()` in `Windows-App/ui/device_manager_dialog.py`)
+- [x] Critical assessment of every candidate feature with a yes/no/later verdict, incorporating user directions (no live translation, no todo view, yes storage warnings, sceptical on multi-format export)
 
 ## In Progress
-- [ ] Awaiting user input on which candidate features to promote to their own plan files
+- [ ] None — awaiting user sign-off on which 🟢 items to promote to their own implementation plans
 
-## Planned
-Triage priorities for the user to pick from (no ordering implied — priority depends on user's roadmap call):
+## Planned — Promoted from 🟢 verdicts
 
-- [ ] **Calendar read for summary enrichment (local)** — cheap, big quality win, macOS EventKit avoids auth dance
-- [ ] **Hardware VoiceMark capture** — investigate whether HiDock's on-device recording metadata includes marker timestamps; if so, render them in the transcript viewer
-- [ ] **Multi-format export (SRT + PDF + Word)** — merges with existing export plan; SRT is free from diarization output
-- [ ] **Template-based summaries** — extend `shared/summarize.py` with selectable prompt templates + a UI picker; test-against-existing-note preview
+Ranked by estimated leverage (quality-per-effort), not calendar order:
+
+- [ ] **Device glyphs + recording badge wiring** — `assets/device-images/` → `Assets.xcassets` + `Windows-App/resources/device-images/`; update `hidockDeviceIcon()` on Mac and `_update_icon()` on Windows with SKU→image matcher + fallback
+- [ ] **Low-storage banner** — read extractor's already-polled storage %, banner at threshold (threshold TBD — validate with a real device)
+- [ ] **Recording-start tray notification** — fire when extractor poll first sees a new recording on the device
 - [ ] **Full-text transcript search UI** — connect `shared/knowledge.py` FTS5 to a search box in the main window
-- [ ] **Todo manager UI** — surface `shared/intelligence.py` commitment tracking + `shared/knowledge.py` action items in a dedicated view
-- [ ] **Folders + Tags for transcripts** — sidebar tree for the recordings table
-- [ ] **Device images in Device Manager** — use P1/H1 glyph SVGs instead of emoji/SF Symbols (licensing check needed before shipping marketing PNGs)
-- [ ] **H1e SKU recognition** — verify our device identity handles an earbud-variant H1 with a different productId; add to device-image lookup
-- [ ] **Low-storage banner** — read value we already poll, surface as warning
-- [ ] **Recording-start tray notification** — fire when poll detects a device has begun a new recording
-- [ ] **Send to Notion / Google Docs / OneNote** — export targets beyond local file
-- [ ] **Re-summarize with feedback** — rate + regenerate loop tied to the summary view
+- [ ] **Calendar read for summary enrichment** — own plan file needed; EventKit on Mac, Graph/MAPI on Windows
+- [ ] **Template-based summaries** — extend `shared/summarize.py` with a prompt registry + UI template picker; test-against-existing-note preview
+- [ ] **Re-summarize on demand** — button in summary view; optional thumbs-up/down capture
+- [ ] **Onboarding copy alignment with HiNotes** — copy change only
+- [ ] **SRT export** — one new export option (not a multi-format export feature)
+- [ ] **VoiceMark spike** — investigation first: does the recording file format carry marker timestamps? If yes → UI plan; if no → drop to 🔴.
+- [ ] **Coordination check with cowork on action-item frontmatter schema** — so cowork's todo view can reliably consume our transcripts
 
-## Rejected / Not Applicable
-- **Rich BlockNote editor** — our transcripts are `.md` and users bring their own editor; re-building a rich editor is a huge sink for marginal value.
-- **Account / billing / quota** — we're local-only by design.
-- **Public-vs-Private device** — requires cloud account concept we don't have.
-- **Apple/Google sign-in, GDPR deletion flow** — same reason.
+## Rejected
+- Live translation (user-rejected)
+- Dedicated to-do view in this app (user will handle in cowork)
+- BlockNote rich editor
+- Password-protected notes
+- Public-vs-private device concept
+- OTA firmware update from our app
+- Bluetooth earbud pairing from our app
+- Auto-record all phone calls setting
+- Send-to Notion / Google Docs / OneNote integrations
+- PDF / Word / CSV export (SRT only — see above)
+- Apple/Google sign-in, GDPR flow, quota/billing
+- Unread-note indicator
 
-## Open questions for the user
-1. Which of the "Planned" items (if any) should be promoted to their own `PLAN-*.md` files?
-2. Should device imagery (the actual PNGs) be vendored into the repo, or should we stick to the neutral SVG glyphs only?
-3. Is the H1e SKU already on the radar, or is that news?
+## Open questions
+1. Should I go ahead and wire the device glyphs (🟢 top of the Planned list) now, or do you want to review the `assets/device-images/` set first?
+2. Is the ~1.5 MB `H1_bg.png` marketing wallpaper worth keeping in the repo, or should I delete it? (It's flagged Don't-Ship; it's only useful as reference art.)
+3. Before we wire images, do we want credit-to-HiDock copy anywhere (README, About dialog)?
+4. The VoiceMark spike needs a real recording made with button-presses during it — can you make one, and I'll inspect the binary?
 
-## Sources (raw files on this machine)
+## Sources (local, non-repo)
 - `/tmp/hinotes_bundle/index.js` — main SPA bundle
 - `/tmp/hinotes_bundle/vendor-*.js`, `css.css`, `manifest.json` — supporting chunks
 - `/tmp/hinotes_assets.txt` — 145 unique asset paths
 - `/tmp/hinotes_refined.txt` — 890 filtered UI strings
-- `/tmp/hinotes_bundle/device_images/` — sample P1/H1 product images + SVG glyphs

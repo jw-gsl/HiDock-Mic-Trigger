@@ -168,16 +168,48 @@ final class HiDockViewModel: ObservableObject {
     /// truncation flag is set.
     @Published var syncDeviceStorage: [String: HiDockStorageStats] = [:]
 
+    /// Known on-device storage capacities in bytes, keyed by product
+    /// short-name. Sourced from HiDock's published product specs and
+    /// user-verified on a real device. Used to compute free space since
+    /// the USB protocol we've implemented doesn't expose a capacity query.
+    /// 1 GB = 1,073,741,824 bytes (binary GB, matching what the vendor
+    /// lists as "32 GB" / "64 GB" on the product page).
+    private static let knownCapacityBytes: [String: Int64] = [
+        "H1":  32 * 1_073_741_824,
+        "H1E": 32 * 1_073_741_824,
+        "P1":  64 * 1_073_741_824,
+    ]
+
     /// Human-readable summary shown in the status header, e.g.
-    /// "H1: 3.2 GB · P1: 1.1 GB". Empty string if nothing usable.
+    /// "H1: 4.4 / 32 GB (28 free) · P1: 1.1 / 64 GB (63 free)".
+    /// Empty string if nothing usable.
     var storageSummary: String {
         let parts = syncPairedDevices.compactMap { device -> String? in
             guard let stats = syncDeviceStorage[device.deviceId] else { return nil }
-            let gb = Double(stats.totalBytesReturned) / 1_073_741_824
-            let mb = Double(stats.totalBytesReturned) / 1_048_576
-            let size = gb >= 1 ? String(format: "%.1f GB", gb) : String(format: "%.0f MB", mb)
-            let flag = stats.truncated ? "+" : ""
-            return "\(device.shortName): \(size)\(flag) (\(stats.totalFiles) files)"
+            let usedBytes = Int64(stats.totalBytesReturned)
+            let usedGB = Double(usedBytes) / 1_073_741_824
+            let usedMB = Double(usedBytes) / 1_048_576
+            let usedStr = usedGB >= 1 ? String(format: "%.1f", usedGB) : String(format: "%.0f MB", usedMB)
+            let truncFlag = stats.truncated ? "+" : ""
+
+            // If we know the device's capacity, show used / total (free).
+            // Otherwise fall back to just used-size so we never show
+            // misleading free-space numbers.
+            if let cap = Self.knownCapacityBytes[device.shortName] {
+                let capGB = Double(cap) / 1_073_741_824
+                let freeGB = max(0, capGB - usedGB)
+                // When the list is truncated, actual usage is higher — so
+                // free is an upper bound. Flag with '≤'.
+                let freeStr = stats.truncated
+                    ? String(format: "≤%.0f GB free", freeGB)
+                    : String(format: "%.0f GB free", freeGB)
+                return String(
+                    format: "%@: %@%@ / %.0f GB (%@, %d files)",
+                    device.shortName, usedStr, truncFlag, capGB, freeStr, stats.totalFiles
+                )
+            } else {
+                return "\(device.shortName): \(usedStr)\(truncFlag) GB (\(stats.totalFiles) files)"
+            }
         }
         return parts.joined(separator: " · ")
     }
