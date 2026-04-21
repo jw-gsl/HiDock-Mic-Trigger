@@ -19,119 +19,72 @@ struct SyncHeaderSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Status row
-            HStack {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 8, height: 8)
-                    Text(viewModel.syncStatus)
-                        .font(.body.weight(.medium))
-                }
-                // Recording indicator — only while the mic-trigger's
-                // ffmpeg is actively streaming from a HiDock. This is the
-                // same state that makes USB data queries fail, so seeing
-                // it explains 'H1 unreachable' in one glance.
-                if viewModel.hidockRecordingActive {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
-                        Text("Recording")
-                            .font(.caption.weight(.medium))
-                            .foregroundColor(.red)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.red.opacity(0.08), in: Capsule())
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            // Device strip — one card per paired device, plus an imports
+            // card when relevant. Every fact about a device (connected /
+            // recording / unreachable / storage / reconnect / filter)
+            // lives on its own card, so the header doesn't need separate
+            // status / storage / filter rows any more.
+            DeviceStripView(viewModel: viewModel)
+
+            // Generic pipeline-status line: transcription progress, skip
+            // confirmations, auto-flow messages. Per-device state has
+            // moved into the cards above — this row is now just for
+            // global pipeline activity.
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(viewModel.syncStatus)
+                    .font(.caption)
+                    .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
                 Spacer()
                 Text(viewModel.syncSummary)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
-            // Per-device storage row. `+` suffix on a size means the device
-            // firmware truncated the list, so the real usage is higher.
-            if !viewModel.storageSummary.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "externaldrive")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text(viewModel.storageSummary)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
+            // Download actions stay in the header until the Process split
+            // button ships — grouped with the device context, same pattern
+            // as before, minus the folder-picker clutter (now in the app
+            // menu bar).
+            HStack(spacing: 6) {
+                Button {
+                    viewModel.onDownloadSelected()
+                } label: {
+                    Label("Download Selected", systemImage: "arrow.down.circle")
                 }
-            }
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
 
-            // Folder paths + download buttons on same row
-            HStack(spacing: 12) {
-                if let folder = viewModel.syncOutputFolder {
-                    Label {
-                        Text(folder)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "folder")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Button {
+                    viewModel.onDownloadNew()
+                } label: {
+                    Label("Download New", systemImage: "arrow.down.to.line")
                 }
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired)
 
-                if let folder = viewModel.syncTranscriptFolder {
-                    Label {
-                        Text(folder)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "doc.text")
+                Button {
+                    viewModel.onMarkDownloaded()
+                } label: {
+                    Label("Skip", systemImage: "forward.fill")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+
+                if viewModel.anySelectedMarkedOnly {
+                    Button {
+                        viewModel.onUnmarkDownloaded()
+                    } label: {
+                        Label("Unskip", systemImage: "backward.fill")
                     }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .disabled(viewModel.syncBusy)
                 }
 
                 Spacer()
-
-                // Download buttons on same row as paths
-                HStack(spacing: 6) {
-                    Button {
-                        viewModel.onDownloadSelected()
-                    } label: {
-                        Label("Download Selected", systemImage: "arrow.down.circle")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
-
-                    Button {
-                        viewModel.onDownloadNew()
-                    } label: {
-                        Label("Download New", systemImage: "arrow.down.to.line")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
-
-                    Button {
-                        viewModel.onMarkDownloaded()
-                    } label: {
-                        Label("Skip", systemImage: "forward.fill")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-
-                    if viewModel.anySelectedMarkedOnly {
-                        Button {
-                            viewModel.onUnmarkDownloaded()
-                        } label: {
-                            Label("Unskip", systemImage: "backward.fill")
-                        }
-                        .disabled(viewModel.syncBusy)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(isConnected ? Color.green.opacity(0.04) : Color.clear)
     }
 }

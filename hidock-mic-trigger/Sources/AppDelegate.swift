@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
     private var terminalWindow: NSWindow?
+    private weak var speakerLabelsMenuItem: NSMenuItem?
     private var importedRecordings: [ImportedRecordingEntry] = []
     /// Filenames the user has opted out of transcribing. Persisted to
     /// ~/HiDock/skipped_transcriptions.json; loaded at launch.
@@ -1071,6 +1072,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
+
+        // File menu — hosts the config actions that used to live in the
+        // sync-window toolbar (pair/unpair, folder pickers, import,
+        // speaker-labels toggle). Keeps those accessible via standard
+        // macOS menu conventions without cluttering the table UI.
+        let fileMenuItem = NSMenuItem()
+        mainMenu.addItem(fileMenuItem)
+        let fileMenu = NSMenu(title: "File")
+
+        let importFileItem = NSMenuItem(title: "Import Audio File...", action: #selector(importAudioFileMenu), keyEquivalent: "i")
+        importFileItem.keyEquivalentModifierMask = [.command, .shift]
+        importFileItem.target = self
+        fileMenu.addItem(importFileItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+
+        let pairItem = NSMenuItem(title: "Pair HiDock...", action: #selector(fileMenuPair), keyEquivalent: "")
+        pairItem.target = self
+        fileMenu.addItem(pairItem)
+
+        let unpairItem = NSMenuItem(title: "Unpair HiDock", action: #selector(fileMenuUnpair), keyEquivalent: "")
+        unpairItem.target = self
+        fileMenu.addItem(unpairItem)
+
+        let deviceMgrItem = NSMenuItem(title: "Device Manager...", action: #selector(fileMenuOpenDeviceManager), keyEquivalent: "d")
+        deviceMgrItem.keyEquivalentModifierMask = [.command, .shift]
+        deviceMgrItem.target = self
+        fileMenu.addItem(deviceMgrItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+
+        let chooseRecItem = NSMenuItem(title: "Choose Recordings Folder...", action: #selector(fileMenuChooseRecordingsFolder), keyEquivalent: "")
+        chooseRecItem.target = self
+        fileMenu.addItem(chooseRecItem)
+
+        let chooseTxItem = NSMenuItem(title: "Choose Transcripts Folder...", action: #selector(fileMenuChooseTranscriptsFolder), keyEquivalent: "")
+        chooseTxItem.target = self
+        fileMenu.addItem(chooseTxItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+
+        let speakerLabelsItem = NSMenuItem(title: "Speaker Labels (Diarize)", action: #selector(fileMenuToggleDiarize), keyEquivalent: "")
+        speakerLabelsItem.target = self
+        speakerLabelsItem.state = diarizeEnabled ? .on : .off
+        fileMenu.addItem(speakerLabelsItem)
+        speakerLabelsMenuItem = speakerLabelsItem
+
+        fileMenuItem.submenu = fileMenu
 
         // Edit menu — required for standard keyboard shortcuts (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z) to work in text views
         let editMenuItem = NSMenuItem()
@@ -2598,6 +2647,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func openTerminalMenu() {
         openTerminal(initialCommand: nil)
+    }
+
+    // MARK: - File menu bridge
+
+    /// Each of these is a thin wrapper that calls the same action the
+    /// toolbar buttons used to call. Keeping them as separate @objc
+    /// methods so the menu items have stable selectors and the
+    /// underlying flows stay unchanged.
+    @objc private func fileMenuPair() { viewModel.onPairDock() }
+    @objc private func fileMenuUnpair() { viewModel.onUnpairDock() }
+    @objc private func fileMenuOpenDeviceManager() { openDeviceManager() }
+    @objc private func fileMenuChooseRecordingsFolder() { viewModel.onChooseRecordingsFolder() }
+    @objc private func fileMenuChooseTranscriptsFolder() { viewModel.onChooseTranscriptFolder() }
+    @objc private func fileMenuToggleDiarize() {
+        viewModel.onToggleDiarize()
+        // Reflect the flipped state on the menu item so the checkmark
+        // tracks reality without rebuilding the whole menu.
+        speakerLabelsMenuItem?.state = diarizeEnabled ? .on : .off
     }
 
     /// Open an embedded PTY terminal window. Optionally start with a command

@@ -28,6 +28,7 @@
 		AC57E3CA0C77C0F9F234F8A8 /* DeviceManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 073D5356B516B86E1A36D08A /* DeviceManagerView.swift */; };
 		AD84D7F268B99977690E39B6 /* CoworkPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3EB96FF645902287442733 /* CoworkPromptView.swift */; };
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
+		AE7DEC1B14636DBD037EC45D /* DeviceCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */; };
 		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
 		C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27867D05F3E255C858BC3F1 /* TerminalView.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
@@ -70,6 +71,7 @@
 		95B0A8C5446AA42C053B684F /* ModelManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManagerView.swift; sourceTree = "<group>"; };
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
 		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
+		A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCardView.swift; sourceTree = "<group>"; };
 		A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedRecordings.swift; sourceTree = "<group>"; };
 		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -132,6 +134,7 @@
 			isa = PBXGroup;
 			children = (
 				5B3EB96FF645902287442733 /* CoworkPromptView.swift */,
+				A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */,
 				073D5356B516B86E1A36D08A /* DeviceManagerView.swift */,
 				F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */,
 				651E9570959AB1B72306DFE9 /* MainWindowView.swift */,
@@ -295,6 +298,7 @@
 			files = (
 				4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */,
 				AD84D7F268B99977690E39B6 /* CoworkPromptView.swift in Sources */,
+				AE7DEC1B14636DBD037EC45D /* DeviceCardView.swift in Sources */,
 				AC57E3CA0C77C0F9F234F8A8 /* DeviceManagerView.swift in Sources */,
 				E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */,
 				D0DA62924A664A5011685A7A /* Helpers.swift in Sources */,

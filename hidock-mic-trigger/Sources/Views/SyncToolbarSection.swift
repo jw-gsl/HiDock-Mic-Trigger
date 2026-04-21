@@ -1,38 +1,18 @@
 import SwiftUI
 
+/// Compact pipeline toolbar. Device-specific concerns (pair/unpair,
+/// reachability, filter, reconnect, storage, recording state) now live
+/// on the per-device cards above. Configuration-y controls (folder
+/// pickers, Speaker Labels toggle) moved to the app's main menu where
+/// they belong. This view only hosts pipeline *actions*.
 struct SyncToolbarSection: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
         VStack(spacing: 6) {
-            // Row: Pair/Unpair/Folders/Refresh on left, Transcribe on right
+            // Action row — left-aligned actions + spacer + right-aligned
+            // status/indicators.
             HStack(spacing: 6) {
-                Button {
-                    viewModel.onPairDock()
-                } label: {
-                    Label("Pair", systemImage: "link.badge.plus")
-                }
-                .disabled(viewModel.syncBusy)
-
-                Button {
-                    viewModel.onUnpairDock()
-                } label: {
-                    Label("Unpair", systemImage: "minus.circle")
-                }
-                .disabled(viewModel.syncBusy || !viewModel.syncPaired)
-
-                Button {
-                    viewModel.onChooseRecordingsFolder()
-                } label: {
-                    Label("Recordings", systemImage: "folder")
-                }
-
-                Button {
-                    viewModel.onChooseTranscriptFolder()
-                } label: {
-                    Label("Transcripts", systemImage: "doc.text")
-                }
-
                 Button {
                     viewModel.onRefreshSync()
                 } label: {
@@ -47,7 +27,7 @@ struct SyncToolbarSection: View {
                 }
                 .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
 
-                Spacer()
+                Divider().frame(height: 16)
 
                 Button {
                     viewModel.onTranscribeSelected()
@@ -62,6 +42,8 @@ struct SyncToolbarSection: View {
                     Label("Transcribe All", systemImage: "text.bubble.fill")
                 }
                 .disabled(viewModel.transcriptionBusy)
+
+                Divider().frame(height: 16)
 
                 Button {
                     viewModel.onMergeSelected()
@@ -89,11 +71,7 @@ struct SyncToolbarSection: View {
                 .help("Remove imported files entirely, delete local copies of downloaded HiDock recordings. Device copies are preserved.")
                 .disabled(viewModel.syncBusy || !viewModel.hasSelection)
 
-                Toggle("Speaker Labels", isOn: Binding(
-                    get: { viewModel.diarizeEnabled },
-                    set: { _ in viewModel.onToggleDiarize() }
-                ))
-                .toggleStyle(.checkbox)
+                Spacer()
 
                 if !viewModel.transcriptionQueue.isEmpty {
                     Button {
@@ -117,55 +95,13 @@ struct SyncToolbarSection: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            // Selection & filter row
+            // Selection + view preferences. Device filter chips have moved
+            // onto the device cards in the header; filtering is now
+            // "click a card's filter icon".
             HStack(spacing: 8) {
                 Button("Select All") { viewModel.onSelectAll() }
                 Button("Select None") { viewModel.onSelectNone() }
                 Button("Select New") { viewModel.onSelectNotDownloaded() }
-
-                Divider().frame(height: 16)
-
-                Text("Filter:")
-                    .font(.caption.weight(.medium))
-
-                Button("All") {
-                    viewModel.onFilterByDevice(nil)
-                }
-                .buttonStyle(.bordered)
-                .tint(viewModel.syncFilterDeviceId == nil ? .accentColor : nil)
-
-                ForEach(viewModel.syncPairedDevices, id: \.deviceId) { device in
-                    let connected = viewModel.syncDeviceConnected[device.deviceId] ?? false
-                    let unreachable = viewModel.syncDeviceLastError[device.deviceId] != nil
-                    HStack(spacing: 2) {
-                        Button {
-                            viewModel.onFilterByDevice(device.deviceId)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(unreachable ? Color.orange : (connected ? Color.green : Color.gray))
-                                    .frame(width: 6, height: 6)
-                                Text(device.shortName)
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(viewModel.syncFilterDeviceId == device.deviceId ? .accentColor : nil)
-                        // Reconnect affordance: always present, but the
-                        // arrow turns orange when the device's last query
-                        // failed so it stands out as the next logical
-                        // action. Clicking runs a fresh status probe.
-                        Button {
-                            viewModel.onReconnectDevice(device.deviceId)
-                        } label: {
-                            Image(systemName: "arrow.clockwise.circle\(unreachable ? ".fill" : "")")
-                                .foregroundColor(unreachable ? .orange : .secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help(unreachable
-                            ? "\(device.shortName) is unreachable — try reconnecting"
-                            : "Reconnect \(device.shortName)")
-                    }
-                }
 
                 Spacer()
 
