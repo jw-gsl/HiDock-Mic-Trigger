@@ -90,21 +90,21 @@ func hidockSKU(for shortName: String, deviceType: DeviceType = .hidock) -> HiDoc
     return nil
 }
 
-/// Returns an asset-catalog glyph for a HiDock SKU, or nil if we don't ship a
-/// bespoke glyph for this device (caller should fall back to `hidockDeviceIcon`).
-/// Pass `recording: true` to get the "device-is-live" photographic variant.
+/// Returns an asset-catalog image for a HiDock SKU, or nil for generic volumes.
+/// The `DeviceRecording*` assets are product photos of the hardware (the name
+/// is historical — they're not recording-state artwork). We use them for all
+/// states because they're richer than the flat monochrome SVG `DeviceGlyph*`
+/// assets and they visually differentiate H1 / H1E / P1. Recording state is
+/// surfaced by the red card chip, so we don't swap artwork for it.
+/// The `recording` parameter is retained for call-site compatibility but is
+/// currently ignored.
 func hidockDeviceImage(_ shortName: String, deviceType: DeviceType = .hidock, recording: Bool = false) -> Image? {
+    _ = recording
     guard let sku = hidockSKU(for: shortName, deviceType: deviceType) else { return nil }
-    if recording {
-        switch sku {
-        case .p1:  return Image("DeviceRecordingP1")
-        case .h1:  return Image("DeviceRecordingH1")
-        case .h1e: return Image("DeviceRecordingH1e")
-        }
-    }
     switch sku {
-    case .p1:         return Image("DeviceGlyphP1")
-    case .h1, .h1e:   return Image("DeviceGlyphH1") // glyph is shared between H1 and H1e
+    case .p1:  return Image("DeviceRecordingP1")
+    case .h1:  return Image("DeviceRecordingH1")
+    case .h1e: return Image("DeviceRecordingH1e")
     }
 }
 

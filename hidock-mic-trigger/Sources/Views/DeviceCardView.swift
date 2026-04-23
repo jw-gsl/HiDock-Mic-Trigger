@@ -88,7 +88,16 @@ struct DeviceCardView: View {
 
     @ViewBuilder
     private var iconView: some View {
-        if let img = hidockDeviceImage(device.shortName, deviceType: device.deviceType, recording: recording) {
+        if device.deviceType == .volume {
+            // Real Finder icon for the mounted volume — differentiates
+            // multiple external drives visually (branded SD-card icon vs.
+            // generic external SSD, etc.) instead of every volume showing
+            // the same grey externaldrive SF Symbol.
+            volumeIcon
+        } else if let img = hidockDeviceImage(device.shortName, deviceType: device.deviceType, recording: recording) {
+            // Product-photo asset (DeviceRecording*) — H1, H1E and P1 each
+            // have distinct artwork, so no extra badge is needed to tell
+            // them apart.
             img
                 .resizable()
                 .scaledToFit()
@@ -97,6 +106,30 @@ struct DeviceCardView: View {
                 .font(.title)
                 .foregroundColor(.secondary)
         }
+    }
+
+    @ViewBuilder
+    private var volumeIcon: some View {
+        if let name = device.volumeName,
+           let nsImg = Self.fetchVolumeIcon(name: name) {
+            Image(nsImage: nsImg)
+                .resizable()
+                .scaledToFit()
+        } else {
+            Image(systemName: "externaldrive")
+                .font(.title)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Fetches the Finder icon for a mounted volume at /Volumes/<name>.
+    /// Returns nil if the volume isn't mounted right now, which is fine —
+    /// by then the card probably shouldn't render anyway (filtered out in
+    /// DeviceStripView.visibleDevices).
+    private static func fetchVolumeIcon(name: String) -> NSImage? {
+        let path = "/Volumes/\(name)"
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        return NSWorkspace.shared.icon(forFile: path)
     }
 
     private var titleRow: some View {
@@ -300,22 +333,45 @@ struct ImportsCardView: View {
     }
 }
 
-/// Stacks all paired-device cards plus an imports card when relevant.
-/// Sits where the old status/storage/filter rows used to be.
+/// Lays out the visible device cards in an adaptive grid so two cards fit
+/// side-by-side at default window width and reflow to one column when the
+/// window is narrow. Sits where the old status/storage/filter rows used to
+/// be.
+///
+/// Visibility rules:
+///   - HiDocks always render (paired devices are important signal even when
+///     unreachable — that's what surfaces "plug me back in")
+///   - Volumes only render when currently connected — unplugged SD cards /
+///     external recorders shouldn't clutter the strip
+///   - Imported files do NOT get a card. Imports live on the File menu and
+///     as a table-level filter; a whole card for them was noise.
 struct DeviceStripView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
-    private var hasImports: Bool {
-        viewModel.syncEntries.contains(where: { $0.deviceId == IMPORTED_DEVICE_ID })
+    /// HiDocks first, then connected volumes. Keeps the highest-signal
+    /// cards in the first row when the grid reflows.
+    private var visibleDevices: [HiDockPairedDevice] {
+        viewModel.syncPairedDevices
+            .filter { device in
+                switch device.deviceType {
+                case .hidock: return true
+                case .volume: return viewModel.syncDeviceConnected[device.deviceId] == true
+                }
+            }
+            .sorted { a, b in
+                if a.deviceType != b.deviceType {
+                    return a.deviceType == .hidock
+                }
+                return a.cleanName < b.cleanName
+            }
     }
 
+    private let columns = [GridItem(.adaptive(minimum: 320), spacing: 8)]
+
     var body: some View {
-        VStack(spacing: 6) {
-            ForEach(viewModel.syncPairedDevices, id: \.deviceId) { device in
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+            ForEach(visibleDevices, id: \.deviceId) { device in
                 DeviceCardView(viewModel: viewModel, device: device)
-            }
-            if hasImports {
-                ImportsCardView(viewModel: viewModel)
             }
         }
     }

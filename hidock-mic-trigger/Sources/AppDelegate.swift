@@ -48,6 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncDeviceStorage: [String: HiDockStorageStats] = [:]
     private var syncDeviceLastError: [String: (String, Date)] = [:]
     private var syncDeviceLastOK: [String: Date] = [:]
+    /// Devices whose last probe timed out with a full 30s hung kill.
+    /// Until they're manually reconnected (via the ↻ button) or the
+    /// backoff expires, auto-refresh/auto-connect paths skip them so
+    /// the user isn't waiting 30s+ per reopen on a known-stalled H1.
+    private var syncDeviceHungUntil: [String: Date] = [:]
+    private let hungBackoffInterval: TimeInterval = 180
     private var syncBusy = false
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
@@ -228,7 +234,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         wireViewModel()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
-        loadCachedRecordings()
+        // Skipped: loadCachedRecordings() used to fire a short-timeout
+        // extractor probe against every paired HiDock for "instant
+        // display from cache", but the extractor still does a USB open
+        // + dev.reset() even on the cached path. With two HiDocks that
+        // meant four USB resets stacked back-to-back at launch — and
+        // the race with the refreshSyncStatus that showSyncWindow runs
+        // moments later was flipping H1 to "held by Python (pid of our
+        // own just-exited probe)". The refreshSyncStatus call populates
+        // the UI within a couple of seconds anyway.
         loadMergeGroups()
         importedRecordings = ImportedRecordingsStore.load()
         log("Loaded \(importedRecordings.count) imported recording(s) from \(ImportedRecordingsStore.path)")
@@ -277,12 +291,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Apply saved appearance mode
         applyAppearanceMode()
 
-        #if !DEV_BUILD
-        if autoStartOnLaunch {
-            startTrigger()
-        }
-        #endif
-        autoConnectSyncIfPaired()
+        // Order matters: probe devices FIRST (while nothing is holding
+        // the HiDock USB interface), THEN start the mic trigger. The
+        // old order (startTrigger then autoConnect) created a narrow
+        // window where ffmpeg was grabbing the interface right as the
+        // first status probe dispatched — the probe either timed out or
+        // returned "held by", and in the worst case the dev.reset()
+        // inside the extractor's prepare_device could wedge the HiDock
+        // firmware. Probing first is free because the trigger hasn't
+        // attached yet. startTrigger fires from the autoConnect
+        // completion.
+        autoConnectSyncIfPaired(startTriggerOnCompletion: true)
 
         // Wire update status to the footer bar
         UpdateChecker.onStatusUpdate = { [weak self] (text: String) in
@@ -1418,15 +1437,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - HiDock Sync Startup
 
-    private func autoConnectSyncIfPaired() {
+    private func autoConnectSyncIfPaired(startTriggerOnCompletion: Bool = false) {
+        // If we were asked to start the trigger on completion but we
+        // short-circuit (busy, extractor missing), still honour the
+        // promise — otherwise the app launches with no trigger running.
+        func finishEarly() {
+            if startTriggerOnCompletion && autoStartOnLaunch {
+                log("autoConnectSyncIfPaired: starting trigger after early exit")
+                startTrigger()
+            }
+        }
         guard !syncBusy else {
             log("autoConnectSyncIfPaired: skipping, already busy")
+            finishEarly()
             return
         }
         guard ensureExtractorReady() else {
             log("autoConnectSyncIfPaired: extractor not ready, aborting")
+            finishEarly()
             return
         }
+        // Unblock any reopen-driven refreshes that were deferred during
+        // the early-launch window — from here on, probes are safe
+        // because we own the initial state.
+        didInitialAutoConnect = true
         log("autoConnectSyncIfPaired: running list-devices")
 
         runExtractor(arguments: ["list-devices"]) { [weak self] result in
@@ -1456,34 +1490,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
 
             let devices = self.syncPairedDevices
-            guard !devices.isEmpty else { return }
+            guard !devices.isEmpty else {
+                DispatchQueue.main.async { finishEarly() }
+                return
+            }
             self.log("Auto-connecting \(devices.count) paired device(s) on startup")
-            self.syncBusy = true
-            self.syncViewModelState()
 
-            let group = DispatchGroup()
-            var anyConnected = false
-            var deviceErrors: [String: String] = [:]  // device name -> error
-
-            for device in devices {
-                group.enter()
-
-                let args: [String]
-                let pid: Int?
-                switch device.deviceType {
-                case .hidock:
-                    args = ["status", "--timeout-ms", "2000"]
-                    pid = device.productId
-                case .volume:
-                    args = self.volumeExtractorArguments("volume-status", device: device)
-                    pid = nil
+            // Do NOT pause the mic trigger for auto-connect probes. The
+            // trigger is the primary purpose of the app; stopping it
+            // under the user's feet to do a background status refresh
+            // is more disruptive than helpful. Instead, if the trigger
+            // is already running, skip HiDock probes this round — the
+            // cards will keep their last-known state (preserved by
+            // renderSyncStatus). Volumes don't share an interface with
+            // ffmpeg so they're safe to probe either way. Manual
+            // Reconnect (↻ on a card) still pauses the trigger —
+            // that's explicit user intent.
+            let triggerRunning = self.process != nil
+            let probeDevices = devices.filter { device in
+                if device.deviceType == .volume { return true }
+                if !triggerRunning { return true }
+                self.log("Auto-connect: skipping \(device.cleanName) — mic trigger is active, keeping last-known state")
+                return false
+            }
+            guard !probeDevices.isEmpty else {
+                self.log("Auto-connect: no devices to probe (trigger active, all HiDocks skipped)")
+                DispatchQueue.main.async {
+                    self.syncViewModelState()
+                    finishEarly()
                 }
+                return
+            }
+            self.runAutoConnectProbes(
+                devices: probeDevices,
+                restartTriggerAfter: false,
+                startTriggerOnCompletion: startTriggerOnCompletion
+            )
+        }
+    }
 
-                self.runExtractor(arguments: args, productId: pid) { [weak self] result in
-                    guard let self = self else { group.leave(); return }
-                    switch result {
-                    case .success(let data):
-                        if let status = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) {
+    private func runAutoConnectProbes(
+        devices: [HiDockPairedDevice],
+        restartTriggerAfter: Bool,
+        startTriggerOnCompletion: Bool = false
+    ) {
+        syncBusy = true
+        syncViewModelState()
+
+        let group = DispatchGroup()
+        var anyConnected = false
+        var deviceErrors: [String: String] = [:]  // device name -> error
+        let now = Date()
+
+        for device in devices {
+            if let until = syncDeviceHungUntil[device.deviceId], until > now {
+                log("Auto-connect: skipping \(device.cleanName) — hung-backoff active for \(Int(until.timeIntervalSince(now)))s more")
+                if syncDeviceConnected[device.deviceId] == true { anyConnected = true }
+                continue
+            }
+            group.enter()
+
+            let args: [String]
+            let pid: Int?
+            switch device.deviceType {
+            case .hidock:
+                args = ["status", "--timeout-ms", "2000"]
+                pid = device.productId
+            case .volume:
+                args = self.volumeExtractorArguments("volume-status", device: device)
+                pid = nil
+            }
+
+            self.runExtractor(arguments: args, productId: pid) { [weak self] result in
+                guard let self = self else { group.leave(); return }
+                switch result {
+                case .success(let data):
+                    if let status = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) {
+                        // Same transient-"held by" guard as refreshSyncStatus
+                        let transientHeldBy = !status.connected
+                            && device.deviceType == .hidock
+                            && (status.error?.contains("held by") ?? false)
+                            && self.syncDeviceConnected[device.deviceId] == true
+                        if transientHeldBy {
+                            self.log("Auto-connect: ignoring transient 'held by' for \(device.cleanName): \(status.error ?? "")")
+                            anyConnected = true
+                        } else {
                             self.renderSyncStatus(status, device: device)
                             if status.connected {
                                 anyConnected = true
@@ -1493,34 +1584,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 self.log("Auto-connect: \(device.cleanName) not connected: \(err)")
                                 deviceErrors[device.cleanName] = err
                             }
-                        } else {
-                            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "(binary)"
-                            self.log("Auto-connect: \(device.cleanName) decode failed: \(preview)")
-                            deviceErrors[device.cleanName] = "Failed to decode status response"
                         }
-                    case .failure(let error):
-                        let desc = error.localizedDescription
-                        let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
-                        self.log("Auto-connect: \(device.cleanName) failed: \(shortDesc)")
-                        deviceErrors[device.cleanName] = shortDesc
+                    } else {
+                        let preview = String(data: data.prefix(200), encoding: .utf8) ?? "(binary)"
+                        self.log("Auto-connect: \(device.cleanName) decode failed: \(preview)")
+                        deviceErrors[device.cleanName] = "Failed to decode status response"
                     }
-                    group.leave()
+                case .failure(let error):
+                    let desc = error.localizedDescription
+                    let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
+                    self.log("Auto-connect: \(device.cleanName) failed: \(shortDesc)")
+                    deviceErrors[device.cleanName] = shortDesc
                 }
+                group.leave()
             }
+        }
 
-            group.notify(queue: .main) { [weak self] in
-                guard let self = self else { return }
-                self.syncBusy = false
-                if !anyConnected, !deviceErrors.isEmpty {
-                    // Prefer the most informative error (one with "held by" info)
-                    let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
-                        ?? deviceErrors.values.first ?? "unknown"
-                    let message = syncErrorDescription(bestError)
-                    self.viewModel.syncStatus = message
-                    self.viewModel.syncStatusLevel = .warning
-                }
-                self.updateMenuSyncStatus(connected: anyConnected)
-                self.syncViewModelState()
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            self.syncBusy = false
+            if !anyConnected, !deviceErrors.isEmpty {
+                // Prefer the most informative error (one with "held by" info)
+                let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
+                    ?? deviceErrors.values.first ?? "unknown"
+                let message = syncErrorDescription(bestError)
+                self.viewModel.syncStatus = message
+                self.viewModel.syncStatusLevel = .warning
+            }
+            self.updateMenuSyncStatus(connected: anyConnected)
+            self.syncViewModelState()
+            if restartTriggerAfter {
+                self.log("Auto-connect: restarting mic trigger")
+                self.startTrigger()
+            } else if startTriggerOnCompletion && self.autoStartOnLaunch && self.process == nil {
+                // Launch-time path: we probed first, now kick the trigger.
+                self.log("Auto-connect: launch probe complete — starting mic trigger")
+                self.startTrigger()
             }
         }
     }
@@ -2251,8 +2350,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.setActivationPolicy(.regular)
         syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        refreshSyncStatus()
+        // Refresh on reopen, but only if the initial launch-time
+        // autoConnectSyncIfPaired has already completed. During the
+        // launch sequence, applicationDidFinishLaunching calls
+        // showSyncWindow BEFORE startTrigger — firing refreshSyncStatus
+        // here would dispatch probes that race startTrigger's ffmpeg,
+        // and the pause-trigger guard can't help because process is
+        // still nil at the time refreshSyncStatus decides. Letting
+        // autoConnectSyncIfPaired own the first probe (it runs AFTER
+        // startTrigger, so its pause-trigger guard does work) avoids
+        // the race.
+        if didInitialAutoConnect {
+            refreshSyncStatus()
+        }
     }
+
+    /// Set to true once the launch-time `autoConnectSyncIfPaired` has
+    /// actually dispatched probes (i.e. we're past the early-launch
+    /// window where the trigger hasn't yet been given a chance to run).
+    private var didInitialAutoConnect = false
 
     // MARK: - Transcript Viewer
 
@@ -2982,14 +3098,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Re-query a single device's status, bypassing the usual batch flow
     /// and clearing any stale 'unreachable' flag before we try.
     ///
-    /// Critical detail for HiDock hardware: the mic-trigger spawns an
-    /// `ffmpeg` child that holds the HiDock's USB audio interface open
-    /// (so physical button-press recording works). While that's streaming,
-    /// the firmware refuses data queries and the extractor hangs until
-    /// our 30-second timeout kills it. Before any reconnect probe we
-    /// stop the trigger if it's running, run the probe, then restart the
-    /// trigger if it was running before. Users get automatic recovery
-    /// without having to know the mic-trigger is fighting them.
+    /// Does NOT stop the mic trigger. Historically we paused ffmpeg
+    /// before probing, waited 800ms, probed, then restarted the trigger.
+    /// That stop-probe-restart dance was the biggest cause of the H1
+    /// firmware wedging — every ffmpeg termination mid-stream risks
+    /// putting the HiDock into a state where subsequent probes hang
+    /// for 30s, which we'd then misinterpret as the device being
+    /// physically stuck. The vendor-specific USB interface we probe
+    /// (bInterfaceClass=255) is a separate interface from the USB
+    /// audio class ffmpeg uses, so they can coexist; the pyusb claim
+    /// only affects the vendor interface. Keep the trigger running.
     func reconnectDevice(deviceId: String) {
         guard let device = syncPairedDevices.first(where: { $0.deviceId == deviceId }) else {
             log("reconnectDevice: no paired device with id \(deviceId)")
@@ -2998,26 +3116,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("reconnectDevice: \(device.shortName) (\(deviceId))")
 
         syncDeviceLastError.removeValue(forKey: deviceId)
+        // Manual reconnect always retries, even if the device is in hung
+        // backoff — the user asked for it explicitly by clicking ↻.
+        syncDeviceHungUntil.removeValue(forKey: deviceId)
         viewModel.syncStatus = "Reconnecting \(device.shortName)..."
         viewModel.syncStatusLevel = .info
         syncViewModelState()
 
-        // Only HiDock devices are subject to the ffmpeg-audio-lock issue.
-        // Volume devices are just mounted filesystems — safe to query
-        // without touching the mic trigger.
-        let triggerWasRunning = device.deviceType == .hidock && process != nil
-        if triggerWasRunning {
-            log("reconnectDevice: pausing mic trigger to free H1 audio interface")
-            stopTrigger()
-            // ffmpeg exits synchronously on SIGTERM but the HiDock firmware
-            // needs a short moment to release the USB endpoint before the
-            // next query will succeed. 800ms is empirically enough on M-series.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                self?.runReconnectProbe(device: device, restartTriggerAfter: true)
-            }
-        } else {
-            runReconnectProbe(device: device, restartTriggerAfter: false)
-        }
+        runReconnectProbe(device: device, restartTriggerAfter: false)
     }
 
     private func runReconnectProbe(
@@ -3466,11 +3572,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    private let extractorProcessTimeout: TimeInterval = 30
+    /// Outer kill-switch for extractor subprocesses. Per-USB-call timeout
+    /// is separate (`--timeout-ms` arg). The slow operation is the initial
+    /// file-list enumeration: each recording takes one or more USB
+    /// round-trips, and for a HiDock with 280+ files the full enumeration
+    /// empirically takes ~35s over USB 2.0. Subsequent calls are fast
+    /// because the extractor's catalog cache short-circuits when the live
+    /// file count matches the cached count. 30s used to be enough; the
+    /// user's H1 crossed the threshold. 120s gives plenty of headroom and
+    /// still keeps us from hanging forever on a genuinely wedged device.
+    private let extractorProcessTimeout: TimeInterval = 120
 
     private func runExtractor(arguments: [String], productId: Int? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         log("runExtractor: \(fullArgs.joined(separator: " "))")
+        let deviceKeyForBackoff: String? = productId.map { "hidock:\($0)" }
         syncExtractorQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
@@ -3496,14 +3612,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 while process.isRunning && Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.2)
                 }
+                var weKilledIt = false
                 if process.isRunning {
                     NSLog("runExtractor: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
+                    weKilledIt = true
                     process.terminate()
                     Thread.sleep(forTimeInterval: 1)
                     if process.isRunning { process.interrupt() }
                     process.waitUntilExit()
                 } else {
                     NSLog("runExtractor: process exited with status %d", process.terminationStatus)
+                }
+
+                // USB teardown cooldown. The kernel keeps IOUSBHost
+                // ioregistry ownership attributed to the exited Python
+                // process for a brief window after it terminates. If the
+                // next extractor subprocess (on this serial queue) opens
+                // the same HiDock immediately, it hits
+                //   [Errno 13] Access denied — device held by Python (pid N)
+                // where N is our own just-exited process. 250ms is
+                // empirically enough for ioregistry to clear on M-series.
+                // Only pay the cost for HiDock-targeted runs; volume /
+                // list-devices / set-output don't need it.
+                if productId != nil {
+                    Thread.sleep(forTimeInterval: 0.25)
                 }
 
                 DispatchQueue.main.async { self.syncExtractorProcess = nil }
@@ -3517,9 +3649,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 if process.terminationStatus == 0 {
                     DispatchQueue.main.async { completion(.success(outData)) }
-                } else if process.terminationReason == .uncaughtSignal {
+                } else if weKilledIt {
+                    // A full timeout (we killed the process after
+                    // extractorProcessTimeout) usually means the device
+                    // firmware has stalled its USB endpoint. ffmpeg has
+                    // already been paused by refresh/reconnect paths by
+                    // the time we get here, so "busy recording" is no
+                    // longer the most likely cause. Nudge the user toward
+                    // the physical reseat that actually fixes it. This
+                    // catches both .uncaughtSignal and the more common
+                    // .exit path (the Python extractor installs a SIGTERM
+                    // handler so process.terminationReason is .exit with
+                    // status 143 after we kill it).
+                    if let key = deviceKeyForBackoff {
+                        let until = Date().addingTimeInterval(self.hungBackoffInterval)
+                        DispatchQueue.main.async {
+                            self.syncDeviceHungUntil[key] = until
+                            self.log("Hung backoff: \(key) suppressed from auto-probes for \(Int(self.hungBackoffInterval))s — manual Reconnect will still try")
+                        }
+                    }
                     let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
-                        NSLocalizedDescriptionKey: "Device query timed out — device may be busy recording"
+                        NSLocalizedDescriptionKey: "Device hung for \(Int(self.extractorProcessTimeout))s — the H1 firmware has stalled its USB endpoint. Unplug the HiDock and plug it back in to reset it."
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 } else {
@@ -3631,16 +3781,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if status.connected {
             syncDeviceLastOK[device.deviceId] = Date()
             syncDeviceLastError.removeValue(forKey: device.deviceId)
-        }
-        if let stats = status.storage {
-            syncDeviceStorage[device.deviceId] = stats
-            let gb = Double(stats.totalBytesReturned) / 1_073_741_824
-            let caveat = stats.truncated ? " (firmware truncated list, actual usage higher)" : ""
-            log("Storage[\(device.shortName)]: \(stats.totalFiles) files, \(String(format: "%.2f", gb)) GB used\(caveat)")
-        }
-        syncEntries.removeAll { $0.deviceId == device.deviceId }
-        for recording in status.recordings {
-            syncEntries.append(HiDockSyncRecordingEntry(recording: recording, deviceProductId: device.productId, deviceId: device.deviceId, deviceName: device.cleanName))
+            syncDeviceHungUntil.removeValue(forKey: device.deviceId)
+            if let stats = status.storage {
+                syncDeviceStorage[device.deviceId] = stats
+                let gb = Double(stats.totalBytesReturned) / 1_073_741_824
+                let caveat = stats.truncated ? " (firmware truncated list, actual usage higher)" : ""
+                log("Storage[\(device.shortName)]: \(stats.totalFiles) files, \(String(format: "%.2f", gb)) GB used\(caveat)")
+            }
+            // Preserve transcription state across the rebuild. Without
+            // this, every refresh constructs fresh entries with
+            // transcribed=false by default, and the Transcribed column
+            // briefly flickers empty until refreshTranscriptionState
+            // runs async and re-populates it. If the lookup misses
+            // (state.json gone, transcript .md moved, etc.) an entry
+            // can get stuck as untranscribed for the rest of the
+            // session. Carry the last-known values forward by name.
+            let previousByName = Dictionary(
+                uniqueKeysWithValues: syncEntries
+                    .filter { $0.deviceId == device.deviceId }
+                    .map { ($0.recording.name, $0) }
+            )
+            syncEntries.removeAll { $0.deviceId == device.deviceId }
+            for recording in status.recordings {
+                let prev = previousByName[recording.name]
+                syncEntries.append(HiDockSyncRecordingEntry(
+                    recording: recording,
+                    deviceProductId: device.productId,
+                    deviceId: device.deviceId,
+                    deviceName: device.cleanName,
+                    transcribed: prev?.transcribed ?? false,
+                    transcriptPath: prev?.transcriptPath,
+                    speakersTagged: prev?.speakersTagged ?? false,
+                    summaryPath: prev?.summaryPath,
+                    transcriptionSkipped: prev?.transcriptionSkipped ?? false
+                ))
+            }
+        } else {
+            // connected:false — we've flipped the device flag, but don't
+            // wipe its entries or storage. The user still wants to see
+            // what was on the device last time we successfully queried.
+            // The card renders "Unreachable" on top of the last-known
+            // storage bar, and the table keeps the rows (they'll just
+            // show as not-downloadable until the device is back).
+            log("renderSyncStatus[\(device.shortName)]: connected=false, preserving last-known entries (\(syncEntries.filter { $0.deviceId == device.deviceId }.count) rows)")
         }
         let importedAfter = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }.count
         log("renderSyncStatus[\(device.shortName)]: \(status.recordings.count) device recs, imported before/after = \(importedBefore)/\(importedAfter), total syncEntries=\(syncEntries.count)")
@@ -3648,15 +3831,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
 
         if !syncBusy {
-            let connectedNames = syncPairedDevices
-                .filter { syncDeviceConnected[$0.deviceId] == true }
-                .map { "\(hidockDeviceEmoji($0.shortName, deviceType: $0.deviceType)) \($0.shortName)" }
-            if connectedNames.isEmpty {
+            let anyConnected = syncPairedDevices.contains(where: { syncDeviceConnected[$0.deviceId] == true })
+            if anyConnected {
+                // Per-device connection lives on the cards. Clear the
+                // global status line so it's available for pipeline
+                // messages only — no redundant "Connected — 🔊 P1" echo.
+                viewModel.syncStatus = ""
+                viewModel.syncStatusLevel = .normal
+            } else {
                 viewModel.syncStatus = "Not connected"
                 viewModel.syncStatusLevel = .secondary
-            } else {
-                viewModel.syncStatus = "Connected — \(connectedNames.joined(separator: " · "))"
-                viewModel.syncStatusLevel = .success
             }
             updateMenuSyncStatus(connected: status.connected)
         }
@@ -3794,6 +3978,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
+        // Do NOT pause the mic trigger for refresh. The trigger is the
+        // primary purpose of the app — stopping it to do a background
+        // status refresh is a bad tradeoff. Instead, if the trigger is
+        // running, skip HiDock probes and keep last-known state. Volumes
+        // are on their own interface, safe to probe. Manual Reconnect
+        // (↻) remains the explicit "I want fresh state, please pause
+        // recording to get it" gesture.
+        let triggerRunning = process != nil
+        let probeDevices = devices.filter { device in
+            if device.deviceType == .volume { return true }
+            if !triggerRunning { return true }
+            log("Refresh: skipping \(device.cleanName) — mic trigger is active, keeping last-known state")
+            return false
+        }
+        if probeDevices.isEmpty {
+            log("Refresh: no devices to probe (trigger active, all HiDocks skipped)")
+            // Leave status/busy state untouched; nothing to do.
+            return
+        }
+        performRefreshProbes(devices: probeDevices, restartTriggerAfter: false)
+    }
+
+    private func performRefreshProbes(devices: [HiDockPairedDevice], restartTriggerAfter: Bool) {
         syncBusy = true
         viewModel.syncStatus = "Refreshing..."
         viewModel.syncStatusLevel = .secondary
@@ -3803,8 +4010,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let group = DispatchGroup()
         var anyConnected = false
         var deviceErrors: [String: String] = [:]
+        let now = Date()
 
         for device in devices {
+            // Skip devices currently in hung-backoff — they just timed
+            // out at the USB level and a retry is only going to hang
+            // again. Let the user press ↻ (which clears the backoff)
+            // once they've physically reseated the device.
+            if let until = syncDeviceHungUntil[device.deviceId], until > now {
+                log("Refresh: skipping \(device.cleanName) — hung-backoff active for \(Int(until.timeIntervalSince(now)))s more")
+                if syncDeviceConnected[device.deviceId] == true { anyConnected = true }
+                continue
+            }
             group.enter()
 
             // Choose extractor command based on device type
@@ -3825,12 +4042,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 case .success(let data):
                     do {
                         let payload = try JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data)
-                        self.renderSyncStatus(payload, device: device)
-                        if payload.connected {
+                        // Extractor can return a JSON payload with
+                        // connected:false and an error like "device held
+                        // by Python (pid X)" when it races its own
+                        // previous subprocess teardown, or "held by
+                        // ffmpeg" when the mic trigger has the interface.
+                        // Either way, that's a transient false-negative —
+                        // don't clobber a previously-good state. Skip the
+                        // render entirely so storage/recordings/connected
+                        // all stay intact.
+                        let transientHeldBy = !payload.connected
+                            && device.deviceType == .hidock
+                            && (payload.error?.contains("held by") ?? false)
+                            && self.syncDeviceConnected[device.deviceId] == true
+                        if transientHeldBy {
+                            self.log("Ignoring transient 'held by' for \(device.cleanName): \(payload.error ?? "") — keeping last-known Connected state")
                             anyConnected = true
-                        } else if let err = payload.error {
-                            self.log("Sync: \(device.cleanName) not connected: \(err)")
-                            deviceErrors[device.cleanName] = err
+                        } else {
+                            self.renderSyncStatus(payload, device: device)
+                            if payload.connected {
+                                anyConnected = true
+                            } else if let err = payload.error {
+                                self.log("Sync: \(device.cleanName) not connected: \(err)")
+                                deviceErrors[device.cleanName] = err
+                            }
                         }
                     } catch {
                         self.log("Sync decode failure for \(device.cleanName): \(error.localizedDescription)")
@@ -3841,14 +4076,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     let shortDesc = desc.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? desc
                     self.log("Sync status error for \(device.cleanName): \(shortDesc)")
                     deviceErrors[device.cleanName] = shortDesc
-                    // Surface per-device unreachability in the storage
-                    // summary so the UI tells the user why their latest
-                    // recordings aren't showing.
-                    self.syncDeviceLastError[device.deviceId] = (shortDesc, Date())
-                    // A failed status query means the device isn't usable
-                    // right now, even if the last successful query said
-                    // 'connected'. Flip the flag so the UI doesn't lie.
-                    self.syncDeviceConnected[device.deviceId] = false
+                    // Only flip the card to Unreachable if the failure
+                    // genuinely means the device is gone. For HiDocks we
+                    // have a known false-positive: while the mic trigger's
+                    // ffmpeg is holding the USB audio interface, a status
+                    // query will either time out or return "held by". The
+                    // device is fine — the query just can't get through.
+                    // Don't clobber a previously-good state in that case;
+                    // the card keeps its last-known "Connected" look until
+                    // a real Refresh (which pauses ffmpeg) can re-probe.
+                    let triggerHoldingHiDock = device.deviceType == .hidock && self.process != nil
+                    if triggerHoldingHiDock && self.syncDeviceConnected[device.deviceId] == true {
+                        self.log("Keeping \(device.cleanName) as Connected — ffmpeg is holding the interface, query failure is expected")
+                    } else {
+                        self.syncDeviceLastError[device.deviceId] = (shortDesc, Date())
+                        self.syncDeviceConnected[device.deviceId] = false
+                    }
                 }
                 group.leave()
             }
@@ -3859,12 +4102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.syncBusy = false
             self.stopSyncRefreshTimer()
             if anyConnected {
-                let connectedNames = self.syncPairedDevices
-                    .filter { self.syncDeviceConnected[$0.deviceId] == true }
-                    .map { "\(hidockDeviceEmoji($0.shortName, deviceType: $0.deviceType)) \($0.shortName)" }
-                let deviceList = connectedNames.joined(separator: " · ")
-                self.viewModel.syncStatus = "Connected — \(deviceList)"
-                self.viewModel.syncStatusLevel = .success
+                // Per-device connection state lives on the device cards
+                // now, so the global status line no longer needs to
+                // duplicate it with "Connected — 🔊 P1 · 🎙 H1". Keep the
+                // row available for pipeline messages (transcribing /
+                // downloading / errors) by clearing it here on success.
+                self.viewModel.syncStatus = ""
+                self.viewModel.syncStatusLevel = .normal
             } else if !deviceErrors.isEmpty {
                 let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
                     ?? deviceErrors.values.first ?? "unknown"
@@ -3875,6 +4119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.updateMenuSyncStatus(connected: anyConnected)
             self.refreshTranscriptionState()
             self.syncViewModelState()
+            if restartTriggerAfter {
+                self.log("refreshSyncStatus: restarting mic trigger")
+                self.startTrigger()
+            }
         }
     }
 

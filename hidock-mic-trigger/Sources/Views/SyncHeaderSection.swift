@@ -28,20 +28,28 @@ struct SyncHeaderSection: View {
             DeviceStripView(viewModel: viewModel)
 
             // Generic pipeline-status line: transcription progress, skip
-            // confirmations, auto-flow messages. Per-device state has
-            // moved into the cards above — this row is now just for
-            // global pipeline activity.
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
-                Text(viewModel.syncStatus)
-                    .font(.caption)
-                    .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
-                Spacer()
-                Text(viewModel.syncSummary)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            // confirmations, auto-flow messages. Per-device connection
+            // state lives on the cards above, so this row is hidden when
+            // there's no pipeline message to surface — prevents the
+            // redundant "Connected — 🔊 P1" line showing the same thing
+            // as the cards.
+            if !viewModel.syncStatus.isEmpty || !viewModel.syncSummary.isEmpty {
+                HStack(spacing: 6) {
+                    if !viewModel.syncStatus.isEmpty {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 8, height: 8)
+                        Text(viewModel.syncStatus)
+                            .font(.caption)
+                            .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
+                    }
+                    Spacer()
+                    if !viewModel.syncSummary.isEmpty {
+                        Text(viewModel.syncSummary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
 
             // Download actions stay in the header until the Process split

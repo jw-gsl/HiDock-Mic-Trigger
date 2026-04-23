@@ -3,7 +3,7 @@
 Cross-platform feature tracking for macOS (Swift/AppKit) and Windows (Python/PyQt6).
 **Update this file whenever a feature is added, changed, or removed on either platform.**
 
-Last reviewed: 2026-04-21
+Last reviewed: 2026-04-22
 
 ## How to use this file
 
@@ -41,7 +41,7 @@ Last reviewed: 2026-04-21
 | Connection status badge | "Connected" badge | "Connected" badge | Both | |
 | Device type badge | Type label | Type label | Both | |
 | Forget device button | Per-device button | Per-device button | Both | |
-| Device icons | SF Symbols + P1/H1 glyph SVGs + H1 for H1e | Unicode emoji + P1/H1 glyph SVGs + H1 for H1e | Both | Bespoke glyphs from `assets/device-images/`, emoji/SF Symbol fallback for unknown SKUs and volumes |
+| Device icons | Product-photo PNGs (`DeviceRecording*`) for H1/H1E/P1; Finder icon via `NSWorkspace` for mounted volumes | Unicode emoji + P1/H1 glyph SVGs + H1 for H1e | macOS ahead | macOS switched 2026-04-22 from monochrome SVG glyphs (template-rendered) to colour product-photo PNGs because they visually differentiate H1 vs H1E vs P1 at a glance. Windows port still on shared SVG — follow-up to port behaviour |
 | Connected badge icon | `DeviceGlyphConnected` asset | `connected_glyph.svg` via QPixmap | Both | Small green tick + "Connected" text |
 
 ## Recording Table
@@ -180,6 +180,22 @@ Last reviewed: 2026-04-21
 | Update on quit | Script at shutdown | Update process | Both | |
 
 ---
+
+## Sync Header — Device Cards (Phase 1 + Phase 2)
+
+| Feature | macOS | Windows | Status | Notes |
+|---------|-------|---------|--------|-------|
+| Per-device card (state chip + storage + reconnect + filter) | `DeviceCardView.swift` | — | macOS only | Phase 1 shipped 2026-04-21; Windows still has scattered status/storage/filter rows |
+| Adaptive grid (2+ cards side-by-side) | `LazyVGrid` in `DeviceStripView` | — | macOS only | 2026-04-22 |
+| Hide disconnected volumes from card strip | Filter in `DeviceStripView.visibleDevices` | — | macOS only | 2026-04-22 |
+| Imported files virtual card | Removed 2026-04-22 — not rendered | — | Removed on macOS | Imports remain accessible via File menu + table filter |
+| H1/H1E/P1 distinct device artwork | Product-photo PNGs per SKU | H1 asset shared with H1E | macOS ahead | 2026-04-22 |
+| Launch order: probe first, then start trigger | `applicationDidFinishLaunching` → `autoConnectSyncIfPaired(startTriggerOnCompletion:)` | — | macOS only | 2026-04-22 (second pass) — probes run while no ffmpeg holds the device, then trigger starts. Avoids the USB race that used to stall the H1 |
+| Auto-refresh / auto-connect skip HiDocks while trigger is active | `refreshSyncStatus` + `autoConnectSyncIfPaired` filter out HiDocks when `process != nil` | — | macOS only | 2026-04-22 (second pass) — trigger is never stopped for background refreshes. Volumes always probe. Manual Reconnect (↻) is the only path that pauses the trigger, and only for that one device |
+| Preserve transcribed state across refresh rebuild | `renderSyncStatus` carries forward `transcribed` / `transcriptPath` / `speakersTagged` / `summaryPath` from old entries when rebuilding | — | macOS only | 2026-04-22 — prevents the Transcribed column flickering empty between `renderSyncStatus` and `refreshTranscriptionState` |
+| Hung-device backoff | `syncDeviceHungUntil` + 180s suppression from auto-probes; cleared by manual ↻ or successful status | — | macOS only | 2026-04-22 |
+| Timeout escalation suggests unplug/replug | `runExtractor` timeout path (catches both `.uncaughtSignal` and `.exit`) | — | macOS only | 2026-04-22 |
+| Extractor: conditional USB reset | `prepare_device` claims first; only calls `dev.reset()` if claim fails | `usb-extractor/extractor.py` | macOS (via shared extractor); Windows uses same extractor via `Windows-Script` | 2026-04-22 — root-cause fix: removes the bus reset we used to send on every status query, which was wedging the H1 when ffmpeg held the audio interface |
 
 ## Known Intentional Differences
 
