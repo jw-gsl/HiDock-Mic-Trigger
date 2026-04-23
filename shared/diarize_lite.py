@@ -579,14 +579,29 @@ def _assign_speakers_to_whisper_segments(
     else:
         full_labels = speaker_labels
 
-    # Now assign whisper segments by overlap
+    # Assign whisper segments to VAD speech segments.
+    #
+    # First try max-overlap. When a whisper segment falls in a gap
+    # between VAD segments (music, silence, non-speech, Whisper
+    # hallucinating during a quiet moment) there is NO overlap with
+    # any VAD segment — previously `best_speaker` stayed hardcoded at
+    # 0, which meant every orphan whisper segment silently defaulted
+    # to Speaker 0. Over a long call with normal non-speech gaps
+    # that's hundreds of segments leaking onto Speaker 0 and producing
+    # extreme 95/5-style skews in the final distribution.
+    #
+    # New behaviour: if no overlap, fall back to the nearest-by-midpoint
+    # VAD segment's speaker. That's a better guess than "speaker 0"
+    # because it assumes the speaker didn't change during a brief
+    # silence — which is what conversational audio usually looks like.
     result = []
     for ws in whisper_segments:
         ws_start = ws["start"]
         ws_end = ws["end"]
         best_overlap = 0.0
-        best_speaker = 0
+        best_speaker: int | None = None
 
+        # Pass 1: max overlap
         for idx, (ss_start, ss_end) in enumerate(speech_segments):
             if idx >= len(full_labels):
                 break
@@ -595,7 +610,21 @@ def _assign_speakers_to_whisper_segments(
                 best_overlap = overlap
                 best_speaker = full_labels[idx]
 
-        result.append(best_speaker)
+        # Pass 2: no overlap — nearest VAD segment by midpoint distance
+        if best_speaker is None:
+            ws_mid = (ws_start + ws_end) / 2.0
+            best_dist = float("inf")
+            for idx, (ss_start, ss_end) in enumerate(speech_segments):
+                if idx >= len(full_labels):
+                    break
+                ss_mid = (ss_start + ss_end) / 2.0
+                d = abs(ws_mid - ss_mid)
+                if d < best_dist:
+                    best_dist = d
+                    best_speaker = full_labels[idx]
+
+        # Absolute fallback (e.g. no VAD segments at all)
+        result.append(best_speaker if best_speaker is not None else 0)
     return result
 
 
