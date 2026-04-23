@@ -692,6 +692,15 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
     dev.write(OUT_ENDPOINT, req_b, timeout=timeout_ms)
     second_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=3.0)
 
+    # After request #2 the firmware still has a continuation queued
+    # (same mechanism that let #2 release #1's queue). Give the
+    # firmware ~300ms to settle, then drain anything left in the USB
+    # endpoint buffer so the NEXT command (e.g. CMD_TRANSFER for a
+    # download) doesn't read stale QUERY_FILE_LIST bytes instead of
+    # its own response and time out.
+    time.sleep(0.3)
+    drain_input(dev, timeout_ms=200)
+
     collected = first_batch + second_batch
 
     if not collected:
