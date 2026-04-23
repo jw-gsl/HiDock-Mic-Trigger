@@ -90,14 +90,9 @@ func hidockSKU(for shortName: String, deviceType: DeviceType = .hidock) -> HiDoc
     return nil
 }
 
-/// Returns an asset-catalog image for a HiDock SKU, or nil for generic volumes.
-/// The `DeviceRecording*` assets are product photos of the hardware (the name
-/// is historical — they're not recording-state artwork). We use them for all
-/// states because they're richer than the flat monochrome SVG `DeviceGlyph*`
-/// assets and they visually differentiate H1 / H1E / P1. Recording state is
-/// surfaced by the red card chip, so we don't swap artwork for it.
-/// The `recording` parameter is retained for call-site compatibility but is
-/// currently ignored.
+/// Returns the rich product-photo asset for a HiDock SKU, or nil for
+/// generic volumes. Use in the big device cards at the top of the sync
+/// window — H1/H1E/P1 are visually distinct at 44pt.
 func hidockDeviceImage(_ shortName: String, deviceType: DeviceType = .hidock, recording: Bool = false) -> Image? {
     _ = recording
     guard let sku = hidockSKU(for: shortName, deviceType: deviceType) else { return nil }
@@ -105,6 +100,19 @@ func hidockDeviceImage(_ shortName: String, deviceType: DeviceType = .hidock, re
     case .p1:  return Image("DeviceRecordingP1")
     case .h1:  return Image("DeviceRecordingH1")
     case .h1e: return Image("DeviceRecordingH1e")
+    }
+}
+
+/// Returns the flat line-glyph asset (template-rendered SVG) for a
+/// HiDock SKU. Use in compact contexts like table rows where the
+/// detailed product photo is too busy — a 16pt glyph reads cleanly
+/// as a visual cue beside the device name. Falls back to the H1
+/// glyph for H1E because there isn't a dedicated asset yet.
+func hidockDeviceGlyph(_ shortName: String, deviceType: DeviceType = .hidock) -> Image? {
+    guard let sku = hidockSKU(for: shortName, deviceType: deviceType) else { return nil }
+    switch sku {
+    case .p1:       return Image("DeviceGlyphP1")
+    case .h1, .h1e: return Image("DeviceGlyphH1")
     }
 }
 

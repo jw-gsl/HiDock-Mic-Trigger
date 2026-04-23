@@ -107,22 +107,18 @@ struct RecordingsTableView: View {
             .labelsHidden()
             .frame(width: 36)
 
-            // Device + expand arrow — with small product-photo glyph
-            // so H1/P1/H1E are visually distinct at a glance.
+            // Device + expand arrow — line glyph to the right of the
+            // name so rows column-align.
             HStack(spacing: 6) {
-                if let img = hidockDeviceImage(deviceName, deviceType: .hidock) {
-                    img
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 20, height: 20)
-                } else {
-                    Image(systemName: "externaldrive")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .frame(width: 20, height: 20)
-                }
                 Text(deviceName)
                     .lineLimit(1)
+                if let glyph = hidockDeviceGlyph(deviceName, deviceType: .hidock) {
+                    glyph
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                        .foregroundColor(.secondary)
+                }
                 Button {
                     viewModel.onToggleMergeExpand(group.id)
                 } label: {
@@ -262,23 +258,25 @@ struct RecordingsTableView: View {
             .frame(width: indented ? 24 : 36)
 
             HStack(spacing: 6) {
-                // Small device photo (H1/H1E/P1 product shots) before
-                // the text, so H1 and P1 are distinguishable at a glance
-                // — the names are only one character apart. Falls back
-                // to an SF Symbol for generic volumes / unknown SKUs.
-                if let img = hidockDeviceImage(entry.deviceName, deviceType: .hidock) {
-                    img
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 20, height: 20)
-                } else {
-                    Image(systemName: hidockDeviceIcon(entry.deviceName, deviceType: entry.deviceId.hasPrefix("volume:") ? .volume : .hidock))
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .frame(width: 20, height: 20)
-                }
+                // Line-glyph (flat SVG, monochrome) for a compact visual
+                // cue beside the device name — the product-photo assets
+                // live on the big cards at the top; in the table they'd
+                // be too busy. Glyph goes AFTER the name so the text
+                // column-aligns between rows.
                 Text(entry.deviceName)
                     .lineLimit(1)
+                if let glyph = hidockDeviceGlyph(entry.deviceName, deviceType: .hidock) {
+                    glyph
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                        .foregroundColor(.secondary)
+                } else {
+                    Image(systemName: hidockDeviceIcon(entry.deviceName, deviceType: entry.deviceId.hasPrefix("volume:") ? .volume : .hidock))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(width: 16, height: 16)
+                }
             }
             .frame(width: 120, alignment: .leading)
 

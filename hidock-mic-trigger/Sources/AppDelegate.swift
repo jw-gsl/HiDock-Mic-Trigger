@@ -70,6 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var transcriptionBusy = false
     private var transcriptionCancelled = false
     private var transcriptionPaused = false
+    /// The currently-running `transcribe.py` subprocess, if any. Held
+    /// so `cancelTranscription()` can actually terminate it — without
+    /// this reference the local variable in runTranscription's closure
+    /// was unreachable, and clicking Cancel only updated the UI while
+    /// the whisper/diarize/summarize pipeline kept burning CPU.
+    private var transcriptionSubprocess: Process?
     private var transcriptionCurrentFile: String? = nil
     private var transcriptionProgress: Int = 0
     private var transcriptionFileIndex: Int = 0
@@ -4958,6 +4964,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
+                DispatchQueue.main.async { self.transcriptionSubprocess = process }
                 NSLog("runTranscription: process started (pid %d)", process.processIdentifier)
 
                 let deadline = Date().addingTimeInterval(timeout)
@@ -4973,6 +4980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 } else {
                     NSLog("runTranscription: process exited with status %d", process.terminationStatus)
                 }
+                DispatchQueue.main.async { self.transcriptionSubprocess = nil }
 
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
@@ -5333,6 +5341,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("Transcription cancelled by user")
         transcriptionCancelled = true
         transcriptionPaused = false
+
+        // Actually kill the subprocess. Without this, the UI flipped
+        // to "cancelled" but whisper/diarize kept burning CPU and
+        // producing a transcript the user didn't want.
+        if let p = transcriptionSubprocess, p.isRunning {
+            log("Cancel: terminating transcription subprocess pid \(p.processIdentifier)")
+            p.terminate()
+            // Escalate to SIGKILL after a short grace period in case
+            // the Python pipeline is deep inside a non-interruptible
+            // call (MPS matmul, torch model load, etc.).
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) { [weak p] in
+                guard let p = p, p.isRunning else { return }
+                NSLog("Cancel: SIGKILL transcription pid %d (didn't respond to SIGTERM)", p.processIdentifier)
+                kill(p.processIdentifier, SIGKILL)
+            }
+        }
+        transcriptionSubprocess = nil
 
         // Stop the progress timer
         transcriptionProgressTimer?.invalidate()
