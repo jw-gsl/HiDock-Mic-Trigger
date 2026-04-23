@@ -72,6 +72,7 @@ MODEL_REGISTRY = {
         "required": True,
         "stage": "transcription",
         "stage_label": "Transcription (Speech → Text)",
+        "category": "pipeline",
         "backend_key": "whisper",
         "description": "OpenAI Whisper large-v3-turbo, 99 languages. Reliable and multilingual; slower than Parakeet on English-only meetings.",
     },
@@ -88,6 +89,7 @@ MODEL_REGISTRY = {
         "managed_externally": True,
         "stage": "transcription",
         "stage_label": "Transcription (Speech → Text)",
+        "category": "pipeline",
         "backend_key": "parakeet",
         "experimental": True,
         "description": "NVIDIA Parakeet TDT 0.6B v2 via MLX. English only, ~60× real-time on Apple Silicon. Tops the English ASR leaderboard. Attribution: CC-BY-4.0.",
@@ -100,8 +102,13 @@ MODEL_REGISTRY = {
         "required": False,
         "stage": "vad",
         "stage_label": "Voice Activity Detection",
+        "category": "supporting",
+        # Who consumes this stage — shown in the UI so the user knows
+        # why it's needed and when it becomes dead weight. If the user
+        # picks Sortformer for diarization, Silero becomes unused.
+        "used_by": "Built-in Lite diarizer (not used by Sortformer)",
         "backend_key": "silero",
-        "description": "Industry-leading voice activity detection. Identifies speech segments with high accuracy.",
+        "description": "Neural voice activity detection. Identifies speech segments with high accuracy.",
     },
     # Our current diarization pipeline (diarize_lite.py). Built-in means
     # it's always available with no download — the UI still lists it so
@@ -110,10 +117,12 @@ MODEL_REGISTRY = {
         "name": "Built-in Lite (Silero + TitaNet + clustering)",
         "stage": "diarization",
         "stage_label": "Speaker Diarization",
+        "category": "pipeline",
         "backend_key": "lite",
         "built_in": True,
         "size_mb": 0,   # no download — VAD + embedding models cover this
-        "description": "Our pipeline: Silero VAD finds speech, TitaNet embeds each segment, hierarchical clustering groups speakers. No extra download. Weaker on short, rapid speaker turns than Sortformer.",
+        "depends_on": "Silero VAD + TitaNet",
+        "description": "Three-stage pipeline that reuses the selected VAD (Silero) + Speaker Embeddings (TitaNet) backends. Hierarchical clustering groups speakers. No extra download. Weaker on short, rapid speaker turns than Sortformer.",
     },
     # NeMo Sortformer — end-to-end neural diarization. Requires the
     # `nemo-toolkit` Python package (~2 GB including torch deps) plus the
@@ -123,6 +132,7 @@ MODEL_REGISTRY = {
         "name": "NeMo Sortformer 4-speaker",
         "stage": "diarization",
         "stage_label": "Speaker Diarization",
+        "category": "pipeline",
         "backend_key": "sortformer",
         "nemo_model": True,
         "nemo_model_name": "nvidia/diar_sortformer_4spk-v1",
@@ -131,7 +141,8 @@ MODEL_REGISTRY = {
         # — budget ~2 GB total install footprint.
         "size_mb": 2000,
         "experimental": True,
-        "description": "State-of-the-art end-to-end neural diarization (CC-BY-4.0). Handles up to 4 speakers with much better per-turn accuracy than the lite pipeline. CPU-only on macOS (torch MPS doesn't support Sortformer's conv2d). Installing this also installs the NeMo toolkit (~2 GB).",
+        "depends_on": "Self-contained (no supporting models needed)",
+        "description": "State-of-the-art end-to-end neural diarization (CC-BY-4.0). Handles up to 4 speakers with much better per-turn accuracy than the lite pipeline. Includes its own VAD and speaker representation — does not use the Silero / TitaNet entries below. CPU-only on macOS. Installing also installs the NeMo toolkit (~2 GB).",
     },
     "speaker_embed": {
         "name": "TitaNet",
@@ -139,11 +150,23 @@ MODEL_REGISTRY = {
         "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx",
         "size_mb": 10,
         "required": False,
-        "stage": "voice_library",
-        "stage_label": "Voice Library (Known Speaker Matching)",
+        "stage": "embedding",
+        "stage_label": "Speaker Embeddings",
+        "category": "supporting",
+        "used_by": "Built-in Lite diarizer + Voice Library (not used by Sortformer)",
         "backend_key": "titanet",
-        "description": "Neural speaker embeddings trained on thousands of voices. Used to match speakers across recordings in the voice library.",
+        "description": "Neural speaker embeddings trained on thousands of voices. Turns a speech clip into a 192-dim vector used for clustering speakers within a meeting and matching them to a personal voice library across meetings.",
     },
+}
+
+# Pipeline-stage entries are the user's primary choices; supporting-stage
+# entries are infrastructure that a pipeline backend depends on.
+# Category drives top-level grouping in the Model Manager UI.
+_DEFAULT_CATEGORY_FOR_STAGE = {
+    "transcription": "pipeline",
+    "diarization": "pipeline",
+    "vad": "supporting",
+    "embedding": "supporting",
 }
 
 
@@ -356,6 +379,9 @@ def get_model_status() -> dict[str, dict]:
             "file_size_bytes": file_size,
             "stage": stage,
             "stage_label": info.get("stage_label", stage.capitalize()),
+            "category": info.get("category", _DEFAULT_CATEGORY_FOR_STAGE.get(stage, "pipeline")),
+            "used_by": info.get("used_by", ""),
+            "depends_on": info.get("depends_on", ""),
             "backend_key": info.get("backend_key", key),
             # Active = this entry's backend_key matches the persisted
             # selection for its stage. Makes the UI "ACTIVE" badge

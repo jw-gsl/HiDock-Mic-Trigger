@@ -9,11 +9,23 @@ struct ModelStatus: Identifiable {
     var installed: Bool
     var downloading: Bool = false
     var progress: Double = 0  // 0..1
-    /// Pipeline stage key: "transcription", "vad", "diarization",
-    /// "voice_library", or "other".
+    /// Pipeline stage key: "transcription", "diarization", "vad",
+    /// "embedding", or "other".
     var stage: String = "other"
     /// User-facing stage section header: "Transcription (Speech → Text)" etc.
     var stageLabel: String = ""
+    /// "pipeline" = user's primary choice (Transcription, Diarization).
+    /// "supporting" = infrastructure backends pipeline stages depend on
+    /// (VAD, Speaker Embeddings). Drives top-level UI grouping.
+    var category: String = "pipeline"
+    /// Human copy for supporting models explaining which pipeline
+    /// stages consume them — e.g. "Built-in Lite diarizer (not used
+    /// by Sortformer)". Empty string on pipeline-stage rows.
+    var usedBy: String = ""
+    /// Human copy for pipeline-stage rows explaining which supporting
+    /// models they pull in — e.g. "Silero VAD + TitaNet" on the
+    /// Lite diarizer.
+    var dependsOn: String = ""
     /// Stable backend identifier within the stage — "whisper" / "parakeet"
     /// for transcription, "lite" / "sortformer" for diarization, etc.
     /// Used when the user picks a new active backend.
@@ -80,23 +92,30 @@ struct ModelManagerView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
-                        ForEach(stageOrder, id: \.self) { stage in
-                            if let entries = stageGroups[stage], !entries.isEmpty {
-                                stageSection(stage: stage, entries: entries)
-                            }
-                        }
+                        categoryBlock(
+                            title: "Pipeline Stages",
+                            subtitle: "Your primary choices — what transforms audio into diarized transcripts.",
+                            stages: pipelineStageOrder
+                        )
+                        categoryBlock(
+                            title: "Supporting Models",
+                            subtitle: "Infrastructure consumed by one or more pipeline backends. Each stage is also pick-one so alternatives can land later.",
+                            stages: supportingStageOrder
+                        )
                     }
                     .padding(.vertical, 8)
                 }
             }
         }
-        .frame(minWidth: 540, minHeight: 360)
+        .frame(minWidth: 540, minHeight: 420)
     }
 
-    /// Stages rendered in a deliberate order — Transcription first
-    /// because it's the most user-visible choice, then Diarization,
-    /// then the infrastructure bits (VAD, Voice Library).
-    private let stageOrder = ["transcription", "diarization", "vad", "voice_library", "other"]
+    /// Top-level categorisation. Pipeline stages are the user's direct
+    /// backend choices; supporting stages hold infrastructure models
+    /// that those backends depend on. Each category renders as a
+    /// bold section header with a one-line explainer.
+    private let pipelineStageOrder = ["transcription", "diarization"]
+    private let supportingStageOrder = ["vad", "embedding"]
 
     /// Group model statuses by stage, keeping active entries first so
     /// the current selection is always at the top of each section.
@@ -113,6 +132,33 @@ struct ModelManagerView: View {
             }
         }
         return groups
+    }
+
+    @ViewBuilder
+    private func categoryBlock(title: String, subtitle: String, stages: [String]) -> some View {
+        let blockStages = stages.filter { (stageGroups[$0]?.isEmpty == false) }
+        if !blockStages.isEmpty {
+            HStack {
+                Text(title)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 4)
+            Divider()
+                .padding(.horizontal, 16)
+            ForEach(blockStages, id: \.self) { stage in
+                if let entries = stageGroups[stage] {
+                    stageSection(stage: stage, entries: entries)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -238,6 +284,20 @@ struct ModelRowView: View {
                 Text(status.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                // Make the stage-relationship explicit so the user can
+                // see why a supporting model exists or which support
+                // a pipeline backend needs.
+                if !status.dependsOn.isEmpty {
+                    Text("Uses: \(status.dependsOn)")
+                        .font(.caption2.italic())
+                        .foregroundColor(.secondary.opacity(0.85))
+                }
+                if !status.usedBy.isEmpty {
+                    Text("Used by: \(status.usedBy)")
+                        .font(.caption2.italic())
+                        .foregroundColor(.secondary.opacity(0.85))
+                }
 
                 if status.downloading {
                     ProgressView(value: status.progress)
