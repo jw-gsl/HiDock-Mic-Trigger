@@ -26,18 +26,24 @@ def test_registry_has_all_keys():
 
 
 def test_registry_entries_have_required_fields():
-    # All models carry name/description/stage/backend_key. Downloadable
-    # models have filename+url+size_mb; built-in code-only diarizers
-    # skip those. NeMo-managed models have nemo_model_name instead of
-    # filename/url.
+    # All models carry name/description/stage/backend_key. Install
+    # flavours:
+    #   - built-in: no file, no pip package
+    #   - pip-installable: pip_package + pip_import_name
+    #     (NeMo Sortformer adds nemo_model_name for HF cache lookup)
+    #   - file-downloadable: filename + url + size_mb
     common = {"name", "description", "stage", "backend_key"}
     for key, info in MODEL_REGISTRY.items():
         missing = common - set(info.keys())
         assert not missing, f"Model '{key}' missing fields: {missing}"
         if info.get("built_in"):
-            continue  # no file or URL needed
-        if info.get("nemo_model"):
-            assert "nemo_model_name" in info, f"{key}: nemo_model set but nemo_model_name missing"
+            continue
+        if info.get("pip_package"):
+            assert info.get("pip_import_name"), (
+                f"{key}: pip_package set but pip_import_name missing (needed for install detection)"
+            )
+            if info.get("nemo_model"):
+                assert "nemo_model_name" in info, f"{key}: nemo_model set but nemo_model_name missing"
             continue
         # Downloadable file — needs filename, url, size_mb
         for f in ("filename", "url", "size_mb"):
@@ -96,10 +102,13 @@ def test_get_model_status_not_installed():
 
 def test_model_paths_resolve_to_models_dir():
     for key, info in MODEL_REGISTRY.items():
-        # Skip models managed by external caches (e.g. parakeet-mlx uses
-        # HuggingFace's hub cache, not our MODELS_DIR) and anything
-        # without a local file (built-in / NeMo-managed).
-        if info.get("managed_externally") or info.get("built_in") or info.get("nemo_model"):
+        # Skip anything that doesn't land in MODELS_DIR:
+        #   - managed_externally: parakeet-mlx via HF hub cache
+        #   - built_in: code-only, no file
+        #   - pip_package: installed by pip into the venv
+        if (info.get("managed_externally")
+                or info.get("built_in")
+                or info.get("pip_package")):
             continue
         expected = MODELS_DIR / info["filename"]
         assert expected.parent == MODELS_DIR

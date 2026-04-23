@@ -108,7 +108,33 @@ MODEL_REGISTRY = {
         # picks Sortformer for diarization, Silero becomes unused.
         "used_by": "Built-in Lite diarizer (not used by Sortformer)",
         "backend_key": "silero",
-        "description": "Neural voice activity detection. Identifies speech segments with high accuracy.",
+        "description": "Neural voice activity detection. Identifies speech segments with high accuracy. The Lite diarizer has been tuned around this model and its threshold.",
+    },
+    # TEN VAD — from the TEN Framework (agora-io). Smaller than Silero
+    # (~306 KB vs 2 MB) with reportedly sharper segment boundaries.
+    # Distributed as a pip package `ten-vad` with the ONNX model
+    # bundled inside. Added as an alternative so users can experiment;
+    # currently the Lite diarizer assumes Silero output characteristics,
+    # so swapping to TEN VAD needs a small pipeline tweak before
+    # recordings work end-to-end (tracked: plumb selected VAD backend
+    # into diarize_lite.detect_speech_segments).
+    "ten_vad": {
+        "name": "TEN VAD",
+        "stage": "vad",
+        "stage_label": "Voice Activity Detection",
+        "category": "supporting",
+        "used_by": "Built-in Lite diarizer (not used by Sortformer)",
+        "backend_key": "ten",
+        "nemo_model": False,
+        # Treated like a pip-installed dependency — no separate model
+        # download needed because the ONNX weights ship inside the
+        # package. Reuse the nemo_model install plumbing by setting
+        # pip_package; `installed` check reads nemo-style import.
+        "pip_package": "ten-vad",
+        "pip_import_name": "ten_vad",
+        "size_mb": 1,  # package ships 306 KB model + tiny Python wrapper
+        "experimental": True,
+        "description": "TEN Framework VAD (CC-BY-4.0 model weights). 306 KB bundled ONNX — much smaller than Silero. Reports sharper segment boundaries on fast speaker turns. Installs via `pip install ten-vad`.",
     },
     # Our current diarization pipeline (diarize_lite.py). Built-in means
     # it's always available with no download — the UI still lists it so
@@ -137,6 +163,7 @@ MODEL_REGISTRY = {
         "nemo_model": True,
         "nemo_model_name": "nvidia/diar_sortformer_4spk-v1",
         "pip_package": "nemo-toolkit",
+        "pip_import_name": "nemo",
         # Sortformer itself is ~250 MB; nemo-toolkit brings torch + deps
         # — budget ~2 GB total install footprint.
         "size_mb": 2000,
@@ -320,15 +347,19 @@ def set_active_backend(stage: str, backend_key: str) -> dict[str, str]:
     return backends
 
 
-def _nemo_toolkit_available() -> bool:
-    """Whether `nemo-toolkit` is importable right now.
+def _python_module_available(module_name: str) -> bool:
+    """Whether a Python module is importable in the current venv.
 
-    Used to tell the UI whether Sortformer is effectively installed.
-    Downloading the Sortformer model entry implies installing nemo.
+    Used as the 'installed' signal for pip-installable registry entries
+    like TEN VAD (`ten_vad`) and NeMo Sortformer (`nemo`). We don't
+    actually import the module (that can be slow and have side effects)
+    — `importlib.util.find_spec` is the cheap check.
     """
+    if not module_name:
+        return False
     try:
         import importlib.util
-        return importlib.util.find_spec("nemo") is not None
+        return importlib.util.find_spec(module_name) is not None
     except Exception:
         return False
 
@@ -348,18 +379,21 @@ def get_model_status() -> dict[str, dict]:
         stage = info.get("stage", "other")
         # Decide "installed" differently per flavour:
         #   - built-in: always True (no download)
-        #   - nemo-managed: need nemo-toolkit importable + model-name set
-        #     (we don't probe HuggingFace cache — NeMo handles that on use)
-        #   - regular (file + url): check MODELS_DIR
+        #   - pip-installable (pip_package + pip_import_name set): the
+        #     module is importable. Covers NeMo Sortformer (nemo import
+        #     + HF cache model) and TEN VAD (ten_vad import with bundled
+        #     ONNX weights).
+        #   - regular (file + url): check MODELS_DIR.
         if info.get("built_in"):
             installed = True
             file_size = 0
             filename = None
             url = None
-        elif info.get("nemo_model"):
-            installed = _nemo_toolkit_available()
+        elif info.get("pip_package"):
+            import_name = info.get("pip_import_name") or info.get("pip_package")
+            installed = _python_module_available(import_name)
             file_size = 0
-            filename = info.get("nemo_model_name")
+            filename = info.get("nemo_model_name") or info.get("pip_package")
             url = None
         else:
             filepath = MODELS_DIR / info["filename"]
@@ -447,10 +481,13 @@ def _cli():
             if info.get("built_in"):
                 print(json.dumps({"ok": True, "built_in": True}))
                 return
-            # NeMo-managed: pip install the toolkit (HuggingFace cache
-            # then fetches the model weights lazily on first use).
-            if info.get("nemo_model"):
-                pkg = info.get("pip_package", "nemo-toolkit")
+            # pip-installable entries (TEN VAD, NeMo Sortformer) install
+            # via `pip install <pkg>`. NeMo additionally relies on the
+            # HuggingFace cache to fetch its model weights lazily on
+            # first use; TEN VAD ships the ONNX bundled with the pip
+            # package. Either way, the install action is the same.
+            if info.get("pip_package"):
+                pkg = info["pip_package"]
                 print(f"Installing Python package: {pkg}", file=sys.stderr)
                 import subprocess
                 result = subprocess.run(
