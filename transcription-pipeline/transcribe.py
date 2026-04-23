@@ -153,54 +153,79 @@ def transcribe_file(
 
         total_stages = 5 if diarize else 4
         stage(1, total_stages, "Loading model")
-        # ASR backend selection — currently only Whisper is routed
-        # through this orchestrator, because the pre/post-processing
-        # wrapped around it (silence stripping before Whisper,
-        # whisper-guard filtering after) is Whisper-specific. If the
-        # user picks Parakeet as active we log a warning and fall back
-        # to Whisper until the pre/post pipeline is refactored to be
-        # backend-agnostic. Diarization + VAD dispatch IS live already.
+        # Decide ASR backend from pipeline_backends.json. Whisper keeps
+        # the Whisper-specific pre (silence stripping) + post
+        # (whisper-guard) passes. Parakeet bypasses both — its output
+        # doesn't hallucinate in the same way Whisper does on silence,
+        # so those passes would at best be no-ops and at worst mangle
+        # the output.
         try:
             from shared.pipeline_dispatch import active_pipeline
             _backends = active_pipeline()
-            if _backends.get("transcription") == "parakeet":
-                print(
-                    "NOTE: Parakeet is selected as active ASR backend but "
-                    "transcribe.py orchestration is still Whisper-only. "
-                    "Running Whisper for this call; see "
-                    "docs/PLAN-self-improving-pipeline-2026-04-23.md for "
-                    "the Parakeet wiring follow-up.",
-                    file=sys.stderr,
-                )
         except Exception:
-            pass
-        if model is None:
+            _backends = {"transcription": "whisper"}
+        asr_backend = _backends.get("transcription", "whisper")
+        print(f"Transcription backend: {asr_backend}", file=sys.stderr)
+
+        if asr_backend == "whisper" and model is None:
             model = load_whisper_model()
 
-        # Preprocess: strip long silence to prevent hallucination loops (from minutes)
+        # Preprocess: strip long silence to prevent Whisper hallucination
+        # loops. Skip for Parakeet — it doesn't suffer from the same
+        # failure mode and we don't want to introduce one by rewriting
+        # the audio.
         stage(2, total_stages, "Transcribing")
         transcribe_path = str(mp3_path)
-        try:
-            from shared.diarize_lite import _replace_silence_with_padding
-            from shared.audio_utils import load_audio
-            import soundfile as sf
-            import tempfile
-            raw_audio = load_audio(str(mp3_path), sr=16000)
-            processed = _replace_silence_with_padding(raw_audio, sr=16000)
-            if len(processed) < len(raw_audio) * 0.95:  # Only use if >5% was stripped
-                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                sf.write(tmp.name, processed, 16000)
-                transcribe_path = tmp.name
-                print(f"Silence stripped: {len(raw_audio)/16000:.0f}s → {len(processed)/16000:.0f}s", file=sys.stderr)
-        except Exception as e:
-            print(f"Silence stripping skipped: {e}", file=sys.stderr)
+        if asr_backend == "whisper":
+            try:
+                from shared.diarize_lite import _replace_silence_with_padding
+                from shared.audio_utils import load_audio
+                import soundfile as sf
+                import tempfile
+                raw_audio = load_audio(str(mp3_path), sr=16000)
+                processed = _replace_silence_with_padding(raw_audio, sr=16000)
+                if len(processed) < len(raw_audio) * 0.95:  # Only use if >5% was stripped
+                    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    sf.write(tmp.name, processed, 16000)
+                    transcribe_path = tmp.name
+                    print(f"Silence stripped: {len(raw_audio)/16000:.0f}s → {len(processed)/16000:.0f}s", file=sys.stderr)
+            except Exception as e:
+                print(f"Silence stripping skipped: {e}", file=sys.stderr)
 
         progress(15)
-        result = model.transcribe(
-            transcribe_path,
-            language=config.WHISPER_LANGUAGE,
-            verbose=False,
-        )
+        if asr_backend == "parakeet":
+            # Route through the dispatcher adapter. Result shape matches
+            # Whisper's: {"text", "segments": [{start, end, text}]}.
+            try:
+                from shared.pipeline_dispatch import transcribe_audio as dispatched_transcribe
+                result = dispatched_transcribe(transcribe_path, language=config.WHISPER_LANGUAGE)
+                # Track which model was actually used so the state file
+                # and the frontmatter reflect reality.
+                active_model_name = "parakeet-tdt-0.6b-v2"
+            except ModuleNotFoundError as e:
+                # Parakeet package isn't installed yet — fall back to
+                # Whisper so the user still gets output rather than a
+                # hard error.
+                print(
+                    f"Parakeet unavailable ({e}); falling back to Whisper. "
+                    "Install parakeet-mlx via the Model Manager to use it.",
+                    file=sys.stderr,
+                )
+                if model is None:
+                    model = load_whisper_model()
+                result = model.transcribe(
+                    transcribe_path,
+                    language=config.WHISPER_LANGUAGE,
+                    verbose=False,
+                )
+                active_model_name = config.WHISPER_MODEL
+        else:
+            result = model.transcribe(
+                transcribe_path,
+                language=config.WHISPER_LANGUAGE,
+                verbose=False,
+            )
+            active_model_name = config.WHISPER_MODEL
         progress(85)
 
         # Clean up temp file
@@ -212,9 +237,24 @@ def transcribe_file(
 
         text = result["text"].strip()
 
-        # Run anti-hallucination filtering
-        from shared.whisper_guard import clean_transcript
-        text, guard_stats = clean_transcript(text, language=config.WHISPER_LANGUAGE or "en")
+        # Whisper-specific post-processing — whisper-guard filters out
+        # the specific hallucination patterns Whisper produces ("Thank
+        # you for watching", repeated "you you you", etc.). Parakeet
+        # doesn't exhibit these and running the filter could strip
+        # real content, so skip it.
+        if asr_backend == "whisper":
+            from shared.whisper_guard import clean_transcript
+            text, guard_stats = clean_transcript(text, language=config.WHISPER_LANGUAGE or "en")
+        else:
+            # Stub stats object so downstream code that reads
+            # guard_stats doesn't crash. No filters triggered.
+            from types import SimpleNamespace
+            guard_stats = SimpleNamespace(
+                filters_triggered=[],
+                original_lines=0,
+                final_word_count=len(text.split()),
+                is_likely_hallucination=False,
+            )
         if guard_stats.filters_triggered:
             print(f"Whisper-Guard: filters triggered: {guard_stats.filters_triggered}", file=sys.stderr)
             _log(_ET("WHISPER_GUARD_FILTERED"), file_path=str(mp3_path),
@@ -279,12 +319,14 @@ def transcribe_file(
                      status="error", error=str(e))
 
         stage(total_stages, total_stages, "Writing output")
-        # Write transcript with frontmatter
+        # Write transcript with frontmatter — pass the actual ASR model
+        # used so the .md frontmatter and state.json reflect the real
+        # backend (Whisper or Parakeet), not always "whisper".
         write_transcript(
             transcript_path,
             text,
             source_path=mp3_path,
-            model=config.WHISPER_MODEL,
+            model=active_model_name,
             diarized_result=diarized_result,
             whisper_segments=result.get("segments", []),
             summary=summary,
@@ -349,13 +391,14 @@ def transcribe_file(
 
         duration_s = round(time.monotonic() - start_time, 1)
 
-        # Update state
+        # Update state — record the ACTUAL backend used, not the
+        # hardcoded Whisper model name, so state.json is accurate.
         state = load_state()
         state["transcriptions"][entry_key] = {
             "status": "completed",
             "source_path": str(mp3_path),
             "transcript_path": str(transcript_path),
-            "model": config.WHISPER_MODEL,
+            "model": active_model_name,
             "started_at": state["transcriptions"].get(entry_key, {}).get("started_at"),
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "duration_s": duration_s,
@@ -364,7 +407,7 @@ def transcribe_file(
         save_state(state)
 
         _log(_ET("TRANSCRIPTION_COMPLETED"), file_path=str(mp3_path),
-             duration_s=duration_s, metadata={"model": config.WHISPER_MODEL,
+             duration_s=duration_s, metadata={"model": active_model_name,
              "transcript_path": str(transcript_path), "summarized": summary is not None})
 
         # Run post-transcription hooks (non-fatal)

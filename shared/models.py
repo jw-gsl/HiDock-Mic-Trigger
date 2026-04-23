@@ -312,20 +312,45 @@ _DEFAULT_BACKENDS = {
     "transcription": "whisper",
     "diarization": "lite",
     "vad": "silero",
-    "voice_library": "titanet",
+    "embedding": "titanet",
+}
+
+# Stage renames — applied when loading a persisted config so old files
+# don't carry dead keys forever. Add an entry when renaming a stage.
+_STAGE_RENAMES = {
+    "voice_library": "embedding",
 }
 
 
 def load_pipeline_backends() -> dict[str, str]:
-    """Return the currently-selected backend for each stage. Falls back
-    to defaults for missing keys so new stages introduced in code don't
-    crash old config files."""
+    """Return the currently-selected backend for each stage.
+
+    Filters unknown keys and applies stage-rename migrations so the
+    returned dict only contains the set of stages our code actually
+    supports today — no stale drift from old configs.
+    """
     merged = dict(_DEFAULT_BACKENDS)
     if PIPELINE_BACKENDS_PATH.exists():
         try:
             persisted = json.loads(PIPELINE_BACKENDS_PATH.read_text())
             if isinstance(persisted, dict):
-                merged.update({k: v for k, v in persisted.items() if isinstance(v, str)})
+                known_stages = set(_DEFAULT_BACKENDS)
+                migrated: dict[str, str] = {}
+                for k, v in persisted.items():
+                    if not isinstance(v, str):
+                        continue
+                    # Rename old stage keys to current names.
+                    key = _STAGE_RENAMES.get(k, k)
+                    if key in known_stages:
+                        migrated[key] = v
+                merged.update(migrated)
+                # If the persisted file had dead keys or old names,
+                # rewrite it now so subsequent reads are clean.
+                if migrated != {k: v for k, v in persisted.items() if isinstance(v, str)}:
+                    try:
+                        save_pipeline_backends(merged)
+                    except Exception:
+                        pass
         except (json.JSONDecodeError, OSError):
             pass
     return merged

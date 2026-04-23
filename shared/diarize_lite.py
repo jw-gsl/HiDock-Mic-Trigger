@@ -247,10 +247,18 @@ def extract_speaker_embeddings(
         maps each embedding back to its segment index.
     """
     speaker_session = _load_speaker_embed_model()
+    # Log the active embedding backend (lets debug output reflect the
+    # user's Model Manager selection once we have alternatives to
+    # TitaNet; "titanet" is the only one today).
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _emb = active_pipeline().get("embedding", "titanet")
+    except Exception:
+        _emb = "titanet"
     if speaker_session is not None:
-        print("  Using neural speaker embeddings (TitaNet)", file=sys.stderr)
+        print(f"  Using neural speaker embeddings ({_emb})", file=sys.stderr)
     else:
-        print("  Using MFCC speaker embeddings (fallback)", file=sys.stderr)
+        print(f"  Using MFCC speaker embeddings (fallback from {_emb})", file=sys.stderr)
 
     chunks = segment_audio(audio, sr, segments)
     embeddings = []
@@ -770,7 +778,20 @@ def diarize(
 ) -> dict:
     """Run full diarization pipeline."""
     audio_path = Path(audio_path)
-    print(f"Diarizing {audio_path.name}...", file=sys.stderr)
+    # Log the live backend choices so debug output reflects what's
+    # actually running — important now that VAD + embedding can be
+    # swapped via the Model Manager.
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _b = active_pipeline()
+        print(
+            f"Diarizing {audio_path.name}... "
+            f"(backend=lite, vad={_b.get('vad', 'silero')}, "
+            f"embedding={_b.get('embedding', 'titanet')})",
+            file=sys.stderr,
+        )
+    except Exception:
+        print(f"Diarizing {audio_path.name}...", file=sys.stderr)
 
     whisper_segments = _filter_hallucinations(whisper_segments)
     print(f"  Whisper segments: {len(whisper_segments)}", file=sys.stderr)
@@ -800,7 +821,13 @@ def diarize(
         speech_segments = detect_speech_segments(audio_norm, sr=_VAD_SR)
     total_speech = sum(e - s for s, e in speech_segments)
     vad_per_min = len(speech_segments) / max(audio_duration / 60, 0.1)
-    print(f"  VAD pass 1: {len(speech_segments)} segs, {total_speech:.0f}s speech, {vad_per_min:.1f}/min", file=sys.stderr)
+    # Include which VAD backend ran so debug logs are self-describing.
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _vad_name = active_pipeline().get("vad", "silero")
+    except Exception:
+        _vad_name = "silero"
+    print(f"  VAD pass 1 ({_vad_name}): {len(speech_segments)} segs, {total_speech:.0f}s speech, {vad_per_min:.1f}/min", file=sys.stderr)
 
     # Step 3: Peak normalization retry if VAD still poor (minutes approach)
     if vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE and raw_peak < 0.5:
