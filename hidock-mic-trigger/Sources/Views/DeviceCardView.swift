@@ -33,11 +33,18 @@ struct DeviceCardView: View {
         lastError != nil
     }
 
-    /// The mic-trigger's ffmpeg currently holds a HiDock open. Today this
-    /// is device-agnostic (we don't know which HiDock). Only flag the card
-    /// as "Recording" for HiDocks — volumes can't be a trigger target.
+    /// The mic-trigger's ffmpeg currently holds a HiDock open.
+    /// Pinned to the specific device it's attached to via the CLI
+    /// output line "Using HiDock audio device: <name>". If we haven't
+    /// parsed a name yet (trigger just starting) we fall back to the
+    /// old device-agnostic flag so the chip still shows *somewhere*
+    /// rather than nowhere.
     private var recording: Bool {
-        viewModel.hidockRecordingActive && device.deviceType == .hidock
+        guard viewModel.hidockRecordingActive, device.deviceType == .hidock else { return false }
+        if let attached = viewModel.hidockRecordingDeviceName {
+            return device.cleanName.caseInsensitiveCompare(attached) == .orderedSame
+        }
+        return true
     }
 
     private var stats: HiDockStorageStats? {

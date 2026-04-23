@@ -15,6 +15,11 @@ final class HiDockViewModel: ObservableObject {
     /// USB data endpoint is unreachable while this is true, so data
     /// queries will fail until the stream stops.
     @Published var hidockRecordingActive: Bool = false
+    /// The CoreAudio device name ffmpeg is currently holding, e.g.
+    /// "HiDock H1" or "HiDock P1". Nil when nothing is being held.
+    /// Used by DeviceCardView to put the Recording chip on only the
+    /// specific HiDock being recorded, not every card.
+    @Published var hidockRecordingDeviceName: String? = nil
 
     // MARK: - Sync State
     @Published var syncStatus: String = "Not loaded"

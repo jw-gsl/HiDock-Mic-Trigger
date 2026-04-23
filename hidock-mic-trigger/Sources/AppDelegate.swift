@@ -631,6 +631,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func handleCLIOutput(_ text: String) {
         for line in text.components(separatedBy: .newlines) {
+            // Capture which HiDock audio device ffmpeg is attached to,
+            // so the Recording chip can appear on only the matching
+            // device card. MicTrigger prints this once on startup:
+            //   "Using HiDock audio device: HiDock H1"
+            if let range = line.range(of: "Using HiDock audio device: ") {
+                let name = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty {
+                    log("Trigger: recording device = '\(name)'")
+                    DispatchQueue.main.async {
+                        self.viewModel.hidockRecordingDeviceName = name
+                    }
+                }
+            }
             if line.contains("IN USE") && line.contains("holding HiDock") {
                 log("Trigger: USB mic in use, HiDock recording started")
                 postNotification(title: "HiDock Recording Started", body: "USB mic is in use — HiDock input held open.")
@@ -1400,6 +1413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.stopUptimeTimer()
                 // Trigger child gone → no ffmpeg → HiDock not being held.
                 self?.viewModel.hidockRecordingActive = false
+                self?.viewModel.hidockRecordingDeviceName = nil
                 self?.updateMenuState()
             }
         }
