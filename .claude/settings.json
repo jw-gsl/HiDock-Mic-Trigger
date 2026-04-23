@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r \".tool_input.command // \\\"\\\"\"); if echo \"$cmd\" | grep -qi xcodebuild; then echo \"Blocked: about to rebuild the HiDock Mac app, which will kill the running instance (and any in-flight downloads). Ask the user to confirm before running xcodebuild.\" >&2; exit 2; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
