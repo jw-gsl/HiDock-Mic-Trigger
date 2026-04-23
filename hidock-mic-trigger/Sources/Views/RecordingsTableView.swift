@@ -2,6 +2,14 @@ import SwiftUI
 
 struct RecordingsTableView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Track whether we've programmatically scrolled to the top for the
+    /// first non-empty row set. Without this, SwiftUI's List keeps a
+    /// stale scroll anchor from a prior render (common when the initial
+    /// paint-from-cache populate replaces entries with the live-probe
+    /// result a second later), leaving the user on row ~5 of 284 instead
+    /// of row 1. One-shot anchor — after the first jump we let the user
+    /// scroll freely.
+    @State private var didScrollToTop = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,19 +40,36 @@ struct RecordingsTableView: View {
             Divider()
 
             // Rows
-            List(viewModel.displayRows) { row in
-                switch row {
-                case .recording(let entry):
-                    recordingRow(entry: entry, indented: false)
-                        .contextMenu { entryContextMenu(entry: entry) }
-                case .mergeParent(let group):
-                    mergeParentRow(group: group)
-                case .mergeChild(let entry):
-                    recordingRow(entry: entry, indented: true)
-                        .contextMenu { entryContextMenu(entry: entry) }
+            ScrollViewReader { proxy in
+                List(viewModel.displayRows) { row in
+                    switch row {
+                    case .recording(let entry):
+                        recordingRow(entry: entry, indented: false)
+                            .contextMenu { entryContextMenu(entry: entry) }
+                            .id(row.id)
+                    case .mergeParent(let group):
+                        mergeParentRow(group: group)
+                            .id(row.id)
+                    case .mergeChild(let entry):
+                        recordingRow(entry: entry, indented: true)
+                            .contextMenu { entryContextMenu(entry: entry) }
+                            .id(row.id)
+                    }
+                }
+                .listStyle(.plain)
+                .onChange(of: viewModel.displayRows.count) { newCount in
+                    guard !didScrollToTop, newCount > 0,
+                          let firstId = viewModel.displayRows.first?.id else { return }
+                    didScrollToTop = true
+                    // Run on next tick so SwiftUI has laid out the rows
+                    // before we ask it to scroll.
+                    DispatchQueue.main.async {
+                        withAnimation(.none) {
+                            proxy.scrollTo(firstId, anchor: .top)
+                        }
+                    }
                 }
             }
-            .listStyle(.plain)
         }
         .overlay(
             RoundedRectangle(cornerRadius: 4)

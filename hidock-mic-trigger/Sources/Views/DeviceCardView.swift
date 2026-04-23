@@ -150,7 +150,22 @@ struct DeviceCardView: View {
         }
     }
 
-    /// One of three mutually-exclusive chips — precedence: Unreachable > Recording > Connected.
+    /// True if we've never heard back about this device (no success,
+    /// no failure) AND a refresh is currently running — the probe is
+    /// in flight. The chip transitions from Connecting → Connected /
+    /// Unreachable when the probe resolves. Distinguishes an
+    /// in-progress check from a device that's genuinely been declared
+    /// "Not connected" so a physically-plugged-in HiDock doesn't
+    /// briefly look absent during launch.
+    private var connecting: Bool {
+        guard device.deviceType == .hidock else { return false }
+        let hadSuccess = viewModel.syncDeviceLastOK[device.deviceId] != nil
+        let hadFailure = viewModel.syncDeviceLastError[device.deviceId] != nil
+        return !hadSuccess && !hadFailure && viewModel.syncBusy
+    }
+
+    /// One of four mutually-exclusive chips — precedence:
+    /// Unreachable > Recording > Connected > Connecting > Not connected.
     @ViewBuilder
     private var stateChip: some View {
         if unreachable {
@@ -168,6 +183,8 @@ struct DeviceCardView: View {
                  text: "Connected",
                  foreground: .green,
                  background: Color.green.opacity(0.12))
+        } else if connecting {
+            AnimatedConnectingChip()
         } else {
             chip(systemImage: "circle.slash",
                  text: "Not connected",
@@ -381,5 +398,30 @@ struct DeviceStripView: View {
                 DeviceCardView(viewModel: viewModel, device: device)
             }
         }
+    }
+}
+
+/// Small blue chip with a rotating `arrow.triangle.2.circlepath` icon
+/// shown while a HiDock probe is in flight. Distinguishes an
+/// in-progress connection check from a genuinely-not-connected device.
+private struct AnimatedConnectingChip: View {
+    @State private var spinning = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .animation(
+                    .linear(duration: 1.2).repeatForever(autoreverses: false),
+                    value: spinning
+                )
+            Text("Connecting…")
+        }
+        .font(.caption.weight(.medium))
+        .foregroundColor(.blue)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.blue.opacity(0.12), in: Capsule())
+        .onAppear { spinning = true }
     }
 }
