@@ -107,8 +107,20 @@ struct RecordingsTableView: View {
             .labelsHidden()
             .frame(width: 36)
 
-            // Device + expand arrow
-            HStack(spacing: 4) {
+            // Device + expand arrow — with small product-photo glyph
+            // so H1/P1/H1E are visually distinct at a glance.
+            HStack(spacing: 6) {
+                if let img = hidockDeviceImage(deviceName, deviceType: .hidock) {
+                    img
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 20, height: 20)
+                } else {
+                    Image(systemName: "externaldrive")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                }
                 Text(deviceName)
                     .lineLimit(1)
                 Button {
@@ -249,9 +261,26 @@ struct RecordingsTableView: View {
             .labelsHidden()
             .frame(width: indented ? 24 : 36)
 
-            Text(entry.deviceName)
-                .lineLimit(1)
-                .frame(width: 120, alignment: .leading)
+            HStack(spacing: 6) {
+                // Small device photo (H1/H1E/P1 product shots) before
+                // the text, so H1 and P1 are distinguishable at a glance
+                // — the names are only one character apart. Falls back
+                // to an SF Symbol for generic volumes / unknown SKUs.
+                if let img = hidockDeviceImage(entry.deviceName, deviceType: .hidock) {
+                    img
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 20, height: 20)
+                } else {
+                    Image(systemName: hidockDeviceIcon(entry.deviceName, deviceType: entry.deviceId.hasPrefix("volume:") ? .volume : .hidock))
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                }
+                Text(entry.deviceName)
+                    .lineLimit(1)
+            }
+            .frame(width: 120, alignment: .leading)
 
             StatusBadge(text: entry.statusText, level: entry.statusLevel)
                 .frame(width: 110, alignment: .leading)

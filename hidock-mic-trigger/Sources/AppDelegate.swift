@@ -1620,6 +1620,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.syncStatusLevel = .warning
             }
             self.updateMenuSyncStatus(connected: anyConnected)
+            // Populate transcribed/tagged state from the on-disk
+            // transcripts directory. Without this call the freshly-
+            // built syncEntries have transcribed=false / tagged=false,
+            // so the Status column can't reach "Transcribed" and the
+            // Tagged column is empty — even when the .md/.json files
+            // are right there on disk. performRefreshProbes calls it;
+            // the launch path (runAutoConnectProbes) was missing it.
+            self.refreshTranscriptionState()
             self.syncViewModelState()
             if restartTriggerAfter {
                 self.log("Auto-connect: restarting mic trigger")
@@ -3790,12 +3798,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncDeviceLastOK[device.deviceId] = Date()
             syncDeviceLastError.removeValue(forKey: device.deviceId)
             syncDeviceHungUntil.removeValue(forKey: device.deviceId)
-            if let stats = status.storage {
-                syncDeviceStorage[device.deviceId] = stats
-                let gb = Double(stats.totalBytesReturned) / 1_073_741_824
-                let caveat = stats.truncated ? " (firmware truncated list, actual usage higher)" : ""
-                log("Storage[\(device.shortName)]: \(stats.totalFiles) files, \(String(format: "%.2f", gb)) GB used\(caveat)")
-            }
+        }
+        if let stats = status.storage {
+            syncDeviceStorage[device.deviceId] = stats
+            let gb = Double(stats.totalBytesReturned) / 1_073_741_824
+            let caveat = stats.truncated ? " (firmware truncated list, actual usage higher)" : ""
+            log("Storage[\(device.shortName)]: \(stats.totalFiles) files, \(String(format: "%.2f", gb)) GB used\(caveat)")
+        }
+        // Always populate entries when the extractor returns recordings —
+        // whether connected:true (live device) or connected:false with
+        // cached recordings (extractor serves state.json's catalog when
+        // the device is unreachable). Only skip replacement when we
+        // genuinely got NOTHING back, so a one-off transient failure
+        // doesn't wipe the table.
+        if !status.recordings.isEmpty {
             // Preserve transcription state across the rebuild. Without
             // this, every refresh constructs fresh entries with
             // transcribed=false by default, and the Transcribed column
@@ -3825,13 +3841,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 ))
             }
         } else {
-            // connected:false — we've flipped the device flag, but don't
-            // wipe its entries or storage. The user still wants to see
-            // what was on the device last time we successfully queried.
-            // The card renders "Unreachable" on top of the last-known
-            // storage bar, and the table keeps the rows (they'll just
-            // show as not-downloadable until the device is back).
-            log("renderSyncStatus[\(device.shortName)]: connected=false, preserving last-known entries (\(syncEntries.filter { $0.deviceId == device.deviceId }.count) rows)")
+            log("renderSyncStatus[\(device.shortName)]: empty recordings (connected=\(status.connected)), preserving last-known \(syncEntries.filter { $0.deviceId == device.deviceId }.count) rows")
         }
         let importedAfter = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }.count
         log("renderSyncStatus[\(device.shortName)]: \(status.recordings.count) device recs, imported before/after = \(importedBefore)/\(importedAfter), total syncEntries=\(syncEntries.count)")
