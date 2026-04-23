@@ -215,18 +215,32 @@ struct HiDockSyncRecordingEntry: Identifiable {
         // Imported files come from outside the HiDock — don't label them as
         // "Downloaded" (semantically wrong and visually indistinguishable).
         if deviceId == "imported:local" { return "Imported" }
+        // Transcribed wins over every other status. A transcript only
+        // exists if the MP3 was downloaded locally and successfully
+        // processed, so "Downloaded" is the floor regardless of what
+        // the extractor's state.json or the transcription-skip list
+        // say. The Transcribed column surfaces the transcription
+        // itself; this column is about download state.
+        if transcribed { return "Downloaded" }
+        // Also: if the MP3 is physically present on disk right now,
+        // treat it as downloaded. The extractor's `downloaded` flag
+        // comes from state.json metadata, which can get out of sync
+        // with the filesystem. Filesystem wins.
+        if recording.localExists { return "Downloaded" }
         if recording.downloaded && !recording.localExists { return "Skipped" }
         if transcriptionSkipped { return "Skipped" }  // downloaded-but-won't-transcribe
-        if recording.downloaded && recording.localExists { return "Downloaded" }
+        if recording.downloaded { return "Downloaded" }
         if recording.lastError != nil { return "Failed" }
         return "On device"
     }
 
     var statusLevel: StatusLevel {
         if deviceId == "imported:local" { return .warning }  // orange — distinct from green Downloaded
-        if recording.downloaded && !recording.localExists { return .info }  // download-skipped
-        if transcriptionSkipped { return .info }                            // transcription-skipped
-        if recording.downloaded && recording.localExists { return .success }
+        if transcribed { return .success }                                   // transcribed ⇒ downloaded ⇒ green
+        if recording.localExists { return .success }                         // local file present ⇒ downloaded
+        if recording.downloaded && !recording.localExists { return .info }   // download-skipped
+        if transcriptionSkipped { return .info }                             // transcription-skipped
+        if recording.downloaded { return .success }
         if recording.lastError != nil { return .error }
         return .secondary
     }
