@@ -33,7 +33,15 @@ struct SyncHeaderSection: View {
             // there's no pipeline message to surface — prevents the
             // redundant "Connected — 🔊 P1" line showing the same thing
             // as the cards.
-            if !viewModel.syncStatus.isEmpty || !viewModel.syncSummary.isEmpty {
+            //
+            // Hidden entirely when the TranscriptionProgressBar (top of
+            // MainWindowView) is already rendering a live
+            // "Transcribing N/M — p% · <stage>" line with its own
+            // progress bar and cancel button. Two places showing the
+            // same transcription status ended up racing each other;
+            // one well-designed indicator wins.
+            if !viewModel.transcriptionBusy
+                && (!viewModel.syncStatus.isEmpty || !viewModel.syncSummary.isEmpty) {
                 HStack(spacing: 6) {
                     if !viewModel.syncStatus.isEmpty {
                         Circle()

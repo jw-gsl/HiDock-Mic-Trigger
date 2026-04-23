@@ -5311,7 +5311,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
                 self.pendingTranscriptionQueue[idx].progress = pct
             }
-            self.viewModel.syncStatus = "\(label) (\(current)/\(stageTotal)) — \(filename) [\(position)/\(total)]"
+            // Publish the stage to transcriptionStatus so the bar at
+            // the top of the window shows "Transcribing N/M — p% ·
+            // Diarizing speakers 4/5". Previously this was written
+            // to syncStatus, which rendered in a separate dot row
+            // below the device cards — now hidden during transcription
+            // to avoid two live indicators.
+            self.viewModel.transcriptionStatus = "\(label) \(current)/\(stageTotal)"
             self.syncViewModelState()
         }) { [weak self] result in
             guard let self = self else { return }
@@ -5320,6 +5326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.transcriptionBusy = false
             self.transcriptionCurrentFile = nil
             self.transcriptionProgress = 0
+            self.viewModel.transcriptionStatus = ""
 
             if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
                 switch result {
@@ -5376,6 +5383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         transcriptionBusy = false
         transcriptionCurrentFile = nil
         transcriptionProgress = 0
+        viewModel.transcriptionStatus = ""
         viewModel.syncStatus = "Transcription cancelled"
         viewModel.syncStatusLevel = .warning
         syncViewModelState()

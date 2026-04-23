@@ -190,26 +190,35 @@ struct DownloadProgressBar: View {
 struct TranscriptionProgressBar: View {
     @ObservedObject var viewModel: HiDockViewModel
 
+    /// Build a single consolidated status string:
+    ///   "Transcribing 2/5 — 42% · Diarizing speakers 3/5"
+    /// Prefix shows file progress through the queue + overall percent.
+    /// Suffix (optional) shows the current pipeline stage when the
+    /// transcription script has reported one via a STAGE: line.
+    private var statusText: String {
+        let prefix: String
+        if viewModel.transcriptionFileCount > 1 {
+            prefix = "Transcribing \(viewModel.transcriptionFileIndex + 1)/\(viewModel.transcriptionFileCount) — \(viewModel.transcriptionProgress)%"
+        } else {
+            prefix = "Transcribing — \(viewModel.transcriptionProgress)%"
+        }
+        if !viewModel.transcriptionStatus.isEmpty {
+            return "\(prefix) · \(viewModel.transcriptionStatus)"
+        }
+        return prefix
+    }
+
     var body: some View {
         if viewModel.transcriptionBusy {
             HStack(spacing: 8) {
                 ProgressView(value: Double(viewModel.transcriptionProgress), total: 100)
                     .frame(width: 120)
 
-                if !viewModel.transcriptionStatus.isEmpty {
-                    Text(viewModel.transcriptionStatus)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                } else if viewModel.transcriptionFileCount > 1 {
-                    Text("Transcribing \(viewModel.transcriptionFileIndex + 1)/\(viewModel.transcriptionFileCount) — \(viewModel.transcriptionProgress)%")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Transcribing... \(viewModel.transcriptionProgress)%")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
                 Spacer()
 
