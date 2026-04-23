@@ -4565,13 +4565,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.syncCheckedRecordings.subtract(entries.map(\.recording.name))
                 self.refreshSyncStatus()
-                let paths = downloaded.map { d in
-                    entries.first(where: { $0.recording.outputName == d.filename.replacingOccurrences(of: ".hda", with: ".mp3") })?.recording.outputPath
-                        ?? "\(self.syncOutputFolder ?? "")/\(d.filename.replacingOccurrences(of: ".hda", with: ".mp3"))"
-                }
-                if !paths.isEmpty, self.syncAutoTranscribe, self.ensureTranscriptionReady() {
-                    self.enqueueTranscriptions(paths)
-                }
+                // Intentionally NOT chaining into auto-transcribe here.
+                // "Download Selected" is a manual action — the user
+                // picked specific files and clicked Download, not
+                // "Download and Transcribe". Auto-transcribe only
+                // applies to the auto-download path (see
+                // downloadNewFromDevices). If the user wants to
+                // transcribe the just-downloaded files, they can
+                // click Transcribe Selected.
             case .failure(let error):
                 if self.syncDownloadStopping {
                     self.syncDownloadStopping = false

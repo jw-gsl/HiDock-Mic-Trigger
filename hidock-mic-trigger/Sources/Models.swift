@@ -211,36 +211,32 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.transcriptionSkipped = transcriptionSkipped
     }
 
+    /// Cascading lifecycle: On device → Downloaded → Transcribed.
+    /// Each step implies the earlier ones (you can't transcribe a file
+    /// you haven't downloaded, you can't download one that isn't on the
+    /// device). The Tagged column is separate — that's about speaker
+    /// tagging on top of the transcription.
     var statusText: String {
-        // Imported files come from outside the HiDock — don't label them as
-        // "Downloaded" (semantically wrong and visually indistinguishable).
         if deviceId == "imported:local" { return "Imported" }
-        // Transcribed wins over every other status. A transcript only
-        // exists if the MP3 was downloaded locally and successfully
-        // processed, so "Downloaded" is the floor regardless of what
-        // the extractor's state.json or the transcription-skip list
-        // say. The Transcribed column surfaces the transcription
-        // itself; this column is about download state.
-        if transcribed { return "Downloaded" }
-        // Also: if the MP3 is physically present on disk right now,
-        // treat it as downloaded. The extractor's `downloaded` flag
-        // comes from state.json metadata, which can get out of sync
-        // with the filesystem. Filesystem wins.
+        if transcribed { return "Transcribed" }
+        // Filesystem wins over metadata: if the MP3 is on disk, it's
+        // downloaded regardless of what the extractor's state.json says.
         if recording.localExists { return "Downloaded" }
-        if recording.downloaded && !recording.localExists { return "Skipped" }
-        if transcriptionSkipped { return "Skipped" }  // downloaded-but-won't-transcribe
-        if recording.downloaded { return "Downloaded" }
+        // `downloaded == true` + `localExists == false` in the extractor
+        // state means the user marked it downloaded without ever pulling
+        // it (the old "Skip" flow to stop the device showing it).
+        if recording.downloaded { return "Skipped" }
+        if transcriptionSkipped { return "Skipped" }
         if recording.lastError != nil { return "Failed" }
         return "On device"
     }
 
     var statusLevel: StatusLevel {
-        if deviceId == "imported:local" { return .warning }  // orange — distinct from green Downloaded
-        if transcribed { return .success }                                   // transcribed ⇒ downloaded ⇒ green
-        if recording.localExists { return .success }                         // local file present ⇒ downloaded
-        if recording.downloaded && !recording.localExists { return .info }   // download-skipped
-        if transcriptionSkipped { return .info }                             // transcription-skipped
-        if recording.downloaded { return .success }
+        if deviceId == "imported:local" { return .warning }
+        if transcribed { return .success }
+        if recording.localExists { return .success }
+        if recording.downloaded { return .info }
+        if transcriptionSkipped { return .info }
         if recording.lastError != nil { return .error }
         return .secondary
     }

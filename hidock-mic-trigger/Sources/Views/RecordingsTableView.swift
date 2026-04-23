@@ -10,7 +10,12 @@ struct RecordingsTableView: View {
                 Text("").frame(width: 36) // checkbox
                 headerButton("Device", key: "device", width: 120)
                 headerButton("Status", key: "status", width: 110)
-                headerButton("Transcribed", key: nil, width: 90)
+                // Renamed from "Transcribed" — the icons in this column
+                // actually communicate speaker-tagging state (tagged ✓,
+                // needs tagging ⚠), not whether the file is transcribed.
+                // Transcribed is now part of the main Status cascade:
+                // On device → Downloaded → Transcribed.
+                headerButton("Tagged", key: nil, width: 90)
                 headerButton("Recording", key: "name", width: 220)
                 headerButton("Created", key: "created", width: 155)
                 headerButton("Length", key: "duration", width: 70)
