@@ -1506,15 +1506,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // ffmpeg so they're safe to probe either way. Manual
             // Reconnect (↻ on a card) still pauses the trigger —
             // that's explicit user intent.
-            let triggerRunning = self.process != nil
+            // Gate on hidockRecordingActive (ffmpeg currently streaming
+            // audio off the HiDock), NOT on process != nil (trigger
+            // child alive). The trigger child stays alive for the life
+            // of the app; ffmpeg only runs when the mic is actually in
+            // use. Checking process != nil would skip HiDock probes
+            // forever and break auto-download / auto-transcribe, which
+            // rely on refreshSyncStatus firing 8s after the mic goes
+            // idle to pick up new recordings.
+            let recording = self.viewModel.hidockRecordingActive
             let probeDevices = devices.filter { device in
                 if device.deviceType == .volume { return true }
-                if !triggerRunning { return true }
-                self.log("Auto-connect: skipping \(device.cleanName) — mic trigger is active, keeping last-known state")
+                if !recording { return true }
+                self.log("Auto-connect: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
                 return false
             }
             guard !probeDevices.isEmpty else {
-                self.log("Auto-connect: no devices to probe (trigger active, all HiDocks skipped)")
+                self.log("Auto-connect: no devices to probe (recording active, all HiDocks skipped)")
                 DispatchQueue.main.async {
                     self.syncViewModelState()
                     finishEarly()
@@ -3978,18 +3986,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
 
-        // Do NOT pause the mic trigger for refresh. The trigger is the
-        // primary purpose of the app — stopping it to do a background
-        // status refresh is a bad tradeoff. Instead, if the trigger is
-        // running, skip HiDock probes and keep last-known state. Volumes
-        // are on their own interface, safe to probe. Manual Reconnect
-        // (↻) remains the explicit "I want fresh state, please pause
-        // recording to get it" gesture.
-        let triggerRunning = process != nil
+        // Don't pause the mic trigger for refresh. If ffmpeg is
+        // actively holding the HiDock audio interface right now, skip
+        // HiDock probes (vendor-interface traffic during audio
+        // streaming has wedged H1 firmware in the past) and keep
+        // last-known state. Otherwise probe freely even if the trigger
+        // child process is alive — its mere existence doesn't block
+        // anything. Volumes are on a different interface; always safe.
+        // Manual Reconnect (↻) remains the explicit "I want fresh
+        // state" gesture.
+        let recording = viewModel.hidockRecordingActive
         let probeDevices = devices.filter { device in
             if device.deviceType == .volume { return true }
-            if !triggerRunning { return true }
-            log("Refresh: skipping \(device.cleanName) — mic trigger is active, keeping last-known state")
+            if !recording { return true }
+            log("Refresh: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
             return false
         }
         if probeDevices.isEmpty {
