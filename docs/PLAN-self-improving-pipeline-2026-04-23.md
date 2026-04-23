@@ -1,6 +1,6 @@
 # Self-improving pipeline — in-app model-research + PR-creation loop
 Research date: 2026-04-23
-Suggested by: Chris Laidler
+Suggested by: James Whiting
 Status: plan only — not implemented
 
 ## The idea
@@ -66,6 +66,51 @@ Clicking opens a terminal sheet (SwiftTerm is already embedded) with the Claude 
 
 A separate background scheduler (not this button) runs the same flow weekly on a cron — opt-in.
 
+## Evaluation — required for this to be trustworthy
+
+Chris flagged this: *"feel like this desperately needs evals."* Right. Without concrete numbers on our own recordings, every model swap proposed by the agent is just leaderboard vibes, and even the human reviewer has no objective basis for signing off. We need to measure the current pipeline AND any candidate against the same yardstick before adoption.
+
+**What we measure, per stage:**
+
+| Stage | Metric | Ground truth source |
+|---|---|---|
+| Transcription | WER (word error rate), CER, wall-clock seconds per minute of audio | User-corrected `.md` transcripts (already exist on disk for 227 meetings); word-level diffs |
+| Diarization | DER (diarization error rate), speaker confusion %, turn-run count vs. ground truth | User's speaker-tag corrections — *this is what James is already doing manually* |
+| VAD | precision / recall on speech vs non-speech frames, boundary latency | Derived from the diarization ground truth |
+| Summarization | ROUGE scores, manual 1-5 quality rating | Harder — skip automated eval for now; rely on user signal (accept/edit) |
+
+**Ground truth source — what we already have, free:**
+
+The "Tagged" column the user is filling in *is* ground truth. Every time James edits a speaker name on a diarized transcript, that's a signal: "the pipeline put Speaker 2 here; the real person is 'Arjun'." The `_diarized.json` files on disk carry both the pipeline's guess and, after human editing, the corrected labels.
+
+We can retroactively build an eval set from the 227 transcripts James has already touched — with no extra work required from him going forward beyond continuing to tag speakers as he does today.
+
+**Eval harness we need to build:**
+
+1. `shared/evals/runner.py` — walks `Raw Transcripts/*_diarized.json` looking for human-edited speaker labels, runs the current pipeline (or a candidate backend) against the source MP3, computes metrics.
+2. `shared/evals/metrics.py` — WER, DER, boundary F1 implementations. Well-trodden formulas; no need to invent.
+3. `docs/EVAL-baseline-*.md` — results file per backend combination, checked into the repo. Grows over time.
+4. `shared/evals/compare.py` — given two result files, emit a diff-style report for the PR body.
+
+**How this plugs into the self-improving flow:**
+
+Before the agent opens a PR proposing a new backend, it MUST:
+1. Run the eval harness against the baseline (current active backend).
+2. Install the candidate backend (`pip install`, model download).
+3. Run the eval harness against the candidate on the same recordings.
+4. Include the comparison table in the PR body:
+   - Overall WER / DER delta
+   - Per-meeting breakdown
+   - Wall-clock timing delta
+   - Size / dependency delta
+5. If the candidate is worse by any metric, flag it clearly; don't try to hide a regression behind a new feature.
+
+The human reviewer's sign-off decision is now "is a 0.3% WER improvement worth a 2 GB NeMo dependency and 3x runtime?" — answerable — rather than "does this sound better?" — unanswerable.
+
+**Secondary value:** same harness becomes the regression test for our own changes. We added the `_assign_speakers_to_whisper_segments` no-overlap-fallback fix today and validated on Rec53 by eyeball. With the eval harness we'd know the DER improvement as a number, and CI could catch future regressions automatically.
+
+**Scope note:** the eval harness is more work than the agent itself. The agent could ship without evals (it'd propose models, humans decide) but that's equivalent to what we already do manually. Evals are what make the automation actually valuable.
+
 ## Why the human stays in the loop
 
 Model selection for this app isn't a pure quality optimization:
@@ -79,20 +124,40 @@ These are judgement calls the human needs to make. The agent's job is to *surfac
 
 ## Implementation sketch (not yet started)
 
-**Phase 1 — Manual trigger:**
-- Add "Check for Updates" button to Model Manager.
-- On click, launch `claude-code` CLI in the existing SwiftTerm sheet, passing a brief prompt file + this repo's root as the working directory.
-- Brief file lives at `docs/AGENT-BRIEF-model-research.md` (separate from this plan) — tight, instructional, written for the agent's consumption not humans.
-- Agent sandboxing: run with read-only sandbox for the research phase; only the PR creation step needs write access.
+Two equal entry points for the same underlying agent flow — both
+shipped together; neither is "phase 1" of the other:
 
-**Phase 2 — Scheduled trigger:**
-- CronCreate-style scheduled trigger, opt-in, weekly cadence.
-- Same brief, same output — just fires without user intervention.
-- Results accumulate in GitHub PRs; user gets notified via their normal GitHub email/Slack.
+**1. Manual trigger — user-initiated.**
+- "Check for Updates" button in the Model Manager, top right of the
+  window (near the existing refresh arrow).
+- On click, launch `claude-code` CLI in the existing SwiftTerm sheet,
+  passing a brief prompt file + this repo's root as the working
+  directory.
+- Live terminal output so the user can watch the research, cancel
+  mid-research, or walk away and return to results.
 
-**Phase 3 — Feedback loop:**
-- When the user merges or closes a PR with a reason ("too slow", "license incompatible"), the agent reads the closure reason and learns which kinds of models are worth proposing next time.
-- Stored as a small `docs/AGENT-MEMORY-model-selection.md` that grows over time.
+**2. Scheduled trigger — automatic.**
+- Opt-in weekly cadence, set via a small toggle in the Model Manager
+  ("Check weekly for model updates").
+- Same brief, same output as the manual path — just fires without
+  user intervention.
+- Results land as GitHub PRs the user reviews on their normal
+  schedule (email/Slack notifications via existing GitHub plumbing).
+
+**Shared across both paths:**
+- Brief file at `docs/AGENT-BRIEF-model-research.md` — tight,
+  instructional, written for the agent's consumption not for humans.
+- Sandbox: read-only during the research phase; write access only
+  for the PR creation step.
+- Max-open-PRs-per-week cap in the brief so scheduled runs don't
+  flood the repo.
+
+**Feedback loop (cross-cuts both):**
+- When the user merges or closes a PR with a reason ("too slow",
+  "license incompatible"), the agent reads the closure reason and
+  learns which kinds of models are worth proposing next time.
+- Stored as a small `docs/AGENT-MEMORY-model-selection.md` that grows
+  over time.
 
 ## Open questions
 

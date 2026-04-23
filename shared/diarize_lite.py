@@ -786,8 +786,18 @@ def diarize(
     norm_rms = np.sqrt(np.mean(audio_norm ** 2))
     print(f"  Audio: {audio_duration:.1f}s, RMS {raw_rms:.4f}→{norm_rms:.4f}, peak {raw_peak:.3f}", file=sys.stderr)
 
-    # Step 2: Detect speech with normalized audio
-    speech_segments = detect_speech_segments(audio_norm, sr=_VAD_SR)
+    # Step 2: Detect speech with normalized audio. Route through the
+    # pipeline dispatcher so the user's VAD selection (Silero or TEN)
+    # is honoured — dispatcher falls back to Silero if the selected
+    # backend isn't installed.
+    try:
+        from shared.pipeline_dispatch import detect_speech_segments as dispatched_vad
+        speech_segments = dispatched_vad(audio_norm, sr=_VAD_SR)
+    except Exception:
+        # Safety net: if the dispatcher itself blows up, fall back to
+        # the in-tree Silero implementation so the diarizer can still
+        # complete.
+        speech_segments = detect_speech_segments(audio_norm, sr=_VAD_SR)
     total_speech = sum(e - s for s, e in speech_segments)
     vad_per_min = len(speech_segments) / max(audio_duration / 60, 0.1)
     print(f"  VAD pass 1: {len(speech_segments)} segs, {total_speech:.0f}s speech, {vad_per_min:.1f}/min", file=sys.stderr)

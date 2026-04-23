@@ -153,6 +153,27 @@ def transcribe_file(
 
         total_stages = 5 if diarize else 4
         stage(1, total_stages, "Loading model")
+        # ASR backend selection — currently only Whisper is routed
+        # through this orchestrator, because the pre/post-processing
+        # wrapped around it (silence stripping before Whisper,
+        # whisper-guard filtering after) is Whisper-specific. If the
+        # user picks Parakeet as active we log a warning and fall back
+        # to Whisper until the pre/post pipeline is refactored to be
+        # backend-agnostic. Diarization + VAD dispatch IS live already.
+        try:
+            from shared.pipeline_dispatch import active_pipeline
+            _backends = active_pipeline()
+            if _backends.get("transcription") == "parakeet":
+                print(
+                    "NOTE: Parakeet is selected as active ASR backend but "
+                    "transcribe.py orchestration is still Whisper-only. "
+                    "Running Whisper for this call; see "
+                    "docs/PLAN-self-improving-pipeline-2026-04-23.md for "
+                    "the Parakeet wiring follow-up.",
+                    file=sys.stderr,
+                )
+        except Exception:
+            pass
         if model is None:
             model = load_whisper_model()
 
@@ -216,18 +237,28 @@ def transcribe_file(
         except ImportError:
             pass
 
-        # Optionally run diarization
+        # Optionally run diarization. Route through the pipeline
+        # dispatcher so the user's active selection (lite or
+        # sortformer) is honoured. The dispatcher handles the
+        # fallback to lite if the selected backend is missing deps.
         diarized_result = None
         if diarize:
             stage(4, total_stages, "Diarizing speakers")
             try:
-                from shared.diarize_lite import diarize as run_diarize
+                from shared.pipeline_dispatch import diarize as run_diarize, active_pipeline
+                backends = active_pipeline()
+                print(f"Diarization backend: {backends.get('diarization', 'lite')}", file=sys.stderr)
                 diarized_result = run_diarize(
                     str(mp3_path), result.get("segments", []),
                     n_speakers=n_speakers,
                 )
+            except ModuleNotFoundError as e:
+                # Selected backend's pip package missing — keep going
+                # with the transcript even if diarization fails, so the
+                # user still gets something useful.
+                print(f"Diarization backend unavailable: {e}", file=sys.stderr)
             except ImportError:
-                print("diarize_lite module not available, skipping diarization", file=sys.stderr)
+                print("diarization dispatcher not available, skipping diarization", file=sys.stderr)
             except Exception as e:
                 print(f"Diarization failed: {e}", file=sys.stderr)
 

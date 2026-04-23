@@ -88,9 +88,11 @@ def test_get_model_status_not_installed():
         if info.get("built_in"):
             assert status["installed"] is True, f"{key}: built-in should always be installed"
             assert status["file_size_bytes"] == 0
-        elif info.get("nemo_model"):
-            # Skip — installed state depends on nemo-toolkit availability
-            # in the test venv, which is orthogonal to MODELS_DIR.
+        elif info.get("pip_package"):
+            # Pip-installable entries (NeMo Sortformer, TEN VAD): skip —
+            # installed state depends on whether the pip module is
+            # importable in the test venv, which is orthogonal to
+            # MODELS_DIR (the test is mocking MODELS_DIR only).
             continue
         else:
             assert status["installed"] is False, f"{key}: should be uninstalled"
