@@ -322,6 +322,10 @@ final class HiDockViewModel: ObservableObject {
     var onDownloadModelByKey: (String) -> Void = { _ in }
     var onDeleteModelByKey: (String) -> Void = { _ in }
     var onRefreshModelStatuses: () -> Void = {}
+    /// Set the given model as the active backend for its stage.
+    /// The registry entry's stage metadata determines what gets
+    /// persisted; only one model per stage can be active at a time.
+    var onSetActiveModelByKey: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
 
     // MARK: - Device Manager

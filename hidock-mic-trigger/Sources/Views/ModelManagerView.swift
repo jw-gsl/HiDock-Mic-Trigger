@@ -9,17 +9,27 @@ struct ModelStatus: Identifiable {
     var installed: Bool
     var downloading: Bool = false
     var progress: Double = 0  // 0..1
-    /// "transcription", "vad", "diarization", "other" — tells the user
-    /// what this model does.
-    var role: String = "other"
-    /// True if this model is the one actually used by the transcription
-    /// pipeline for its role. Used to show an "Active" badge so the
-    /// user can tell Whisper (live) apart from Parakeet (downloaded
-    /// but not yet routed to by default).
+    /// Pipeline stage key: "transcription", "vad", "diarization",
+    /// "voice_library", or "other".
+    var stage: String = "other"
+    /// User-facing stage section header: "Transcription (Speech → Text)" etc.
+    var stageLabel: String = ""
+    /// Stable backend identifier within the stage — "whisper" / "parakeet"
+    /// for transcription, "lite" / "sortformer" for diarization, etc.
+    /// Used when the user picks a new active backend.
+    var backendKey: String = ""
+    /// True if this entry is the currently-active backend for its stage.
+    /// Derived from pipeline_backends.json on the Python side.
     var active: Bool = false
-    /// True if the model is downloaded but the pipeline hasn't been
-    /// wired to use it yet (Parakeet is like this today).
+    /// True if this is a prototype that may not run end-to-end yet
+    /// (e.g. Parakeet until transcribe.py routes to it).
     var experimental: Bool = false
+    /// True if this entry is code-only (no file download, always
+    /// available) — e.g. the lite diarization pipeline.
+    var builtIn: Bool = false
+    /// True if this entry is installed via pip + uses HuggingFace's
+    /// cache rather than MODELS_DIR — e.g. Sortformer via nemo-toolkit.
+    var nemoModel: Bool = false
 }
 
 /// Format a model size in human-readable form — switches to GB once the
@@ -69,16 +79,10 @@ struct ModelManagerView: View {
                 }
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(sortedModelKeys, id: \.self) { key in
-                            if let status = viewModel.modelStatuses[key] {
-                                ModelRowView(
-                                    status: status,
-                                    onDownload: { viewModel.onDownloadModelByKey(key) },
-                                    onDelete: { viewModel.onDeleteModelByKey(key) }
-                                )
-                                Divider()
-                                    .padding(.horizontal, 16)
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                        ForEach(stageOrder, id: \.self) { stage in
+                            if let entries = stageGroups[stage], !entries.isEmpty {
+                                stageSection(stage: stage, entries: entries)
                             }
                         }
                     }
@@ -86,47 +90,119 @@ struct ModelManagerView: View {
                 }
             }
         }
-        .frame(minWidth: 480, minHeight: 300)
+        .frame(minWidth: 540, minHeight: 360)
     }
 
-    /// Sort models: required first, then alphabetically by name.
-    private var sortedModelKeys: [String] {
-        let keys = Array(viewModel.modelStatuses.keys)
-        return keys.sorted { a, b in
-            let sa = viewModel.modelStatuses[a]!
-            let sb = viewModel.modelStatuses[b]!
-            if sa.sizeMB != sb.sizeMB {
-                // Largest first (whisper at top)
-                return sa.sizeMB > sb.sizeMB
+    /// Stages rendered in a deliberate order — Transcription first
+    /// because it's the most user-visible choice, then Diarization,
+    /// then the infrastructure bits (VAD, Voice Library).
+    private let stageOrder = ["transcription", "diarization", "vad", "voice_library", "other"]
+
+    /// Group model statuses by stage, keeping active entries first so
+    /// the current selection is always at the top of each section.
+    private var stageGroups: [String: [ModelStatus]] {
+        var groups: [String: [ModelStatus]] = [:]
+        for status in viewModel.modelStatuses.values {
+            groups[status.stage, default: []].append(status)
+        }
+        for key in groups.keys {
+            groups[key]?.sort { a, b in
+                if a.active != b.active { return a.active }
+                if a.builtIn != b.builtIn { return a.builtIn }
+                return a.name < b.name
             }
-            return sa.name < sb.name
+        }
+        return groups
+    }
+
+    @ViewBuilder
+    private func stageSection(stage: String, entries: [ModelStatus]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Section header shows the stage label + a count of how many
+            // alternatives exist so the user sees at a glance that this
+            // is a pick-one choice.
+            HStack(alignment: .firstTextBaseline) {
+                Text(entries.first?.stageLabel ?? stage.capitalized)
+                    .font(.headline)
+                Text(entries.count == 1 ? "" : " — pick one")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+
+            ForEach(entries) { status in
+                ModelRowView(
+                    status: status,
+                    allowSelection: entries.count > 1,
+                    onDownload: { viewModel.onDownloadModelByKey(status.id) },
+                    onDelete: { viewModel.onDeleteModelByKey(status.id) },
+                    onSetActive: { viewModel.onSetActiveModelByKey(status.id) }
+                )
+                Divider()
+                    .padding(.horizontal, 16)
+            }
         }
     }
 }
 
 struct ModelRowView: View {
     let status: ModelStatus
+    /// True if this stage has multiple alternatives, so the row shows
+    /// a radio-style selector. Stages with only one candidate (VAD,
+    /// Voice Library) hide the picker and just show installed state.
+    let allowSelection: Bool
     let onDownload: () -> Void
     let onDelete: () -> Void
+    let onSetActive: () -> Void
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // Icon
+    /// A radio-style indicator for which backend is active within a
+    /// stage. Tapping a not-currently-active installed row promotes
+    /// it. Not-installed rows can't be selected until downloaded.
+    @ViewBuilder
+    private var selector: some View {
+        if allowSelection {
+            Button {
+                if status.installed && !status.active {
+                    onSetActive()
+                }
+            } label: {
+                Image(systemName: status.active
+                      ? "largecircle.fill.circle"
+                      : (status.installed ? "circle" : "circle.dashed"))
+                    .font(.title2)
+                    .foregroundColor(status.active ? .accentColor : (status.installed ? .secondary : .secondary.opacity(0.4)))
+            }
+            .buttonStyle(.plain)
+            .disabled(!status.installed || status.active)
+            .help(
+                status.active
+                    ? "Active — currently used for \(friendlyStage(status.stage))"
+                    : (status.installed
+                        ? "Set as active for \(friendlyStage(status.stage))"
+                        : "Download first to select this backend")
+            )
+        } else {
+            // Single-option stage: still show an installed/uninstalled
+            // dot so the row shape is consistent.
             Image(systemName: status.installed ? "checkmark.circle.fill" : "arrow.down.circle")
                 .font(.title2)
                 .foregroundColor(status.installed ? .green : .secondary)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            selector
                 .frame(width: 28)
                 .padding(.top, 2)
 
-            // Text content
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(status.name)
                         .font(.headline)
-                    // "Active" badge — this is the model the pipeline
-                    // currently routes to for its role. Makes it
-                    // unambiguous which of (Whisper, Parakeet) is in
-                    // use when both are installed.
                     if status.active && status.installed {
                         Text("ACTIVE")
                             .font(.caption2.weight(.bold))
@@ -135,8 +211,14 @@ struct ModelRowView: View {
                             .padding(.vertical, 1)
                             .background(Color.green, in: Capsule())
                     }
-                    // Warn that a model is downloaded but the pipeline
-                    // can't actually use it yet.
+                    if status.builtIn {
+                        Text("BUILT-IN")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.gray, in: Capsule())
+                    }
                     if status.experimental {
                         Text("EXPERIMENTAL")
                             .font(.caption2.weight(.bold))
@@ -146,19 +228,11 @@ struct ModelRowView: View {
                             .background(Color.orange, in: Capsule())
                     }
                     Spacer()
-                    Text(formatSize(mb: status.sizeMB))
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-
-                // Role line — makes it clear what purpose each model
-                // serves (Whisper and Parakeet are both Transcription,
-                // Silero is VAD, TitaNet is Diarization).
-                if !status.role.isEmpty && status.role != "other" {
-                    Text(roleLabel(status.role))
-                        .font(.caption2.weight(.medium))
-                        .foregroundColor(.secondary)
-                        .textCase(.uppercase)
+                    if !status.builtIn && status.sizeMB > 0 {
+                        Text(formatSize(mb: status.sizeMB))
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 Text(status.description)
@@ -174,9 +248,13 @@ struct ModelRowView: View {
                 }
             }
 
-            // Action button
             VStack {
-                if status.downloading {
+                if status.builtIn {
+                    // Always available; nothing to download or delete.
+                    Text("Always on")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if status.downloading {
                     ProgressView()
                         .controlSize(.small)
                 } else if status.installed {
@@ -184,6 +262,9 @@ struct ModelRowView: View {
                         Text("Installed")
                             .font(.caption)
                             .foregroundColor(.green)
+                        // Deleting the active backend would leave the
+                        // pipeline broken; gate deletion behind "active
+                        // is somewhere else" to prevent a foot-gun.
                         Button(role: .destructive) {
                             onDelete()
                         } label: {
@@ -192,31 +273,36 @@ struct ModelRowView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(status.active)
+                        .help(status.active
+                              ? "Can't delete the active backend — pick a different one first"
+                              : "Remove this model from disk")
                     }
                 } else {
                     Button {
                         onDownload()
                     } label: {
-                        Text("Download")
+                        Text(status.nemoModel ? "Install" : "Download")
                             .font(.caption)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
             }
-            .frame(width: 80)
+            .frame(width: 90)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
 }
 
-/// Map internal role tags to user-facing labels.
-private func roleLabel(_ role: String) -> String {
-    switch role {
+private func friendlyStage(_ stage: String) -> String {
+    switch stage {
     case "transcription": return "Transcription"
+    case "diarization":   return "Speaker Diarization"
     case "vad":           return "Voice Activity Detection"
-    case "diarization":   return "Speaker Recognition"
-    default:              return role.capitalized
+    case "voice_library": return "Voice Library"
+    default:              return stage.capitalized
     }
 }
+

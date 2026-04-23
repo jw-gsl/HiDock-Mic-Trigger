@@ -26,10 +26,22 @@ def test_registry_has_all_keys():
 
 
 def test_registry_entries_have_required_fields():
-    required_fields = {"name", "filename", "url", "size_mb", "required", "description"}
+    # All models carry name/description/stage/backend_key. Downloadable
+    # models have filename+url+size_mb; built-in code-only diarizers
+    # skip those. NeMo-managed models have nemo_model_name instead of
+    # filename/url.
+    common = {"name", "description", "stage", "backend_key"}
     for key, info in MODEL_REGISTRY.items():
-        missing = required_fields - set(info.keys())
+        missing = common - set(info.keys())
         assert not missing, f"Model '{key}' missing fields: {missing}"
+        if info.get("built_in"):
+            continue  # no file or URL needed
+        if info.get("nemo_model"):
+            assert "nemo_model_name" in info, f"{key}: nemo_model set but nemo_model_name missing"
+            continue
+        # Downloadable file — needs filename, url, size_mb
+        for f in ("filename", "url", "size_mb"):
+            assert f in info, f"Downloadable model '{key}' missing '{f}'"
 
 
 # ── get_model_status ────────────────────────────────────────────────────────
@@ -57,13 +69,26 @@ def test_get_model_status_correct_fields():
 
 
 def test_get_model_status_not_installed():
-    """Models should show as not installed when MODELS_DIR doesn't exist."""
+    """File-backed models should show as not installed when MODELS_DIR
+    doesn't exist. Built-in code models stay installed=True (no file
+    needed); NeMo-managed status depends on `nemo-toolkit` being
+    importable at test time and isn't covered by the MODELS_DIR mock."""
     with patch("shared.models.MODELS_DIR", Path("/nonexistent/path")):
         statuses = get_model_status()
 
-    for status in statuses.values():
-        assert status["installed"] is False
-        assert status["file_size_bytes"] == 0
+    from shared.models import MODEL_REGISTRY
+    for key, status in statuses.items():
+        info = MODEL_REGISTRY[key]
+        if info.get("built_in"):
+            assert status["installed"] is True, f"{key}: built-in should always be installed"
+            assert status["file_size_bytes"] == 0
+        elif info.get("nemo_model"):
+            # Skip — installed state depends on nemo-toolkit availability
+            # in the test venv, which is orthogonal to MODELS_DIR.
+            continue
+        else:
+            assert status["installed"] is False, f"{key}: should be uninstalled"
+            assert status["file_size_bytes"] == 0
 
 
 # ── Model paths ─────────────────────────────────────────────────────────────
@@ -72,8 +97,9 @@ def test_get_model_status_not_installed():
 def test_model_paths_resolve_to_models_dir():
     for key, info in MODEL_REGISTRY.items():
         # Skip models managed by external caches (e.g. parakeet-mlx uses
-        # HuggingFace's hub cache, not our MODELS_DIR).
-        if info.get("managed_externally"):
+        # HuggingFace's hub cache, not our MODELS_DIR) and anything
+        # without a local file (built-in / NeMo-managed).
+        if info.get("managed_externally") or info.get("built_in") or info.get("nemo_model"):
             continue
         expected = MODELS_DIR / info["filename"]
         assert expected.parent == MODELS_DIR

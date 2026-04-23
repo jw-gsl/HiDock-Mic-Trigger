@@ -509,6 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
+        viewModel.onSetActiveModelByKey = { [weak self] key in self?.setActiveModelByKey(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
@@ -3529,9 +3530,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 description: info["description"] as? String ?? "",
                                 sizeMB: info["size_mb"] as? Int ?? 0,
                                 installed: info["installed"] as? Bool ?? false,
-                                role: info["role"] as? String ?? "other",
+                                stage: info["stage"] as? String ?? "other",
+                                stageLabel: info["stage_label"] as? String ?? "",
+                                backendKey: info["backend_key"] as? String ?? key,
                                 active: info["active"] as? Bool ?? false,
-                                experimental: info["experimental"] as? Bool ?? false
+                                experimental: info["experimental"] as? Bool ?? false,
+                                builtIn: info["built_in"] as? Bool ?? false,
+                                nemoModel: info["nemo_model"] as? Bool ?? false
                             )
                         }
                         self.viewModel.modelStatuses = statuses
@@ -3600,6 +3605,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 DispatchQueue.main.async {
                     self?.viewModel.modelStatuses[key]?.downloading = false
                 }
+            }
+        }
+    }
+
+    /// Persist a new active backend selection. Calls
+    /// `shared/models.py set-active <key>`, which updates
+    /// pipeline_backends.json — the next refreshModelStatuses()
+    /// picks it up and the UI flips the ACTIVE badge.
+    private func setActiveModelByKey(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "set-active", key]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                DispatchQueue.main.async {
+                    self?.log("Set active model: \(key)")
+                    self?.refreshModelStatuses()
+                }
+            } catch {
+                self?.log("Failed to set active model \(key): \(error)")
             }
         }
     }

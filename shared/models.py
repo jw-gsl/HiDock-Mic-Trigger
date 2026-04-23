@@ -44,21 +44,39 @@ SPEAKER_EMBED_URL = SPEAKER_EMBED_MODELS[SPEAKER_EMBED_MODEL]["url"]
 
 # ── Model Registry ──────────────────────────────────────────────────────────
 
+"""Model registry keyed by registry_key, with per-model metadata.
+
+Each entry declares which `stage` of the pipeline it belongs to, so the
+Model Manager UI can group them. Stages:
+  - "transcription" — speech → text (Whisper, Parakeet)
+  - "diarization" — who spoke when (built-in lite pipeline, Sortformer)
+  - "vad" — where is speech vs silence (Silero)
+  - "voice_library" — identify known speakers across recordings (TitaNet)
+
+For stages with alternatives (transcription, diarization), the active
+backend is persisted in pipeline_backends.json and read at runtime.
+The `active` field is NOT hardcoded here any more; it's derived.
+
+Model flavours:
+  - Downloadable (`filename` + `url` + `size_mb`): a file we fetch.
+  - Built-in (`built_in: True`): code-only, no download, always available.
+  - NeMo-managed (`nemo_model: True`): weights fetched by NeMo on first
+    use, but we still need to install nemo-toolkit before it works.
+"""
 MODEL_REGISTRY = {
     "whisper": {
-        "name": "Speech Recognition — Whisper",
+        "name": "Whisper large-v3-turbo",
         "filename": "ggml-large-v3-turbo-q5_0.bin",
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
         "size_mb": 547,
         "required": True,
-        "role": "transcription",
-        # The active ASR backend hard-wired in transcribe.py. When Parakeet
-        # is fully wired in this becomes a selectable default.
-        "active": True,
-        "description": "OpenAI Whisper large-v3-turbo, 99 languages. Default and fallback for non-English audio.",
+        "stage": "transcription",
+        "stage_label": "Transcription (Speech → Text)",
+        "backend_key": "whisper",
+        "description": "OpenAI Whisper large-v3-turbo, 99 languages. Reliable and multilingual; slower than Parakeet on English-only meetings.",
     },
     "parakeet": {
-        "name": "Speech Recognition — Parakeet TDT v2 (MLX)",
+        "name": "Parakeet TDT 0.6B v2 (MLX)",
         # Managed by parakeet-mlx via HuggingFace hub cache, not MODELS_DIR.
         # filename is informational for the UI; actual weights live under
         # ~/.cache/huggingface/hub/ and are pulled on first transcription.
@@ -68,32 +86,63 @@ MODEL_REGISTRY = {
         "required": False,
         "platform": "darwin-arm64",
         "managed_externally": True,
-        "role": "transcription",
-        "active": False,
-        # Flagged experimental in the UI until transcribe.py can route to
-        # it. Currently only transcribe_parakeet.py (prototype) uses it.
+        "stage": "transcription",
+        "stage_label": "Transcription (Speech → Text)",
+        "backend_key": "parakeet",
         "experimental": True,
-        "description": "NVIDIA Parakeet TDT 0.6B v2 via MLX. English only, ~60× real-time on Apple Silicon. Prototype — not yet wired into the default transcription flow; Whisper runs by default. Attribution: CC-BY-4.0.",
+        "description": "NVIDIA Parakeet TDT 0.6B v2 via MLX. English only, ~60× real-time on Apple Silicon. Tops the English ASR leaderboard. Attribution: CC-BY-4.0.",
     },
     "silero_vad": {
-        "name": "Voice Detection (Silero VAD)",
+        "name": "Silero VAD",
         "filename": "silero_vad.onnx",
         "url": "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
         "size_mb": 2,
         "required": False,
-        "role": "vad",
-        "active": True,
+        "stage": "vad",
+        "stage_label": "Voice Activity Detection",
+        "backend_key": "silero",
         "description": "Industry-leading voice activity detection. Identifies speech segments with high accuracy.",
     },
+    # Our current diarization pipeline (diarize_lite.py). Built-in means
+    # it's always available with no download — the UI still lists it so
+    # the user can compare it to Sortformer and pick which one runs.
+    "diarize_lite": {
+        "name": "Built-in Lite (Silero + TitaNet + clustering)",
+        "stage": "diarization",
+        "stage_label": "Speaker Diarization",
+        "backend_key": "lite",
+        "built_in": True,
+        "size_mb": 0,   # no download — VAD + embedding models cover this
+        "description": "Our pipeline: Silero VAD finds speech, TitaNet embeds each segment, hierarchical clustering groups speakers. No extra download. Weaker on short, rapid speaker turns than Sortformer.",
+    },
+    # NeMo Sortformer — end-to-end neural diarization. Requires the
+    # `nemo-toolkit` Python package (~2 GB including torch deps) plus the
+    # Sortformer model weights which NeMo fetches from HuggingFace hub
+    # on first use. The UI's "Download" action handles both steps.
+    "diarize_sortformer": {
+        "name": "NeMo Sortformer 4-speaker",
+        "stage": "diarization",
+        "stage_label": "Speaker Diarization",
+        "backend_key": "sortformer",
+        "nemo_model": True,
+        "nemo_model_name": "nvidia/diar_sortformer_4spk-v1",
+        "pip_package": "nemo-toolkit",
+        # Sortformer itself is ~250 MB; nemo-toolkit brings torch + deps
+        # — budget ~2 GB total install footprint.
+        "size_mb": 2000,
+        "experimental": True,
+        "description": "State-of-the-art end-to-end neural diarization (CC-BY-4.0). Handles up to 4 speakers with much better per-turn accuracy than the lite pipeline. CPU-only on macOS (torch MPS doesn't support Sortformer's conv2d). Installing this also installs the NeMo toolkit (~2 GB).",
+    },
     "speaker_embed": {
-        "name": "Speaker Recognition (TitaNet)",
+        "name": "TitaNet",
         "filename": "speaker_embedding.onnx",
         "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx",
         "size_mb": 10,
         "required": False,
-        "role": "diarization",
-        "active": True,
-        "description": "Neural speaker recognition trained on thousands of voices. Identifies who is speaking across recordings.",
+        "stage": "voice_library",
+        "stage_label": "Voice Library (Known Speaker Matching)",
+        "backend_key": "titanet",
+        "description": "Neural speaker embeddings trained on thousands of voices. Used to match speakers across recordings in the voice library.",
     },
 }
 
@@ -200,33 +249,122 @@ def set_speaker_embed_model(key: str) -> None:
 ensure_speaker_embedding_model = ensure_speaker_embed
 
 
+# ── Pipeline Backend Selection ──────────────────────────────────────────────
+#
+# Users can pick which model runs for stages with alternatives
+# (Transcription: Whisper vs Parakeet; Diarization: lite vs Sortformer).
+# Selection persists in pipeline_backends.json next to state/config, so
+# it survives app restarts and survives editing the Python code.
+
+PIPELINE_BACKENDS_PATH = Path.home() / "HiDock" / "pipeline_backends.json"
+
+_DEFAULT_BACKENDS = {
+    "transcription": "whisper",
+    "diarization": "lite",
+    "vad": "silero",
+    "voice_library": "titanet",
+}
+
+
+def load_pipeline_backends() -> dict[str, str]:
+    """Return the currently-selected backend for each stage. Falls back
+    to defaults for missing keys so new stages introduced in code don't
+    crash old config files."""
+    merged = dict(_DEFAULT_BACKENDS)
+    if PIPELINE_BACKENDS_PATH.exists():
+        try:
+            persisted = json.loads(PIPELINE_BACKENDS_PATH.read_text())
+            if isinstance(persisted, dict):
+                merged.update({k: v for k, v in persisted.items() if isinstance(v, str)})
+        except (json.JSONDecodeError, OSError):
+            pass
+    return merged
+
+
+def save_pipeline_backends(backends: dict[str, str]) -> None:
+    """Persist the backend selections atomically."""
+    PIPELINE_BACKENDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PIPELINE_BACKENDS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(backends, indent=2))
+    tmp.replace(PIPELINE_BACKENDS_PATH)
+
+
+def set_active_backend(stage: str, backend_key: str) -> dict[str, str]:
+    """Set the active backend for a stage; returns the new full mapping."""
+    backends = load_pipeline_backends()
+    backends[stage] = backend_key
+    save_pipeline_backends(backends)
+    return backends
+
+
+def _nemo_toolkit_available() -> bool:
+    """Whether `nemo-toolkit` is importable right now.
+
+    Used to tell the UI whether Sortformer is effectively installed.
+    Downloading the Sortformer model entry implies installing nemo.
+    """
+    try:
+        import importlib.util
+        return importlib.util.find_spec("nemo") is not None
+    except Exception:
+        return False
+
+
 # ── Model Status & Management ───────────────────────────────────────────────
 
 
 def get_model_status() -> dict[str, dict]:
     """Return the status of each registered model.
 
-    Returns:
-        Dict keyed by model registry key, each value containing:
-        name, description, size_mb, filename, installed, file_size_bytes.
+    Installed-ness and active flags are both derived, not stored in the
+    registry — so adding/removing selections doesn't require code edits.
     """
+    backends = load_pipeline_backends()
     statuses = {}
     for key, info in MODEL_REGISTRY.items():
-        filepath = MODELS_DIR / info["filename"]
-        installed = filepath.exists() and filepath.stat().st_size > 1000
-        file_size = filepath.stat().st_size if installed else 0
+        stage = info.get("stage", "other")
+        # Decide "installed" differently per flavour:
+        #   - built-in: always True (no download)
+        #   - nemo-managed: need nemo-toolkit importable + model-name set
+        #     (we don't probe HuggingFace cache — NeMo handles that on use)
+        #   - regular (file + url): check MODELS_DIR
+        if info.get("built_in"):
+            installed = True
+            file_size = 0
+            filename = None
+            url = None
+        elif info.get("nemo_model"):
+            installed = _nemo_toolkit_available()
+            file_size = 0
+            filename = info.get("nemo_model_name")
+            url = None
+        else:
+            filepath = MODELS_DIR / info["filename"]
+            installed = filepath.exists() and filepath.stat().st_size > 1000
+            file_size = filepath.stat().st_size if installed else 0
+            filename = info["filename"]
+            url = info.get("url")
+
         statuses[key] = {
             "name": info["name"],
             "description": info["description"],
-            "size_mb": info["size_mb"],
-            "filename": info["filename"],
-            "url": info["url"],
-            "required": info["required"],
+            "size_mb": info.get("size_mb", 0),
+            "filename": filename,
+            "url": url,
+            "required": info.get("required", False),
             "installed": installed,
             "file_size_bytes": file_size,
-            "role": info.get("role", "other"),
-            "active": info.get("active", False),
+            "stage": stage,
+            "stage_label": info.get("stage_label", stage.capitalize()),
+            "backend_key": info.get("backend_key", key),
+            # Active = this entry's backend_key matches the persisted
+            # selection for its stage. Makes the UI "ACTIVE" badge
+            # reflect the live config, not a hardcoded registry flag.
+            "active": backends.get(stage) == info.get("backend_key", key),
             "experimental": info.get("experimental", False),
+            "built_in": info.get("built_in", False),
+            "nemo_model": info.get("nemo_model", False),
+            "pip_package": info.get("pip_package"),
         }
     return statuses
 
@@ -243,6 +381,10 @@ def delete_model(model_key: str) -> bool:
     if model_key not in MODEL_REGISTRY:
         return False
     info = MODEL_REGISTRY[model_key]
+    if info.get("built_in"):
+        return False
+    if "filename" not in info:
+        return False
     filepath = MODELS_DIR / info["filename"]
     if not filepath.exists():
         return False
@@ -275,11 +417,55 @@ def _cli():
             sys.exit(1)
         info = MODEL_REGISTRY[key]
         try:
+            # Built-in models never need downloading.
+            if info.get("built_in"):
+                print(json.dumps({"ok": True, "built_in": True}))
+                return
+            # NeMo-managed: pip install the toolkit (HuggingFace cache
+            # then fetches the model weights lazily on first use).
+            if info.get("nemo_model"):
+                pkg = info.get("pip_package", "nemo-toolkit")
+                print(f"Installing Python package: {pkg}", file=sys.stderr)
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", pkg],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(json.dumps({
+                        "ok": False,
+                        "error": f"pip install {pkg} failed: {result.stderr[-500:]}",
+                    }))
+                    sys.exit(1)
+                print(json.dumps({"ok": True, "pip_package_installed": pkg}))
+                return
+            # Regular file download.
             path = download_model_if_needed(info["url"], info["filename"])
             print(json.dumps({"ok": True, "path": str(path)}))
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}))
             sys.exit(1)
+
+    elif command == "set-active":
+        if len(sys.argv) < 3:
+            print("Usage: models.py set-active <model_key>", file=sys.stderr)
+            sys.exit(1)
+        key = sys.argv[2]
+        if key not in MODEL_REGISTRY:
+            print(json.dumps({"ok": False, "error": f"Unknown model key: {key}"}))
+            sys.exit(1)
+        info = MODEL_REGISTRY[key]
+        stage = info.get("stage")
+        backend_key = info.get("backend_key", key)
+        if not stage:
+            print(json.dumps({"ok": False, "error": f"Model {key} has no stage"}))
+            sys.exit(1)
+        backends = set_active_backend(stage, backend_key)
+        print(json.dumps({"ok": True, "backends": backends}))
+
+    elif command == "backends":
+        # Dump the current backend selection for debugging/inspection.
+        print(json.dumps(load_pipeline_backends(), indent=2))
 
     elif command == "delete":
         if len(sys.argv) < 3:
