@@ -287,6 +287,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let vis = viewModel.visibleEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
         log("viewModel.visibleEntries imported count = \(vis.count) (filter: hideDownloaded=\(viewModel.syncHideDownloaded), deviceFilter=\(viewModel.syncFilterDeviceId ?? "nil"))")
+        // Fast-path: paint the recordings table from cached state before
+        // USB enumeration even starts. The user sees their already-
+        // downloaded + transcribed rows with correct status immediately
+        // instead of watching the list populate device-by-device as live
+        // probes resolve, then flip from "Downloaded" to "Transcribed"
+        // when refreshTranscriptionState catches up.
+        loadCachedCatalogsForPaintOnLaunch()
         showSyncWindow()
 
         // Show onboarding wizard on first run
@@ -1456,6 +1463,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     // MARK: - HiDock Sync Startup
+
+    /// Paint the recordings table from state.json's cached catalog for
+    /// each paired HiDock, before autoConnectSyncIfPaired fires its
+    /// live USB probes. The extractor's `cached-status` command reads
+    /// only from state.json (no USB) and returns in ~60ms, so the user
+    /// sees the full list of already-downloaded + transcribed rows
+    /// immediately on launch instead of watching them appear device-by-
+    /// device as live probes resolve.
+    ///
+    /// Follow-up: `refreshTranscriptionState` fires here so the Status
+    /// column lands on "Transcribed" directly — no initial "Downloaded"
+    /// → "Transcribed" flicker.
+    ///
+    /// The live probe path (autoConnectSyncIfPaired) still runs after
+    /// this; its renderSyncStatus call replaces the cached rows with
+    /// fresh device-returned data when it completes, which is fine —
+    /// preserves any new recordings that have appeared on the device
+    /// since state.json was last written.
+    private func loadCachedCatalogsForPaintOnLaunch() {
+        let devices = syncPairedDevices.filter { $0.deviceType == .hidock }
+        guard !devices.isEmpty else { return }
+        guard ensureExtractorReady() else { return }
+        log("Paint-from-cache: loading cached catalogs for \(devices.count) paired HiDock(s)")
+        let group = DispatchGroup()
+        for device in devices {
+            group.enter()
+            runExtractor(arguments: ["cached-status"], productId: device.productId) { [weak self] result in
+                defer { group.leave() }
+                guard let self = self else { return }
+                guard case .success(let data) = result,
+                      let payload = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) else {
+                    self.log("Paint-from-cache: no cached data for \(device.cleanName)")
+                    return
+                }
+                self.renderSyncStatus(payload, device: device)
+            }
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            self.log("Paint-from-cache: cached catalogs loaded, refreshing transcription state")
+            // Populate transcribed/tagged state from on-disk transcripts
+            // so the table lands on final status immediately instead of
+            // flipping Downloaded → Transcribed after live probes.
+            self.refreshTranscriptionState()
+            self.syncViewModelState()
+        }
+    }
 
     private func autoConnectSyncIfPaired(startTriggerOnCompletion: Bool = false) {
         // If we were asked to start the trigger on completion but we

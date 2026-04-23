@@ -1096,6 +1096,36 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
     return items
 
 
+def cached_status_payload(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    state_path: Path = DEFAULT_STATE_PATH,
+    product_id: int | None = None,
+) -> dict:
+    """Return what `status_payload` returns, without touching USB.
+
+    Reads the cached catalog from state.json and enriches it with
+    local download/transcription metadata. `connected` is always
+    False — we haven't verified the device is live; the desktop
+    client can use this for instant startup paint and then do the
+    real USB probe asynchronously to update.
+    """
+    config = load_config(config_path)
+    output_dir = resolved_output_dir(config)
+    state = load_state(state_path)
+    cache_key = str(product_id) if product_id else "default"
+    cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+    return {
+        "connected": False,
+        "outputDir": str(output_dir),
+        "statePath": str(state_path.resolve()),
+        "configPath": str(config_path.resolve()),
+        "recordings": build_recording_status_items(
+            cached_recs, state, output_dir, product_id=product_id
+        ),
+        "cached": True,
+    }
+
+
 def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH, product_id: int | None = None) -> dict:
     config = load_config(config_path)
     output_dir = resolved_output_dir(config)
@@ -1691,6 +1721,13 @@ def main() -> int:
     status = sub.add_parser("status", help="Report sync status and device recordings as JSON")
     status.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
 
+    # `cached-status` returns what `status` returns when the device is
+    # unreachable: connected=false, recordings from state.json's cached
+    # catalog. Meant for instant startup — desktop clients can show
+    # already-downloaded rows immediately without waiting 10s+ for USB
+    # enumeration to complete.
+    sub.add_parser("cached-status", help="Report cached catalog from state.json without touching USB")
+
     set_output = sub.add_parser("set-output", help="Persist the default output directory")
     set_output.add_argument("path", help="Directory for downloaded recordings")
 
@@ -1831,6 +1868,9 @@ def main() -> int:
         return 0
     if args.command == "status":
         print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
+        return 0
+    if args.command == "cached-status":
+        print(json.dumps(cached_status_payload(product_id=args.product_id), indent=2))
         return 0
     if args.command == "set-output":
         config = load_config()
