@@ -251,29 +251,56 @@ def find_device(product_id: int | None = None):
 
 
 def prepare_device(dev):
-    try:
-        dev.reset()
-    except usb.core.USBError:
-        pass
-    try:
-        dev.set_configuration()
-    except usb.core.USBError:
-        pass
+    """Claim the HiDock's vendor interface.
 
-    cfg = dev.get_active_configuration()
-    intf = cfg[(0, 0)]
+    Historically this called ``dev.reset()`` unconditionally before every
+    command. That sends a USB bus reset to the device, which:
+      - yanks any other process (e.g. ffmpeg holding the audio-class
+        interface) out of the middle of a read/write, and
+      - forces the HiDock firmware to re-initialise its USB stack.
+    On a HiDock H1 the latter occasionally wedges the firmware
+    completely — subsequent opens hang for 30+ seconds until the user
+    physically unplugs the device. The reset was there as a "kitchen
+    sink" recovery for devices left in a weird state by a previous
+    session, but paying that cost on every status query is too
+    expensive for a device shared with ffmpeg.
+
+    New flow: try the normal claim path first. Only fall back to a full
+    reset if ``claim_interface`` raises ``USBError`` (i.e. the device
+    really is in a state that needs recovery).
+    """
+    def _claim_once():
+        try:
+            dev.set_configuration()
+        except usb.core.USBError:
+            pass
+
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0, 0)]
+        try:
+            if dev.is_kernel_driver_active(intf.bInterfaceNumber):
+                try:
+                    dev.detach_kernel_driver(intf.bInterfaceNumber)
+                except usb.core.USBError:
+                    # On macOS this is often unsupported or blocked even when we can
+                    # still continue to talk to the device directly.
+                    pass
+        except (NotImplementedError, usb.core.USBError):
+            pass
+        usb.util.claim_interface(dev, intf.bInterfaceNumber)
+        return intf.bInterfaceNumber
+
     try:
-        if dev.is_kernel_driver_active(intf.bInterfaceNumber):
-            try:
-                dev.detach_kernel_driver(intf.bInterfaceNumber)
-            except usb.core.USBError:
-                # On macOS this is often unsupported or blocked even when we can
-                # still continue to talk to the device directly.
-                pass
-    except (NotImplementedError, usb.core.USBError):
-        pass
-    usb.util.claim_interface(dev, intf.bInterfaceNumber)
-    return intf.bInterfaceNumber
+        return _claim_once()
+    except usb.core.USBError:
+        # Recovery path: the device is probably in a stuck state. Reset
+        # the bus and retry once. This used to run on every invocation;
+        # now it only runs when the fast path genuinely fails.
+        try:
+            dev.reset()
+        except usb.core.USBError:
+            pass
+        return _claim_once()
 
 
 def release_device(dev, interface_number: int) -> None:
@@ -575,86 +602,137 @@ def query_file_count(dev, request_id: int = 1, timeout_ms: int = 5000) -> int:
 
 
 def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[dict]:
-    expected_count = None
-    try:
-        expected_count = query_file_count(
-            dev,
-            request_id=request_id - 1,
-            timeout_ms=min(timeout_ms, 1000),
-        )
-    except Exception:
-        pass
+    """Fetch the device's full recording catalog.
 
-    # HiNotes primes the device with a clock query before asking for the file
-    # catalog, and the catalog itself arrives in two raw chunks: the first
-    # starts with the list header, the second is a continuation without it.
-    try:
-        send_and_collect(dev, CMD_QUERY_TIME, request_id - 1, timeout_ms=min(timeout_ms, 1000), max_reads=8)
-    except Exception:
-        pass
+    HiDock firmware behaviour discovered 2026-04-23 via raw USB capture:
 
-    # Step 1: Collect ALL frames from the initial response.
-    # Some devices (P1) send multiple frames in a single USB transfer,
-    # while others (H1) send one frame then require continuation requests.
-    payloads: list[bytes] = []
+    - **P1** packs the entire catalog into one USB transfer with multiple
+      frames. One request, one read.
 
-    # Use send_and_collect to get all frames from the initial request
-    frames = send_and_collect(dev, CMD_QUERY_FILE_LIST, request_id, timeout_ms=timeout_ms, max_reads=10)
-    for _cmd, _req, body in frames:
-        if body:
-            payloads.append(body)
+    - **H1** auto-paginates across multiple USB transfers. We send ONE
+      ``CMD_QUERY_FILE_LIST`` request; the device returns the first chunk
+      (~8KB, up to ~143 records) almost immediately with the original
+      request_id, then a few seconds later streams a second frame with
+      the remaining records — but the firmware **increments the
+      request_id** on that continuation frame (from N to N+1). For 282
+      records we observed frame 0 (req=N, 8180b) then frame 1
+      (req=N+1, 7900b). Large catalogs may have three or more frames.
 
-    if payloads:
-        declared_count = None
-        if len(payloads[0]) >= 6 and payloads[0][:2] == b"\xff\xff":
-            declared_count = struct.unpack(">I", payloads[0][2:6])[0]
+    The previous implementation missed this because ``send_and_collect``
+    filtered on matching request_id, silently discarding every
+    continuation frame. It also sent its own offset-based continuation
+    requests which the firmware ignores (they get the same first batch
+    back, or nothing), leaving us stuck at ~143 records.
 
-        # Step 2: If we still don't have all records, try continuation requests.
-        # The H1 supports offset-based pagination for large catalogs.
-        parsed_so_far = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
-        next_req_id = request_id + 1
-        max_continuations = 10
-        while declared_count is not None and parsed_so_far < declared_count and max_continuations > 0:
-            max_continuations -= 1
+    New approach: send one request, keep reading every frame whose
+    command ID is ``CMD_QUERY_FILE_LIST`` until the device goes quiet
+    for long enough that we're confident no more frames are coming.
+    Sort by request_id to reassemble ordering, then parse.
+    """
+    # IMPORTANT: don't issue QUERY_FILE_COUNT or QUERY_TIME here.
+    # Empirically (2026-04-23) any other command between our two
+    # back-to-back QUERY_FILE_LIST writes resets the firmware's
+    # "continuation pending" state and we end up with only the first
+    # frame. Pull expected_count out of the header payload instead
+    # (it's encoded in the first 4 bytes after the 0xFFFF marker).
+    expected_count: int | None = None
+
+    # Drain any stale data buffered from a previous aborted transaction
+    # so our first read doesn't pick up orphaned continuation bytes
+    # without their header. Safe here (before we've sent anything).
+    drain_input(dev, timeout_ms=100)
+
+    # H1 catalog protocol (discovered 2026-04-23 via USB capture):
+    #   - A single QUERY_FILE_LIST returns one 8180-byte frame with the
+    #     header (0xFFFF + total count) + the first-buffer-worth of
+    #     records (~143 for modern filename length).
+    #   - The firmware ALSO QUEUES the remainder internally. That
+    #     queued continuation is only released when the device sees the
+    #     next OUT request on the endpoint — and crucially, it is
+    #     flushed as the FIRST frame of that next transaction. The
+    #     second transaction's own response then follows.
+    #   - So to get the full catalog in one shot: send request #1,
+    #     drain what comes back (header + batch1); send request #2,
+    #     which returns <queued continuation batch2> + <header + batch1
+    #     again>. Merge + de-dupe.
+    #   - Frame request_ids are firmware-assigned and effectively
+    #     random; we collect by cmd, not by rid.
+    def _read_all_frames(deadline: float, idle_stop_s: float = 3.0) -> list[bytes]:
+        pending_local = b""
+        out: list[bytes] = []
+        last_data = time.time()
+        while time.time() < deadline:
             try:
-                offset_payload = struct.pack(">I", parsed_so_far)
-                req = build_simple_request(CMD_QUERY_FILE_LIST, next_req_id, offset_payload)
-                dev.write(OUT_ENDPOINT, req, timeout=timeout_ms)
-
-                pending = b""
-                started = False
-                deadline = time.time() + (min(timeout_ms, 3000) / 1000.0)
-                while time.time() < deadline:
-                    try:
-                        chunk = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=1000))
-                        pending += chunk
-                        started = True
-                    except usb.core.USBTimeoutError:
-                        if started:
-                            break
-                        continue
-
-                cont_frames, _ = extract_frames(pending)
-                if not cont_frames:
+                chunk = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=500))
+            except usb.core.USBTimeoutError:
+                if out and (time.time() - last_data) > idle_stop_s:
                     break
-                body = cont_frames[0][2]
-                if not body:
-                    break
-                payloads.append(body)
-                new_count = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
-                if new_count <= parsed_so_far:
-                    break  # no progress — device doesn't support continuation
-                parsed_so_far = new_count
-                next_req_id += 1
-            except (HiDockProtocolError, usb.core.USBError):
-                break
+                continue
+            if not chunk:
+                continue
+            last_data = time.time()
+            pending_local += chunk
+            parsed_frames, pending_local = extract_frames(pending_local)
+            for cmd, _rid, body in parsed_frames:
+                if cmd == CMD_QUERY_FILE_LIST and body:
+                    out.append(body)
+        return out
 
-    if not payloads:
+    # Request #1 — primes the queue. Read frame 1.
+    total_budget_s = max(min(timeout_ms / 1000.0, 30.0), 12.0)
+    half_budget_s = total_budget_s / 2.0
+
+    req_a = build_simple_request(CMD_QUERY_FILE_LIST, request_id)
+    dev.write(OUT_ENDPOINT, req_a, timeout=timeout_ms)
+    first_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=2.0)
+
+    # Request #2 — releases the queued continuation, then sends its own
+    # response. Read everything.
+    req_b = build_simple_request(CMD_QUERY_FILE_LIST, request_id + 1)
+    dev.write(OUT_ENDPOINT, req_b, timeout=timeout_ms)
+    second_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=3.0)
+
+    collected = first_batch + second_batch
+
+    if not collected:
         raise HiDockProtocolError("no file list response received")
+
+    # De-dupe exact-duplicate frames (small catalog = both requests
+    # return the same header frame).
+    seen: set[bytes] = set()
+    unique: list[bytes] = []
+    for body in collected:
+        if body not in seen:
+            seen.add(body)
+            unique.append(body)
+
+    # Reassembly: header frame (starts with 0xFFFF + 4-byte total)
+    # must go first so the parser finds the record stream. The
+    # continuation frames go after, keeping their arrival order.
+    header_idx = next(
+        (i for i, body in enumerate(unique) if len(body) >= 2 and body[0] == 0xFF and body[1] == 0xFF),
+        None,
+    )
+    if header_idx is None:
+        raise HiDockProtocolError(
+            f"no header frame in file-list response "
+            f"({len(unique)} frame(s), totalling {sum(len(b) for b in unique)} bytes)"
+        )
+    payloads = [unique[header_idx]] + [b for i, b in enumerate(unique) if i != header_idx]
+
+    # Read the declared total count from the header frame (0xFFFF +
+    # 4-byte big-endian count). Used below for the truncation warning
+    # and stashed on the function object so cmd_status can read it.
+    header = payloads[0]
+    if len(header) >= 6:
+        expected_count = struct.unpack(">I", header[2:6])[0]
+    query_file_list._last_declared_total = expected_count  # type: ignore[attr-defined]
 
     result = parse_query_file_list_payload(payloads, expected_count=expected_count)
 
-    # Warn if we couldn't get all recordings (firmware pagination limit)
+    # Warn only if we truly couldn't get all records. With the new
+    # multi-frame collector this should be rare — mainly for catalogs
+    # that exceed the firmware's own buffer regardless of pagination.
     if expected_count is not None and len(result) < expected_count:
         missing = expected_count - len(result)
         import sys
@@ -1036,28 +1114,19 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         return payload
 
     try:
-        # Fast path: query file count first and compare with cached catalog.
-        # The full file list query can require multiple USB round-trips for
-        # large catalogs, so skip it when the count hasn't changed.
+        # Previously we called query_file_count here as a cache-fast-path
+        # optimisation, but it consumed firmware state in a way that
+        # prevented query_file_list from picking up the full catalog on
+        # the H1. Now we always do a full query_file_list and derive
+        # the declared total from its header frame.
         cache_key = str(product_id) if product_id else "default"
         catalogs = state.get("catalogs", {})
-        cached = catalogs.get(cache_key, {})
-        cached_recordings = cached.get("recordings", [])
 
-        file_count = None
-        try:
-            file_count = query_file_count(dev, request_id=1, timeout_ms=min(timeout_ms, 1000))
-        except Exception:
-            pass
-
-        if file_count is not None and len(cached_recordings) == file_count and cached_recordings:
-            recordings = cached_recordings
-        else:
-            recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
-            # Cache the raw catalog for next time
-            catalogs[cache_key] = {"recordings": recordings}
-            state["catalogs"] = catalogs
-            save_state(state, state_path)
+        recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
+        # Cache the raw catalog for next time
+        catalogs[cache_key] = {"recordings": recordings}
+        state["catalogs"] = catalogs
+        save_state(state, state_path)
 
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
@@ -1067,16 +1136,20 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         # sizes. If the firmware truncated the list, the sum is a minimum
         # bound — we flag that to the client.
         total_bytes = sum(int(r.get("length", 0)) for r in recordings)
+        # query_file_list sets a module-level hint on the function
+        # object when it detects a declared-count > returned-count
+        # scenario, so we can surface truncation accurately.
+        declared = getattr(query_file_list, "_last_declared_total", None)
+        truncated = declared is not None and declared > len(recordings)
         payload["storage"] = {
-            "totalFiles": file_count if file_count is not None else len(recordings),
+            "totalFiles": declared if declared is not None else len(recordings),
             "returnedFiles": len(recordings),
             "totalBytesReturned": total_bytes,
-            "truncated": file_count is not None and len(recordings) < file_count,
+            "truncated": truncated,
         }
 
-        # Warn if firmware truncated the recording list
-        if file_count is not None and len(recordings) < file_count:
-            missing = file_count - len(recordings)
+        if truncated:
+            missing = declared - len(recordings)
             payload["warning"] = (
                 f"{missing} newest recordings are hidden due to device firmware limits. "
                 f"Delete old recordings from the device to see them all."
