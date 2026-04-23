@@ -51,6 +51,10 @@ MODEL_REGISTRY = {
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
         "size_mb": 547,
         "required": True,
+        "role": "transcription",
+        # The active ASR backend hard-wired in transcribe.py. When Parakeet
+        # is fully wired in this becomes a selectable default.
+        "active": True,
         "description": "OpenAI Whisper large-v3-turbo, 99 languages. Default and fallback for non-English audio.",
     },
     "parakeet": {
@@ -64,7 +68,12 @@ MODEL_REGISTRY = {
         "required": False,
         "platform": "darwin-arm64",
         "managed_externally": True,
-        "description": "NVIDIA Parakeet TDT 0.6B v2 via MLX. English only, ~60× real-time on Apple Silicon. Attribution: CC-BY-4.0.",
+        "role": "transcription",
+        "active": False,
+        # Flagged experimental in the UI until transcribe.py can route to
+        # it. Currently only transcribe_parakeet.py (prototype) uses it.
+        "experimental": True,
+        "description": "NVIDIA Parakeet TDT 0.6B v2 via MLX. English only, ~60× real-time on Apple Silicon. Prototype — not yet wired into the default transcription flow; Whisper runs by default. Attribution: CC-BY-4.0.",
     },
     "silero_vad": {
         "name": "Voice Detection (Silero VAD)",
@@ -72,6 +81,8 @@ MODEL_REGISTRY = {
         "url": "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
         "size_mb": 2,
         "required": False,
+        "role": "vad",
+        "active": True,
         "description": "Industry-leading voice activity detection. Identifies speech segments with high accuracy.",
     },
     "speaker_embed": {
@@ -80,6 +91,8 @@ MODEL_REGISTRY = {
         "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx",
         "size_mb": 10,
         "required": False,
+        "role": "diarization",
+        "active": True,
         "description": "Neural speaker recognition trained on thousands of voices. Identifies who is speaking across recordings.",
     },
 }
@@ -211,6 +224,9 @@ def get_model_status() -> dict[str, dict]:
             "required": info["required"],
             "installed": installed,
             "file_size_bytes": file_size,
+            "role": info.get("role", "other"),
+            "active": info.get("active", False),
+            "experimental": info.get("experimental", False),
         }
     return statuses
 

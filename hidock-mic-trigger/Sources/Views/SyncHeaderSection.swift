@@ -6,6 +6,7 @@ struct SyncHeaderSection: View {
     private var statusColor: Color {
         switch viewModel.syncStatusLevel {
         case .success: return .green
+        case .transcribed: return .purple
         case .warning: return .orange
         case .error: return .red
         case .info: return .blue

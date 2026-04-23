@@ -7,6 +7,7 @@ struct StatusBadge: View {
     private var color: Color {
         switch level {
         case .success: return .green
+        case .transcribed: return .purple   // distinct from Downloaded's green
         case .warning: return .orange
         case .error: return .red
         case .info: return .blue

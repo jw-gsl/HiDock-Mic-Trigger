@@ -1174,6 +1174,16 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
             )
     except Exception as exc:
         payload["error"] = f"Failed to query device: {exc}"
+        # Fall back to the cached catalog so the desktop UI can still
+        # show rows the user has already downloaded/transcribed. Covers
+        # the timeout kill, protocol errors after prepare_device
+        # succeeded, JSON decode failures, etc. The two earlier error
+        # paths (FileNotFoundError, USBError on prepare_device) already
+        # did this; this closes the gap for everything in between.
+        cache_key = str(product_id) if product_id else "default"
+        cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+        if cached_recs:
+            payload["recordings"] = build_recording_status_items(cached_recs, state, output_dir, product_id=product_id)
     finally:
         release_device(dev, interface_number)
     return payload

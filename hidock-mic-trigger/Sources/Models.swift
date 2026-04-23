@@ -233,9 +233,9 @@ struct HiDockSyncRecordingEntry: Identifiable {
 
     var statusLevel: StatusLevel {
         if deviceId == "imported:local" { return .warning }
-        if transcribed { return .success }
-        if recording.localExists { return .success }
-        if recording.downloaded { return .info }
+        if transcribed { return .transcribed }                // distinct: "fully processed"
+        if recording.localExists { return .success }          // green: "got the bytes"
+        if recording.downloaded { return .info }              // blue: marked-as-done without local
         if transcriptionSkipped { return .info }
         if recording.lastError != nil { return .error }
         return .secondary
@@ -258,6 +258,10 @@ enum DisplayRow: Identifiable {
 
 enum StatusLevel {
     case normal, success, warning, error, info, secondary
+    /// Used for the "Transcribed" status — distinct from `.success`
+    /// (which remains green for "Downloaded") so Downloaded and
+    /// Transcribed rows are visually distinguishable at a glance.
+    case transcribed
 }
 
 struct MergeGroup: Codable, Identifiable {

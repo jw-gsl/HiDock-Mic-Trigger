@@ -3474,7 +3474,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 name: info["name"] as? String ?? key,
                                 description: info["description"] as? String ?? "",
                                 sizeMB: info["size_mb"] as? Int ?? 0,
-                                installed: info["installed"] as? Bool ?? false
+                                installed: info["installed"] as? Bool ?? false,
+                                role: info["role"] as? String ?? "other",
+                                active: info["active"] as? Bool ?? false,
+                                experimental: info["experimental"] as? Bool ?? false
                             )
                         }
                         self.viewModel.modelStatuses = statuses

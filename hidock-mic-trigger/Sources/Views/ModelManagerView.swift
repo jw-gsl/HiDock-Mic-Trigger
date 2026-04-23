@@ -9,6 +9,17 @@ struct ModelStatus: Identifiable {
     var installed: Bool
     var downloading: Bool = false
     var progress: Double = 0  // 0..1
+    /// "transcription", "vad", "diarization", "other" — tells the user
+    /// what this model does.
+    var role: String = "other"
+    /// True if this model is the one actually used by the transcription
+    /// pipeline for its role. Used to show an "Active" badge so the
+    /// user can tell Whisper (live) apart from Parakeet (downloaded
+    /// but not yet routed to by default).
+    var active: Bool = false
+    /// True if the model is downloaded but the pipeline hasn't been
+    /// wired to use it yet (Parakeet is like this today).
+    var experimental: Bool = false
 }
 
 /// Format a model size in human-readable form — switches to GB once the
@@ -109,13 +120,45 @@ struct ModelRowView: View {
 
             // Text content
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
+                HStack(spacing: 6) {
                     Text(status.name)
                         .font(.headline)
+                    // "Active" badge — this is the model the pipeline
+                    // currently routes to for its role. Makes it
+                    // unambiguous which of (Whisper, Parakeet) is in
+                    // use when both are installed.
+                    if status.active && status.installed {
+                        Text("ACTIVE")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.green, in: Capsule())
+                    }
+                    // Warn that a model is downloaded but the pipeline
+                    // can't actually use it yet.
+                    if status.experimental {
+                        Text("EXPERIMENTAL")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.orange, in: Capsule())
+                    }
                     Spacer()
                     Text(formatSize(mb: status.sizeMB))
                         .font(.callout)
                         .foregroundColor(.secondary)
+                }
+
+                // Role line — makes it clear what purpose each model
+                // serves (Whisper and Parakeet are both Transcription,
+                // Silero is VAD, TitaNet is Diarization).
+                if !status.role.isEmpty && status.role != "other" {
+                    Text(roleLabel(status.role))
+                        .font(.caption2.weight(.medium))
+                        .foregroundColor(.secondary)
+                        .textCase(.uppercase)
                 }
 
                 Text(status.description)
@@ -165,5 +208,15 @@ struct ModelRowView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
+    }
+}
+
+/// Map internal role tags to user-facing labels.
+private func roleLabel(_ role: String) -> String {
+    switch role {
+    case "transcription": return "Transcription"
+    case "vad":           return "Voice Activity Detection"
+    case "diarization":   return "Speaker Recognition"
+    default:              return role.capitalized
     }
 }
