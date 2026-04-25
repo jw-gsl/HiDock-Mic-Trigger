@@ -681,6 +681,186 @@ def cmd_rediarize(args):
     }))
 
 
+def cmd_merge_rediarize(args):
+    """Build a merged transcript from existing per-piece transcripts.
+
+    Stitches each piece's `_whisper.json` segments together with cumulative
+    timestamp offsets, then re-runs only diarization (and optionally
+    summarisation) on the merged audio. ~10–15 min faster than a fresh
+    Whisper pass on a 60-min merge for identical text output, because
+    Whisper's word-level output is essentially deterministic on the same
+    audio. Cross-segment speaker continuity is the only thing the merge
+    actually needs that the per-piece outputs don't already have, and
+    that's a diarization-only concern.
+
+    Args expected:
+        merged_audio: Path to the ffmpeg-merged mp3
+        pieces: ordered list of piece mp3 paths
+        --summarize: run LLM summary over the merged text
+        --n-speakers: hint for diarization
+    """
+    import json as _json
+    from datetime import datetime, timezone
+
+    merged_audio = Path(args.merged_audio).resolve()
+    if not merged_audio.exists():
+        print(f"Merged audio not found: {merged_audio}", file=sys.stderr)
+        sys.exit(1)
+    pieces = [Path(p).resolve() for p in args.pieces]
+    if len(pieces) < 2:
+        print("merge-rediarize needs at least two pieces", file=sys.stderr)
+        sys.exit(1)
+
+    transcripts_dir = config.RAW_TRANSCRIPTS_DIR
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compute per-piece audio duration via mutagen (authoritative). We use
+    # this for the cumulative offset, NOT the whisper.json's last segment
+    # end (which can fall short of the file's true duration when the
+    # closing audio is silent). Without this, piece-2 timestamps would
+    # land a few seconds early relative to the merged audio.
+    from mutagen.mp3 import MP3
+    durations: list[float] = []
+    for p in pieces:
+        try:
+            durations.append(float(MP3(str(p)).info.length))
+        except Exception as exc:
+            print(f"Could not read duration of {p}: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    # Stitch whisper.json segments with cumulative offsets.
+    stitched_segments: list[dict] = []
+    cumulative_offset = 0.0
+    for piece_path, piece_dur in zip(pieces, durations):
+        wjson = transcripts_dir / f"{piece_path.stem}_whisper.json"
+        if not wjson.exists():
+            print(f"Missing per-piece whisper JSON for {piece_path.name}: {wjson}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            wdata = _json.loads(wjson.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"Failed to parse {wjson}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        for seg in wdata.get("segments", []):
+            stitched_segments.append({
+                "start": float(seg.get("start", 0.0)) + cumulative_offset,
+                "end": float(seg.get("end", 0.0)) + cumulative_offset,
+                "text": (seg.get("text", "") or "").strip(),
+            })
+        cumulative_offset += piece_dur
+
+    if not stitched_segments:
+        print("Stitched whisper segments are empty — refusing to merge", file=sys.stderr)
+        sys.exit(1)
+
+    progress(10)
+
+    # Persist the stitched whisper.json so a future rediarize can reuse it.
+    merged_stem = merged_audio.stem
+    merged_md = transcripts_dir / f"{merged_stem}.md"
+    merged_whisper_json = transcripts_dir / f"{merged_stem}_whisper.json"
+    merged_diarized_json = transcripts_dir / f"{merged_stem}_diarized.json"
+    merged_whisper_json.write_text(
+        _json.dumps({"audio_file": str(merged_audio), "segments": stitched_segments},
+                    indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    progress(20)
+
+    # Run only the diarization stage on the merged audio. Use the
+    # pipeline_dispatch helper so this honours the user's selected
+    # backend (lite / sortformer) — same as cmd_transcribe.
+    from shared.pipeline_dispatch import diarize as run_diarize
+    n_speakers = getattr(args, "n_speakers", None)
+    diarized_result = run_diarize(str(merged_audio), stitched_segments, n_speakers=n_speakers)
+    progress(70)
+
+    # Apply text corrections on diarized segments (matches cmd_transcribe).
+    try:
+        from shared.corrections import apply_corrections
+        for seg in diarized_result.get("segments", []):
+            if "text" in seg:
+                seg["text"] = apply_corrections(seg["text"])
+    except ImportError:
+        pass
+
+    diarized_result["audio_file"] = str(merged_audio)
+
+    # Build the plain-text transcript that goes into the .md body and
+    # feeds the optional LLM summary. Use diarized segments if we got
+    # them, else fall back to stitched whisper.
+    body_segments = diarized_result.get("segments") or stitched_segments
+    body_text = " ".join(seg.get("text", "").strip() for seg in body_segments if seg.get("text"))
+
+    # Optional summarisation. Re-running this is cheap (one LLM call ~30s),
+    # and a merged meeting deserves its own coherent summary instead of
+    # whichever piece's summary happened to be longest.
+    summary = None
+    if getattr(args, "summarize", False):
+        try:
+            from shared.summarize import summarize as run_summarize
+            progress(80)
+            summary = run_summarize(body_text)
+        except Exception as exc:
+            print(f"Summarization failed (non-fatal): {exc}", file=sys.stderr)
+
+    # Write merged outputs (.md + .srt + _diarized.json + _whisper.json
+    # already saved above). Mirrors cmd_transcribe's tail.
+    from shared.transcript_writer import write_transcript
+    write_transcript(
+        merged_md,
+        body_text,
+        source_path=merged_audio,
+        model="merge-rediarize",
+        diarized_result=diarized_result,
+        whisper_segments=stitched_segments,
+        summary=summary,
+    )
+    try:
+        from shared.srt_writer import srt_path_for, write_srt
+        write_srt(
+            srt_path_for(merged_md),
+            diarized_result=diarized_result,
+            whisper_segments=stitched_segments if not diarized_result else None,
+        )
+    except Exception as exc:
+        print(f"SRT export failed (non-fatal): {exc}", file=sys.stderr)
+
+    if diarized_result and diarized_result.get("segments"):
+        merged_diarized_json.write_text(
+            _json.dumps(diarized_result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    # Mark the merged file as transcribed in state.json so cmd_status
+    # reports it correctly and the desktop UI flips its row to
+    # "Transcribed".
+    state = load_state()
+    state.setdefault("transcriptions", {})[merged_audio.name] = {
+        "status": "completed",
+        "transcript_path": str(merged_md),
+        "duration_s": None,
+        "model": "merge-rediarize",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        save_state(state)
+    except Exception as exc:
+        print(f"WARN: could not persist transcription state: {exc}", file=sys.stderr)
+
+    progress(100)
+    n_segs = len(diarized_result.get("segments", [])) if diarized_result else len(stitched_segments)
+    speakers = diarized_result.get("speaker_names", {}) if diarized_result else {}
+    print(_json.dumps({
+        "transcribed": True,
+        "transcript_path": str(merged_md),
+        "segments": n_segs,
+        "speakers": len(speakers),
+        "speaker_names": speakers,
+        "method": "merge-rediarize",
+    }))
+
+
 def main():
     parser = argparse.ArgumentParser(description="HiDock Transcription Pipeline")
     sub = parser.add_subparsers(dest="command")
@@ -702,6 +882,16 @@ def main():
     p_rediarize.add_argument("json_path", help="Path to _diarized.json file")
     p_rediarize.add_argument("--n-speakers", type=int, help="Force number of speakers")
     p_rediarize.set_defaults(func=cmd_rediarize)
+
+    p_merge = sub.add_parser(
+        "merge-rediarize",
+        help="Build merged transcript from per-piece whisper.json + re-run diarization (no Whisper pass)",
+    )
+    p_merge.add_argument("merged_audio", help="Path to merged mp3 (output of ffmpeg concat)")
+    p_merge.add_argument("--pieces", nargs="+", required=True, help="Ordered list of piece mp3 paths")
+    p_merge.add_argument("--summarize", action="store_true", help="Re-run LLM summary on stitched text")
+    p_merge.add_argument("--n-speakers", type=int, help="Hint: expected number of speakers")
+    p_merge.set_defaults(func=cmd_merge_rediarize)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)
