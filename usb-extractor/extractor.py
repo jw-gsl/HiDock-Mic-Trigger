@@ -29,6 +29,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Make `shared/` importable regardless of where the extractor is invoked
+# from. The desktop app subprocesses this script with various CWDs,
+# and the project's shared/ lives one level up from usb-extractor/.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import usb.core
 import usb.util
 
@@ -1860,6 +1867,15 @@ def main() -> int:
     unmark_removed_p = sub.add_parser("unmark-removed", help="Clear the removed flag on recordings")
     unmark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to clear removed flag on")
 
+    cand_p = sub.add_parser("merge-candidates",
+                            help="List groups of recordings that look like one conversation split across files")
+    cand_p.add_argument("--include-low-confidence", action="store_true",
+                        help="Also surface candidates below the high-confidence cutoff (score < 8)")
+
+    dismiss_p = sub.add_parser("dismiss-merge-pair",
+                               help="Mark a chain of recordings as 'not the same conversation' (sticky)")
+    dismiss_p.add_argument("filenames", nargs="+", help="Ordered device-side filenames in the chain to dismiss")
+
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
 
@@ -2027,6 +2043,19 @@ def main() -> int:
                 cleared.append(filename)
         save_state(state)
         print(json.dumps({"unremoved": cleared}, indent=2))
+        return 0
+    if args.command == "merge-candidates":
+        from shared.merge_finder import find_candidates, candidates_to_payload
+        state = load_state()
+        chains = find_candidates(state.get("downloads", {}))
+        if not args.include_low_confidence:
+            chains = [c for c in chains if c.score >= 8]
+        print(json.dumps(candidates_to_payload(chains), indent=2))
+        return 0
+    if args.command == "dismiss-merge-pair":
+        from shared.merge_finder import dismiss_chain
+        dismiss_chain(args.filenames)
+        print(json.dumps({"dismissed": args.filenames}, indent=2))
         return 0
     if args.command == "status":
         print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))

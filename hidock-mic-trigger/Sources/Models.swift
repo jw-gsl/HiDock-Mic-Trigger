@@ -358,6 +358,38 @@ struct MergeGroup: Codable, Identifiable {
     }
 }
 
+/// One detected merge-candidate chain: 2+ recordings on the same
+/// device, small wall-clock gaps, transcripts present on every piece.
+/// Decoded from `extractor.py merge-candidates` JSON output.
+struct MergeCandidate: Codable, Identifiable {
+    struct Piece: Codable {
+        let device_name: String   // e.g. "2026Apr22-203106-Rec52.hda"
+        let mp3_name: String
+        let mp3_path: String
+        let start: String         // ISO-8601
+        let duration_s: Double
+        let pid: Int?
+    }
+    let score: Int
+    let high_confidence: Bool
+    let total_min: Double
+    let max_gap_s: Double
+    let continuity_signals: [String]
+    let pair_key: String          // stable order-independent key for dismiss
+    let pieces: [Piece]
+
+    /// Identifiable conformance — pair_key is stable across rescans
+    /// (sorted concat of first+last filename), so SwiftUI can keep
+    /// row identity even when scores or signals change.
+    var id: String { pair_key }
+}
+
+struct MergeCandidatesPayload: Codable {
+    let chains: [MergeCandidate]
+    let high_confidence_count: Int
+    let total_count: Int
+}
+
 struct TranscriptionQueueItem: Identifiable {
     let id: String
     let path: String

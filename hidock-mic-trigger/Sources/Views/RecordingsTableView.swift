@@ -187,13 +187,11 @@ struct RecordingsTableView: View {
                 .font(.caption.monospacedDigit())
                 .frame(width: 70, alignment: .leading)
 
-            // Actions — width and alignment must match the recording
-            // row's actions HStack so the folder icons line up between
-            // merge-parent rows and regular rows. The recording row
-            // expanded to 70pt with `.leading` to fit the trim/merge
-            // indicator icons; this row has no extra icons so stays
-            // visually equivalent to a recording row's "Show in Finder"
-            // button at the same x-coordinate.
+            // Actions — width + alignment match the recording row so
+            // folder icons line up across rows. The merge-parent gets
+            // the same blue merge-triangle indicator the children
+            // carry, so the parent and child rows visually advertise
+            // the same merge group at a glance.
             HStack(spacing: 4) {
                 if fileExists {
                     Button {
@@ -205,6 +203,10 @@ struct RecordingsTableView: View {
                     .foregroundColor(.accentColor)
                     .help("Show in Finder")
                 }
+                Image(systemName: "arrow.triangle.merge")
+                    .font(.caption2)
+                    .foregroundColor(.blue)
+                    .help("Merged from \(group.childNames.count) recordings")
             }
             .frame(width: 70, alignment: .leading)
 
@@ -268,7 +270,16 @@ struct RecordingsTableView: View {
 
     @ViewBuilder
     private func recordingRow(entry: HiDockSyncRecordingEntry, indented: Bool) -> some View {
+        // Highlight rows the merge-candidate detector flagged. A subtle
+        // blue left bar (matching the existing merge icon's blue) is
+        // enough to draw the eye without competing with the row's
+        // own content. The accent only appears for visible candidates
+        // (respects the user's "show all" toggle).
+        let isCandidate = viewModel.mergeCandidatePaths.contains(entry.recording.outputPath)
         HStack(spacing: 0) {
+            Rectangle()
+                .fill(isCandidate ? Color.blue.opacity(0.6) : Color.clear)
+                .frame(width: 3)
             if indented {
                 Color.clear.frame(width: 24) // indent for merge children
                 Image(systemName: "arrow.turn.down.right")
@@ -419,6 +430,37 @@ struct RecordingsTableView: View {
 
     @ViewBuilder
     private func entryContextMenu(entry: HiDockSyncRecordingEntry) -> some View {
+        // Merge-candidate suggestions live at the top of the menu so
+        // users see "the system thinks this might pair with another"
+        // without having to scan past the regular actions. Surfaces
+        // only when this row is in a currently-visible candidate
+        // chain — high-confidence by default, all candidates if the
+        // user has flipped the toggle.
+        let candidates = viewModel.mergeCandidates.filter { cand in
+            (viewModel.mergeCandidatesShowAll || cand.high_confidence)
+                && cand.pieces.contains(where: { $0.mp3_path == entry.recording.outputPath })
+        }
+        if !candidates.isEmpty {
+            ForEach(candidates) { cand in
+                let others = cand.pieces
+                    .map { ($0.mp3_name as NSString).deletingPathExtension }
+                    .filter { $0 != (entry.recording.outputName as NSString).deletingPathExtension }
+                let othersLabel = others.isEmpty ? "adjacent recording" :
+                    others.map { $0.split(separator: "-").last.map(String.init) ?? $0 }
+                          .joined(separator: ", ")
+                Button {
+                    viewModel.onMergeCandidate(cand)
+                } label: {
+                    Label("Merge with \(othersLabel)", systemImage: "arrow.triangle.merge")
+                }
+                Button {
+                    viewModel.onDismissMergeCandidate(cand)
+                } label: {
+                    Label("Dismiss merge suggestion", systemImage: "xmark.circle")
+                }
+            }
+            Divider()
+        }
         if !entry.recording.downloaded {
             Button {
                 viewModel.onDownloadSelected()

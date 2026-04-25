@@ -53,6 +53,32 @@ final class HiDockViewModel: ObservableObject {
     /// disable Trim — the operation is purely local-file.
     @Published var trimBusy = false
 
+    // MARK: - Merge candidate detection (split-recording finder)
+    /// Chains the extractor flagged as likely-one-conversation. High
+    /// confidence ones are styled stronger; the rest sit behind a
+    /// "show all" toggle in the merge candidates sheet.
+    @Published var mergeCandidates: [MergeCandidate] = []
+    @Published var mergeCandidatesShowAll = false
+    /// User-visible "Merge candidates (N)" count — hidden when zero.
+    var mergeCandidateCountForBadge: Int {
+        mergeCandidatesShowAll
+            ? mergeCandidates.count
+            : mergeCandidates.filter(\.high_confidence).count
+    }
+    /// Set of mp3 paths that appear in at least one currently-surfaced
+    /// candidate. Used by the recordings table to draw the subtle
+    /// blue left-border accent on those rows.
+    var mergeCandidatePaths: Set<String> {
+        let visible = mergeCandidatesShowAll
+            ? mergeCandidates
+            : mergeCandidates.filter(\.high_confidence)
+        return Set(visible.flatMap { $0.pieces.map(\.mp3_path) })
+    }
+    var onScanMergeCandidates: () -> Void = {}
+    var onMergeCandidate: (MergeCandidate) -> Void = { _ in }
+    var onDismissMergeCandidate: (MergeCandidate) -> Void = { _ in }
+    var onShowMergeCandidates: () -> Void = {}
+
     // MARK: - Transcription State
     @Published var diarizeEnabled = false
     @Published var transcriptionBusy = false

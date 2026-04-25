@@ -486,6 +486,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
         viewModel.onTrimRecording = { [weak self] path in self?.showTrimDialog(for: path) }
         viewModel.onShowTranscriptionQueue = { [weak self] in self?.showTranscriptionQueueWindow() }
+        viewModel.onScanMergeCandidates = { [weak self] in self?.scanMergeCandidates() }
+        viewModel.onMergeCandidate = { [weak self] cand in self?.executeMergeCandidate(cand) }
+        viewModel.onDismissMergeCandidate = { [weak self] cand in self?.dismissMergeCandidate(cand) }
         viewModel.onRemoveFromQueue = { [weak self] path in self?.removeFromTranscriptionQueue(path) }
         viewModel.onMoveInQueue = { [weak self] from, to in self?.moveInTranscriptionQueue(from: from, to: to) }
         viewModel.onPauseTranscription = { [weak self] in self?.pauseTranscription() }
@@ -2240,6 +2243,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.showError(detail)
                 }
                 self.syncViewModelState()
+            }
+        }
+    }
+
+    // MARK: - Merge candidate detection
+
+    /// Subprocess `extractor.py merge-candidates --include-low-confidence`
+    /// and decode the chains into the view model. Cheap (~1s on a few
+    /// hundred recordings) so we can fire it on launch + after every
+    /// auto-transcribe completion. The toggle in the UI decides
+    /// whether to surface only high-confidence or all chains.
+    private func scanMergeCandidates() {
+        guard ensureExtractorReady() else { return }
+        runExtractor(arguments: ["merge-candidates", "--include-low-confidence"], productId: nil) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let data):
+                guard let payload = try? JSONDecoder().decode(MergeCandidatesPayload.self, from: data) else {
+                    self.log("merge-candidates: failed to decode JSON (\(data.count) bytes)")
+                    return
+                }
+                DispatchQueue.main.async {
+                    self.viewModel.mergeCandidates = payload.chains
+                    self.log("merge-candidates: \(payload.high_confidence_count) high-conf, \(payload.total_count) total")
+                }
+            case .failure(let err):
+                self.log("merge-candidates failed: \(err.localizedDescription)")
+            }
+        }
+    }
+
+    /// One-click merge action from the candidate sheet. Reuses the
+    /// existing merge flow by constructing entries that match
+    /// `mergeSelectedRecordings`'s expectations and routing through
+    /// the same code path — so users get the same auto-rediarize
+    /// transcript output they'd get from a manual select-and-merge.
+    private func executeMergeCandidate(_ cand: MergeCandidate) {
+        let names = Set(cand.pieces.map { ($0.mp3_name as NSString).deletingPathExtension }
+                        .map { "\($0).hda" })
+        let entries = syncEntries.filter { entry in
+            names.contains(entry.recording.name)
+                && entry.recording.downloaded && entry.recording.localExists
+        }
+        guard entries.count == cand.pieces.count else {
+            log("Merge candidate aborted: expected \(cand.pieces.count) entries, found \(entries.count)")
+            showError("Merge aborted — could not locate all pieces in the current table. Try Refresh first.")
+            return
+        }
+        // Pre-populate the checked set so the existing merge code path
+        // picks these up. mergeSelectedRecordings reads from
+        // syncCheckedRecordings, so this single-line reuse keeps the
+        // logic in one place.
+        syncCheckedRecordings = Set(entries.map(\.recording.name))
+        log("Merge candidate \(cand.pair_key): firing merge on \(cand.pieces.count) pieces")
+        mergeSelectedRecordings()
+    }
+
+    /// Sticky dismissal — calls `extractor.py dismiss-merge-pair` so
+    /// the chain stops re-appearing on rescans, then refreshes the
+    /// candidate list locally.
+    private func dismissMergeCandidate(_ cand: MergeCandidate) {
+        let names = cand.pieces.map(\.device_name)
+        runExtractor(arguments: ["dismiss-merge-pair"] + names, productId: nil) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.scanMergeCandidates()
             }
         }
     }
@@ -5785,6 +5853,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             }
             refreshTranscriptionState()
+            // The queue just drained; new transcripts on disk may
+            // unlock new merge candidates (the detector requires
+            // every piece in a chain to have a transcript). Cheap to
+            // re-run, ~1s.
+            scanMergeCandidates()
             syncViewModelState()
             return
         }
@@ -6126,6 +6199,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// own duplicate-guard handles any overlap with later
     /// download-new triggers on the same session.
     private func runLaunchAutoTranscribeIfNeeded() {
+        // Always scan for merge candidates on first refreshTranscriptionState
+        // — this is the moment we know transcripts on disk are reflected
+        // in syncEntries.transcribed, which the merge-candidates
+        // detector relies on. Cheap (~1s) so safe to fire here too.
+        if !didRunLaunchAutoTranscribe {
+            scanMergeCandidates()
+        }
         guard !didRunLaunchAutoTranscribe else { return }
         guard syncAutoTranscribe else {
             // Still flip the flag — if the user toggles auto-transcribe

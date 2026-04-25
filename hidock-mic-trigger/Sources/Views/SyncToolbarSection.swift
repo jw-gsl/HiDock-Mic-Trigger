@@ -89,6 +89,24 @@ struct SyncToolbarSection: View {
                     }
                 }
 
+                // Merge candidates indicator — passive count + tooltip,
+                // not a button. The actual Merge / Dismiss actions live
+                // in each candidate row's right-click context menu;
+                // popping a separate window or sheet for a "system
+                // suggestion" felt heavier than the affordance warrants.
+                // The blue left-border on candidate rows is the primary
+                // visual cue; this label just confirms the system is
+                // paying attention.
+                if viewModel.mergeCandidateCountForBadge > 0 {
+                    Label(
+                        "\(viewModel.mergeCandidateCountForBadge) merge suggestion\(viewModel.mergeCandidateCountForBadge == 1 ? "" : "s")",
+                        systemImage: "arrow.triangle.merge"
+                    )
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(.blue)
+                    .help("Right-click any blue-bordered row to Merge or Dismiss the suggestion.")
+                }
+
                 if viewModel.needsTaggingCount > 0 {
                     Label("\(viewModel.needsTaggingCount) need tagging", systemImage: "tag.fill")
                         .font(.caption.weight(.medium))

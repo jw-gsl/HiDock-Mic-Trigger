@@ -86,12 +86,19 @@ struct SyncHeaderSection: View {
                       ? "At least one selected recording is trimmed — re-downloading will replace the trimmed local file with the device's original."
                       : "Download the selected recordings from the device")
 
-                Button {
-                    viewModel.onDownloadNew()
-                } label: {
-                    Label("Download New", systemImage: "arrow.down.to.line")
+                // Hide Download New when auto-download is on — it'd be
+                // redundant: any new file appearing would auto-download
+                // anyway. Showing it would just bait users into manual
+                // double-trips. If the user toggles auto-download off,
+                // the button comes back.
+                if !viewModel.syncAutoDownload {
+                    Button {
+                        viewModel.onDownloadNew()
+                    } label: {
+                        Label("Download New", systemImage: "arrow.down.to.line")
+                    }
+                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
                 }
-                .disabled(viewModel.syncBusy || !viewModel.syncPaired)
 
                 Button {
                     viewModel.onMarkDownloaded()
