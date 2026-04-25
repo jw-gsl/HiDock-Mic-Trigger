@@ -475,6 +475,17 @@ def read_raw_response_payload(
             if start == -1 or len(pending) - start < 12:
                 continue
             payload_len = struct.unpack(">I", pending[start + 8 : start + 12])[0]
+            # Bounds-check the device-reported payload length the same
+            # way parse_frame() does. Without this, a corrupted length
+            # field causes the loop below to wait until the deadline
+            # then silently return a truncated payload to query_file_list,
+            # producing a wrong catalog. Catalog responses are typically
+            # tens of KB — the 100 MB ceiling has ample headroom for
+            # legitimate growth.
+            if payload_len > MAX_PAYLOAD_SIZE:
+                raise HiDockProtocolError(
+                    f"payload too large: {payload_len} bytes (max {MAX_PAYLOAD_SIZE})"
+                )
             total_needed = start + 12 + payload_len
             pending = pending[start:]
             started = True

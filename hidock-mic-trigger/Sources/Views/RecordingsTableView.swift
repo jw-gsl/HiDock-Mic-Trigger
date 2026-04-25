@@ -187,7 +187,13 @@ struct RecordingsTableView: View {
                 .font(.caption.monospacedDigit())
                 .frame(width: 70, alignment: .leading)
 
-            // Actions
+            // Actions — width and alignment must match the recording
+            // row's actions HStack so the folder icons line up between
+            // merge-parent rows and regular rows. The recording row
+            // expanded to 70pt with `.leading` to fit the trim/merge
+            // indicator icons; this row has no extra icons so stays
+            // visually equivalent to a recording row's "Show in Finder"
+            // button at the same x-coordinate.
             HStack(spacing: 4) {
                 if fileExists {
                     Button {
@@ -200,7 +206,7 @@ struct RecordingsTableView: View {
                     .help("Show in Finder")
                 }
             }
-            .frame(width: 50)
+            .frame(width: 70, alignment: .leading)
 
             Spacer(minLength: 0)
         }
@@ -305,14 +311,20 @@ struct RecordingsTableView: View {
             }
             .frame(width: 120, alignment: .leading)
 
-            StatusBadge(text: entry.statusText, level: entry.statusLevel)
-                .frame(width: 110, alignment: .leading)
+            ClickableStatusBadge(
+                text: entry.statusText,
+                level: entry.statusLevel,
+                errorMessage: entry.recording.lastError
+            )
+            .frame(width: 110, alignment: .leading)
 
             TranscriptionIndicator(
                 entry: entry,
                 transcriptionBusy: viewModel.transcriptionBusy,
                 transcriptionCurrentFile: viewModel.transcriptionCurrentFile,
                 transcriptionProgress: viewModel.transcriptionProgress,
+                transcriptionFailed: viewModel.failedTranscriptionPaths.contains(entry.recording.outputPath),
+                transcriptionErrorMessage: viewModel.transcriptionErrorMessage(for: entry.recording.outputPath),
                 onRevealTranscript: viewModel.onRevealTranscript,
                 onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer
             )
@@ -327,9 +339,33 @@ struct RecordingsTableView: View {
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
 
-            Text(formatRecordingDuration(entry.recording.duration))
+            // The extractor pre-download estimate is `file_size / 8000`
+            // (assumes 64 kbps), which is correct for H1 (16 kHz/64 kbps)
+            // but ~50% over for P1 (48 kHz/96 kbps). Real value comes
+            // from mutagen reading the MP3 once the file is local.
+            //
+            // We trust the explicit `durationEstimated` flag if the
+            // extractor sent one (newer payloads always do). Older
+            // payloads default to the previous heuristic: "estimated
+            // iff not localExists." This keeps the `~` accurate even
+            // if mutagen ever fails post-download — which is exactly
+            // how a 2h P1 recording silently displayed as 3h until the
+            // missing-mutagen dependency was caught on 2026-04-25.
+            let isEstimated: Bool = {
+                if let flag = entry.recording.durationEstimated {
+                    return flag
+                }
+                return !entry.recording.localExists
+            }()
+            Text(isEstimated
+                 ? "~" + formatRecordingDuration(entry.recording.duration)
+                 : formatRecordingDuration(entry.recording.duration))
                 .font(.caption.monospacedDigit())
+                .foregroundColor(isEstimated ? .secondary : .primary)
                 .frame(width: 70, alignment: .leading)
+                .help(isEstimated
+                      ? "Estimated duration — actual value will appear after download (read from MP3)"
+                      : "")
 
             Text(entry.recording.humanLength)
                 .font(.caption.monospacedDigit())
@@ -346,8 +382,32 @@ struct RecordingsTableView: View {
                     .foregroundColor(.accentColor)
                     .help("Show in Finder")
                 }
+                // Indicator icons, right of the folder button:
+                //   - scissors: the local file was trimmed in-place;
+                //     flagged in state.json so refreshes preserve it
+                //     and re-downloads warn.
+                //   - arrow.triangle.merge: this recording is a child
+                //     of an active merge group (i.e. its bytes were
+                //     combined into a merged .mp3 alongside siblings).
+                // Both icons use `.blue` so they pick up exactly the
+                // same colour as the "Merged" StatusBadge (which is
+                // `.info` → `.blue`). Keeps the affordance consistent
+                // visually across the row — folder + trim + merge all
+                // read as one related set, not three different things.
+                if entry.recording.trimmed == true {
+                    Image(systemName: "scissors")
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+                        .help("Trimmed locally — Re-download will overwrite this with the original from the device")
+                }
+                if viewModel.mergeGroups.contains(where: { $0.childNames.contains(entry.recording.name) }) {
+                    Image(systemName: "arrow.triangle.merge")
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+                        .help("Included in a merge group")
+                }
             }
-            .frame(width: 50)
+            .frame(width: 70, alignment: .leading)
 
             Spacer(minLength: 0)
         }

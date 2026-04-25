@@ -57,6 +57,15 @@ class HiDockProtocolError(RuntimeError):
     pass
 
 
+def _log_warn(message: str) -> None:
+    """Print a warning to stderr that the desktop app's log capture picks
+    up. Used wherever we previously had a silent `except Exception: pass`
+    that could mask real-world breakage (e.g. a missing mutagen dep that
+    silently let bad duration estimates flow through to the UI for
+    months). Anything noisy enough to log but not fatal goes here."""
+    print(f"[extractor] WARN: {message}", file=sys.stderr, flush=True)
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -532,6 +541,15 @@ def read_raw_response_payload(
             if start == -1 or len(pending) - start < 12:
                 continue
             payload_len = struct.unpack(">I", pending[start + 8 : start + 12])[0]
+            # Bounds-check the device-reported payload length the same way
+            # parse_frame() does. Without this, a corrupted or malicious
+            # length field can cause the loop below to wait indefinitely
+            # for an impossible byte count, then fall through to the
+            # best-effort return below — silently truncating the payload.
+            if payload_len > MAX_PAYLOAD_SIZE:
+                raise HiDockProtocolError(
+                    f"payload too large: {payload_len} bytes (max {MAX_PAYLOAD_SIZE})"
+                )
             total_needed = start + 12 + payload_len
             pending = pending[start:]
             started = True
@@ -1024,17 +1042,68 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         if stored.get("last_error") and not downloaded:
             status = "failed"
         duration = recording.get("duration", 0.0)
+        # When the file exists locally, prefer filesystem truth for
+        # length and duration over the device's catalog numbers.
+        # Rationale: the user may have trimmed the local file in-place
+        # (Mac app's Trim action), producing a shorter file than the
+        # device still reports. Without this override the UI flips back
+        # to the device-reported (pre-trim) size and duration on every
+        # refresh, confusing the user. Duration from mutagen is
+        # frame-accurate; size is the filesystem byte count.
+        length_for_display = recording.get("length", 0)
+        # `duration_estimated` flips false the moment we successfully
+        # read the duration from the local MP3 via mutagen. The flag
+        # rides through to the desktop UI so the column can show "~"
+        # for any value that is still a `bytes / 8000` guess — useful
+        # when the file is downloaded but the metadata read failed
+        # (e.g. mutagen missing from the venv, which is the bug that
+        # made every P1 recording show ~50% over its real length).
+        duration_estimated = True
         if local_exists:
+            try:
+                local_size = output_path.stat().st_size
+                if local_size > 0:
+                    length_for_display = local_size
+            except OSError as exc:
+                _log_warn(f"length stat failed for {output_path}: {exc}")
             try:
                 from mutagen.mp3 import MP3
                 audio = MP3(str(output_path))
                 duration = audio.info.length
-            except Exception:
-                pass  # keep the estimated duration
+                duration_estimated = False
+            except ImportError as exc:
+                # Hard dependency missing — don't swallow it. Previously
+                # this `except Exception: pass` kept the bad estimate
+                # silently. Log loudly so the next time a venv is missing
+                # mutagen it's obvious in the desktop log.
+                _log_warn(
+                    f"mutagen unavailable; duration for {output_path.name} "
+                    f"is the size/8000 estimate, not the real value ({exc})"
+                )
+            except Exception as exc:
+                _log_warn(f"mutagen read failed for {output_path}: {exc}")
+        # Derive the "trimmed" flag two ways:
+        #   1. Explicit: state.json has `trimmed: true` from a Mac-app
+        #      Trim that ran after the mark-trimmed feature shipped.
+        #   2. Inferred: the local file is meaningfully smaller than the
+        #      device-reported length. Catches files trimmed BEFORE
+        #      mark-trimmed existed — without this, every historical
+        #      trim shows no scissors icon. 5% slack absorbs ID3 / minor
+        #      tag-rewrite differences from non-trim post-processing.
+        device_length = recording.get("length", 0) or 0
+        size_inferred_trim = (
+            local_exists
+            and device_length > 0
+            and length_for_display > 0
+            and length_for_display < device_length * 0.95
+        )
+        trimmed_flag = bool(stored.get("trimmed")) or size_inferred_trim
         items.append(
             {
                 **recording,
+                "length": length_for_display,
                 "duration": duration,
+                "durationEstimated": duration_estimated,
                 "outputPath": str(output_path),
                 "outputName": output_name_for(name),
                 "downloaded": downloaded,
@@ -1042,7 +1111,9 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "downloadedAt": stored.get("downloaded_at"),
                 "lastError": stored.get("last_error"),
                 "status": status,
-                "humanLength": human_size(recording["length"]),
+                "humanLength": human_size(length_for_display),
+                "trimmed": trimmed_flag,
+                "removed": bool(stored.get("removed")),
             }
         )
 
@@ -1064,12 +1135,21 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         local_exists = output_path.exists()
         length = int(stored.get("length", 0))
         duration = 0.0
+        duration_estimated = True
         if local_exists:
             try:
                 from mutagen.mp3 import MP3
                 audio = MP3(str(output_path))
                 duration = audio.info.length
-            except Exception:
+                duration_estimated = False
+            except ImportError as exc:
+                _log_warn(
+                    f"mutagen unavailable; orphan duration for {output_path.name} "
+                    f"falling back to size/8000 estimate ({exc})"
+                )
+                duration = max(length / 8000.0, 0.0)
+            except Exception as exc:
+                _log_warn(f"mutagen read failed for orphan {output_path}: {exc}")
                 duration = max(length / 8000.0, 0.0)
         ts = bcdish_filename_to_datetime(name)
         items.append(
@@ -1079,6 +1159,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "createTime": ts.strftime("%H:%M:%S") if ts else "",
                 "length": length,
                 "duration": duration,
+                "durationEstimated": duration_estimated,
                 "version": 0,
                 "mode": "unknown",
                 "signature": stored.get("signature", md5_hex(name)),
@@ -1090,6 +1171,8 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "lastError": stored.get("last_error"),
                 "status": "downloaded" if bool(stored.get("downloaded")) else "missing_local",
                 "humanLength": human_size(length),
+                "trimmed": bool(stored.get("trimmed")),
+                "removed": bool(stored.get("removed")),
             }
         )
     items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
@@ -1331,6 +1414,12 @@ def download_new(
         if item["downloaded"]:
             skipped.append({"filename": item["name"], "reason": "already_downloaded"})
             continue
+        if item.get("removed"):
+            # User deleted the local copy via the Mac app's Remove. Don't
+            # silently re-pull it on the next auto-download cycle —
+            # they'll have to explicitly Unremove first.
+            skipped.append({"filename": item["name"], "reason": "user_removed"})
+            continue
         result = download_one(
             item["name"],
             length=item["length"],
@@ -1455,13 +1544,20 @@ def _audio_file_metadata(audio_path: Path) -> dict:
     mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
     duration = stat.st_size / 16000.0  # rough estimate
+    duration_estimated = True
     try:
         from mutagen import File as MutagenFile
         mf = MutagenFile(str(audio_path))
         if mf and mf.info:
             duration = mf.info.length
-    except Exception:
-        pass
+            duration_estimated = False
+    except ImportError as exc:
+        _log_warn(
+            f"mutagen unavailable; volume duration for {audio_path.name} "
+            f"falling back to size/16000 estimate ({exc})"
+        )
+    except Exception as exc:
+        _log_warn(f"mutagen read failed for volume file {audio_path}: {exc}")
 
     return {
         "name": audio_path.name,
@@ -1469,6 +1565,7 @@ def _audio_file_metadata(audio_path: Path) -> dict:
         "createTime": mtime.strftime("%H:%M:%S"),
         "length": stat.st_size,
         "duration": round(duration, 1),
+        "durationEstimated": duration_estimated,
         "version": 0,
         "mode": "external",
         "signature": md5_hex(f"{audio_path.name}:{stat.st_size}:{int(stat.st_mtime)}"),
@@ -1549,6 +1646,8 @@ def volume_status(
             "lastError": stored.get("last_error"),
             "status": status,
             "humanLength": human_size(meta["length"]),
+            "trimmed": bool(stored.get("trimmed")),
+            "removed": bool(stored.get("removed")),
         })
 
     # Include state-only entries for files no longer on the volume
@@ -1565,6 +1664,7 @@ def volume_status(
             "createTime": "",
             "length": stored.get("length", 0),
             "duration": 0,
+            "durationEstimated": True,
             "version": 0,
             "mode": "external",
             "signature": stored.get("signature", ""),
@@ -1577,6 +1677,8 @@ def volume_status(
             "lastError": stored.get("last_error"),
             "status": "downloaded" if stored.get("downloaded") else "missing_local",
             "humanLength": human_size(stored.get("length", 0)),
+            "trimmed": bool(stored.get("trimmed")),
+            "removed": bool(stored.get("removed")),
         })
 
     items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
@@ -1746,6 +1848,18 @@ def main() -> int:
     unmark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to unmark")
     unmark_dl.add_argument("--volume-name", default=None, help="For volume devices")
 
+    mark_trim = sub.add_parser("mark-trimmed", help="Flag recordings as locally trimmed (UI icon + re-download warning)")
+    mark_trim.add_argument("filenames", nargs="+", help="Device-side filenames to flag as trimmed")
+
+    unmark_trim = sub.add_parser("unmark-trimmed", help="Clear the trimmed flag on recordings")
+    unmark_trim.add_argument("filenames", nargs="+", help="Device-side filenames to clear trimmed flag on")
+
+    mark_removed_p = sub.add_parser("mark-removed", help="Flag recordings as locally removed (excluded from auto-download/transcribe)")
+    mark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to flag as removed")
+
+    unmark_removed_p = sub.add_parser("unmark-removed", help="Clear the removed flag on recordings")
+    unmark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to clear removed flag on")
+
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
 
@@ -1865,6 +1979,54 @@ def main() -> int:
                 unmarked.append(filename)
         save_state(state)
         print(json.dumps({"unmarked": unmarked}, indent=2))
+        return 0
+    if args.command == "mark-trimmed":
+        state = load_state()
+        downloads = state["downloads"]
+        flagged = []
+        for filename in args.filenames:
+            if filename in downloads:
+                downloads[filename]["trimmed"] = True
+                downloads[filename]["updated_at"] = utc_now_iso()
+                flagged.append(filename)
+        save_state(state)
+        print(json.dumps({"trimmed": flagged}, indent=2))
+        return 0
+    if args.command == "unmark-trimmed":
+        state = load_state()
+        downloads = state["downloads"]
+        cleared = []
+        for filename in args.filenames:
+            if filename in downloads and "trimmed" in downloads[filename]:
+                del downloads[filename]["trimmed"]
+                downloads[filename]["updated_at"] = utc_now_iso()
+                cleared.append(filename)
+        save_state(state)
+        print(json.dumps({"untrimmed": cleared}, indent=2))
+        return 0
+    if args.command == "mark-removed":
+        state = load_state()
+        downloads = state["downloads"]
+        flagged = []
+        for filename in args.filenames:
+            if filename in downloads:
+                downloads[filename]["removed"] = True
+                downloads[filename]["updated_at"] = utc_now_iso()
+                flagged.append(filename)
+        save_state(state)
+        print(json.dumps({"removed": flagged}, indent=2))
+        return 0
+    if args.command == "unmark-removed":
+        state = load_state()
+        downloads = state["downloads"]
+        cleared = []
+        for filename in args.filenames:
+            if filename in downloads and "removed" in downloads[filename]:
+                del downloads[filename]["removed"]
+                downloads[filename]["updated_at"] = utc_now_iso()
+                cleared.append(filename)
+        save_state(state)
+        print(json.dumps({"unremoved": cleared}, indent=2))
         return 0
     if args.command == "status":
         print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))

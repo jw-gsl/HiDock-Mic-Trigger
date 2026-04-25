@@ -39,9 +39,19 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncSortKey: String = "created"
     @Published var syncSortAscending: Bool = false
     @Published var syncFilterDeviceId: String?
+    /// Pipeline-stage filter for the recordings table. Defaults to
+    /// `.all`. Combined with `syncFilterDeviceId` (AND), `syncHideDownloaded`,
+    /// and the user's sort key inside `visibleEntries`.
+    @Published var syncStatusFilter: SyncStatusFilter = .all
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
     @Published var syncPaired = false
+
+    // MARK: - Local-file Operation State
+    /// True while an ffmpeg trim is in flight. Separate from
+    /// `syncBusy` so a device still probing / connecting doesn't
+    /// disable Trim — the operation is purely local-file.
+    @Published var trimBusy = false
 
     // MARK: - Transcription State
     @Published var diarizeEnabled = false
@@ -62,6 +72,36 @@ final class HiDockViewModel: ObservableObject {
     var onRediarize: (String, Int?) -> Void = { _, _ in }  // jsonPath, nSpeakers
 
     // MARK: - Computed
+
+    /// True if any currently-checked recording has been locally
+    /// trimmed. Drives the Download Selected button's label flip to
+    /// "Re-download Selected" so the user sees what the click will
+    /// actually do (overwrite the trimmed local file with the
+    /// device original).
+    var selectionIncludesTrimmed: Bool {
+        syncEntries.contains { entry in
+            syncCheckedRecordings.contains(entry.recording.name)
+                && (entry.recording.trimmed ?? false)
+        }
+    }
+
+    /// Paths whose last transcription attempt ended in failure or was
+    /// cancelled. Used by the tag column to show an X icon so the user
+    /// can tell at a glance which rows need a retry, and by bulk-select
+    /// flows that want to surface "N recordings need a retry".
+    var failedTranscriptionPaths: Set<String> {
+        Set(transcriptionQueue
+            .filter { $0.status == .failed || $0.status == .cancelled }
+            .map(\.path))
+    }
+
+    /// Look up the captured error / cancellation message for a path.
+    /// Returns nil for queued/transcribing/completed items. The view
+    /// layer hands this to an alert when the red X is clicked.
+    func transcriptionErrorMessage(for path: String) -> String? {
+        transcriptionQueue.first(where: { $0.path == path })?.errorMessage
+    }
+
     var visibleEntries: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
@@ -79,6 +119,34 @@ final class HiDockViewModel: ObservableObject {
             entries = entries.filter {
                 !$0.recording.downloaded || $0.deviceId == "imported:local"
             }
+        }
+        // Pipeline-stage filter, evaluated on the same statusText
+        // cascade the table renders, so what the user picks always
+        // matches what the rows display.
+        switch syncStatusFilter {
+        case .all:
+            break
+        case .onDevice:
+            entries = entries.filter { $0.statusText == "On device" }
+        case .downloaded:
+            entries = entries.filter { $0.statusText == "Downloaded" }
+        case .untranscribed:
+            // Downloaded locally but no transcript yet, regardless of
+            // device. Excludes Skipped (user opted out) and Imported
+            // that's already been transcribed.
+            entries = entries.filter {
+                $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped
+            }
+        case .transcribed:
+            entries = entries.filter { $0.transcribed }
+        case .skipped:
+            entries = entries.filter { $0.statusText == "Skipped" }
+        case .removed:
+            entries = entries.filter { $0.statusText == "Removed" }
+        case .failed:
+            entries = entries.filter { $0.statusText == "Failed" }
+        case .imported:
+            entries = entries.filter { $0.deviceId == "imported:local" }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording

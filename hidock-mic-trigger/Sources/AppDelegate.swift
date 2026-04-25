@@ -1504,9 +1504,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
             self.log("Paint-from-cache: cached catalogs loaded, refreshing transcription state")
-            // Populate transcribed/tagged state from on-disk transcripts
-            // so the table lands on final status immediately instead of
-            // flipping Downloaded → Transcribed after live probes.
+            // Two-phase transcribed-state population: the sync disk
+            // scan below lands the table on Transcribed immediately
+            // (prevents Downloaded→Transcribed flash), then the async
+            // Python refresh fills in speakersTagged / summary paths
+            // that the filesystem scan can't tell us.
+            self.applyTranscribedFromDiskScan()
+            self.viewModel.syncEntries = self.syncEntries
             self.refreshTranscriptionState()
             self.syncViewModelState()
         }
@@ -1687,12 +1691,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             self.syncBusy = false
             if !anyConnected, !deviceErrors.isEmpty {
-                // Prefer the most informative error (one with "held by" info)
-                let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
-                    ?? deviceErrors.values.first ?? "unknown"
-                let message = syncErrorDescription(bestError)
-                self.viewModel.syncStatus = message
-                self.viewModel.syncStatusLevel = .warning
+                // Suppress the global amber when every paired device just
+                // isn't plugged in. The per-device cards already render
+                // "Not connected" themselves, and a global "HiDock device
+                // not found" banner on top of that is redundant noise —
+                // it implies something's wrong when in fact the user
+                // simply hasn't plugged in. Surface the global warning
+                // only for genuinely unusual errors (held-by-another-
+                // process, access denied, USB busy, etc.).
+                let allJustMissing = deviceErrors.values.allSatisfy {
+                    $0.localizedCaseInsensitiveContains("not found")
+                        && !$0.contains("held by")
+                        && !$0.localizedCaseInsensitiveContains("access denied")
+                        && !$0.contains("Errno 13")
+                }
+                if !allJustMissing {
+                    let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
+                        ?? deviceErrors.values.first ?? "unknown"
+                    let message = syncErrorDescription(bestError)
+                    self.viewModel.syncStatus = message
+                    self.viewModel.syncStatusLevel = .warning
+                }
             }
             self.updateMenuSyncStatus(connected: anyConnected)
             // Populate transcribed/tagged state from the on-disk
@@ -2087,6 +2106,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+
+            // Pre-flight: ffmpeg's concat demuxer parses the list with
+            // single-quoted paths, so any path containing a `'`, newline,
+            // backslash, or NUL would break the format and could let
+            // ffmpeg interpret the rest of the line as metadata or a
+            // filter directive. Today every path in `entries` is built
+            // from `outputFolder + sanitised HiDock filename`, so this
+            // check is defence-in-depth against (a) a future code path
+            // that lets a less-strict source reach this list, and (b) a
+            // user-chosen `outputFolder` that itself contains a quote.
+            // We keep `-safe 0` because our paths are absolute and
+            // `-safe 1` would reject all of them, breaking Merge.
+            let unsafePathChars = CharacterSet(charactersIn: "'\n\r\\\0")
+            let allPaths = entries.map(\.recording.outputPath) + [outputPath]
+            if let bad = allPaths.first(where: { $0.rangeOfCharacter(from: unsafePathChars) != nil }) {
+                DispatchQueue.main.async {
+                    self.viewModel.syncStatus = "Merge aborted (unsafe path)"
+                    self.viewModel.syncStatusLevel = .error
+                    self.showError("Merge aborted — refusing to pass a path with quote/newline/NUL/backslash to ffmpeg:\n\n\(bad)")
+                    self.syncViewModelState()
+                }
+                return
+            }
+
             // Write concat list to temp file
             let listPath = NSTemporaryDirectory() + "hidock-merge-list.txt"
             let listContent = entries.map { "file '\($0.recording.outputPath)'" }.joined(separator: "\n")
@@ -2096,12 +2139,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.executableURL = URL(fileURLWithPath: self.ffmpegPath)
             process.arguments = ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            // Capture stderr so failures surface a real message via the
+            // same pattern Trim uses, instead of an opaque exit code.
+            let errPipe = Pipe()
+            process.standardError = errPipe
+            var stderrData = Data()
+            let errQueue = DispatchQueue(label: "hidock.merge.stderr")
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                errQueue.sync { stderrData.append(chunk) }
+            }
 
             do {
                 try process.run()
                 process.waitUntilExit()
             } catch {
+                errPipe.fileHandleForReading.readabilityHandler = nil
                 DispatchQueue.main.async {
                     self.viewModel.syncStatus = "Merge failed"
                     self.viewModel.syncStatusLevel = .error
@@ -2110,6 +2164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 return
             }
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            let tail = errPipe.fileHandleForReading.readDataToEndOfFile()
+            if !tail.isEmpty { errQueue.sync { stderrData.append(tail) } }
+            let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
 
             try? FileManager.default.removeItem(atPath: listPath)
 
@@ -2132,11 +2190,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                     self.syncCheckedRecordings.removeAll()
                     self.refreshSyncStatus()
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: outputPath)])
+                    // Auto-transcribe the merged file. Merge implies
+                    // "treat this as one meeting", so we re-run the
+                    // pipeline against the combined audio rather than
+                    // splicing the children's transcripts together.
+                    // Re-running gives us cross-segment diarization
+                    // (speakers cluster across the whole recording,
+                    // not per-child) and a single internally-consistent
+                    // transcript. Cost is one Whisper pass over the
+                    // merged duration; usually fine because the user
+                    // explicitly asked for one unified output.
+                    if self.ensureTranscriptionReady() {
+                        self.log("Merge: queueing merged file for transcription: \(outputPath)")
+                        self.enqueueTranscriptions([outputPath])
+                    }
+                    // Finder pop-out removed — distracting and
+                    // unnecessary now that the merged row is visible
+                    // in the table. Right-click → Show in Finder
+                    // remains available.
                 } else {
                     self.viewModel.syncStatus = "Merge failed"
                     self.viewModel.syncStatusLevel = .error
-                    self.showError("ffmpeg exited with status \(process.terminationStatus)")
+                    let lastLines = stderrText
+                        .split(separator: "\n")
+                        .suffix(6)
+                        .joined(separator: "\n")
+                    self.log("Merge failed (exit \(process.terminationStatus)):\n\(stderrText)")
+                    let detail = lastLines.isEmpty
+                        ? "ffmpeg exited with status \(process.terminationStatus) (no stderr output)"
+                        : "ffmpeg exited with status \(process.terminationStatus):\n\n\(lastLines)"
+                    self.showError(detail)
                 }
                 self.syncViewModelState()
             }
@@ -2200,12 +2283,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let hostingView = NSHostingView(rootView: trimView)
         hostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 260)
         let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        // NSWindow defaults to isReleasedWhenClosed = true, which would
+        // let AppKit drop the window during close() while ARC still has
+        // a strong ref via `trimWindow` AND the in-flight close
+        // animation (_NSWindowTransformAnimation) still expects the
+        // window to be live. That's the double-free that crashed the
+        // app in objc_release during the next autorelease pool pop
+        // after clicking Trim. Every other NSWindow in this codebase
+        // sets this flag — this one was the outlier.
+        window.isReleasedWhenClosed = false
         window.title = "Trim Audio"
         window.contentView = hostingView
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         trimWindow = window
+    }
+
+    /// After an overwrite-trim succeeds, replace the matching
+    /// `HiDockSyncRecording` in `syncEntries` with one whose `length`
+    /// (byte size) and `duration` reflect the newly-trimmed local
+    /// file. We don't call refreshSyncStatus here because that would
+    /// re-read the device catalog, which still reports the original
+    /// (pre-trim) metadata — the recording on the HiDock itself isn't
+    /// touched by a local trim. `humanLength` is recomputed from the
+    /// new byte count so the Size column agrees with the file on disk.
+    private func updateEntryAfterOverwriteTrim(path: String, newDuration: Double) {
+        guard let idx = syncEntries.firstIndex(where: { $0.recording.outputPath == path }) else { return }
+        let newBytes: Int = {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let n = attrs[.size] as? Int else { return 0 }
+            return n
+        }()
+        let old = syncEntries[idx].recording
+        let humanLength: String
+        if newBytes >= 1_048_576 {
+            humanLength = String(format: "%.1f MB", Double(newBytes) / 1_048_576.0)
+        } else if newBytes >= 1024 {
+            humanLength = String(format: "%.0f KB", Double(newBytes) / 1024.0)
+        } else {
+            humanLength = "\(newBytes) B"
+        }
+        let updated = HiDockSyncRecording(
+            name: old.name,
+            createDate: old.createDate,
+            createTime: old.createTime,
+            length: newBytes,
+            duration: newDuration,
+            version: old.version,
+            mode: old.mode,
+            signature: old.signature,
+            outputPath: old.outputPath,
+            outputName: old.outputName,
+            downloaded: old.downloaded,
+            localExists: old.localExists,
+            downloadedAt: old.downloadedAt,
+            lastError: old.lastError,
+            status: old.status,
+            humanLength: humanLength,
+            trimmed: true,  // instant UI feedback — persist via mark-trimmed below
+            durationEstimated: false,  // we just trimmed it; the new duration is `end - start`
+            removed: old.removed  // preserve any prior removed flag (typically nil/false)
+        )
+        let existing = syncEntries[idx]
+        syncEntries[idx] = HiDockSyncRecordingEntry(
+            recording: updated,
+            deviceProductId: existing.deviceProductId,
+            deviceId: existing.deviceId,
+            deviceName: existing.deviceName,
+            transcribed: existing.transcribed,
+            transcriptPath: existing.transcriptPath,
+            speakersTagged: existing.speakersTagged,
+            summaryPath: existing.summaryPath,
+            transcriptionSkipped: existing.transcriptionSkipped
+        )
+        viewModel.syncEntries = syncEntries
+        log("updateEntryAfterOverwriteTrim: \(old.outputName) length=\(old.length)→\(newBytes), duration=\(String(format: "%.1f", old.duration))→\(String(format: "%.1f", newDuration))")
+
+        // Persist the trimmed flag in state.json so it survives app
+        // restarts and is visible to subsequent `status` calls — the
+        // in-memory update above is for instant paint; this is the
+        // source of truth.
+        let device = syncPairedDevices.first { $0.deviceId == syncEntries[idx].deviceId }
+        let pid = device?.productId
+        runExtractor(arguments: ["mark-trimmed", old.name], productId: pid) { [weak self] result in
+            guard let self = self else { return }
+            if case .failure(let err) = result {
+                self.log("mark-trimmed failed for \(old.name): \(err.localizedDescription)")
+            }
+        }
     }
 
     private func trimRecording(path: String, start: Double, end: Double, saveAsCopy: Bool) {
@@ -2216,33 +2382,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let dir = url.deletingLastPathComponent().path
             outputPath = "\(dir)/\(stem)-trimmed.mp3"
         } else {
-            outputPath = path + ".tmp"
+            // Keep the `.mp3` extension on the temp path — the earlier
+            // `path + ".tmp"` form ended in `.mp3.tmp`, and ffmpeg
+            // couldn't guess the container format from `.tmp`, failing
+            // with "Unable to choose an output format" (exit 234). A
+            // hidden dotfile sibling avoids showing a transient file
+            // in the Recordings folder listing.
+            let basename = url.lastPathComponent
+            let dir = url.deletingLastPathComponent().path
+            outputPath = "\(dir)/.\(basename).trim-tmp.mp3"
         }
 
-        viewModel.syncStatus = "Trimming…"
-        viewModel.syncStatusLevel = .secondary
-        viewModel.syncBusy = true
+        viewModel.trimBusy = true
         syncViewModelState()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: self.ffmpegPath)
+            // Re-encode instead of `-c copy`. Stream-copying MP3 with
+            // `-ss`/`-to` was exiting 234 (EINVAL) because MP3 frames
+            // can't be split at arbitrary byte offsets — ffmpeg lands
+            // mid-frame and bails. libmp3lame re-encode is frame-exact
+            // and is available in the standard Homebrew ffmpeg build.
+            // `-q:a 2` picks VBR ~190kbps, comparable quality to the
+            // HiDock source, and is fast on local CPU.
             process.arguments = [
                 "-y", "-i", path,
                 "-ss", String(format: "%.2f", start),
                 "-to", String(format: "%.2f", end),
-                "-c", "copy", outputPath
+                "-c:a", "libmp3lame", "-q:a", "2",
+                "-f", "mp3",  // explicit container — don't rely on output extension
+                outputPath
             ]
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            let errPipe = Pipe()
+            process.standardError = errPipe
+            // Drain the pipe concurrently; otherwise ffmpeg blocks on
+            // a full stderr buffer partway through a long file.
+            var stderrData = Data()
+            let errQueue = DispatchQueue(label: "hidock.trim.stderr")
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                errQueue.sync { stderrData.append(chunk) }
+            }
 
             do {
                 try process.run()
                 process.waitUntilExit()
             } catch {
+                errPipe.fileHandleForReading.readabilityHandler = nil
                 DispatchQueue.main.async {
-                    self.viewModel.syncBusy = false
+                    self.viewModel.trimBusy = false
                     self.viewModel.syncStatus = "Trim failed"
                     self.viewModel.syncStatusLevel = .error
                     self.showError("Trim failed: \(error.localizedDescription)")
@@ -2250,6 +2442,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 return
             }
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            let tail = errPipe.fileHandleForReading.readDataToEndOfFile()
+            if !tail.isEmpty { errQueue.sync { stderrData.append(tail) } }
+            let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
 
             // If replacing original, swap files
             if !saveAsCopy && process.terminationStatus == 0 {
@@ -2258,17 +2454,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
 
             DispatchQueue.main.async {
-                self.viewModel.syncBusy = false
+                self.viewModel.trimBusy = false
                 if process.terminationStatus == 0 {
                     let name = URL(fileURLWithPath: path).lastPathComponent
                     self.log("Trimmed \(name) (\(start)s–\(end)s)")
                     self.viewModel.syncStatus = "Trimmed \(name)"
                     self.viewModel.syncStatusLevel = .success
-                    self.refreshSyncStatus()
+                    // Overwrite-trim produces a shorter local file, but
+                    // refreshSyncStatus would re-read the HiDock catalog
+                    // and clobber our new size/duration with the
+                    // device's still-original numbers — so the list
+                    // would keep showing pre-trim length & size. Update
+                    // the entry in place from the local file instead:
+                    // size comes from the filesystem, duration from the
+                    // requested (end - start). Save-as-copy doesn't
+                    // touch the listed entry, so nothing to update there.
+                    if !saveAsCopy {
+                        self.updateEntryAfterOverwriteTrim(path: path, newDuration: end - start)
+                    }
                 } else {
                     self.viewModel.syncStatus = "Trim failed"
                     self.viewModel.syncStatusLevel = .error
-                    self.showError("ffmpeg exited with status \(process.terminationStatus)")
+                    // Surface the last few lines of ffmpeg stderr — the
+                    // exit-code number alone is useless to the user.
+                    let lastLines = stderrText
+                        .split(separator: "\n")
+                        .suffix(6)
+                        .joined(separator: "\n")
+                    self.log("Trim failed (exit \(process.terminationStatus)):\n\(stderrText)")
+                    let detail = lastLines.isEmpty
+                        ? "ffmpeg exited with status \(process.terminationStatus) (no stderr output)"
+                        : "ffmpeg exited with status \(process.terminationStatus):\n\n\(lastLines)"
+                    self.showError(detail)
                 }
                 self.syncViewModelState()
             }
@@ -2460,6 +2677,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// actually dispatched probes (i.e. we're past the early-launch
     /// window where the trigger hasn't yet been given a chance to run).
     private var didInitialAutoConnect = false
+    /// Guard for the launch-time auto-transcribe sweep. `refreshTranscriptionState`
+    /// runs multiple times as the launch sequence unfolds (cache paint,
+    /// then after each USB status probe returns), and we only want the
+    /// backlog-catchup to fire once per session — otherwise it could
+    /// trigger twice before the user even sees the UI.
+    private var didRunLaunchAutoTranscribe = false
+
+    /// Last-seen device-side file count per deviceId. Used to detect
+    /// "a new recording appeared on the device since we last looked"
+    /// so auto-download can fire even when the user records directly
+    /// on the HiDock without going through the USB mic trigger (the
+    /// trigger-release path was the only auto-download trigger before;
+    /// recording directly meant the file just sat there).
+    private var syncDeviceLastSeenCount: [String: Int] = [:]
 
     // MARK: - Transcript Viewer
 
@@ -3311,13 +3542,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        // Imports: drop file + JSON entry. Skip the per-item confirmation
-        // since we just got a bulk one.
+        // Imports: drop file + transcript artifacts + JSON entry.
+        // Without this the .md / .srt / *_diarized.json / *_whisper.json
+        // and the summary file would orphan in their respective folders
+        // every time the user removed an imported recording.
         for entry in imports {
             let name = entry.recording.name
             if let im = importedRecordings.first(where: { $0.name == name }) {
                 try? FileManager.default.removeItem(atPath: im.outputPath)
             }
+            removeTranscriptArtifacts(forRecordingName: entry.recording.outputName)
             importedRecordings.removeAll { $0.name == name }
             syncCheckedRecordings.remove(name)
         }
@@ -3325,10 +3559,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             ImportedRecordingsStore.save(importedRecordings)
         }
 
-        // HiDock local copies: delete MP3, unmark so catalogue reflects it.
+        // HiDock local copies: delete MP3 + transcript artifacts. Mark
+        // the entry as `removed` in state.json so download-new skips
+        // it on the next auto-cycle (status pill flips to "Removed",
+        // same UX as Skipped). Volumes use `unmark-downloaded` (the
+        // older flow) because they don't go through the same removed
+        // semantics — re-importing them is the natural way back.
         let group = DispatchGroup()
         for entry in localCopies {
             try? FileManager.default.removeItem(atPath: entry.recording.outputPath)
+            removeTranscriptArtifacts(forRecordingName: entry.recording.outputName)
             let device = syncPairedDevices.first { $0.deviceId == entry.deviceId }
             var args: [String]
             let pid: Int?
@@ -3336,7 +3576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 args = ["unmark-downloaded", "--volume-name", device.volumeName ?? "", entry.recording.name]
                 pid = nil
             } else {
-                args = ["unmark-downloaded", entry.recording.name]
+                args = ["mark-removed", entry.recording.name]
                 pid = device?.productId
             }
             group.enter()
@@ -3351,6 +3591,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.viewModel.syncStatusLevel = .success
             self.rebuildSyncEntries()
             self.refreshSyncStatus()
+        }
+    }
+
+    /// Delete every transcript-pipeline artifact that belongs to a
+    /// recording (by mp3 base name): the markdown transcript, the SRT,
+    /// the diarized JSON, the raw whisper JSON, and any summary in
+    /// ~/HiDock/Summaries/. Called from Remove and from any future
+    /// "wipe and re-transcribe" flow. Best-effort — `try?` swallows
+    /// the missing-file case which is the common one.
+    private func removeTranscriptArtifacts(forRecordingName outputName: String) {
+        let stem = (outputName as NSString).deletingPathExtension
+        let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let summariesDir = (NSHomeDirectory() as NSString).appendingPathComponent("HiDock/Summaries")
+
+        let transcriptArtifacts = [
+            "\(transcriptDir)/\(stem).md",
+            "\(transcriptDir)/\(stem).srt",
+            "\(transcriptDir)/\(stem)_diarized.json",
+            "\(transcriptDir)/\(stem)_whisper.json",
+        ]
+        for path in transcriptArtifacts {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
+        // Summaries are matched by `contains(stem)` — same lookup
+        // findSummaryPath uses — because summary filenames sometimes
+        // have a date prefix or suffix from the prompt template.
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) {
+            for entry in entries where entry.contains(stem) {
+                try? FileManager.default.removeItem(atPath: "\(summariesDir)/\(entry)")
+            }
         }
     }
 
@@ -3957,6 +4228,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let importedAfter = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }.count
         log("renderSyncStatus[\(device.shortName)]: \(status.recordings.count) device recs, imported before/after = \(importedBefore)/\(importedAfter), total syncEntries=\(syncEntries.count)")
+
+        // Auto-download trigger #2: device file-count rose since we
+        // last probed → at least one new recording appeared. Covers
+        // the "recorded directly on the HiDock without using the USB
+        // mic trigger" case, which previously left files marooned on
+        // the device because scheduleAutoDownloadNewRecordings only
+        // fired on mic-trigger release. Gated on syncAutoDownload,
+        // and only when the device is actually connected (otherwise
+        // a cached-catalog response could spuriously look like growth).
+        if status.connected {
+            let previousCount = syncDeviceLastSeenCount[device.deviceId]
+            let currentCount = status.recordings.count
+            syncDeviceLastSeenCount[device.deviceId] = currentCount
+            if let prev = previousCount, currentCount > prev, syncAutoDownload, !syncBusy, !syncDownloading {
+                log("Auto-download: \(device.shortName) recording count \(prev)→\(currentCount), triggering download-new")
+                scheduleAutoDownloadNewRecordings()
+            }
+        }
+        // Apply the sync disk-based transcribed check now, before any
+        // view update: this ensures rows paint at "Transcribed" rather
+        // than flashing "Downloaded" until the async Python refresh
+        // finishes. Cheap — one directory listing + O(n) set lookups.
+        applyTranscribedFromDiskScan()
         let validNames = Set(syncEntries.map(\.recording.name))
         syncCheckedRecordings = syncCheckedRecordings.intersection(validNames)
 
@@ -4242,11 +4536,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.syncStatus = ""
                 self.viewModel.syncStatusLevel = .normal
             } else if !deviceErrors.isEmpty {
-                let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
-                    ?? deviceErrors.values.first ?? "unknown"
-                let message = syncErrorDescription(bestError)
-                self.viewModel.syncStatus = message
-                self.viewModel.syncStatusLevel = .error
+                // Mirror the auto-connect path: suppress the global
+                // banner when every paired device is just unplugged.
+                // Reserve it for genuinely unusual errors.
+                let allJustMissing = deviceErrors.values.allSatisfy {
+                    $0.localizedCaseInsensitiveContains("not found")
+                        && !$0.contains("held by")
+                        && !$0.localizedCaseInsensitiveContains("access denied")
+                        && !$0.contains("Errno 13")
+                }
+                if !allJustMissing {
+                    let bestError = deviceErrors.values.first(where: { $0.contains("held by") })
+                        ?? deviceErrors.values.first ?? "unknown"
+                    let message = syncErrorDescription(bestError)
+                    self.viewModel.syncStatus = message
+                    self.viewModel.syncStatusLevel = .error
+                }
             }
             self.updateMenuSyncStatus(connected: anyConnected)
             self.refreshTranscriptionState()
@@ -4771,10 +5076,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
 
-        downloadNewFromDevices(devices, totalDownloaded: 0)
+        downloadNewFromDevices(devices, totalDownloaded: 0, freshDownloads: [])
     }
 
-    private func downloadNewFromDevices(_ remaining: [HiDockPairedDevice], totalDownloaded: Int) {
+    private func downloadNewFromDevices(_ remaining: [HiDockPairedDevice], totalDownloaded: Int, freshDownloads: [HiDockSyncDownloadResult]) {
         guard let device = remaining.first else {
             stopDownloadTimer()
             syncBusy = false
@@ -4788,15 +5093,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
             viewModel.syncStatusLevel = .success
             refreshSyncStatus()
-            // Auto-transcribe any untranscribed downloaded files
+            // Auto-transcribe combines two sources so nothing is missed:
+            //
+            //   1. Fresh downloads (`freshDownloads`) — the extractor's
+            //      own download-new response. We must use this because
+            //      refreshSyncStatus above is async and hasn't populated
+            //      `visibleEntries` with the just-downloaded files yet;
+            //      filtering visibleEntries alone would skip every
+            //      recording downloaded in this pass. (This is exactly
+            //      how Rec59 got missed: auto-transcribe fired ~14s
+            //      before the status probe returned with the new file.)
+            //
+            //   2. Backlog (`visibleEntries`) — rows that WERE already in
+            //      the table before this download run but remained
+            //      untranscribed (e.g. user toggled auto-transcribe off
+            //      previously, or a prior transcription failed).
+            //
+            // Fresh paths come first so the newest recordings jump the
+            // queue — matches the default newest-first table sort.
+            // Dedupe by path so a file that somehow appears in both
+            // lists isn't enqueued twice.
             if self.syncAutoTranscribe, ensureTranscriptionReady() {
-                // Refresh entries first to get latest state
-                let untranscribed = self.syncEntries
+                let freshPaths = freshDownloads.map(\.outputPath)
+                let backlogPaths = self.viewModel.visibleEntries
                     .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
                     .map(\.recording.outputPath)
-                if !untranscribed.isEmpty {
-                    self.log("Auto-transcribe: \(untranscribed.count) untranscribed recording(s) found")
-                    self.enqueueTranscriptions(untranscribed)
+                var seen = Set<String>()
+                let combined = (freshPaths + backlogPaths).filter { seen.insert($0).inserted }
+                if !combined.isEmpty {
+                    self.log("Auto-transcribe: \(combined.count) recording(s) to process (\(freshPaths.count) fresh + \(backlogPaths.count) backlog, deduped)")
+                    self.enqueueTranscriptions(combined)
                 }
             }
             syncViewModelState()
@@ -4826,13 +5152,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             switch result {
             case .success(let data):
                 var deviceDownloaded = 0
+                var devicePayloads: [HiDockSyncDownloadResult] = []
                 if let payload = try? JSONDecoder().decode(HiDockSyncDownloadNewResponse.self, from: data) {
                     if let error = payload.error {
                         self.log("download-new error for \(device.cleanName): \(error)")
                     }
                     deviceDownloaded = payload.downloaded.count
+                    devicePayloads = payload.downloaded
                 }
-                self.downloadNewFromDevices(Array(remaining.dropFirst()), totalDownloaded: totalDownloaded + deviceDownloaded)
+                self.downloadNewFromDevices(
+                    Array(remaining.dropFirst()),
+                    totalDownloaded: totalDownloaded + deviceDownloaded,
+                    freshDownloads: freshDownloads + devicePayloads
+                )
             case .failure(let error):
                 if self.syncDownloadStopping {
                     self.syncDownloadStopping = false
@@ -4843,7 +5175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 self.log("download-new failed for \(device.cleanName): \(error.localizedDescription)")
-                self.downloadNewFromDevices(Array(remaining.dropFirst()), totalDownloaded: totalDownloaded)
+                self.downloadNewFromDevices(
+                    Array(remaining.dropFirst()),
+                    totalDownloaded: totalDownloaded,
+                    freshDownloads: freshDownloads
+                )
             }
         }
     }
@@ -5305,14 +5641,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func enqueueTranscriptions(_ paths: [String]) {
+        // Items that have previously failed or been cancelled still live
+        // in `pendingTranscriptionQueue` so the Queue window can show
+        // their final state. Without resetting their status here, a user
+        // who re-selects those rows and hits Transcribe Selected sees
+        // nothing happen: the existing item isn't `.queued`, so
+        // processNextInQueue skips it, and the duplicate guard below
+        // stops us appending a fresh entry. Retry by flipping the
+        // terminal status back to `.queued` and clearing progress so
+        // the retry shows a clean 0%.
+        transcriptionCancelled = false
         for path in paths {
-            if !pendingTranscriptionQueue.contains(where: { $0.path == path }) {
-                pendingTranscriptionQueue.append(TranscriptionQueueItem(path: path))
+            if let idx = pendingTranscriptionQueue.firstIndex(where: { $0.path == path }) {
+                let st = pendingTranscriptionQueue[idx].status
+                if st == .failed || st == .cancelled {
+                    pendingTranscriptionQueue[idx].status = .queued
+                    pendingTranscriptionQueue[idx].progress = 0
+                    pendingTranscriptionQueue[idx].errorMessage = nil
+                }
+                continue
             }
+            pendingTranscriptionQueue.append(TranscriptionQueueItem(path: path))
         }
         log("Enqueued \(paths.count) recording(s), queue size: \(pendingTranscriptionQueue.count)")
         syncViewModelState()
         processNextInQueue()
+    }
+
+    /// Ratcheting progress setter: the bar only ever moves forward.
+    /// All three sources (synthetic timer, real PROGRESS: from Whisper,
+    /// STAGE: stage floors) call this. Previously each source wrote
+    /// directly to `transcriptionProgress`, so they overwrote each
+    /// other — STAGE 1/5 set 20%, then real Whisper progress dropped
+    /// back to 5%, then STAGE 4/5 jumped to 80%. The user saw the
+    /// bar bouncing. Taking a max here (per item) keeps it monotonic.
+    private func applyTranscriptionProgress(_ candidate: Int, itemPath: String, filename: String, position: Int, total: Int) {
+        let clamped = max(0, min(candidate, 100))
+        let next = max(transcriptionProgress, clamped)
+        guard next != transcriptionProgress else { return }
+        transcriptionProgress = next
+        if let idx = pendingTranscriptionQueue.firstIndex(where: { $0.path == itemPath }) {
+            pendingTranscriptionQueue[idx].progress = next
+        }
+        viewModel.syncStatus = "Transcribing \(filename) — \(next)% (\(position)/\(total))"
+        syncViewModelState()
+    }
+
+    /// Map a STAGE: line from transcribe.py to a percent floor that
+    /// roughly matches how long each stage takes on Whisper-MPS for a
+    /// typical meeting. Equal-weighting (N/M*100) was misleading
+    /// because "Loading model" is a couple of seconds while
+    /// "Transcribing" is most of the run. Falls back to the raw N/M
+    /// ratio for stages we don't know about, so future pipeline
+    /// changes degrade gracefully.
+    private func progressFloorForStage(label: String, current: Int, stageTotal: Int) -> Int {
+        let normalised = label.lowercased()
+        if normalised.contains("loading") { return 5 }
+        if normalised.contains("transcribing") { return 10 }
+        if normalised.contains("applying") || normalised.contains("correction") { return 80 }
+        if normalised.contains("diariz") { return 85 }
+        if normalised.contains("writing") { return 95 }
+        return Int(Double(current) / Double(max(stageTotal, 1)) * 100)
     }
 
     private func processNextInQueue() {
@@ -5360,7 +5749,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         transcriptionEstimatedDuration = max(audioDuration / 2.0, 60)  // Whisper ~2x realtime
         transcriptionStartTime = Date()
 
-        // Start a Swift-side timer for synthetic progress (Python GIL blocks the progress thread)
+        // Start a Swift-side timer for synthetic progress (Python GIL blocks the progress thread).
+        // The three progress sources (synthetic, real PROGRESS: lines,
+        // STAGE: lines) all funnel through a ratcheting setter so the
+        // bar is monotonic — never drops back. Previously they
+        // overwrote each other, producing the "20% → 5% → 85%" bounce.
         transcriptionProgressTimer?.invalidate()
         transcriptionProgressTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             guard let self = self, self.transcriptionBusy else { return }
@@ -5368,14 +5761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let elapsed = Date().timeIntervalSince(startTime)
             let frac = min(elapsed / self.transcriptionEstimatedDuration, 0.95)
             let syntheticPct = max(15, min(Int(15 + frac * 70), 84))
-            // Only use synthetic if real progress hasn't overtaken it
-            let displayPct = max(syntheticPct, self.transcriptionLastRealProgress)
-            self.transcriptionProgress = displayPct
-            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
-                self.pendingTranscriptionQueue[idx].progress = displayPct
-            }
-            self.viewModel.syncStatus = "Transcribing \(filename) — \(displayPct)% (\(position)/\(total))"
-            self.syncViewModelState()
+            self.applyTranscriptionProgress(syntheticPct, itemPath: item.path, filename: filename, position: position, total: total)
         }
 
         var args = ["transcribe", item.path]
@@ -5391,18 +5777,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         runTranscription(arguments: args, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }
             self.transcriptionLastRealProgress = pct
-            self.transcriptionProgress = pct
-            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
-                self.pendingTranscriptionQueue[idx].progress = pct
-            }
-            self.syncViewModelState()
+            self.applyTranscriptionProgress(pct, itemPath: item.path, filename: filename, position: position, total: total)
         }, onStage: { [weak self] current, stageTotal, label in
             guard let self = self else { return }
-            let pct = Int(Double(current) / Double(max(stageTotal, 1)) * 100)
-            self.transcriptionProgress = pct
-            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
-                self.pendingTranscriptionQueue[idx].progress = pct
-            }
+            // Map the stage to a time-realistic floor instead of
+            // raw N/M*100. Stages aren't equal-duration: "Loading
+            // model" is < 5% of total time but used to render as
+            // 20% (1/5), making the bar leap forward and then stall.
+            // The new mapping reflects roughly how long each stage
+            // takes on Whisper-MPS for a typical 30-min meeting.
+            let floor = self.progressFloorForStage(label: label, current: current, stageTotal: stageTotal)
+            self.applyTranscriptionProgress(floor, itemPath: item.path, filename: filename, position: position, total: total)
             // Publish the stage to transcriptionStatus so the bar at
             // the top of the window shows "Transcribing N/M — p% ·
             // Diarizing speakers 4/5". Previously this was written
@@ -5424,8 +5809,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 switch result {
                 case .success:
                     self.pendingTranscriptionQueue[idx].status = .completed
-                case .failure:
+                    self.pendingTranscriptionQueue[idx].errorMessage = nil
+                case .failure(let err):
                     self.pendingTranscriptionQueue[idx].status = .failed
+                    // The NSError carries the trimmed stderr text
+                    // assembled by `runTranscription` — exactly what we
+                    // want shown when the user clicks the red X icon.
+                    self.pendingTranscriptionQueue[idx].errorMessage =
+                        err.localizedDescription
                 }
             }
 
@@ -5466,9 +5857,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for i in pendingTranscriptionQueue.indices {
             if pendingTranscriptionQueue[i].status == .transcribing {
                 pendingTranscriptionQueue[i].status = .cancelled
+                pendingTranscriptionQueue[i].errorMessage = "Cancelled mid-run by user."
             }
             if pendingTranscriptionQueue[i].status == .queued {
                 pendingTranscriptionQueue[i].status = .cancelled
+                pendingTranscriptionQueue[i].errorMessage = "Cancelled before this item ran."
             }
         }
 
@@ -5547,6 +5940,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         enqueueTranscriptions(paths)
     }
 
+    /// Synchronous, filesystem-only pass that marks entries as
+    /// transcribed when a matching `<basename>.md` exists in the
+    /// transcripts folder. Prevents the "Downloaded → Transcribed"
+    /// flash on launch: `refreshTranscriptionState` spawns Python
+    /// (`transcribe.py status`) which takes long enough that the user
+    /// sees stale "Downloaded" rows until it returns. This pass is
+    /// effectively free — one `contentsOfDirectory` + set lookups —
+    /// and lands the table on the correct pipeline-end status (the
+    /// cascade already prefers Transcribed over Downloaded). The
+    /// async refresh still runs afterwards to fill in `speakersTagged`
+    /// / `summaryPath` / canonical `transcriptPath`.
+    private func applyTranscribedFromDiskScan() {
+        let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: transcriptDir) else { return }
+        let mdBaseNames = Set(
+            contents
+                .filter { $0.hasSuffix(".md") }
+                .map { ($0 as NSString).deletingPathExtension }
+        )
+        guard !mdBaseNames.isEmpty else { return }
+        var flipped = 0
+        for i in syncEntries.indices {
+            let base = (syncEntries[i].recording.outputName as NSString).deletingPathExtension
+            if mdBaseNames.contains(base) && !syncEntries[i].transcribed {
+                syncEntries[i].transcribed = true
+                if syncEntries[i].transcriptPath == nil {
+                    syncEntries[i].transcriptPath = (transcriptDir as NSString).appendingPathComponent(base + ".md")
+                }
+                flipped += 1
+            }
+        }
+        if flipped > 0 {
+            log("applyTranscribedFromDiskScan: flipped \(flipped) row(s) to Transcribed from disk")
+        }
+    }
+
     private func refreshTranscriptionState() {
         guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
               FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else {
@@ -5622,8 +6051,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.log("refreshTranscriptionState: matched \(matched) transcribed entries out of \(self.syncEntries.count)")
                 self.syncViewModelState()
+                self.runLaunchAutoTranscribeIfNeeded()
             }
         }
+    }
+
+    /// Fires once per session after the first `refreshTranscriptionState`
+    /// completes, so any recording that was already downloaded but never
+    /// transcribed gets picked up on launch — no need for the user to
+    /// trigger a Download New to kick the backlog filter. Gated on
+    /// `syncAutoTranscribe`: this is the opt-in contract the user made
+    /// when they ticked that box. Idempotent via
+    /// `didRunLaunchAutoTranscribe`, and `enqueueTranscriptions`'
+    /// own duplicate-guard handles any overlap with later
+    /// download-new triggers on the same session.
+    private func runLaunchAutoTranscribeIfNeeded() {
+        guard !didRunLaunchAutoTranscribe else { return }
+        guard syncAutoTranscribe else {
+            // Still flip the flag — if the user toggles auto-transcribe
+            // on later in the session, we don't want a stale backlog
+            // sweep to suddenly fire. They can hit Transcribe All.
+            didRunLaunchAutoTranscribe = true
+            return
+        }
+        guard ensureTranscriptionReady() else { return }
+        didRunLaunchAutoTranscribe = true
+
+        let untranscribed = viewModel.visibleEntries
+            .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
+            .map(\.recording.outputPath)
+        guard !untranscribed.isEmpty else { return }
+        log("Auto-transcribe (launch backlog): \(untranscribed.count) untranscribed recording(s) found")
+        enqueueTranscriptions(untranscribed)
     }
 
     // MARK: - Speaker Tagging & Summary Helpers

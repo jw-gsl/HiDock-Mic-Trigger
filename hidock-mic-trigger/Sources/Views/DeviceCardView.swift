@@ -68,7 +68,12 @@ struct DeviceCardView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 titleRow
-                if stats != nil || capacityBytes != nil {
+                // Only show the storage row when the device is actually
+                // reachable. Stale stats from a previous connection are
+                // misleading: "0 bytes / 32 GB free" on a disconnected
+                // device just looks like a bug. When unreachable, the
+                // unreachableNote below carries the relevant info.
+                if connected, stats != nil || capacityBytes != nil {
                     storageRow
                 }
                 if unreachable, let (msg, when) = lastError {

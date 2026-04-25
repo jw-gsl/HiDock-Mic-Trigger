@@ -50,7 +50,10 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Merge", systemImage: "arrow.triangle.merge")
                 }
-                .disabled(viewModel.syncBusy || viewModel.syncCheckedRecordings.count < 2)
+                // Local-file op — don't gate on `syncBusy` (which is set
+                // whenever any device is probing). Only block during an
+                // active download (file being written) or in-flight trim.
+                .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count < 2)
 
                 Button {
                     if let entry = viewModel.visibleEntries.first(where: {
@@ -61,7 +64,7 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Trim", systemImage: "scissors")
                 }
-                .disabled(viewModel.syncBusy || viewModel.syncCheckedRecordings.count != 1)
+                .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count != 1)
 
                 Button {
                     viewModel.onRemoveSelected()
@@ -69,7 +72,7 @@ struct SyncToolbarSection: View {
                     Label("Remove", systemImage: "trash")
                 }
                 .help("Remove imported files entirely, delete local copies of downloaded HiDock recordings. Device copies are preserved.")
-                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+                .disabled(viewModel.syncDownloading || viewModel.trimBusy || !viewModel.hasSelection)
 
                 Spacer()
 
@@ -95,13 +98,39 @@ struct SyncToolbarSection: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            // Selection + view preferences. Device filter chips have moved
-            // onto the device cards in the header; filtering is now
-            // "click a card's filter icon".
+            // Selection + filters. Three loose buttons here used to
+            // grow each time a new "Select X" was added; consolidated
+            // into a single Menu so adding "Select Failed" / "Select
+            // Untranscribed" later is one line. Status filter sits
+            // alongside it so selection and filter share a row and
+            // the user can see what they're filtering AND selecting in
+            // one glance. Device filter chips already live on the
+            // device cards above and AND with this one.
             HStack(spacing: 8) {
-                Button("Select All") { viewModel.onSelectAll() }
-                Button("Select None") { viewModel.onSelectNone() }
-                Button("Select New") { viewModel.onSelectNotDownloaded() }
+                Menu {
+                    Button("All")            { viewModel.onSelectAll() }
+                    Button("None")           { viewModel.onSelectNone() }
+                    Divider()
+                    Button("New (on device, not downloaded)") {
+                        viewModel.onSelectNotDownloaded()
+                    }
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                Picker("Filter", selection: Binding(
+                    get: { viewModel.syncStatusFilter },
+                    set: { viewModel.syncStatusFilter = $0 }
+                )) {
+                    ForEach(SyncStatusFilter.allCases) { f in
+                        Text(f.label).tag(f)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+                .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
 
                 Spacer()
 
@@ -110,6 +139,7 @@ struct SyncToolbarSection: View {
                     set: { _ in viewModel.onToggleHideDownloaded() }
                 ))
                 .toggleStyle(.checkbox)
+                .help("Hide rows already pulled off the HiDock. Imported files stay visible.")
 
                 Toggle("Auto-download", isOn: Binding(
                     get: { viewModel.syncAutoDownload },

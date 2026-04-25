@@ -1197,6 +1197,28 @@ class MainWindow(QMainWindow):
 
         def _do_merge():
             try:
+                # Pre-flight: ffmpeg's concat demuxer parses the list with
+                # single-quoted paths, so any path containing a quote,
+                # newline, backslash, or NUL would break the format and
+                # could let ffmpeg interpret the rest of the line as
+                # metadata or a filter directive. Today every path in
+                # `ready` is built from sanitised HiDock filenames, so
+                # this check is defence-in-depth against future code
+                # paths or output folders that contain quotes. We keep
+                # `-safe 0` because the paths are absolute and `-safe 1`
+                # would reject all of them, breaking Merge.
+                unsafe_chars = ("'", "\n", "\r", "\\", "\x00")
+                all_paths = [str(e.recording.output_path) for e in ready] + [str(out_path)]
+                bad = next(
+                    (p for p in all_paths if any(c in p for c in unsafe_chars)),
+                    None,
+                )
+                if bad is not None:
+                    self.statusBar().showMessage(
+                        f"Merge aborted — refusing to pass a path with quote/newline/NUL/backslash to ffmpeg: {bad}"
+                    )
+                    return
+
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
                     for e in ready:
                         f.write(f"file '{e.recording.output_path}'\n")

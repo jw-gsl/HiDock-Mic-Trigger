@@ -12,6 +12,8 @@ struct SyncHeaderSection: View {
         case .info: return .blue
         case .secondary: return .secondary
         case .normal: return .primary
+        case .skipped: return Color.teal.opacity(0.6)
+        case .removed: return Color.red.opacity(0.6)
         }
     }
 
@@ -41,7 +43,7 @@ struct SyncHeaderSection: View {
             // progress bar and cancel button. Two places showing the
             // same transcription status ended up racing each other;
             // one well-designed indicator wins.
-            if !viewModel.transcriptionBusy
+            if !viewModel.transcriptionBusy && !viewModel.trimBusy
                 && (!viewModel.syncStatus.isEmpty || !viewModel.syncSummary.isEmpty) {
                 HStack(spacing: 6) {
                     if !viewModel.syncStatus.isEmpty {
@@ -69,9 +71,20 @@ struct SyncHeaderSection: View {
                 Button {
                     viewModel.onDownloadSelected()
                 } label: {
-                    Label("Download Selected", systemImage: "arrow.down.circle")
+                    // Re-label when any selected recording is a
+                    // locally-trimmed file — the extractor would
+                    // overwrite the trimmed bytes with the device
+                    // original, so the user should see that framing
+                    // before clicking.
+                    let label = viewModel.selectionIncludesTrimmed
+                        ? "Re-download Selected"
+                        : "Download Selected"
+                    Label(label, systemImage: "arrow.down.circle")
                 }
                 .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
+                .help(viewModel.selectionIncludesTrimmed
+                      ? "At least one selected recording is trimmed — re-downloading will replace the trimmed local file with the device's original."
+                      : "Download the selected recordings from the device")
 
                 Button {
                     viewModel.onDownloadNew()

@@ -561,16 +561,44 @@ def cmd_status(_args):
     transcripts_dir = config.RAW_TRANSCRIPTS_DIR
     recordings_dir = config.RECORDINGS_DIR
 
-    # Build lookup: mp3 filename -> transcription info
+    # Build lookup: mp3 filename -> transcription info.
+    # Verify the transcript file still exists on disk before reporting
+    # `transcribed: True`. Without this check, removing a recording in
+    # the Mac app deletes the .md/.srt/.json files but leaves this
+    # state.json entry stuck at status="completed", so the desktop UI
+    # keeps flipping the row back to "Transcribed" — overriding the
+    # "Removed" status the user just set. This guard reports the row
+    # as not-transcribed once the artifact's gone.
     lookup = {}
+    stale_keys: list[str] = []
     for key, info in state.get("transcriptions", {}).items():
+        completed = info.get("status") == "completed"
+        transcript_path = info.get("transcript_path")
+        path_present = bool(transcript_path) and Path(transcript_path).exists()
+        is_transcribed = completed and path_present
+        if completed and not path_present:
+            stale_keys.append(key)
         lookup[key] = {
             "status": info.get("status", "unknown"),
-            "transcript_path": info.get("transcript_path"),
-            "transcribed": info.get("status") == "completed",
+            "transcript_path": transcript_path,
+            "transcribed": is_transcribed,
             "duration_s": info.get("duration_s"),
             "model": info.get("model"),
         }
+    # Opportunistically prune state entries whose transcript files have
+    # been deleted out-of-band (most often by the Mac app's Remove
+    # action). Keeps state.json from growing forever with stale rows
+    # and prevents repeat cmd_status calls re-checking the same gone
+    # files. Best-effort — failure is non-fatal because the in-memory
+    # `lookup` already reflects truth for this call.
+    if stale_keys:
+        transcriptions = state.get("transcriptions", {})
+        for k in stale_keys:
+            transcriptions.pop(k, None)
+        try:
+            save_state(state)
+        except Exception as exc:
+            print(f"WARN: could not prune {len(stale_keys)} stale entries: {exc}", file=sys.stderr)
 
     # Check for any recordings that have transcripts on disk but aren't in state
     if recordings_dir.exists() and transcripts_dir.exists():

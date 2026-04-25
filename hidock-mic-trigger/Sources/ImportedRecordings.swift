@@ -126,7 +126,14 @@ enum ImportedRecordingsStore {
             downloadedAt: entry.importedAt,
             lastError: nil,
             status: "imported",
-            humanLength: formatBytes(entry.length)
+            humanLength: formatBytes(entry.length),
+            trimmed: nil,
+            // ImportedRecording.duration was already authoritative when
+            // the file was first imported (see ImportedRecordingsStore's
+            // ffprobe/mutagen-equivalent computation), so it's not an
+            // estimate.
+            durationEstimated: false,
+            removed: nil
         )
     }
 
