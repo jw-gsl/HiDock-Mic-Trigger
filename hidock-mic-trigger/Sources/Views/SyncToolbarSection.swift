@@ -89,22 +89,38 @@ struct SyncToolbarSection: View {
                     }
                 }
 
-                // Merge candidates indicator — passive count + tooltip,
-                // not a button. The actual Merge / Dismiss actions live
-                // in each candidate row's right-click context menu;
-                // popping a separate window or sheet for a "system
-                // suggestion" felt heavier than the affordance warrants.
-                // The blue left-border on candidate rows is the primary
-                // visual cue; this label just confirms the system is
-                // paying attention.
-                if viewModel.mergeCandidateCountForBadge > 0 {
-                    Label(
-                        "\(viewModel.mergeCandidateCountForBadge) merge suggestion\(viewModel.mergeCandidateCountForBadge == 1 ? "" : "s")",
-                        systemImage: "arrow.triangle.merge"
-                    )
-                    .font(.caption.weight(.medium))
+                // Merge candidates / merge-selected toolbar slot. Three
+                // possible states:
+                //   1. Ticks selected (>=2) → primary blue button:
+                //      "Merge N selected" fires the merge.
+                //   2. Suggestions exist, no ticks → clickable label
+                //      that scrolls the table to the first candidate
+                //      row so the user can find what was flagged.
+                //   3. Nothing flagged → slot hidden.
+                if viewModel.canMergeTickedCandidates {
+                    Button {
+                        viewModel.onMergeTickedCandidates()
+                    } label: {
+                        Label(
+                            "Merge \(viewModel.mergeCandidatesTicked.count) selected",
+                            systemImage: "arrow.triangle.merge"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .help("Combine the ticked candidate rows into one merged recording. Re-runs diarization but reuses the existing per-piece transcripts.")
+                } else if viewModel.mergeCandidateCountForBadge > 0 {
+                    Button {
+                        viewModel.scrollToFirstCandidateTrigger += 1
+                    } label: {
+                        Label(
+                            "\(viewModel.mergeCandidateCountForBadge) merge suggestion\(viewModel.mergeCandidateCountForBadge == 1 ? "" : "s")",
+                            systemImage: "arrow.triangle.merge"
+                        )
+                    }
+                    .buttonStyle(.plain)
                     .foregroundColor(.blue)
-                    .help("Right-click any blue-bordered row to Merge or Dismiss the suggestion.")
+                    .help("Click to jump to the first suggested row. Tick the 'Potential merge' box on each row you want to combine, then click 'Merge N selected'.")
                 }
 
                 if viewModel.needsTaggingCount > 0 {

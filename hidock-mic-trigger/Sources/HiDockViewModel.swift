@@ -74,10 +74,34 @@ final class HiDockViewModel: ObservableObject {
             : mergeCandidates.filter(\.high_confidence)
         return Set(visible.flatMap { $0.pieces.map(\.mp3_path) })
     }
+    /// mp3 paths the user has ticked as "yes, include this in a merge".
+    /// Multi-select within candidate rows: a 5-piece chain can be
+    /// merged as a 3-of-5 subset by ticking only the pieces the user
+    /// confirms belong together. Only paths visible in
+    /// `mergeCandidatePaths` should ever be added here.
+    @Published var mergeCandidatesTicked: Set<String> = []
+    /// `true` once the user has ticked enough candidate rows to do a
+    /// merge — drives the "Merge N selected" action's visibility.
+    var canMergeTickedCandidates: Bool { mergeCandidatesTicked.count >= 2 }
+    /// Path of the first candidate row, used by the toolbar's count
+    /// label to scroll the table to the first suggestion when clicked.
+    var firstMergeCandidatePath: String? {
+        let visible = mergeCandidatesShowAll
+            ? mergeCandidates
+            : mergeCandidates.filter(\.high_confidence)
+        return visible.first?.pieces.first?.mp3_path
+    }
+
     var onScanMergeCandidates: () -> Void = {}
     var onMergeCandidate: (MergeCandidate) -> Void = { _ in }
     var onDismissMergeCandidate: (MergeCandidate) -> Void = { _ in }
-    var onShowMergeCandidates: () -> Void = {}
+    var onMergeTickedCandidates: () -> Void = {}
+    /// Increment to ask the recordings table to scroll to the first
+    /// candidate row. The table observes this via `.onChange` and
+    /// scrolls when it bumps. Counter rather than bool because we
+    /// want consecutive clicks to work even when the row is already
+    /// visible (a re-bump still triggers `.onChange`).
+    @Published var scrollToFirstCandidateTrigger: Int = 0
 
     // MARK: - Transcription State
     @Published var diarizeEnabled = false

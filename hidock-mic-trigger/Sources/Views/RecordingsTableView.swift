@@ -69,6 +69,24 @@ struct RecordingsTableView: View {
                         }
                     }
                 }
+                // User clicked the "N merge suggestions" toolbar label —
+                // jump to the first candidate row so they don't have
+                // to hunt for it. Watching a counter lets repeat clicks
+                // work even when the row is already on-screen (and
+                // makes the gesture feel like a "find it again" affordance).
+                .onChange(of: viewModel.scrollToFirstCandidateTrigger) { _ in
+                    guard let path = viewModel.firstMergeCandidatePath else { return }
+                    guard let target = viewModel.displayRows.first(where: { row in
+                        if case .recording(let e) = row, e.recording.outputPath == path { return true }
+                        if case .mergeChild(let e) = row, e.recording.outputPath == path { return true }
+                        return false
+                    }) else { return }
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo(target.id, anchor: .center)
+                        }
+                    }
+                }
             }
         }
         .overlay(
@@ -270,16 +288,14 @@ struct RecordingsTableView: View {
 
     @ViewBuilder
     private func recordingRow(entry: HiDockSyncRecordingEntry, indented: Bool) -> some View {
-        // Highlight rows the merge-candidate detector flagged. A subtle
-        // blue left bar (matching the existing merge icon's blue) is
-        // enough to draw the eye without competing with the row's
-        // own content. The accent only appears for visible candidates
-        // (respects the user's "show all" toggle).
+        // Highlight whole-row when the merge-candidate detector flagged
+        // this row. The earlier 3pt left-bar was too subtle to spot in
+        // a long table; a row-wide blue tint catches the eye without
+        // overwhelming the row's own content. Background tint applied
+        // at the bottom via .background — declared here so all the
+        // child views render in front.
         let isCandidate = viewModel.mergeCandidatePaths.contains(entry.recording.outputPath)
         HStack(spacing: 0) {
-            Rectangle()
-                .fill(isCandidate ? Color.blue.opacity(0.6) : Color.clear)
-                .frame(width: 3)
             if indented {
                 Color.clear.frame(width: 24) // indent for merge children
                 Image(systemName: "arrow.turn.down.right")
@@ -420,10 +436,41 @@ struct RecordingsTableView: View {
             }
             .frame(width: 70, alignment: .leading)
 
+            // Per-row "Potential merge" toggle for candidate rows. Click
+            // ticks the row; once 2+ are ticked, the toolbar surfaces
+            // a "Merge N selected" button that combines exactly those
+            // ticks. Lets the user pick which pieces from a detected
+            // chain actually go together (a 5-piece chain may have a
+            // genuine boundary in the middle).
+            if isCandidate {
+                let isTicked = viewModel.mergeCandidatesTicked.contains(entry.recording.outputPath)
+                Button {
+                    if isTicked {
+                        viewModel.mergeCandidatesTicked.remove(entry.recording.outputPath)
+                    } else {
+                        viewModel.mergeCandidatesTicked.insert(entry.recording.outputPath)
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: isTicked ? "checkmark.square.fill" : "square")
+                            .font(.caption)
+                        Text(isTicked ? "Selected for merge" : "Potential merge")
+                            .font(.caption)
+                    }
+                    .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+                .help("System suggests this might be part of one conversation. Tick rows you want to merge, then click 'Merge N selected' in the toolbar.")
+            }
+
             Spacer(minLength: 0)
         }
         .font(.system(size: 12))
         .padding(.vertical, 1)
+        // Whole-row tint when this is a candidate. Subtle enough not
+        // to overpower selection / hover styles, distinct enough to
+        // catch the eye in a long table.
+        .background(isCandidate ? Color.blue.opacity(0.10) : Color.clear)
     }
 
     // MARK: - Context Menu

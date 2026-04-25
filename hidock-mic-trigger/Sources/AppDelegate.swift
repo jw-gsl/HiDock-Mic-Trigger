@@ -489,6 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onScanMergeCandidates = { [weak self] in self?.scanMergeCandidates() }
         viewModel.onMergeCandidate = { [weak self] cand in self?.executeMergeCandidate(cand) }
         viewModel.onDismissMergeCandidate = { [weak self] cand in self?.dismissMergeCandidate(cand) }
+        viewModel.onMergeTickedCandidates = { [weak self] in self?.mergeTickedCandidates() }
         viewModel.onRemoveFromQueue = { [weak self] path in self?.removeFromTranscriptionQueue(path) }
         viewModel.onMoveInQueue = { [weak self] from, to in self?.moveInTranscriptionQueue(from: from, to: to) }
         viewModel.onPauseTranscription = { [weak self] in self?.pauseTranscription() }
@@ -2298,6 +2299,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncCheckedRecordings = Set(entries.map(\.recording.name))
         log("Merge candidate \(cand.pair_key): firing merge on \(cand.pieces.count) pieces")
         mergeSelectedRecordings()
+    }
+
+    /// Merge whatever the user has ticked across candidate rows. The
+    /// ticks are explicit "include this in the merge" decisions, so
+    /// we don't filter by chain — if the user ticked rows from
+    /// different detected chains, we still respect their choice.
+    /// Pre-condition: `canMergeTickedCandidates` (≥2 ticks).
+    private func mergeTickedCandidates() {
+        let paths = viewModel.mergeCandidatesTicked
+        guard paths.count >= 2 else { return }
+        let entries = syncEntries.filter {
+            paths.contains($0.recording.outputPath)
+                && $0.recording.downloaded && $0.recording.localExists
+        }
+        guard entries.count == paths.count else {
+            log("Merge ticked: expected \(paths.count) entries, found \(entries.count)")
+            showError("Merge aborted — could not locate all ticked rows in the current table. Try Refresh first.")
+            return
+        }
+        // Reuse the existing merge plumbing — it reads from
+        // syncCheckedRecordings and runs the full ffmpeg + rediarize
+        // path. Keeps merging logic in one place.
+        syncCheckedRecordings = Set(entries.map(\.recording.name))
+        log("Merge ticked: \(entries.count) candidate rows")
+        mergeSelectedRecordings()
+        // Clear the ticks once the merge fires — otherwise the user
+        // would have to manually un-tick after a successful merge.
+        viewModel.mergeCandidatesTicked.removeAll()
     }
 
     /// Sticky dismissal — calls `extractor.py dismiss-merge-pair` so
