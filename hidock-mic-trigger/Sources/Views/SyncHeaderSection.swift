@@ -63,63 +63,15 @@ struct SyncHeaderSection: View {
                 }
             }
 
-            // Download actions stay in the header until the Process split
-            // button ships — grouped with the device context, same pattern
-            // as before, minus the folder-picker clutter (now in the app
-            // menu bar).
-            HStack(spacing: 6) {
-                Button {
-                    viewModel.onDownloadSelected()
-                } label: {
-                    // Re-label when any selected recording is a
-                    // locally-trimmed file — the extractor would
-                    // overwrite the trimmed bytes with the device
-                    // original, so the user should see that framing
-                    // before clicking.
-                    let label = viewModel.selectionIncludesTrimmed
-                        ? "Re-download Selected"
-                        : "Download Selected"
-                    Label(label, systemImage: "arrow.down.circle")
-                }
-                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
-                .help(viewModel.selectionIncludesTrimmed
-                      ? "At least one selected recording is trimmed — re-downloading will replace the trimmed local file with the device's original."
-                      : "Download the selected recordings from the device")
-
-                // Hide Download New when auto-download is on — it'd be
-                // redundant: any new file appearing would auto-download
-                // anyway. Showing it would just bait users into manual
-                // double-trips. If the user toggles auto-download off,
-                // the button comes back.
-                if !viewModel.syncAutoDownload {
-                    Button {
-                        viewModel.onDownloadNew()
-                    } label: {
-                        Label("Download New", systemImage: "arrow.down.to.line")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
-                }
-
-                Button {
-                    viewModel.onMarkDownloaded()
-                } label: {
-                    Label("Skip", systemImage: "forward.fill")
-                }
-                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-
-                if viewModel.anySelectedMarkedOnly {
-                    Button {
-                        viewModel.onUnmarkDownloaded()
-                    } label: {
-                        Label("Unskip", systemImage: "backward.fill")
-                    }
-                    .disabled(viewModel.syncBusy)
-                }
-
-                Spacer()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            // Action buttons (Download Selected, Download New, Skip,
+            // Unskip) used to live here. They migrated to the toolbar
+            // below as part of the 2026-04-26 layout consolidation —
+            // Skip joined Merge/Trim/Remove on the actions row, and
+            // Download Selected sits on the select/filter row, since
+            // "select rows → choose what → click Download Selected"
+            // reads as a left-to-right verb on a single line. Unskip
+            // remained available via the row's right-click context
+            // menu (which it also was before).
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

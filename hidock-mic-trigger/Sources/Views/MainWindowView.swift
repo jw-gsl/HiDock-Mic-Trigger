@@ -15,6 +15,21 @@ struct MainWindowView: View {
 
             // Footer
             HStack {
+                // Refresh moved here from the action toolbar in 2026-04-26
+                // restructure — re-probing devices is a maintenance action,
+                // not a primary verb in the workflow, so it lives next to
+                // the other footer affordances (notifications, appearance)
+                // rather than competing with Import / Transcribe / Merge.
+                Button {
+                    viewModel.onRefreshSync()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(viewModel.syncBusy)
+                .help("Probe paired devices for fresh status.")
+
                 if !viewModel.updateStatusText.isEmpty {
                     Label {
                         Text(viewModel.updateStatusText)

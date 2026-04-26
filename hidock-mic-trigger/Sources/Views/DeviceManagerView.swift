@@ -163,23 +163,29 @@ struct DeviceRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // Icon — prefer bespoke device glyph when we ship one for this SKU;
-            // fall back to an SF Symbol so USB volumes / unknown devices still
-            // render something sensible.
+            // Icon — prefer the bespoke device product photo when we
+            // ship one for this SKU (H1, H1E, P1); fall back to an SF
+            // Symbol so USB volumes / unknown devices still render
+            // something sensible. The product photos are full-colour
+            // assets, so we DON'T template-tint them — that turned
+            // them into flat silhouettes (matched DeviceCardView's
+            // approach, which renders them in colour). Tinting still
+            // applies to the SF Symbol fallback so volumes get the
+            // connected/disconnected colour cue.
             Group {
                 if let img = hidockDeviceImage(device.shortName, deviceType: device.deviceType) {
                     img
-                        .renderingMode(.template)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 22, height: 22)
+                        .frame(width: 32, height: 32)
+                        .opacity(isConnected ? 1.0 : 0.6)
                 } else {
                     Image(systemName: deviceIcon)
                         .font(.title2)
+                        .foregroundColor(isConnected ? .green : .secondary)
                 }
             }
-            .foregroundColor(isConnected ? .green : .secondary)
-            .frame(width: 28)
+            .frame(width: 36)
             .padding(.top, 2)
 
             // Text content

@@ -34,7 +34,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncTranscriptFolder: String?
     private var syncEntries: [HiDockSyncRecordingEntry] = []
     private var syncCheckedRecordings: Set<String> = []
-    private var syncHideDownloaded = false
     private var syncAutoDownload = false
     private var syncAutoTranscribe = false
     private let syncAutoTranscribeKey = "hidockSyncAutoTranscribe"
@@ -102,7 +101,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let syncPairedDevicesKey = "hidockSyncPairedDevices"
     private let syncOutputFolderKey = "hidockSyncOutputFolder"
     private let syncTranscriptFolderKey = "hidockSyncTranscriptFolder"
-    private let syncHideDownloadedKey = "hidockSyncHideDownloaded"
     private let syncAutoDownloadKey = "hidockSyncAutoDownload"
     private let hasCompletedOnboardingKey = "hasCompletedOnboarding"
     private let notifyTranscriptionKey = "notifyTranscriptionComplete"
@@ -286,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log("First imported entry: name=\(first.recording.name), deviceId=\(first.deviceId), downloaded=\(first.recording.downloaded), localExists=\(first.recording.localExists), outputPath=\(first.recording.outputPath)")
         }
         let vis = viewModel.visibleEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
-        log("viewModel.visibleEntries imported count = \(vis.count) (filter: hideDownloaded=\(viewModel.syncHideDownloaded), deviceFilter=\(viewModel.syncFilterDeviceId ?? "nil"))")
+        log("viewModel.visibleEntries imported count = \(vis.count) (deviceFilter=\(viewModel.syncFilterDeviceId ?? "nil"))")
         // Fast-path: paint the recordings table from cached state before
         // USB enumeration even starts. The user sees their already-
         // downloaded + transcribed rows with correct status immediately
@@ -413,8 +411,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.availableMics = getInputDeviceNames()
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
-        viewModel.syncHideDownloaded = UserDefaults.standard.bool(forKey: syncHideDownloadedKey)
-        syncHideDownloaded = viewModel.syncHideDownloaded
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
         viewModel.syncAutoTranscribe = UserDefaults.standard.bool(forKey: syncAutoTranscribeKey)
@@ -463,12 +459,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onFilterByDevice = { [weak self] deviceId in self?.filterSyncByDevice(deviceId) }
         viewModel.onToggleChecked = { [weak self] name, shift in self?.toggleSyncRecordingCheckbox(name, shiftHeld: shift) }
         viewModel.onUnmarkDownloaded = { [weak self] in self?.unmarkSyncRecordingsAsDownloaded() }
-        viewModel.onToggleHideDownloaded = { [weak self] in self?.toggleHideDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onToggleAutoTranscribe = { [weak self] in self?.toggleAutoTranscribe() }
         viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
-        viewModel.onTranscribeAll = { [weak self] in self?.transcribeAllRecordings() }
         viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
         viewModel.onRevealRecording = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -581,7 +575,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncDownloading = syncDownloading
         viewModel.syncEntries = syncEntries
         viewModel.syncCheckedRecordings = syncCheckedRecordings
-        viewModel.syncHideDownloaded = syncHideDownloaded
         viewModel.syncAutoDownload = syncAutoDownload
         viewModel.syncAutoTranscribe = syncAutoTranscribe
         viewModel.diarizeEnabled = diarizeEnabled
@@ -2318,15 +2311,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             showError("Merge aborted — could not locate all ticked rows in the current table. Try Refresh first.")
             return
         }
+        // Find every candidate chain that overlaps with the ticked
+        // paths — once we merge, those chains shouldn't keep
+        // suggesting themselves. The children files stay on disk +
+        // their transcripts stay on disk, so the detector would
+        // re-flag the same chain on next scan unless we explicitly
+        // dismiss it. dismissChain is sticky (persisted to
+        // merge_candidates.json), which is what we want here: the
+        // user explicitly accepted the suggestion, that's the strongest
+        // possible signal that we shouldn't surface it again.
+        let chainsToDismiss = viewModel.mergeCandidates.filter { cand in
+            cand.pieces.contains { paths.contains($0.mp3_path) }
+        }
+
         // Reuse the existing merge plumbing — it reads from
         // syncCheckedRecordings and runs the full ffmpeg + rediarize
         // path. Keeps merging logic in one place.
         syncCheckedRecordings = Set(entries.map(\.recording.name))
-        log("Merge ticked: \(entries.count) candidate rows")
+        log("Merge ticked: \(entries.count) candidate rows; will dismiss \(chainsToDismiss.count) overlapping chain(s)")
         mergeSelectedRecordings()
-        // Clear the ticks once the merge fires — otherwise the user
-        // would have to manually un-tick after a successful merge.
+
+        // Clear ticks immediately so the toolbar collapses back to
+        // "merge suggestions" or hides entirely.
         viewModel.mergeCandidatesTicked.removeAll()
+
+        // Optimistically remove the dismissed chains from the local
+        // candidate list so the row highlights / toolbar count update
+        // without waiting for the next rescan to re-fetch.
+        let dismissedKeys = Set(chainsToDismiss.map(\.pair_key))
+        viewModel.mergeCandidates.removeAll { dismissedKeys.contains($0.pair_key) }
+
+        // Persist the dismissals so the next merge-candidates scan
+        // (which fires after the transcription queue drains) doesn't
+        // resurface them.
+        for cand in chainsToDismiss {
+            dismissMergeCandidate(cand)
+        }
     }
 
     /// Sticky dismissal — calls `extractor.py dismiss-merge-pair` so
@@ -4414,12 +4434,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return []
     }
 
-    private func toggleHideDownloaded() {
-        syncHideDownloaded.toggle()
-        UserDefaults.standard.set(syncHideDownloaded, forKey: syncHideDownloadedKey)
-        syncViewModelState()
-    }
-
     private func toggleAutoDownload() {
         syncAutoDownload.toggle()
         UserDefaults.standard.set(syncAutoDownload, forKey: syncAutoDownloadKey)
@@ -6087,21 +6101,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         transcriptionQueueWindow = win
     }
 
-    private func transcribeAllRecordings() {
-        guard ensureTranscriptionReady() else { return }
-        let paths = viewModel.visibleEntries
-            .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
-            .map(\.recording.outputPath)
-
-        guard !paths.isEmpty else {
-            viewModel.syncStatus = "All recordings already transcribed"
-            viewModel.syncStatusLevel = .success
-            return
-        }
-
-        enqueueTranscriptions(paths)
-    }
-
     /// Synchronous, filesystem-only pass that marks entries as
     /// transcribed when a matching `<basename>.md` exists in the
     /// transcripts folder. Prevents the "Downloaded → Transcribed"
@@ -6212,6 +6211,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.skippedTranscriptions.contains(mp3Name)
                 }
                 self.log("refreshTranscriptionState: matched \(matched) transcribed entries out of \(self.syncEntries.count)")
+
+                // Populate merge-group transcript state from the same
+                // lookup. Merge groups don't live in syncEntries, so
+                // the loop above never sets their transcribed/tagged
+                // flags — without this block, a successful merge-rediarize
+                // would leave the merged row showing "no transcript"
+                // forever and the "needs tagging" count would never
+                // include it. We mirror exactly the per-row logic.
+                var mergedTranscribed: Set<String> = []
+                var mergedTagged: Set<String> = []
+                var mergedPaths: [String: String] = [:]
+                for group in self.mergeGroups {
+                    let mergedMp3Name = (group.outputPath as NSString).lastPathComponent
+                    guard let info = lookup[mergedMp3Name],
+                          (info["transcribed"] as? Bool) == true else { continue }
+                    mergedTranscribed.insert(mergedMp3Name)
+                    let path = info["transcript_path"] as? String
+                    if let path = path { mergedPaths[mergedMp3Name] = path }
+                    if self.checkSpeakersTagged(transcriptPath: path) {
+                        mergedTagged.insert(mergedMp3Name)
+                    }
+                }
+                self.viewModel.mergedFileTranscribed = mergedTranscribed
+                self.viewModel.mergedFileTagged = mergedTagged
+                self.viewModel.mergedFileTranscriptPaths = mergedPaths
+                if !mergedTranscribed.isEmpty {
+                    self.log("refreshTranscriptionState: \(mergedTranscribed.count) merged file(s) transcribed, \(mergedTranscribed.count - mergedTagged.count) need tagging")
+                }
+
                 self.syncViewModelState()
                 self.runLaunchAutoTranscribeIfNeeded()
             }

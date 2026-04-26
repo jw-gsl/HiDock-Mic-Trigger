@@ -27,7 +27,7 @@ if echo "$out" | grep -q "BUILD SUCCEEDED"; then
   # systemMessage is rendered into the conversation so it's hard to miss.
   # Keep the text short and prescriptive.
   cat <<'JSON'
-{"systemMessage": "BUILD SUCCEEDED — commit the changes now with a focused, single-purpose message describing exactly what was just shipped (per the commit-on-rebuild policy in feedback_ask_before_rebuild.md). Skip only if the user explicitly says 'don't commit yet'."}
+{"systemMessage": "BUILD SUCCEEDED — commit the changes now. The message should comprehensively cover EVERYTHING that changed in this rebuild cycle (backend + UI + tests + tweaks that shipped together). Per-cycle granularity is the goal, not minimalism within a cycle. See feedback_ask_before_rebuild.md. Skip only if the user explicitly says 'don't commit yet'."}
 JSON
 fi
 

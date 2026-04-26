@@ -236,13 +236,20 @@ struct RecordingsTableView: View {
 
     @ViewBuilder
     private func mergeTranscriptionIndicator(group: MergeGroup) -> some View {
-        // Check if the merged file has a transcript
+        // Merge groups don't live in syncEntries, so we can't reuse
+        // the per-row entry lookup the regular row uses. Read from the
+        // viewModel.mergedFileTranscribed / mergedFileTagged sets
+        // instead — refreshTranscriptionState populates these from the
+        // same Python `transcribe.py status` JSON that drives the
+        // per-row state.
         let mp3Name = (group.outputPath as NSString).lastPathComponent
-        let entry = viewModel.syncEntries.first { $0.recording.outputName == mp3Name }
+        let isTranscribed = viewModel.mergedFileTranscribed.contains(mp3Name)
+        let isTagged = viewModel.mergedFileTagged.contains(mp3Name)
+        let path = viewModel.mergedFileTranscriptPaths[mp3Name]
 
-        if let entry = entry, entry.transcribed && entry.speakersTagged {
+        if isTranscribed && isTagged {
             Button {
-                if let path = entry.transcriptPath {
+                if let path = path {
                     viewModel.onOpenTranscriptViewer(path)
                 }
             } label: {
@@ -251,9 +258,9 @@ struct RecordingsTableView: View {
             }
             .buttonStyle(.plain)
             .help("Transcribed and tagged")
-        } else if let entry = entry, entry.transcribed && !entry.speakersTagged {
+        } else if isTranscribed {
             Button {
-                if let path = entry.transcriptPath {
+                if let path = path {
                     viewModel.onOpenTranscriptViewer(path)
                 }
             } label: {

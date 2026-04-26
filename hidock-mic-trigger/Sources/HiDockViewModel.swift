@@ -28,7 +28,6 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncTranscriptFolder: String?
     @Published var syncEntries: [HiDockSyncRecordingEntry] = []
     @Published var syncCheckedRecordings: Set<String> = []
-    @Published var syncHideDownloaded = false
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
     @Published var mergeGroups: [MergeGroup] = []
@@ -40,8 +39,8 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncSortAscending: Bool = false
     @Published var syncFilterDeviceId: String?
     /// Pipeline-stage filter for the recordings table. Defaults to
-    /// `.all`. Combined with `syncFilterDeviceId` (AND), `syncHideDownloaded`,
-    /// and the user's sort key inside `visibleEntries`.
+    /// `.all`. Combined with `syncFilterDeviceId` (AND) and the
+    /// user's sort key inside `visibleEntries`.
     @Published var syncStatusFilter: SyncStatusFilter = .all
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
@@ -121,6 +120,19 @@ final class HiDockViewModel: ObservableObject {
     var onResumeTranscription: () -> Void = {}
     var onRediarize: (String, Int?) -> Void = { _, _ in }  // jsonPath, nSpeakers
 
+    // MARK: - Merge-group transcript state
+
+    /// Merge groups don't live in `syncEntries` (which only holds
+    /// HiDock + imported recordings), so the per-row `transcribed` /
+    /// `speakersTagged` flags never set for them. Tracking the state
+    /// per merged-mp3-name here lets mergeTranscriptionIndicator and
+    /// `needsTaggingCount` surface merge-rediarize results correctly.
+    /// Populated by refreshTranscriptionState after each Python `status`
+    /// query — same source of truth as the per-row state.
+    @Published var mergedFileTranscribed: Set<String> = []
+    @Published var mergedFileTagged: Set<String> = []
+    @Published var mergedFileTranscriptPaths: [String: String] = [:]
+
     // MARK: - Computed
 
     /// True if any currently-checked recording has been locally
@@ -162,14 +174,10 @@ final class HiDockViewModel: ObservableObject {
                 $0.deviceId == filterDeviceId || $0.deviceId == "imported:local"
             }
         }
-        if syncHideDownloaded {
-            // Hide Downloaded is semantically "hide recordings already pulled
-            // off the HiDock so I can focus on new ones to fetch". Imported
-            // files were never on a HiDock — they should stay visible.
-            entries = entries.filter {
-                !$0.recording.downloaded || $0.deviceId == "imported:local"
-            }
-        }
+        // (Hide Downloaded toggle removed in 2026-04-26 cleanup —
+        // it was a strict subset of the Filter dropdown's "On device"
+        // / "Untranscribed" options, so keeping both was redundant.)
+        //
         // Pipeline-stage filter, evaluated on the same statusText
         // cascade the table renders, so what the user picks always
         // matches what the rows display.
@@ -273,7 +281,13 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var needsTaggingCount: Int {
-        syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
+        let perRow = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
+        // Add merged-file rows that are transcribed-but-not-tagged.
+        // These don't live in syncEntries, so without this they'd
+        // never show up in the count even when the rediarize step
+        // produced a fresh transcript that needs speaker labelling.
+        let perMerge = mergedFileTranscribed.subtracting(mergedFileTagged).count
+        return perRow + perMerge
     }
 
     var syncSummary: String {
@@ -404,12 +418,10 @@ final class HiDockViewModel: ObservableObject {
     var onFilterByDevice: (String?) -> Void = { _ in }
     var onToggleChecked: (String, Bool) -> Void = { _, _ in }  // name, shiftHeld
     var onUnmarkDownloaded: () -> Void = {}
-    var onToggleHideDownloaded: () -> Void = {}
     var onToggleAutoDownload: () -> Void = {}
     var onToggleAutoTranscribe: () -> Void = {}
     var onToggleMergeExpand: (String) -> Void = { _ in }
     var onTranscribeSelected: () -> Void = {}
-    var onTranscribeAll: () -> Void = {}
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }

@@ -10,16 +10,14 @@ struct SyncToolbarSection: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Action row — left-aligned actions + spacer + right-aligned
-            // status/indicators.
+            // Action row 1 — global actions (Import, Transcribe) +
+            // selection-driven actions (Merge, Trim, Skip, Remove). Skip
+            // moved here from the old header row on 2026-04-26 to
+            // cluster all selection actions in one place. Refresh moved
+            // out (now in the footer) and Transcribe All was removed
+            // (Auto-Transcribe + Select-All-then-Transcribe-Selected
+            // covers the same intent without a dedicated button).
             HStack(spacing: 6) {
-                Button {
-                    viewModel.onRefreshSync()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(viewModel.syncBusy)
-
                 Button {
                     viewModel.onImportAudioFile()
                 } label: {
@@ -35,13 +33,6 @@ struct SyncToolbarSection: View {
                     Label("Transcribe Selected", systemImage: "text.bubble")
                 }
                 .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
-
-                Button {
-                    viewModel.onTranscribeAll()
-                } label: {
-                    Label("Transcribe All", systemImage: "text.bubble.fill")
-                }
-                .disabled(viewModel.transcriptionBusy)
 
                 Divider().frame(height: 16)
 
@@ -65,6 +56,18 @@ struct SyncToolbarSection: View {
                     Label("Trim", systemImage: "scissors")
                 }
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count != 1)
+
+                // Skip: mark selected device-side recordings as
+                // "downloaded" without pulling bytes — hides them from
+                // future download-new sweeps. Mirrors the action that
+                // used to live in SyncHeaderSection.
+                Button {
+                    viewModel.onMarkDownloaded()
+                } label: {
+                    Label("Skip", systemImage: "forward.fill")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.hasSelection)
+                .help("Mark selected on-device recordings as 'don't download' — they'll stop appearing in download-new sweeps")
 
                 Button {
                     viewModel.onRemoveSelected()
@@ -132,14 +135,16 @@ struct SyncToolbarSection: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            // Selection + filters. Three loose buttons here used to
-            // grow each time a new "Select X" was added; consolidated
-            // into a single Menu so adding "Select Failed" / "Select
-            // Untranscribed" later is one line. Status filter sits
-            // alongside it so selection and filter share a row and
-            // the user can see what they're filtering AND selecting in
-            // one glance. Device filter chips already live on the
-            // device cards above and AND with this one.
+            // Action row 2 — narrowing the table (Select, Filter) +
+            // the action that operates on the narrowed selection
+            // (Download Selected). Auto-* toggles on the right.
+            //
+            // Filter is a Menu (not a Picker) so it matches Select's
+            // shape — having two visually-different dropdowns next to
+            // each other was the inconsistency James called out. Hide
+            // Downloaded was removed: the Filter menu can already do
+            // "On device" / "Untranscribed" / etc., which is the
+            // strictly more general control.
             HStack(spacing: 8) {
                 Menu {
                     Button("All")            { viewModel.onSelectAll() }
@@ -154,26 +159,63 @@ struct SyncToolbarSection: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
 
-                Picker("Filter", selection: Binding(
-                    get: { viewModel.syncStatusFilter },
-                    set: { viewModel.syncStatusFilter = $0 }
-                )) {
+                Menu {
                     ForEach(SyncStatusFilter.allCases) { f in
-                        Text(f.label).tag(f)
+                        Button {
+                            viewModel.syncStatusFilter = f
+                        } label: {
+                            // Tick the currently-active filter so the
+                            // user can see what's selected without
+                            // closing the menu first.
+                            HStack {
+                                Image(systemName: viewModel.syncStatusFilter == f
+                                      ? "checkmark.circle.fill" : "circle")
+                                Text(f.label)
+                            }
+                        }
                     }
+                } label: {
+                    Label(
+                        viewModel.syncStatusFilter == .all
+                            ? "Filter"
+                            : "Filter: \(viewModel.syncStatusFilter.label)",
+                        systemImage: "line.3.horizontal.decrease.circle"
+                    )
                 }
-                .pickerStyle(.menu)
+                .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
 
-                Spacer()
+                // Download Selected, moved here from the (now-empty)
+                // header row. Re-labels to "Re-download Selected" when
+                // any selected row is locally trimmed, so the user
+                // sees what the click will do (overwrite the trimmed
+                // copy with the device original).
+                Button {
+                    viewModel.onDownloadSelected()
+                } label: {
+                    let label = viewModel.selectionIncludesTrimmed
+                        ? "Re-download Selected"
+                        : "Download Selected"
+                    Label(label, systemImage: "arrow.down.circle")
+                }
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
+                .help(viewModel.selectionIncludesTrimmed
+                      ? "At least one selected recording is trimmed — re-downloading will replace the trimmed local file with the device's original."
+                      : "Download the selected recordings from the device")
 
-                Toggle("Hide Downloaded", isOn: Binding(
-                    get: { viewModel.syncHideDownloaded },
-                    set: { _ in viewModel.onToggleHideDownloaded() }
-                ))
-                .toggleStyle(.checkbox)
-                .help("Hide rows already pulled off the HiDock. Imported files stay visible.")
+                // Download New — only when auto-download is OFF.
+                // With auto-download on this is redundant.
+                if !viewModel.syncAutoDownload {
+                    Button {
+                        viewModel.onDownloadNew()
+                    } label: {
+                        Label("Download New", systemImage: "arrow.down.to.line")
+                    }
+                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
+                }
+
+                Spacer()
 
                 Toggle("Auto-download", isOn: Binding(
                     get: { viewModel.syncAutoDownload },
