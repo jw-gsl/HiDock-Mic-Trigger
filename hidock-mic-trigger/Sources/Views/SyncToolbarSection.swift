@@ -10,13 +10,10 @@ struct SyncToolbarSection: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Action row 1 — global actions (Import, Transcribe) +
-            // selection-driven actions (Merge, Trim, Skip, Remove). Skip
-            // moved here from the old header row on 2026-04-26 to
-            // cluster all selection actions in one place. Refresh moved
-            // out (now in the footer) and Transcribe All was removed
-            // (Auto-Transcribe + Select-All-then-Transcribe-Selected
-            // covers the same intent without a dedicated button).
+            // Action row 1 — Import + transformative selection-driven
+            // actions (Merge, Trim, Skip, Remove). Transcribe Selected
+            // sits on row 2 next to Download Selected (both are
+            // "process selected rows" verbs and pair visually).
             HStack(spacing: 6) {
                 Button {
                     viewModel.onImportAudioFile()
@@ -24,15 +21,6 @@ struct SyncToolbarSection: View {
                     Label("Import", systemImage: "square.and.arrow.down")
                 }
                 .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
-
-                Divider().frame(height: 16)
-
-                Button {
-                    viewModel.onTranscribeSelected()
-                } label: {
-                    Label("Transcribe Selected", systemImage: "text.bubble")
-                }
-                .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
 
                 Divider().frame(height: 16)
 
@@ -186,11 +174,13 @@ struct SyncToolbarSection: View {
                 .fixedSize()
                 .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
 
-                // Download Selected, moved here from the (now-empty)
-                // header row. Re-labels to "Re-download Selected" when
-                // any selected row is locally trimmed, so the user
-                // sees what the click will do (overwrite the trimmed
-                // copy with the device original).
+                // "Process selected rows" verbs cluster here: Download
+                // Selected and Transcribe Selected sit side-by-side
+                // because they're the two things the user does to
+                // narrowed-down rows. Download Selected re-labels to
+                // "Re-download Selected" when any selected row is
+                // locally trimmed, so the user sees the click will
+                // overwrite the trimmed copy with the device original.
                 Button {
                     viewModel.onDownloadSelected()
                 } label: {
@@ -204,16 +194,22 @@ struct SyncToolbarSection: View {
                       ? "At least one selected recording is trimmed — re-downloading will replace the trimmed local file with the device's original."
                       : "Download the selected recordings from the device")
 
-                // Download New — only when auto-download is OFF.
-                // With auto-download on this is redundant.
-                if !viewModel.syncAutoDownload {
-                    Button {
-                        viewModel.onDownloadNew()
-                    } label: {
-                        Label("Download New", systemImage: "arrow.down.to.line")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
+                Button {
+                    viewModel.onTranscribeSelected()
+                } label: {
+                    Label("Transcribe Selected", systemImage: "text.bubble")
                 }
+                .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
+
+                // (Download New removed in 2026-04-26 cleanup — it was
+                // dead UI in every realistic state. Auto-download
+                // covers the "I want the new ones" case when on; when
+                // off, the renderSyncStatus auto-fire on file-count
+                // rise + the manual Refresh + Select New + Download
+                // Selected path together cover the rest. The
+                // workhorse `downloadNewSyncRecordings` stays in
+                // AppDelegate because the auto-download trigger calls
+                // it directly.)
 
                 Spacer()
 

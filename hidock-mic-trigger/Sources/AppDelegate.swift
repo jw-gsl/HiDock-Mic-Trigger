@@ -450,7 +450,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onChooseRecordingsFolder = { [weak self] in self?.chooseSyncOutputFolder() }
         viewModel.onChooseTranscriptFolder = { [weak self] in self?.chooseTranscriptOutputFolder() }
         viewModel.onDownloadSelected = { [weak self] in self?.downloadSelectedSyncRecording() }
-        viewModel.onDownloadNew = { [weak self] in self?.downloadNewSyncRecordings() }
         viewModel.onStopDownload = { [weak self] in self?.stopSyncDownload() }
         viewModel.onMarkDownloaded = { [weak self] in self?.markSyncRecordingsAsDownloaded() }
         viewModel.onSelectAll = { [weak self] in self?.selectAllSyncRecordings() }

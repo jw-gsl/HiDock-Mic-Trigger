@@ -60,17 +60,19 @@ final class HiDockViewModel: ObservableObject {
     @Published var mergeCandidatesShowAll = false
     /// User-visible "Merge candidates (N)" count — hidden when zero.
     var mergeCandidateCountForBadge: Int {
-        mergeCandidatesShowAll
-            ? mergeCandidates.count
-            : mergeCandidates.filter(\.high_confidence).count
+        let pool = effectiveMergeCandidates
+        return mergeCandidatesShowAll
+            ? pool.count
+            : pool.filter(\.high_confidence).count
     }
     /// Set of mp3 paths that appear in at least one currently-surfaced
     /// candidate. Used by the recordings table to draw the subtle
     /// blue left-border accent on those rows.
     var mergeCandidatePaths: Set<String> {
+        let pool = effectiveMergeCandidates
         let visible = mergeCandidatesShowAll
-            ? mergeCandidates
-            : mergeCandidates.filter(\.high_confidence)
+            ? pool
+            : pool.filter(\.high_confidence)
         return Set(visible.flatMap { $0.pieces.map(\.mp3_path) })
     }
     /// mp3 paths the user has ticked as "yes, include this in a merge".
@@ -82,12 +84,34 @@ final class HiDockViewModel: ObservableObject {
     /// `true` once the user has ticked enough candidate rows to do a
     /// merge — drives the "Merge N selected" action's visibility.
     var canMergeTickedCandidates: Bool { mergeCandidatesTicked.count >= 2 }
+
+    /// Candidates after filtering out chains where any piece is
+    /// already a child of an active merge group. The visual heuristic
+    /// is "if the row already shows the merge-triangle icon next to
+    /// the folder, it's been merged — don't keep suggesting it." This
+    /// double-defends against any race where the dismiss didn't
+    /// propagate (state update lag, scan hadn't refreshed yet) by
+    /// using the existing merge-groups state as the authoritative
+    /// "already merged" signal. Used everywhere a candidate would
+    /// otherwise surface (row tint, tick toggle, toolbar count,
+    /// scroll target, right-click menu).
+    var effectiveMergeCandidates: [MergeCandidate] {
+        let mergedStems = Set(mergeGroups.flatMap(\.childNames)
+            .map { ($0 as NSString).deletingPathExtension })
+        return mergeCandidates.filter { cand in
+            let chainStems = cand.pieces.map {
+                ($0.mp3_name as NSString).deletingPathExtension
+            }
+            return !chainStems.contains(where: { mergedStems.contains($0) })
+        }
+    }
     /// Path of the first candidate row, used by the toolbar's count
     /// label to scroll the table to the first suggestion when clicked.
     var firstMergeCandidatePath: String? {
+        let pool = effectiveMergeCandidates
         let visible = mergeCandidatesShowAll
-            ? mergeCandidates
-            : mergeCandidates.filter(\.high_confidence)
+            ? pool
+            : pool.filter(\.high_confidence)
         return visible.first?.pieces.first?.mp3_path
     }
 
@@ -409,7 +433,6 @@ final class HiDockViewModel: ObservableObject {
     var onChooseRecordingsFolder: () -> Void = {}
     var onChooseTranscriptFolder: () -> Void = {}
     var onDownloadSelected: () -> Void = {}
-    var onDownloadNew: () -> Void = {}
     var onStopDownload: () -> Void = {}
     var onMarkDownloaded: () -> Void = {}
     var onSelectAll: () -> Void = {}

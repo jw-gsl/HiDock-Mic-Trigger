@@ -490,7 +490,7 @@ struct RecordingsTableView: View {
         // only when this row is in a currently-visible candidate
         // chain — high-confidence by default, all candidates if the
         // user has flipped the toggle.
-        let candidates = viewModel.mergeCandidates.filter { cand in
+        let candidates = viewModel.effectiveMergeCandidates.filter { cand in
             (viewModel.mergeCandidatesShowAll || cand.high_confidence)
                 && cand.pieces.contains(where: { $0.mp3_path == entry.recording.outputPath })
         }
