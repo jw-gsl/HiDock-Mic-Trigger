@@ -2047,7 +2047,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func mergeSelectedRecordings() {
         let selected = selectedSyncEntries()
         let entries = selected
-            .filter { $0.recording.downloaded && $0.recording.localExists }
+            .filter { $0.recording.localExists }
             .sorted { "\($0.recording.createDate) \($0.recording.createTime)" < "\($1.recording.createDate) \($1.recording.createTime)" }
         guard entries.count >= 2 else {
             let total = selected.count
@@ -2276,8 +2276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let names = Set(cand.pieces.map { ($0.mp3_name as NSString).deletingPathExtension }
                         .map { "\($0).hda" })
         let entries = syncEntries.filter { entry in
-            names.contains(entry.recording.name)
-                && entry.recording.downloaded && entry.recording.localExists
+            names.contains(entry.recording.name) && entry.recording.localExists
         }
         guard entries.count == cand.pieces.count else {
             log("Merge candidate aborted: expected \(cand.pieces.count) entries, found \(entries.count)")
@@ -2303,7 +2302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard paths.count >= 2 else { return }
         let entries = syncEntries.filter {
             paths.contains($0.recording.outputPath)
-                && $0.recording.downloaded && $0.recording.localExists
+                && $0.recording.localExists
         }
         guard entries.count == paths.count else {
             log("Merge ticked: expected \(paths.count) entries, found \(entries.count)")
@@ -2651,6 +2650,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Re-diarize
 
+    /// Layer 2 of the voice-training plan. Fires
+    /// `transcribe.py recluster-with-anchors` against the diarized
+    /// JSON; the Python side treats every user-named segment as an
+    /// anchor centroid and reassigns every other segment to its
+    /// closest anchor. Closes + reopens the viewer on success so the
+    /// new assignments paint immediately.
+    private func reclusterTranscriptWithLabels(jsonPath: String) {
+        guard ensureTranscriptionReady() else { return }
+        log("Re-clustering \(jsonPath) using user labels as anchors")
+        viewModel.syncStatus = "Re-clustering from your labels…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+
+        let args = ["recluster-with-anchors", jsonPath]
+        runTranscription(arguments: args) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                self.log("Re-cluster complete")
+                self.viewModel.syncStatus = "Re-cluster complete — reopen transcript to see changes"
+                self.viewModel.syncStatusLevel = .success
+                self.transcriptViewerWindow?.close()
+                self.transcriptViewerWindow = nil
+                let mdPath = jsonPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.openTranscriptViewer(transcriptMdPath: mdPath)
+                }
+            case .failure(let error):
+                self.log("Re-cluster failed: \(error.localizedDescription)")
+                self.viewModel.syncStatus = "Re-cluster failed"
+                self.viewModel.syncStatusLevel = .error
+            }
+            self.syncViewModelState()
+        }
+    }
+
     private func rediarizeTranscript(jsonPath: String, nSpeakers: Int?) {
         guard ensureTranscriptionReady() else { return }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
@@ -2870,6 +2905,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onRediarize: { [weak self] jsonPath, nSpeakers in
                 self?.rediarizeTranscript(jsonPath: jsonPath, nSpeakers: nSpeakers)
+            },
+            onReclusterWithLabels: { [weak self] jsonPath in
+                self?.reclusterTranscriptWithLabels(jsonPath: jsonPath)
             }
         )
 
@@ -3444,8 +3482,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log("transcribeWithSpeakerCount: no entry named \(name)")
             return
         }
-        guard entry.recording.downloaded && entry.recording.localExists else {
-            log("transcribeWithSpeakerCount: \(name) not downloaded yet")
+        guard entry.recording.localExists else {
+            log("transcribeWithSpeakerCount: \(name) not on disk yet")
             return
         }
         guard ensureTranscriptionReady() else { return }
@@ -4367,15 +4405,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // last probed → at least one new recording appeared. Covers
         // the "recorded directly on the HiDock without using the USB
         // mic trigger" case, which previously left files marooned on
-        // the device because scheduleAutoDownloadNewRecordings only
-        // fired on mic-trigger release. Gated on syncAutoDownload,
-        // and only when the device is actually connected (otherwise
-        // a cached-catalog response could spuriously look like growth).
-        if status.connected {
+        // the device.
+        //
+        // The baseline-count must be set even for *cached-catalog*
+        // responses (extractor returns the last-known catalog with
+        // `connected:false` when a probe fails). Without that, on a
+        // fresh app launch where the user reconnects a device that
+        // has new recordings, the very first successful probe sees
+        // `previousCount == nil` and skips the trigger entirely.
+        // Storing the cached count establishes the baseline so the
+        // first real connection's count rise actually fires the
+        // download. We still only TRIGGER the download for
+        // genuinely-connected probes — a cached catalog can't be
+        // bigger than its previous self anyway, so the rise check
+        // naturally rejects spurious cached growth.
+        let currentCount = status.recordings.count
+        if currentCount > 0 {  // empty catalog = "I don't know", don't reset baseline
             let previousCount = syncDeviceLastSeenCount[device.deviceId]
-            let currentCount = status.recordings.count
             syncDeviceLastSeenCount[device.deviceId] = currentCount
-            if let prev = previousCount, currentCount > prev, syncAutoDownload, !syncBusy, !syncDownloading {
+            if status.connected,
+               let prev = previousCount,
+               currentCount > prev,
+               syncAutoDownload, !syncBusy, !syncDownloading {
                 log("Auto-download: \(device.shortName) recording count \(prev)→\(currentCount), triggering download-new")
                 scheduleAutoDownloadNewRecordings()
             }
@@ -5244,7 +5295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if self.syncAutoTranscribe, ensureTranscriptionReady() {
                 let freshPaths = freshDownloads.map(\.outputPath)
                 let backlogPaths = self.viewModel.visibleEntries
-                    .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
+                    .filter { $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
                     .map(\.recording.outputPath)
                 var seen = Set<String>()
                 let combined = (freshPaths + backlogPaths).filter { seen.insert($0).inserted }
@@ -5744,7 +5795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         guard !all.isEmpty else { return }
 
-        let ready = all.filter { $0.recording.downloaded && $0.recording.localExists }
+        let ready = all.filter { $0.recording.localExists }
         let needsDownload = all.filter { !$0.recording.downloaded || !$0.recording.localExists }
         log("Transcribe selected: \(all.count) to process (\(ready.count) ready, \(needsDownload.count) need download)")
 
@@ -6274,7 +6325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         didRunLaunchAutoTranscribe = true
 
         let untranscribed = viewModel.visibleEntries
-            .filter { $0.recording.downloaded && $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
+            .filter { $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
             .map(\.recording.outputPath)
         guard !untranscribed.isEmpty else { return }
         log("Auto-transcribe (launch backlog): \(untranscribed.count) untranscribed recording(s) found")

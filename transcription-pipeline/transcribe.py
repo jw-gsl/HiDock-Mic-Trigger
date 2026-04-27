@@ -681,6 +681,54 @@ def cmd_rediarize(args):
     }))
 
 
+def cmd_recluster_with_anchors(args):
+    """Layer 2 of the voice-training plan. Reads a _diarized.json,
+    treats every user-named segment as an anchor centroid, and
+    re-assigns the rest of the transcript to its closest anchor by
+    cosine similarity. The action is idempotent — running it twice in
+    a row is a no-op when nothing has changed."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    progress(5)
+    from shared.recluster_with_anchors import recluster_with_anchors, SIMILARITY_THRESHOLD
+    threshold = args.threshold if args.threshold is not None else SIMILARITY_THRESHOLD
+    progress(10)
+    summary = recluster_with_anchors(json_path, similarity_threshold=threshold)
+    progress(95)
+    if "error" in summary:
+        print(_json.dumps(summary), file=sys.stderr)
+        sys.exit(1)
+
+    # Re-render the .md so the user sees the new assignments without
+    # having to re-open the viewer manually. Mirrors what cmd_rediarize
+    # does — read the diarized JSON we just wrote, regenerate the
+    # transcript file alongside it.
+    try:
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+        from shared.transcript_writer import write_transcript
+        md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+        body_text = " ".join(
+            seg.get("text", "").strip()
+            for seg in data.get("segments", [])
+            if seg.get("text")
+        )
+        write_transcript(
+            md_path,
+            body_text,
+            source_path=Path(data.get("audio_file", "")),
+            model="recluster-with-anchors",
+            diarized_result=data,
+        )
+    except Exception as exc:
+        print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+
+    progress(100)
+    print(_json.dumps(summary))
+
+
 def cmd_merge_rediarize(args):
     """Build a merged transcript from existing per-piece transcripts.
 
@@ -882,6 +930,19 @@ def main():
     p_rediarize.add_argument("json_path", help="Path to _diarized.json file")
     p_rediarize.add_argument("--n-speakers", type=int, help="Force number of speakers")
     p_rediarize.set_defaults(func=cmd_rediarize)
+
+    p_recluster = sub.add_parser(
+        "recluster-with-anchors",
+        help="Re-cluster transcript using user-named segments as anchors (Layer 2 of voice-training plan)",
+    )
+    p_recluster.add_argument("json_path", help="Path to _diarized.json file")
+    p_recluster.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Cosine-similarity threshold (0-1). Below this, segments keep their existing speaker. Defaults to the conservative value tuned in shared.recluster_with_anchors.",
+    )
+    p_recluster.set_defaults(func=cmd_recluster_with_anchors)
 
     p_merge = sub.add_parser(
         "merge-rediarize",

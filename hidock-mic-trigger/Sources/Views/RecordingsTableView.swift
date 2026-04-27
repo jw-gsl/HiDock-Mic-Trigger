@@ -406,7 +406,16 @@ struct RecordingsTableView: View {
                 .frame(width: 70, alignment: .leading)
 
             HStack(spacing: 4) {
-                if entry.recording.downloaded && entry.recording.localExists {
+                // Show in Finder gates on `localExists` only, not on the
+                // state.json `downloaded` flag. A file can land on disk
+                // with `downloaded=false` if the bytes-written came up
+                // short of the device-reported length (saw a 7KB
+                // mismatch on Rec63 on 2026-04-27 — file was perfectly
+                // playable + transcribed but the flag stayed false).
+                // The `downloaded` flag is for download-decisioning
+                // ("should we auto-fetch this again"); UI affordances
+                // should ask the filesystem.
+                if entry.recording.localExists {
                     Button {
                         viewModel.onRevealRecording(entry.recording.outputPath)
                     } label: {
@@ -547,7 +556,7 @@ struct RecordingsTableView: View {
             }
         }
 
-        if entry.recording.downloaded && entry.recording.localExists {
+        if entry.recording.localExists {
             Menu {
                 // Presets cover 1:1s, small meetings, and typical group
                 // panels. Auto leaves the density-prior estimator in charge
@@ -564,7 +573,7 @@ struct RecordingsTableView: View {
 
         Divider()
 
-        if entry.recording.downloaded && entry.recording.localExists {
+        if entry.recording.localExists {
             Button {
                 viewModel.onRevealRecording(entry.recording.outputPath)
             } label: {
@@ -585,7 +594,7 @@ struct RecordingsTableView: View {
             }
         }
 
-        if entry.recording.downloaded && entry.recording.localExists {
+        if entry.recording.localExists {
             Divider()
 
             Button {
@@ -610,7 +619,7 @@ struct RecordingsTableView: View {
             } label: {
                 Label("Remove Import", systemImage: "trash")
             }
-        } else if entry.recording.downloaded && entry.recording.localExists {
+        } else if entry.recording.localExists {
             // HiDock recordings: offer to delete only the local copy.
             // Deleting from the device itself isn't supported yet —
             // the HiDock USB protocol we've reverse-engineered doesn't

@@ -36,7 +36,13 @@ struct SyncToolbarSection: View {
 
                 Button {
                     if let entry = viewModel.visibleEntries.first(where: {
-                        viewModel.syncCheckedRecordings.contains($0.recording.name) && $0.recording.downloaded && $0.recording.localExists
+                        // localExists, not `downloaded && localExists`:
+                        // a row can have the file on disk but
+                        // `downloaded=false` if the device-reported
+                        // length and the actual byte count differ
+                        // slightly. The flag is for download-decisioning;
+                        // file ops should ask the filesystem.
+                        viewModel.syncCheckedRecordings.contains($0.recording.name) && $0.recording.localExists
                     }) {
                         viewModel.onTrimRecording(entry.recording.outputPath)
                     }
