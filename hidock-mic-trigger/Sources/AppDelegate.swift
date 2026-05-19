@@ -86,6 +86,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var transcriptionEstimatedDuration: TimeInterval = 180  // 3 min default
     private var transcriptionLastRealProgress: Int = 0
 
+    /// Device-side filename of the recording the extractor is actively
+    /// pulling. Mirrored to `viewModel.currentlyDownloadingName` so the
+    /// recordings table can render that one row "Downloading" (yellow)
+    /// while the rest of the pending batch stays "On device". Set on
+    /// `FILE_START:`, cleared on `FILE_DONE:` and again on batch
+    /// completion as a belt-and-braces guard.
+    private var currentlyDownloadingName: String?
+
+    /// True once the trigger CLI has confirmed it found both devices
+    /// and is actively polling. `process != nil` alone isn't enough —
+    /// a process can be alive but stuck in waitForDevice. Mirrored to
+    /// `viewModel.triggerHealthy` and drives the green/amber dot in
+    /// MicTriggerSection.
+    private var triggerHealthy = false
+    /// Human-readable wait status from the CLI's waitForDevice loop.
+    /// Cleared when the trigger goes healthy or when the process exits.
+    private var triggerWaitMessage: String?
+    /// Wall-clock of the most recent successful start. Mirrored to the
+    /// view model so the user can see a restart actually happened even
+    /// when the amber→green flip was sub-second.
+    private var triggerLastStartedAt: Date?
+    /// Hold the amber state for at least this long after a restart so
+    /// the eye can catch the transition. The "healthy" log line from
+    /// the CLI can fire within ~50ms of process spawn when both
+    /// devices were already enumerated; without this, the dot never
+    /// visibly leaves green even though a restart happened.
+    private static let minAmberDuration: TimeInterval = 1.5
+    private var pendingHealthyTimer: Timer?
+
     private var processStartDate: Date?
     private var uptimeTimer: Timer?
 
@@ -588,6 +617,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncTranscriptFolder = syncTranscriptFolder
         viewModel.transcriptionBusy = transcriptionBusy
         viewModel.transcriptionCurrentFile = transcriptionCurrentFile
+        viewModel.currentlyDownloadingName = currentlyDownloadingName
+        viewModel.triggerHealthy = triggerHealthy
+        viewModel.triggerWaitMessage = triggerWaitMessage
+        viewModel.triggerLastStartedAt = triggerLastStartedAt
         viewModel.transcriptionProgress = transcriptionProgress
         viewModel.transcriptionPaused = transcriptionPaused
         viewModel.transcriptionQueue = pendingTranscriptionQueue
@@ -639,19 +672,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - CLI output monitoring
 
+    /// Flip the trigger to "Active" green, but only after the
+    /// minAmberDuration window has elapsed since process spawn. This
+    /// makes restart cycles visible to the eye even when the CLI emits
+    /// "Using HiDock audio device" sub-second after spawn (which
+    /// happens whenever both devices were already enumerated). Also
+    /// captures triggerLastStartedAt so the UI's "↻ HH:MM:SS" stamp
+    /// updates on every restart, and fires the "Active" notification
+    /// (gated to the user's preferred mic so a transient fallback
+    /// doesn't double-notify).
+    private func confirmTriggerHealthy(deviceName: String) {
+        pendingHealthyTimer?.invalidate()
+        let elapsed = processStartDate.map { Date().timeIntervalSince($0) } ?? Self.minAmberDuration
+        let remaining = max(0, Self.minAmberDuration - elapsed)
+        let fire: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            // Drop the flip if the process exited in the meantime.
+            guard self.process != nil else { return }
+            let micName = self.selectedMicName ?? ""
+            self.triggerHealthy = true
+            self.triggerLastStartedAt = self.processStartDate
+            self.syncViewModelState()
+            let preferredOK = self.preferredMicName == nil
+                || (self.preferredMicName ?? "").isEmpty
+                || self.preferredMicName == self.selectedMicName
+            if preferredOK, !micName.isEmpty {
+                self.log("Trigger Active — \(shortenMicName(micName)) → \(deviceName)")
+                self.postNotification(
+                    title: "HiDock Mic Trigger Active",
+                    body: "Watching \(shortenMicName(micName)); \(deviceName) ready to record."
+                )
+            } else {
+                self.log("Trigger healthy on fallback mic '\(micName)' — suppressing 'Active' notification (preferred is '\(self.preferredMicName ?? "?")')")
+            }
+        }
+        if remaining <= 0 {
+            fire()
+        } else {
+            pendingHealthyTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { _ in fire() }
+        }
+    }
+
     private func handleCLIOutput(_ text: String) {
         for line in text.components(separatedBy: .newlines) {
             // Capture which HiDock audio device ffmpeg is attached to,
             // so the Recording chip can appear on only the matching
             // device card. MicTrigger prints this once on startup:
             //   "Using HiDock audio device: HiDock H1"
+            // This is also our "trigger is healthy and polling" signal —
+            // the CLI only reaches this print after both the USB mic and
+            // the HiDock have been resolved by waitForDevice.
             if let range = line.range(of: "Using HiDock audio device: ") {
                 let name = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
                 if !name.isEmpty {
-                    log("Trigger: recording device = '\(name)'")
+                    log("Trigger: recording device = '\(name)' — confirmed (will flip Active after minAmberDuration)")
                     DispatchQueue.main.async {
                         self.viewModel.hidockRecordingDeviceName = name
+                        // triggerWaitMessage cleared immediately — we
+                        // know the wait ended. triggerHealthy waits.
+                        self.triggerWaitMessage = nil
+                        self.confirmTriggerHealthy(deviceName: name)
                     }
+                }
+            }
+            // CLI's waitForDevice loop announces what it's waiting on.
+            // Surface it in the UI so the user can see why the trigger
+            // is alive but not yet healthy (e.g. dock not plugged in).
+            if line.hasPrefix("Waiting for ") || line.hasPrefix("Still waiting for ") {
+                let msg = String(line)
+                log("Trigger: \(msg)")
+                DispatchQueue.main.async {
+                    self.triggerWaitMessage = msg
+                    self.syncViewModelState()
+                }
+            } else if line.contains(" appeared after ") {
+                log("Trigger: \(line)")
+                DispatchQueue.main.async {
+                    self.triggerWaitMessage = nil
+                    self.syncViewModelState()
                 }
             }
             if line.contains("IN USE") && line.contains("holding HiDock") {
@@ -817,7 +915,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.selectedMicName = preferred
             viewModel.availableMics = getInputDeviceNames()
             updateMenuState()
-            if process != nil && preferred != oldMic {
+            if process == nil {
+                // Same recovery as selectMic: if the trigger died on a
+                // previous fallback mic (e.g. it crashed-out trying to
+                // open a built-in name) and autoStartOnLaunch is on,
+                // the preferred-mic-reconnect event is a natural moment
+                // to retry. Without this, plugging Samson back in just
+                // logs "auto-switching" and does nothing.
+                if autoStartOnLaunch {
+                    log("Preferred-mic auto-switch: no running trigger — starting fresh with '\(preferred)'")
+                    startTrigger()
+                }
+            } else if preferred != oldMic {
                 restartTrigger()
             }
             postMicChangeNotification(
@@ -851,6 +960,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 postNotification(title: "Mic Disconnected", body: "\(shortenMicName(selected)) was unplugged. No mics available.")
             }
             return
+        }
+
+        // Generic recovery: if there's no running trigger, autoStartOnLaunch
+        // is on, and the currently-selected mic is now present in the
+        // device list, start a fresh trigger. Catches the case the
+        // auto-switch block above misses — when the selected mic equals
+        // the preferred mic (so `selected != preferred` is false), the
+        // auto-switch block returns without starting. Without this
+        // clause, the trigger would stay dead even though everything is
+        // back to normal.
+        if process == nil, autoStartOnLaunch,
+           let selected = selected, !selected.isEmpty,
+           currentDevices.contains(selected) {
+            log("USB change recovery: trigger not running, '\(selected)' is present — starting")
+            startTrigger()
         }
     }
 
@@ -1058,7 +1182,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.selectedMicName = micName
         log("Selected trigger mic: \(micName)")
         updateMenuState()
-        if process != nil && micName != oldMic {
+        if process == nil {
+            // Trigger isn't running — either it was never started, or
+            // it crashed past max retries on a previous mic (typical
+            // path: USB mic unplugged → fallback to a built-in name
+            // CoreAudio doesn't expose with that exact spelling → 3
+            // crashes → giving up). Picking a mic from the menu is an
+            // explicit "make it watch this one" gesture, so start a
+            // fresh attempt with the new selection rather than silently
+            // dropping it. Respects autoStartOnLaunch so users who have
+            // explicitly disabled auto-start aren't second-guessed.
+            if autoStartOnLaunch {
+                log("selectMic: no running trigger — starting fresh with '\(micName)'")
+                startTrigger()
+            }
+        } else if micName != oldMic {
             restartTrigger()
         }
     }
@@ -1329,6 +1467,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func launchProcess() {
+        // Fresh launch — clear any stale healthy/wait state from a
+        // previous run before the CLI even starts emitting output.
+        triggerHealthy = false
+        triggerWaitMessage = nil
+        pendingHealthyTimer?.invalidate()
+        pendingHealthyTimer = nil
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binaryPath)
 
@@ -1360,8 +1505,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 self.process = nil
                 self.processStartDate = nil
+                self.triggerHealthy = false
+                self.triggerWaitMessage = nil
+                self.pendingHealthyTimer?.invalidate()
+                self.pendingHealthyTimer = nil
                 self.stopUptimeTimer()
                 self.updateMenuState()
+                self.syncViewModelState()
 
                 if !self.stoppingIntentionally && status != 0 {
                     self.handleCrash(exitStatus: status)
@@ -4263,7 +4413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func runExtractorWithProgress(arguments: [String], productId: Int? = nil, onProgress: @escaping (Int, Int, Int) -> Void, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runExtractorWithProgress(arguments: [String], productId: Int? = nil, onProgress: @escaping (Int, Int, Int) -> Void, onFile: ((String, Bool) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         syncExtractorQueue.async {
             let process = Process()
@@ -4305,6 +4455,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                let pct = Int(parts[2]) {
                                 DispatchQueue.main.async { onProgress(received, total, pct) }
                             }
+                        } else if line.hasPrefix("FILE_START:") {
+                            let name = String(line.dropFirst("FILE_START:".count))
+                            DispatchQueue.main.async { onFile?(name, true) }
+                        } else if line.hasPrefix("FILE_DONE:") {
+                            let name = String(line.dropFirst("FILE_DONE:".count))
+                            DispatchQueue.main.async { onFile?(name, false) }
                         }
                     }
                 }
@@ -4346,6 +4502,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func renderSyncStatus(_ status: HiDockSyncStatusResponse, device: HiDockPairedDevice) {
         let importedBefore = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }.count
+        // Capture the previous connection state before we overwrite it —
+        // auto-download trigger #3 fires on the disconnected→connected
+        // transition. Treat "never seen" (nil) as not-connected so the
+        // very first live probe after launch counts as a fresh connect.
+        let wasConnected = syncDeviceConnected[device.deviceId] ?? false
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         syncDeviceConnected[device.deviceId] = status.connected
@@ -4426,10 +4587,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if status.connected,
                let prev = previousCount,
                currentCount > prev,
-               syncAutoDownload, !syncBusy, !syncDownloading {
+               syncAutoDownload, !syncDownloading {
+                // !syncBusy intentionally not gated here — renderSyncStatus
+                // is normally called from inside an auto-connect / refresh
+                // probe batch that holds syncBusy=true until the dispatch
+                // group's notify block fires. The 2s timer inside
+                // scheduleAutoDownloadNewRecordings re-checks !syncBusy
+                // post-batch, which is the correct deferral point.
                 log("Auto-download: \(device.shortName) recording count \(prev)→\(currentCount), triggering download-new")
                 scheduleAutoDownloadNewRecordings()
             }
+        }
+
+        // Auto-download trigger #3: device just transitioned from
+        // disconnected→connected. Covers the case the count-rise check
+        // misses: the catalog hasn't grown since last session, but the
+        // recordings on it were never downloaded — without this, those
+        // files sit on the device forever because there's no count
+        // rise for #2 to detect. Fires on:
+        //   - first successful live probe after app launch
+        //   - replug after disconnect
+        //   - manual ↻ when the previous state was "not connected"
+        // Skipped on cached-status (connected=false). `download-new` is
+        // a no-op when everything's already downloaded, so the worst
+        // case is one extra extractor call per fresh connect.
+        if status.connected, !wasConnected, currentCount > 0,
+           syncAutoDownload, !syncDownloading {
+            // !syncBusy intentionally not gated — see comment on trigger #2.
+            log("Auto-download: \(device.shortName) freshly connected with \(currentCount) recording(s) on device, triggering download-new")
+            scheduleAutoDownloadNewRecordings()
         }
         // Apply the sync disk-based transcribed check now, before any
         // view update: this ensures rows paint at "Transcribed" rather
@@ -4559,7 +4745,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func scheduleAutoDownloadNewRecordings() {
-        guard syncAutoDownload, syncPaired, !syncBusy else { return }
+        // No !syncBusy guard at the entry: the 2s debounce timer is the
+        // correct deferral point. Triggers #2 and #3 fire from inside a
+        // probe batch where syncBusy is true; we still want to schedule,
+        // and re-check when the timer fires after the batch settles.
+        guard syncAutoDownload, syncPaired else { return }
         syncAutoDownloadTimer?.invalidate()
         syncAutoDownloadTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
             guard let self = self, self.syncAutoDownload, self.syncPaired, !self.syncBusy else { return }
@@ -5263,6 +5453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             stopDownloadTimer()
             syncBusy = false
             syncDownloading = false
+            currentlyDownloadingName = nil
             if totalDownloaded > 0 {
                 let body = totalDownloaded == 1
                     ? "1 new recording was saved successfully."
@@ -5326,6 +5517,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
             self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
             self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+        }, onFile: { [weak self] name, started in
+            guard let self = self else { return }
+            self.currentlyDownloadingName = started ? name : nil
+            self.log(started ? "FILE_START: \(name)" : "FILE_DONE: \(name)")
+            self.syncViewModelState()
         }) { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -5350,6 +5546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.stopDownloadTimer()
                     self.syncBusy = false
                     self.syncDownloading = false
+                    self.currentlyDownloadingName = nil
                     self.syncViewModelState()
                     return
                 }

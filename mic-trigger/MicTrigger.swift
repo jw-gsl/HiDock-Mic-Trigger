@@ -220,21 +220,51 @@ guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
     exit(1)
 }
 
-guard let foundUSBID = findInputDeviceID(named: usbMicName) else {
-    print("Could not find USB mic input device named '\(usbMicName)'. Check the name.")
-    exit(1)
+// Wait for the USB mic and HiDock to appear instead of exiting on
+// the first miss. The previous behaviour (exit 1 if either device
+// isn't enumerated yet) caused a recurring failure mode: when the
+// user unplugs their dock, both Samson and HiDock disappear together;
+// the parent app spawns a fresh CLI on the fallback mic, the CLI can't
+// find HiDock, exits 1, the parent's max-3-crash retry kicks in, and
+// after ~7 seconds the parent gives up. When the dock comes back the
+// CLI never restarts (parent's selectMic / preferred-mic-just-connected
+// paths used to silently no-op when process==nil; that's now fixed).
+// Even with that fix, the new CLI would still exit 1 if HiDock and
+// Samson don't enumerate in the same USB burst. Waiting here is the
+// belt-and-braces solution: SIGINT/SIGTERM (sent by the parent on
+// Stop) terminate the process via the default handler at this stage,
+// because the explicit DispatchSource handlers below haven't been
+// installed yet — safe because we haven't claimed the HiDock interface.
+func waitForDevice<T>(_ label: String, find: () -> T?) -> T {
+    if let found = find() { return found }
+    print("Waiting for \(label)...")
+    var elapsed = 0
+    while true {
+        Thread.sleep(forTimeInterval: 5)
+        elapsed += 5
+        if let found = find() {
+            print("\(label) appeared after \(elapsed)s.")
+            return found
+        }
+        if elapsed % 60 == 0 {
+            print("Still waiting for \(label) (\(elapsed)s elapsed)...")
+        }
+    }
 }
-var usbID = foundUSBID
 
-// Resolve HiDock device name for ffmpeg (auto-detect or use --hidock override)
+var usbID = waitForDevice("USB mic '\(usbMicName)'") {
+    findInputDeviceID(named: usbMicName)
+}
+
+// Resolve HiDock device name for ffmpeg (auto-detect or use --hidock override).
+// Override path trusts the caller — they explicitly named a device.
 let hidockDevice: String
 if let override = config.hidockDevice {
     hidockDevice = override
-} else if let detected = findHiDockDeviceName() {
-    hidockDevice = detected
 } else {
-    print("Could not find a HiDock audio input device. Is the HiDock connected?")
-    exit(1)
+    hidockDevice = waitForDevice("HiDock audio input device") {
+        findHiDockDeviceName()
+    }
 }
 
 print("Found USB mic '\(usbMicName)' (deviceID \(usbID)).")

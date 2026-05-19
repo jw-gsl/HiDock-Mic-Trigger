@@ -6,6 +6,23 @@ final class HiDockViewModel: ObservableObject {
     @Published var triggerRunning = false
     @Published var triggerPID: Int32?
     @Published var triggerUptime: String = ""
+    /// True once the CLI has confirmed it found both the watched USB mic
+    /// and the HiDock audio device, and is actively polling. Distinct
+    /// from `triggerRunning` (process != nil): a process can be up but
+    /// stuck in the wait-for-devices loop, in which case the trigger
+    /// isn't actually doing anything yet. UI uses this to paint amber
+    /// (waiting) vs green (healthy).
+    @Published var triggerHealthy = false
+    /// Human-readable status while the CLI is waiting for a device to
+    /// enumerate (e.g. "Waiting for USB mic 'Samson Q2U Microphone'").
+    /// nil when the trigger is healthy or not running.
+    @Published var triggerWaitMessage: String?
+    /// Wall-clock time of the most recent successful (re)start of the
+    /// trigger CLI process. Surfaced in the Mic Trigger row as "↻
+    /// 16:23:18" so the user has passive confirmation that an unplug/
+    /// replug cycle did in fact bounce the trigger — useful when
+    /// notifications get coalesced or missed by macOS.
+    @Published var triggerLastStartedAt: Date?
     @Published var selectedMicName: String?
     @Published var autoStartOnLaunch = true
     @Published var availableMics: [String] = []
@@ -35,6 +52,12 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncBusy = false
     @Published var syncDownloading = false
     @Published var syncDownloadProgress: String?
+    /// Device-side filename of the recording the extractor is currently
+    /// pulling (e.g. `2026May06-...hda`). Updated in real time from the
+    /// extractor's `FILE_START:` / `FILE_DONE:` stderr markers, so the
+    /// recordings table can paint that one row "Downloading" (yellow)
+    /// while the rest of the pending batch stays "On device".
+    @Published var currentlyDownloadingName: String?
     @Published var syncSortKey: String = "created"
     @Published var syncSortAscending: Bool = false
     @Published var syncFilterDeviceId: String?

@@ -64,25 +64,65 @@ doesn't yet.
 - [x] Voice Library window listing enrolled voices.
 - [x] Auto-detected merge candidates + multi-row merge UI (separate
   feature, mentioned because it's the same UI surface).
+- [x] **Layer 1 — Word-level split in Transcript Viewer.** Shipped
+  2026-04-27 in commit `82b0024` as a context-menu → sheet flow
+  ("Split segment at a word…"). **Superseded 2026-04-28 by the
+  inline range UX below** (user feedback: the sheet felt clunky and
+  the context menu was shadowed by the native text-selection menu
+  whenever the user selected text first). The `applySplit` /
+  enrolment-on-second-half logic from this version is reused by the
+  new UX.
+- [x] **Layer 2 — Re-diarize with anchors.** Shipped 2026-04-27 in
+  commit `82b0024`. `shared/recluster_with_anchors.py` loads the
+  TitaNet embedding model, treats every user-named segment as an
+  anchor centroid (averaged per name), reassigns every other segment
+  to its nearest anchor by cosine similarity (≥0.55), final
+  consecutive-same-speaker merge. Exposed as
+  `transcribe.py recluster-with-anchors <diarized.json>` and via the
+  "Re-cluster from my labels" button in the Transcript Viewer
+  (visible only when at least one speaker has been renamed away from
+  the auto "Speaker N").
 
-## In Progress (this session — 2026-04-26)
+## In Progress (this session — 2026-04-28)
 
-- [ ] **Layer 1 — Word-level split in Transcript Viewer.** Render
-  segment text as clickable word tokens. Click a word → context menu
-  with "Split here as Speaker X / new speaker". Splits the segment
-  into two sub-segments at the chosen boundary, with time estimated by
-  linear interpolation across the segment's word count. The new sub-
-  segment becomes a fresh enrolment sample for the chosen speaker
-  (cleaner than a contaminated whole-segment sample).
+- [ ] **Layer 1 v2 — Inline word-token range selection.** Replaces
+  the sheet shipped on 2026-04-27. New UX:
+  - Each segment's text renders as a flow of clickable word tokens
+    (FlowLayout reused — was previously sheet-only).
+  - User **drag-selects** a range of words inside one segment. Tokens
+    inside the range tint blue. Single-click selects one word. The
+    selection lives in row-local state; only one segment can have an
+    active range at a time.
+  - The moment a range exists, a thin inline speaker bar slides in
+    **below that segment** (chosen over above so the text doesn't
+    shift): existing speaker pills + "New speaker" + a small ✕ to
+    cancel the selection.
+  - Click a pill → the words in the range become a new sub-segment
+    assigned to that speaker. Up to a 3-way split:
+    - range = whole segment → just reassign speakerId, no structural
+      split
+    - range starts at word 0, doesn't reach the end → 2 parts
+      (range first, then original tail)
+    - range starts mid-segment, reaches the end → 2 parts
+      (original head, then range)
+    - range strictly in the middle → 3 parts
+      (original head, range, original tail)
+  - Time boundaries on each new sub-segment via linear interpolation
+    over word indices (consistent with the old sheet's behaviour).
+  - Enrolment fires on the **range sub-segment** (cleaner provenance
+    than the whole-segment sample we used to take from the second
+    half of a single-cut split).
+  - The old sheet, the context-menu "Split segment at a word…" item,
+    and the `splittingSegmentIndex` / `splitWordIndex` state are
+    removed entirely.
+  - `.textSelection(.enabled)` on segment text is removed (replaced
+    by tokens). Plain-text copy stays available via the existing
+    "Copy All" button in the toolbar; per-segment copy can be added
+    later if asked.
 
-- [ ] **Layer 2 — Re-diarize with anchors.** New
-  `transcribe.py recluster-with-anchors <diarized.json>` subcommand:
-  reads the diarized JSON, treats every named-speaker segment as an
-  anchor centroid, re-embeds all segments, assigns each non-anchor
-  segment to its nearest anchor via cosine similarity (above a
-  threshold) or "Unknown" otherwise. UI: a "Re-cluster from my
-  labels" button in the Transcript Viewer that fires this and reloads
-  the JSON.
+- [ ] **Parity update.** Layer 1 v2 is macOS-only on landing. Document
+  the gap in `PARITY.md`. Windows-side port is a separate piece of
+  work — flagged but not in scope for this commit.
 
 ## Planned (Layer 3 — separate sessions)
 
@@ -188,3 +228,11 @@ def recluster_with_anchors(diarized_json_path):
 ### Status as of writing
 Plan written; Layer 1 + Layer 2 implementation begins immediately
 after this commit.
+
+### Update 2026-04-28
+Layer 1 (sheet) and Layer 2 (recluster) shipped in `82b0024`. User
+hit Layer 1 by selecting text and right-clicking, which surfaced the
+native text-selection menu instead of the SwiftUI contextMenu — the
+Split affordance was effectively invisible. Decision: rip the sheet
+out, render words as inline tokens, drag-select a range, show a
+speaker bar below the segment. Captured above as "Layer 1 v2".

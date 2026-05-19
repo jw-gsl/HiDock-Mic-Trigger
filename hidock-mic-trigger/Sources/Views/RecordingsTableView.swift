@@ -345,9 +345,25 @@ struct RecordingsTableView: View {
             }
             .frame(width: 120, alignment: .leading)
 
+            // In-flight overlay: when this row is the file the extractor
+            // is actively pulling, paint "Downloading"; when it's the
+            // file the transcriber is actively running, paint
+            // "Transcribing". Both overlays use .warning (orange/yellow)
+            // so the eye can spot live work at a glance. Underlying
+            // statusText / statusLevel are unchanged — pipeline-stage
+            // filters and sort still see the lifecycle state.
+            let isDownloadingRow = viewModel.currentlyDownloadingName == entry.recording.name
+            let isTranscribingRow = viewModel.transcriptionBusy
+                && viewModel.transcriptionCurrentFile == entry.recording.outputName
+            let badgeText: String = {
+                if isDownloadingRow { return "Downloading" }
+                if isTranscribingRow { return "Transcribing" }
+                return entry.statusText
+            }()
+            let badgeLevel: StatusLevel = (isDownloadingRow || isTranscribingRow) ? .warning : entry.statusLevel
             ClickableStatusBadge(
-                text: entry.statusText,
-                level: entry.statusLevel,
+                text: badgeText,
+                level: badgeLevel,
                 errorMessage: entry.recording.lastError
             )
             .frame(width: 110, alignment: .leading)

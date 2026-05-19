@@ -838,6 +838,32 @@ def transfer_file_stream_to_path(
 ) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(out_path.suffix + '.downloading')
+
+    # Clear stuck firmware queue state before issuing CMD_TRANSFER.
+    # Empirically (2026-05-07): a HiDock H1 with leftover queued state
+    # from a previous transaction (a file-list continuation, an aborted
+    # transfer, or an earlier transfer that ended uncleanly) will
+    # silently swallow the next CMD_TRANSFER request — the read loop
+    # times out with zero bytes after 40s. Reproduced on Rec70 (47MB,
+    # not corrupt — HiDock's own app downloaded it fine) which had
+    # failed three times with three different transfer commands
+    # (CMD_TRANSFER, CMD_TRANSFER_FILE_PARTIAL, CMD_GET_FILE_BLOCK)
+    # until this warm-up was added; with it, the same file pulled
+    # cleanly in 23s on the first try.
+    #
+    # CMD_QUERY_TIME has a side-effect of resetting the firmware's
+    # "continuation pending" state — a property already exploited at
+    # the end of query_file_list to avoid breaking the next command.
+    # Drain before AND after to mop up any orphaned bytes.
+    drain_input(dev, timeout_ms=200)
+    try:
+        send_and_collect(dev, CMD_QUERY_TIME, request_id - 1, timeout_ms=1000, max_reads=4)
+    except Exception:
+        # Warm-up is best-effort. If it fails we still try the transfer;
+        # most files don't need the warm-up at all.
+        pass
+    drain_input(dev, timeout_ms=200)
+
     payload = build_name_only_payload(filename)
     request = build_simple_request(CMD_TRANSFER, request_id, payload)
     dev.write(OUT_ENDPOINT, request, timeout=timeout_ms)
@@ -1427,16 +1453,25 @@ def download_new(
             # they'll have to explicitly Unremove first.
             skipped.append({"filename": item["name"], "reason": "user_removed"})
             continue
-        result = download_one(
-            item["name"],
-            length=item["length"],
-            output_dir=Path(status["outputDir"]),
-            timeout_ms=timeout_ms,
-            config_path=config_path,
-            state_path=state_path,
-            product_id=product_id,
-        )
-        downloaded.append(result)
+        # Emit a per-file marker on stderr so the Mac app can paint the
+        # currently-downloading row as "Downloading" (yellow) instead of
+        # leaving every not-yet-downloaded row stuck on "On device" until
+        # the whole batch finishes. PROGRESS lines on the same channel
+        # cover transfer percent; FILE_START / FILE_DONE bracket the file.
+        print(f"FILE_START:{item['name']}", file=sys.stderr, flush=True)
+        try:
+            result = download_one(
+                item["name"],
+                length=item["length"],
+                output_dir=Path(status["outputDir"]),
+                timeout_ms=timeout_ms,
+                config_path=config_path,
+                state_path=state_path,
+                product_id=product_id,
+            )
+            downloaded.append(result)
+        finally:
+            print(f"FILE_DONE:{item['name']}", file=sys.stderr, flush=True)
 
     return {
         "connected": True,

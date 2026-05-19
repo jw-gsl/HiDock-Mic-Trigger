@@ -95,6 +95,8 @@ Last reviewed: 2026-04-22
 | Transcript viewer dialog | Speaker view + colors | Speaker view + colors | Both | |
 | Rename speakers in transcript | Click to edit | Click to rename | Both | |
 | Speaker enrollment on rename | Automatic | Subprocess call | Both | |
+| Mid-segment word-range split | `WordTokensView` drag-select + inline speaker bar (`TranscriptViewerView.swift`) | — | macOS only | 2026-04-28 — drag a range of words inside a segment, click a speaker pill in the inline bar below to assign that range as a new sub-segment (Layer 1 v2). Replaces the earlier sheet-based UX. Windows port pending. |
+| Re-cluster transcript using user labels | "Re-cluster from my labels" toolbar button → `transcribe.py recluster-with-anchors` | — | macOS only | 2026-04-27 — Layer 2 of voice-training plan. Treats every renamed speaker as an anchor centroid and reassigns every other segment to its nearest anchor by cosine similarity. Windows port pending. |
 | Transcription complete notification | User notification with actions | Tray notification | Both | macOS has "Open Transcript" / "Show in Finder" actions |
 | Auto-emit `.srt` beside `.md` on transcription | `transcribe.py` (shared pipeline) | `transcribe.py` (shared pipeline) | Both | Shared `shared/srt_writer.py`. Speaker labels included when diarized. |
 | Export as SRT (context menu) | `onExportSRT` → `NSSavePanel` → copy/regenerate | `_ctx_export_srt` → `QFileDialog` → copy/regenerate | Both | Regenerates from `_diarized.json` / `_whisper.json` for legacy transcripts that predate auto-emit. |
