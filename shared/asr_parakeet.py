@@ -1,0 +1,86 @@
+"""Parakeet TDT v2 ASR backend via parakeet-mlx.
+
+Selectable alternative to Whisper. Uses Apple's MLX via the
+`parakeet-mlx` pip package (installed through the Model Manager).
+English-only, leaderboard-topping accuracy on English meetings,
+~60× real-time on Apple Silicon.
+
+Exposes `transcribe(audio_path, language) -> dict` returning the same
+shape as Whisper's `model.transcribe()` so `transcribe.py` can swap
+backends without caring which one ran:
+
+    { "text": str, "segments": [{"start": float, "end": float, "text": str}] }
+
+If `parakeet-mlx` isn't installed this module raises a helpful
+ImportError at call time — never on import — so a user selecting
+Whisper still gets a working pipeline even if Parakeet isn't set up.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def transcribe(audio_path: str | Path, language: str | None = None) -> dict:
+    """Transcribe audio with Parakeet TDT v2 via MLX.
+
+    Args:
+        audio_path: path to an audio file (any format ffmpeg can decode).
+        language: ignored; Parakeet TDT v2 is English-only.
+
+    Returns:
+        dict with "text" (full transcript) and "segments" (per-sentence
+        windows with start/end/text), matching Whisper's output shape.
+
+    Raises:
+        ModuleNotFoundError: if `parakeet-mlx` isn't installed. The user
+            should click "Install" on the Parakeet row in the Model
+            Manager, which pip-installs the package.
+    """
+    try:
+        from parakeet_mlx import from_pretrained
+    except ImportError as e:
+        raise ModuleNotFoundError(
+            "parakeet-mlx is not installed. Install it via the Model "
+            "Manager (Parakeet row > Install) before selecting Parakeet "
+            "as the active transcription backend."
+        ) from e
+
+    if language and language.lower() not in ("en", "english", ""):
+        # Parakeet is English-only. Don't silently produce bad output —
+        # the caller should fall back to Whisper for non-English audio
+        # at a higher level.
+        raise ValueError(
+            f"Parakeet TDT v2 supports English only; got language={language!r}. "
+            "Switch to Whisper for multilingual transcription."
+        )
+
+    model = from_pretrained("mlx-community/parakeet-tdt-0.6b-v2")
+
+    # `transcribe` in parakeet-mlx returns an AlignedResult with `text`
+    # and segment-level alignment. Shape varies across versions; shield
+    # ourselves by defensively extracting what we need.
+    result = model.transcribe(str(audio_path))
+
+    text = getattr(result, "text", None) or ""
+    segments_raw = getattr(result, "sentences", None) or getattr(result, "segments", None) or []
+
+    segments = []
+    for seg in segments_raw:
+        start = getattr(seg, "start", None)
+        end = getattr(seg, "end", None)
+        seg_text = getattr(seg, "text", None) or ""
+        if start is None or end is None:
+            # Some versions expose .words instead; derive sentence
+            # boundaries from word timestamps.
+            words = getattr(seg, "words", None) or []
+            if not words:
+                continue
+            start = float(getattr(words[0], "start", 0))
+            end = float(getattr(words[-1], "end", start))
+        segments.append({
+            "start": float(start),
+            "end": float(end),
+            "text": seg_text.strip(),
+        })
+
+    return {"text": text.strip(), "segments": segments}

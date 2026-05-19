@@ -542,6 +542,8 @@ class MainWindow(QMainWindow):
                 )
             open_trans_act = menu.addAction("Open Transcript")
             open_trans_act.triggered.connect(lambda: self._open_file(rec.transcript_path))
+            export_srt_act = menu.addAction("Export as SRT...")
+            export_srt_act.triggered.connect(lambda: self._ctx_export_srt(entry))
 
         if menu.actions():
             menu.exec(self.table_view.viewport().mapToGlobal(pos))
@@ -576,6 +578,75 @@ class MainWindow(QMainWindow):
             subprocess.Popen(["open", filepath])
         else:
             subprocess.Popen(["xdg-open", filepath])
+
+    def _ctx_export_srt(self, entry):
+        """Save an .srt for this transcript. Prefers the paired .srt that
+        transcribe.py auto-emits; regenerates from _diarized.json for legacy
+        transcripts that predate auto-emit."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import shutil
+
+        transcript_path = Path(entry.recording.transcript_path)
+        paired_srt = transcript_path.with_suffix(".srt")
+        stem = transcript_path.stem
+        dir_ = transcript_path.parent
+
+        default_name = f"{stem}.srt"
+        out_path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export as SRT",
+            str(dir_ / default_name),
+            "SubRip subtitles (*.srt)",
+        )
+        if not out_path_str:
+            return
+        out_path = Path(out_path_str)
+
+        try:
+            if paired_srt.exists():
+                shutil.copy2(paired_srt, out_path)
+            else:
+                # Regenerate from whichever sidecar is available.
+                diarized = dir_ / f"{stem}_diarized.json"
+                whisper = dir_ / f"{stem}_whisper.json"
+                if diarized.exists():
+                    source = diarized
+                elif whisper.exists():
+                    source = whisper
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Export as SRT",
+                        "No timed segments are available for this transcript. "
+                        "Re-transcribe it to generate an SRT.",
+                    )
+                    return
+
+                # Ensure shared/ is importable (same trick as core.transcription).
+                repo_root = Path(__file__).resolve().parent.parent.parent
+                if str(repo_root) not in sys.path:
+                    sys.path.insert(0, str(repo_root))
+                import json as _json
+
+                from shared.srt_writer import write_srt
+
+                data = _json.loads(source.read_text(encoding="utf-8"))
+                if "speaker_names" in data:
+                    written = write_srt(out_path, diarized_result=data)
+                else:
+                    written = write_srt(out_path, whisper_segments=data.get("segments") or [])
+                if written is None:
+                    QMessageBox.warning(
+                        self,
+                        "Export as SRT",
+                        "The transcript has no usable timed segments.",
+                    )
+                    return
+
+            self.statusBar().showMessage(f"Exported SRT to {out_path}", 5000)
+            self._open_file_location(str(out_path))
+        except Exception as exc:  # noqa: BLE001 — user-facing feedback
+            QMessageBox.critical(self, "Export as SRT", f"Could not write SRT: {exc}")
 
     # ── Keyboard shortcuts ──────────────────────────────────────────────
 
@@ -1126,6 +1197,28 @@ class MainWindow(QMainWindow):
 
         def _do_merge():
             try:
+                # Pre-flight: ffmpeg's concat demuxer parses the list with
+                # single-quoted paths, so any path containing a quote,
+                # newline, backslash, or NUL would break the format and
+                # could let ffmpeg interpret the rest of the line as
+                # metadata or a filter directive. Today every path in
+                # `ready` is built from sanitised HiDock filenames, so
+                # this check is defence-in-depth against future code
+                # paths or output folders that contain quotes. We keep
+                # `-safe 0` because the paths are absolute and `-safe 1`
+                # would reject all of them, breaking Merge.
+                unsafe_chars = ("'", "\n", "\r", "\\", "\x00")
+                all_paths = [str(e.recording.output_path) for e in ready] + [str(out_path)]
+                bad = next(
+                    (p for p in all_paths if any(c in p for c in unsafe_chars)),
+                    None,
+                )
+                if bad is not None:
+                    self.statusBar().showMessage(
+                        f"Merge aborted — refusing to pass a path with quote/newline/NUL/backslash to ffmpeg: {bad}"
+                    )
+                    return
+
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
                     for e in ready:
                         f.write(f"file '{e.recording.output_path}'\n")

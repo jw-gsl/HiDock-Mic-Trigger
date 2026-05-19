@@ -7,6 +7,7 @@ import numpy as np
 
 from shared.diarize_lite import (
     _assign_speakers_to_whisper_segments,
+    _compute_density_prior,
     cluster_speakers,
     diarize,
 )
@@ -149,3 +150,56 @@ def test_diarize_output_format_with_speech(mock_load_audio, mock_detect, mock_em
         assert "text" in seg
         assert "speaker" in seg
     assert len(result["speaker_names"]) >= 1
+
+
+# ── _compute_density_prior ──────────────────────────────────────────────────
+
+
+def test_density_prior_short_audio_returns_minimum():
+    """Audio <60s should return the minimum floor regardless of other signals."""
+    segs = [(0.0, 2.0), (3.0, 5.0), (6.0, 8.0), (9.0, 11.0)]
+    min_k, preferred = _compute_density_prior(segs, audio_duration_s=30.0)
+    assert min_k == 1
+    assert preferred == 2
+
+
+def test_density_prior_sparse_conversation_returns_two():
+    """Low VAD-per-min with long segments (1:1 meeting) should suggest ~2 speakers."""
+    # 10 min of audio, 8 segments, each ~60s — classic 1:1 pattern
+    segs = [(i * 60.0, i * 60.0 + 50.0) for i in range(8)]
+    min_k, preferred = _compute_density_prior(segs, audio_duration_s=600.0)
+    assert preferred == 2
+    assert min_k == 2
+
+
+def test_density_prior_dense_conversation_suggests_group():
+    """High VAD-per-min with short segments (hackathon room) should suggest 5+."""
+    # 10 min, 250 short segments (~25/min, avg 1.5s) — group conversation
+    segs = [(i * 2.4, i * 2.4 + 1.5) for i in range(250)]
+    min_k, preferred = _compute_density_prior(segs, audio_duration_s=600.0)
+    assert preferred >= 5
+    assert min_k >= 4
+
+
+def test_density_prior_medium_conversation():
+    """Moderate density should land at ~3–4 speakers."""
+    # 10 min, 130 segments (~13/min, avg 3s) — small group
+    segs = [(i * 4.5, i * 4.5 + 3.0) for i in range(130)]
+    min_k, preferred = _compute_density_prior(segs, audio_duration_s=600.0)
+    assert preferred in (3, 4)
+
+
+def test_density_prior_embedding_spread_lifts_prior():
+    """High embedding spread should raise the prior even with moderate VAD."""
+    segs = [(i * 5.0, i * 5.0 + 3.0) for i in range(100)]  # ~10/min, mid density
+    # Create embeddings with high spread: 6 distinct directions in 128-d space
+    rng = np.random.default_rng(42)
+    centers = np.eye(6, 128, dtype=np.float32)
+    embeddings = np.vstack([c + rng.normal(0, 0.02, 128).astype(np.float32) for c in centers for _ in range(3)])
+    # Normalise
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    min_k_no_emb, pref_no_emb = _compute_density_prior(segs, 500.0)
+    min_k_with_emb, pref_with_emb = _compute_density_prior(segs, 500.0, embeddings)
+    # Spread signal should raise preferred k
+    assert pref_with_emb >= pref_no_emb

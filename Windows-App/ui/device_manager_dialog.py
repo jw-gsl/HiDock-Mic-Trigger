@@ -7,6 +7,7 @@ Supports searching, filtering by type, and sorting.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -20,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.models import DeviceType, PairedDevice
+from ui.device_icons import connected_badge_pixmap, device_glyph_pixmap
 
 
 class DeviceRowWidget(QWidget):
@@ -53,10 +55,20 @@ class DeviceRowWidget(QWidget):
         name_row.addWidget(self.name_label)
 
         if connected:
-            conn_badge = QLabel("Connected")
+            conn_badge = QWidget()
+            conn_layout = QHBoxLayout(conn_badge)
+            conn_layout.setContentsMargins(5, 1, 5, 1)
+            conn_layout.setSpacing(3)
+            tick_pm = connected_badge_pixmap(size=10)
+            if tick_pm is not None:
+                tick_label = QLabel()
+                tick_label.setPixmap(tick_pm)
+                conn_layout.addWidget(tick_label)
+            conn_text = QLabel("Connected")
+            conn_text.setStyleSheet("color: #a6e3a1; font-size: 10px;")
+            conn_layout.addWidget(conn_text)
             conn_badge.setStyleSheet(
-                "color: #a6e3a1; font-size: 10px; background: rgba(166,227,161,0.15); "
-                "padding: 1px 5px; border-radius: 3px;"
+                "background: rgba(166,227,161,0.15); border-radius: 3px;"
             )
             name_row.addWidget(conn_badge)
 
@@ -100,7 +112,15 @@ class DeviceRowWidget(QWidget):
         self._update_icon()
 
     def _update_icon(self):
-        if self.device.device_type == DeviceType.VOLUME:
+        # Prefer the bespoke HiDock glyph for P1/H1/H1e; fall back to emoji when
+        # the SKU isn't recognised, the SVG plugin fails, or the asset is missing.
+        is_volume = self.device.device_type == DeviceType.VOLUME
+        pm = device_glyph_pixmap(self.device.display_name, is_volume, size=22)
+        if pm is not None:
+            self.icon_label.clear()
+            self.icon_label.setPixmap(pm)
+            return
+        if is_volume:
             icon = "\U0001F4BE"  # floppy disk / external drive
         elif "h1" in self.device.display_name.lower() or "dock" in self.device.display_name.lower():
             icon = "\U0001F50A"  # speaker
@@ -108,6 +128,7 @@ class DeviceRowWidget(QWidget):
             icon = "\U0001F399"  # studio microphone
         else:
             icon = "\U0001F50C"  # plug
+        self.icon_label.setPixmap(QPixmap())
         self.icon_label.setText(icon)
 
     def update_device(self, device: PairedDevice, connected: bool):

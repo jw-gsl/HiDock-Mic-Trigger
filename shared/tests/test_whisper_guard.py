@@ -1,8 +1,6 @@
 """Tests for shared.whisper_guard — anti-hallucination filtering."""
-import pytest
 
 from shared.whisper_guard import (
-    FilterStats,
     _check_repetition_density,
     _count_words,
     _filter_consecutive_dedup,

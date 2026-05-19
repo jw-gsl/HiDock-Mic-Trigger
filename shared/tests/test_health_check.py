@@ -1,9 +1,7 @@
 """Tests for the health check system."""
 from __future__ import annotations
 
-import json
 import pytest
-from pathlib import Path
 
 from shared.health_check import run_health_check, _check_directories, _check_database
 

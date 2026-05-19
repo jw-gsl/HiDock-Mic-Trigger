@@ -9,6 +9,15 @@ import sys
 import threading
 from pathlib import Path
 
+
+def _format_size(mb: int) -> str:
+    """Human-readable size — switches to GB once we cross 1024 MB so the
+    Models screen reads '1.2 GB' instead of '1200 MB'."""
+    if mb >= 1024:
+        gb = mb / 1024.0
+        return f"{gb:.1f} GB" if gb < 10 else f"{int(round(gb))} GB"
+    return f"{mb} MB"
+
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QDialog,
@@ -90,7 +99,7 @@ class ModelRowWidget(QWidget):
         self.name_label.setStyleSheet("font-weight: bold; font-size: 13px;")
         name_row.addWidget(self.name_label)
         name_row.addStretch()
-        self.size_label = QLabel(f"{info.get('size_mb', 0)} MB")
+        self.size_label = QLabel(_format_size(info.get("size_mb", 0)))
         self.size_label.setStyleSheet("color: gray;")
         name_row.addWidget(self.size_label)
         text_layout.addLayout(name_row)

@@ -3,7 +3,7 @@
 Cross-platform feature tracking for macOS (Swift/AppKit) and Windows (Python/PyQt6).
 **Update this file whenever a feature is added, changed, or removed on either platform.**
 
-Last reviewed: 2026-04-05
+Last reviewed: 2026-04-22
 
 ## How to use this file
 
@@ -41,7 +41,8 @@ Last reviewed: 2026-04-05
 | Connection status badge | "Connected" badge | "Connected" badge | Both | |
 | Device type badge | Type label | Type label | Both | |
 | Forget device button | Per-device button | Per-device button | Both | |
-| Device icons | SF Symbols | Unicode emoji | Both | Platform-appropriate |
+| Device icons | Product-photo PNGs (`DeviceRecording*`) for H1/H1E/P1; Finder icon via `NSWorkspace` for mounted volumes | Unicode emoji + P1/H1 glyph SVGs + H1 for H1e | macOS ahead | macOS switched 2026-04-22 from monochrome SVG glyphs (template-rendered) to colour product-photo PNGs because they visually differentiate H1 vs H1E vs P1 at a glance. Windows port still on shared SVG — follow-up to port behaviour |
+| Connected badge icon | `DeviceGlyphConnected` asset | `connected_glyph.svg` via QPixmap | Both | Small green tick + "Connected" text |
 
 ## Recording Table
 
@@ -56,6 +57,7 @@ Last reviewed: 2026-04-05
 | Context menu: Transcribe | Right-click | Right-click | Both | |
 | Context menu: Show in Finder / Open File Location | Right-click | Right-click | Both | |
 | Context menu: Open Transcript | Right-click | Right-click | Both | |
+| Context menu: Export as SRT... | Right-click | Right-click | Both | Copies paired `.srt` or regenerates via `shared.srt_writer` CLI |
 | Double-click to open file | Opens in Finder | Opens file location | Both | |
 
 ## Recording Toolbar
@@ -93,7 +95,11 @@ Last reviewed: 2026-04-05
 | Transcript viewer dialog | Speaker view + colors | Speaker view + colors | Both | |
 | Rename speakers in transcript | Click to edit | Click to rename | Both | |
 | Speaker enrollment on rename | Automatic | Subprocess call | Both | |
+| Mid-segment word-range split | `WordTokensView` drag-select + inline speaker bar (`TranscriptViewerView.swift`) | — | macOS only | 2026-04-28 — drag a range of words inside a segment, click a speaker pill in the inline bar below to assign that range as a new sub-segment (Layer 1 v2). Replaces the earlier sheet-based UX. Windows port pending. |
+| Re-cluster transcript using user labels | "Re-cluster from my labels" toolbar button → `transcribe.py recluster-with-anchors` | — | macOS only | 2026-04-27 — Layer 2 of voice-training plan. Treats every renamed speaker as an anchor centroid and reassigns every other segment to its nearest anchor by cosine similarity. Windows port pending. |
 | Transcription complete notification | User notification with actions | Tray notification | Both | macOS has "Open Transcript" / "Show in Finder" actions |
+| Auto-emit `.srt` beside `.md` on transcription | `transcribe.py` (shared pipeline) | `transcribe.py` (shared pipeline) | Both | Shared `shared/srt_writer.py`. Speaker labels included when diarized. |
+| Export as SRT (context menu) | `onExportSRT` → `NSSavePanel` → copy/regenerate | `_ctx_export_srt` → `QFileDialog` → copy/regenerate | Both | Regenerates from `_diarized.json` / `_whisper.json` for legacy transcripts that predate auto-emit. |
 
 ## Voice Library
 
@@ -150,6 +156,7 @@ Last reviewed: 2026-04-05
 | Show Logs | Cmd+L | — | macOS only | Opens log files |
 | Show Status | Cmd+I | — | macOS only | Shows sync window |
 | Send Feedback | Cmd+F | — | macOS only | Via menu |
+| Terminal... | Cmd+Shift+T | — | macOS only | Embedded PTY (SwiftTerm) for CLI auth (e.g. `claude auth login`) |
 | Appearance menu | Menu bar submenu | Help menu submenu | Both | |
 | Help > About | macOS standard | QMessageBox | Both | |
 | Help > Check for Updates | Menu bar | Help menu | Both | |
@@ -175,6 +182,22 @@ Last reviewed: 2026-04-05
 | Update on quit | Script at shutdown | Update process | Both | |
 
 ---
+
+## Sync Header — Device Cards (Phase 1 + Phase 2)
+
+| Feature | macOS | Windows | Status | Notes |
+|---------|-------|---------|--------|-------|
+| Per-device card (state chip + storage + reconnect + filter) | `DeviceCardView.swift` | — | macOS only | Phase 1 shipped 2026-04-21; Windows still has scattered status/storage/filter rows |
+| Adaptive grid (2+ cards side-by-side) | `LazyVGrid` in `DeviceStripView` | — | macOS only | 2026-04-22 |
+| Hide disconnected volumes from card strip | Filter in `DeviceStripView.visibleDevices` | — | macOS only | 2026-04-22 |
+| Imported files virtual card | Removed 2026-04-22 — not rendered | — | Removed on macOS | Imports remain accessible via File menu + table filter |
+| H1/H1E/P1 distinct device artwork | Product-photo PNGs per SKU | H1 asset shared with H1E | macOS ahead | 2026-04-22 |
+| Launch order: probe first, then start trigger | `applicationDidFinishLaunching` → `autoConnectSyncIfPaired(startTriggerOnCompletion:)` | — | macOS only | 2026-04-22 (second pass) — probes run while no ffmpeg holds the device, then trigger starts. Avoids the USB race that used to stall the H1 |
+| Auto-refresh / auto-connect skip HiDocks while trigger is active | `refreshSyncStatus` + `autoConnectSyncIfPaired` filter out HiDocks when `process != nil` | — | macOS only | 2026-04-22 (second pass) — trigger is never stopped for background refreshes. Volumes always probe. Manual Reconnect (↻) is the only path that pauses the trigger, and only for that one device |
+| Preserve transcribed state across refresh rebuild | `renderSyncStatus` carries forward `transcribed` / `transcriptPath` / `speakersTagged` / `summaryPath` from old entries when rebuilding | — | macOS only | 2026-04-22 — prevents the Transcribed column flickering empty between `renderSyncStatus` and `refreshTranscriptionState` |
+| Hung-device backoff | `syncDeviceHungUntil` + 180s suppression from auto-probes; cleared by manual ↻ or successful status | — | macOS only | 2026-04-22 |
+| Timeout escalation suggests unplug/replug | `runExtractor` timeout path (catches both `.uncaughtSignal` and `.exit`) | — | macOS only | 2026-04-22 |
+| Extractor: conditional USB reset | `prepare_device` claims first; only calls `dev.reset()` if claim fails | `usb-extractor/extractor.py` | macOS (via shared extractor); Windows uses same extractor via `Windows-Script` | 2026-04-22 — root-cause fix: removes the bus reset we used to send on every status query, which was wedging the H1 when ffmpeg held the audio interface |
 
 ## Known Intentional Differences
 

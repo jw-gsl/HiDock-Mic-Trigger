@@ -163,12 +163,30 @@ struct DeviceRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // Icon
-            Image(systemName: deviceIcon)
-                .font(.title2)
-                .foregroundColor(isConnected ? .green : .secondary)
-                .frame(width: 28)
-                .padding(.top, 2)
+            // Icon — prefer the bespoke device product photo when we
+            // ship one for this SKU (H1, H1E, P1); fall back to an SF
+            // Symbol so USB volumes / unknown devices still render
+            // something sensible. The product photos are full-colour
+            // assets, so we DON'T template-tint them — that turned
+            // them into flat silhouettes (matched DeviceCardView's
+            // approach, which renders them in colour). Tinting still
+            // applies to the SF Symbol fallback so volumes get the
+            // connected/disconnected colour cue.
+            Group {
+                if let img = hidockDeviceImage(device.shortName, deviceType: device.deviceType) {
+                    img
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 32, height: 32)
+                        .opacity(isConnected ? 1.0 : 0.6)
+                } else {
+                    Image(systemName: deviceIcon)
+                        .font(.title2)
+                        .foregroundColor(isConnected ? .green : .secondary)
+                }
+            }
+            .frame(width: 36)
+            .padding(.top, 2)
 
             // Text content
             VStack(alignment: .leading, spacing: 4) {
@@ -176,13 +194,19 @@ struct DeviceRowView: View {
                     Text(device.cleanName)
                         .font(.headline)
                     if isConnected {
-                        Text("Connected")
-                            .font(.caption2)
-                            .foregroundColor(.green)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.1))
-                            .cornerRadius(4)
+                        HStack(spacing: 3) {
+                            Image("DeviceGlyphConnected")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 10, height: 10)
+                            Text("Connected")
+                                .font(.caption2)
+                        }
+                        .foregroundColor(.green)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.1))
+                        .cornerRadius(4)
                     }
                     Spacer()
                     Text(device.deviceType == .hidock ? "HiDock" : "Volume")

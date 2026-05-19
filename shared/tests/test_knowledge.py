@@ -137,7 +137,7 @@ class TestPeople:
         # But speakers come from the write_transcript metadata, which
         # uses diarized_result for speakers - our test transcripts
         # don't have diarized_result, so speakers list may be empty
-        people = kg.list_people()
+        kg.list_people()
         # People come from action item assignees, not speakers in this test
         kg.close()
 

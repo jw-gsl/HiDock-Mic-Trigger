@@ -10,10 +10,26 @@ struct MainWindowView: View {
             SyncToolbarSection(viewModel: viewModel)
             DownloadProgressBar(viewModel: viewModel)
             TranscriptionProgressBar(viewModel: viewModel)
+            TrimProgressBar(viewModel: viewModel)
             RecordingsTableView(viewModel: viewModel)
 
             // Footer
             HStack {
+                // Refresh moved here from the action toolbar in 2026-04-26
+                // restructure — re-probing devices is a maintenance action,
+                // not a primary verb in the workflow, so it lives next to
+                // the other footer affordances (notifications, appearance)
+                // rather than competing with Import / Transcribe / Merge.
+                Button {
+                    viewModel.onRefreshSync()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(viewModel.syncBusy)
+                .help("Probe paired devices for fresh status.")
+
                 if !viewModel.updateStatusText.isEmpty {
                     Label {
                         Text(viewModel.updateStatusText)
@@ -190,26 +206,44 @@ struct DownloadProgressBar: View {
 struct TranscriptionProgressBar: View {
     @ObservedObject var viewModel: HiDockViewModel
 
+    /// Build a single consolidated status string:
+    ///   "<Rec52> 2/5 — 42% · Diarizing speakers"
+    /// Prefix leads with the current filename (stem, no extension) plus
+    /// queue position + percent. Suffix shows the pipeline stage when the
+    /// transcription script reports one — suppressed when the stage is
+    /// "Transcribing" because the progress bar already conveys that
+    /// implicitly.
+    private var statusText: String {
+        let stem: String
+        if let name = viewModel.transcriptionCurrentFile, !name.isEmpty {
+            stem = (name as NSString).deletingPathExtension
+        } else {
+            stem = "—"
+        }
+        let prefix: String
+        if viewModel.transcriptionFileCount > 1 {
+            prefix = "\(stem) \(viewModel.transcriptionFileIndex + 1)/\(viewModel.transcriptionFileCount) — \(viewModel.transcriptionProgress)%"
+        } else {
+            prefix = "\(stem) — \(viewModel.transcriptionProgress)%"
+        }
+        let stage = viewModel.transcriptionStatus
+        if !stage.isEmpty && stage.lowercased() != "transcribing" {
+            return "\(prefix) · \(stage)"
+        }
+        return prefix
+    }
+
     var body: some View {
         if viewModel.transcriptionBusy {
             HStack(spacing: 8) {
                 ProgressView(value: Double(viewModel.transcriptionProgress), total: 100)
                     .frame(width: 120)
 
-                if !viewModel.transcriptionStatus.isEmpty {
-                    Text(viewModel.transcriptionStatus)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                } else if viewModel.transcriptionFileCount > 1 {
-                    Text("Transcribing \(viewModel.transcriptionFileIndex + 1)/\(viewModel.transcriptionFileCount) — \(viewModel.transcriptionProgress)%")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Transcribing... \(viewModel.transcriptionProgress)%")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
                 Spacer()
 
@@ -221,6 +255,34 @@ struct TranscriptionProgressBar: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+        }
+    }
+}
+
+/// Compact, persistent trim-in-progress indicator. Lives in the same
+/// bottom strip as DownloadProgressBar and TranscriptionProgressBar so
+/// there's one consistent place for "something is happening". Replaces
+/// the old transient syncStatus "Trimming…" text that popped above
+/// Download Selected — that slot was cramped and noisy, and several
+/// other status lines competed for it.
+struct TrimProgressBar: View {
+    @ObservedObject var viewModel: HiDockViewModel
+
+    var body: some View {
+        if viewModel.trimBusy {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text("Trimming…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 6)

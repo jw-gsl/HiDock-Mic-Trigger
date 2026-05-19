@@ -29,6 +29,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Make `shared/` importable regardless of where the extractor is invoked
+# from. The desktop app subprocesses this script with various CWDs,
+# and the project's shared/ lives one level up from usb-extractor/.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import usb.core
 import usb.util
 
@@ -55,6 +62,15 @@ DEFAULT_OUTPUT_DIR = BASE_DIR / "out"
 
 class HiDockProtocolError(RuntimeError):
     pass
+
+
+def _log_warn(message: str) -> None:
+    """Print a warning to stderr that the desktop app's log capture picks
+    up. Used wherever we previously had a silent `except Exception: pass`
+    that could mask real-world breakage (e.g. a missing mutagen dep that
+    silently let bad duration estimates flow through to the UI for
+    months). Anything noisy enough to log but not fatal goes here."""
+    print(f"[extractor] WARN: {message}", file=sys.stderr, flush=True)
 
 
 def utc_now_iso() -> str:
@@ -251,29 +267,56 @@ def find_device(product_id: int | None = None):
 
 
 def prepare_device(dev):
-    try:
-        dev.reset()
-    except usb.core.USBError:
-        pass
-    try:
-        dev.set_configuration()
-    except usb.core.USBError:
-        pass
+    """Claim the HiDock's vendor interface.
 
-    cfg = dev.get_active_configuration()
-    intf = cfg[(0, 0)]
+    Historically this called ``dev.reset()`` unconditionally before every
+    command. That sends a USB bus reset to the device, which:
+      - yanks any other process (e.g. ffmpeg holding the audio-class
+        interface) out of the middle of a read/write, and
+      - forces the HiDock firmware to re-initialise its USB stack.
+    On a HiDock H1 the latter occasionally wedges the firmware
+    completely — subsequent opens hang for 30+ seconds until the user
+    physically unplugs the device. The reset was there as a "kitchen
+    sink" recovery for devices left in a weird state by a previous
+    session, but paying that cost on every status query is too
+    expensive for a device shared with ffmpeg.
+
+    New flow: try the normal claim path first. Only fall back to a full
+    reset if ``claim_interface`` raises ``USBError`` (i.e. the device
+    really is in a state that needs recovery).
+    """
+    def _claim_once():
+        try:
+            dev.set_configuration()
+        except usb.core.USBError:
+            pass
+
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0, 0)]
+        try:
+            if dev.is_kernel_driver_active(intf.bInterfaceNumber):
+                try:
+                    dev.detach_kernel_driver(intf.bInterfaceNumber)
+                except usb.core.USBError:
+                    # On macOS this is often unsupported or blocked even when we can
+                    # still continue to talk to the device directly.
+                    pass
+        except (NotImplementedError, usb.core.USBError):
+            pass
+        usb.util.claim_interface(dev, intf.bInterfaceNumber)
+        return intf.bInterfaceNumber
+
     try:
-        if dev.is_kernel_driver_active(intf.bInterfaceNumber):
-            try:
-                dev.detach_kernel_driver(intf.bInterfaceNumber)
-            except usb.core.USBError:
-                # On macOS this is often unsupported or blocked even when we can
-                # still continue to talk to the device directly.
-                pass
-    except (NotImplementedError, usb.core.USBError):
-        pass
-    usb.util.claim_interface(dev, intf.bInterfaceNumber)
-    return intf.bInterfaceNumber
+        return _claim_once()
+    except usb.core.USBError:
+        # Recovery path: the device is probably in a stuck state. Reset
+        # the bus and retry once. This used to run on every invocation;
+        # now it only runs when the fast path genuinely fails.
+        try:
+            dev.reset()
+        except usb.core.USBError:
+            pass
+        return _claim_once()
 
 
 def release_device(dev, interface_number: int) -> None:
@@ -505,6 +548,15 @@ def read_raw_response_payload(
             if start == -1 or len(pending) - start < 12:
                 continue
             payload_len = struct.unpack(">I", pending[start + 8 : start + 12])[0]
+            # Bounds-check the device-reported payload length the same way
+            # parse_frame() does. Without this, a corrupted or malicious
+            # length field can cause the loop below to wait indefinitely
+            # for an impossible byte count, then fall through to the
+            # best-effort return below — silently truncating the payload.
+            if payload_len > MAX_PAYLOAD_SIZE:
+                raise HiDockProtocolError(
+                    f"payload too large: {payload_len} bytes (max {MAX_PAYLOAD_SIZE})"
+                )
             total_needed = start + 12 + payload_len
             pending = pending[start:]
             started = True
@@ -575,78 +627,165 @@ def query_file_count(dev, request_id: int = 1, timeout_ms: int = 5000) -> int:
 
 
 def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[dict]:
-    expected_count = None
-    try:
-        expected_count = query_file_count(
-            dev,
-            request_id=request_id - 1,
-            timeout_ms=min(timeout_ms, 1000),
-        )
-    except Exception:
-        pass
+    """Fetch the device's full recording catalog.
 
-    # HiNotes primes the device with a clock query before asking for the file
-    # catalog, and the catalog itself arrives in two raw chunks: the first
-    # starts with the list header, the second is a continuation without it.
-    try:
-        send_and_collect(dev, CMD_QUERY_TIME, request_id - 1, timeout_ms=min(timeout_ms, 1000), max_reads=8)
-    except Exception:
-        pass
+    HiDock firmware behaviour discovered 2026-04-23 via raw USB capture:
 
-    payloads: list[bytes] = []
-    first_payload = read_raw_response_payload(dev, CMD_QUERY_FILE_LIST, request_id, timeout_ms=timeout_ms)
-    if first_payload:
-        payloads.append(first_payload)
-        declared_count = None
-        if len(first_payload) >= 6 and first_payload[:2] == b"\xff\xff":
-            declared_count = struct.unpack(">I", first_payload[2:6])[0]
+    - **P1** packs the entire catalog into one USB transfer with multiple
+      frames. One request, one read.
 
-        # The device has an ~8 KB response buffer.  When the catalog is larger
-        # it truncates mid-record.  Sending a follow-up request whose payload
-        # is the number of fully-parsed records triggers a continuation that
-        # picks up exactly where the first response left off.  We concatenate
-        # all raw payloads so truncated records are reassembled correctly.
-        parsed_so_far = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
-        next_req_id = request_id + 1
-        max_continuations = 10  # safety limit
-        while declared_count is not None and parsed_so_far < declared_count and max_continuations > 0:
-            max_continuations -= 1
+    - **H1** auto-paginates across multiple USB transfers. We send ONE
+      ``CMD_QUERY_FILE_LIST`` request; the device returns the first chunk
+      (~8KB, up to ~143 records) almost immediately with the original
+      request_id, then a few seconds later streams a second frame with
+      the remaining records — but the firmware **increments the
+      request_id** on that continuation frame (from N to N+1). For 282
+      records we observed frame 0 (req=N, 8180b) then frame 1
+      (req=N+1, 7900b). Large catalogs may have three or more frames.
+
+    The previous implementation missed this because ``send_and_collect``
+    filtered on matching request_id, silently discarding every
+    continuation frame. It also sent its own offset-based continuation
+    requests which the firmware ignores (they get the same first batch
+    back, or nothing), leaving us stuck at ~143 records.
+
+    New approach: send one request, keep reading every frame whose
+    command ID is ``CMD_QUERY_FILE_LIST`` until the device goes quiet
+    for long enough that we're confident no more frames are coming.
+    Sort by request_id to reassemble ordering, then parse.
+    """
+    # IMPORTANT: don't issue QUERY_FILE_COUNT or QUERY_TIME here.
+    # Empirically (2026-04-23) any other command between our two
+    # back-to-back QUERY_FILE_LIST writes resets the firmware's
+    # "continuation pending" state and we end up with only the first
+    # frame. Pull expected_count out of the header payload instead
+    # (it's encoded in the first 4 bytes after the 0xFFFF marker).
+    expected_count: int | None = None
+
+    # Drain any stale data buffered from a previous aborted transaction
+    # so our first read doesn't pick up orphaned continuation bytes
+    # without their header. Safe here (before we've sent anything).
+    drain_input(dev, timeout_ms=100)
+
+    # H1 catalog protocol (discovered 2026-04-23 via USB capture):
+    #   - A single QUERY_FILE_LIST returns one 8180-byte frame with the
+    #     header (0xFFFF + total count) + the first-buffer-worth of
+    #     records (~143 for modern filename length).
+    #   - The firmware ALSO QUEUES the remainder internally. That
+    #     queued continuation is only released when the device sees the
+    #     next OUT request on the endpoint — and crucially, it is
+    #     flushed as the FIRST frame of that next transaction. The
+    #     second transaction's own response then follows.
+    #   - So to get the full catalog in one shot: send request #1,
+    #     drain what comes back (header + batch1); send request #2,
+    #     which returns <queued continuation batch2> + <header + batch1
+    #     again>. Merge + de-dupe.
+    #   - Frame request_ids are firmware-assigned and effectively
+    #     random; we collect by cmd, not by rid.
+    def _read_all_frames(deadline: float, idle_stop_s: float = 3.0) -> list[bytes]:
+        pending_local = b""
+        out: list[bytes] = []
+        last_data = time.time()
+        while time.time() < deadline:
             try:
-                offset_payload = struct.pack(">I", parsed_so_far)
-                req = build_simple_request(CMD_QUERY_FILE_LIST, next_req_id, offset_payload)
-                dev.write(OUT_ENDPOINT, req, timeout=timeout_ms)
-
-                pending = b""
-                started = False
-                deadline = time.time() + (min(timeout_ms, 3000) / 1000.0)
-                while time.time() < deadline:
-                    try:
-                        chunk = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=1000))
-                        pending += chunk
-                        started = True
-                    except usb.core.USBTimeoutError:
-                        if started:
-                            break
-                        continue
-
-                frames, _ = extract_frames(pending)
-                if not frames:
+                chunk = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=500))
+            except usb.core.USBTimeoutError:
+                if out and (time.time() - last_data) > idle_stop_s:
                     break
-                body = frames[0][2]
-                if not body:
-                    break
-                payloads.append(body)
-                new_count = len(parse_query_file_list_payload(payloads, expected_count=declared_count))
-                if new_count <= parsed_so_far:
-                    break  # no progress
-                parsed_so_far = new_count
-                next_req_id += 1
-            except (HiDockProtocolError, usb.core.USBError):
-                break
+                continue
+            if not chunk:
+                continue
+            last_data = time.time()
+            pending_local += chunk
+            parsed_frames, pending_local = extract_frames(pending_local)
+            for cmd, _rid, body in parsed_frames:
+                if cmd == CMD_QUERY_FILE_LIST and body:
+                    out.append(body)
+        return out
 
-    if not payloads:
+    # Request #1 — primes the queue. Read frame 1.
+    total_budget_s = max(min(timeout_ms / 1000.0, 30.0), 12.0)
+    half_budget_s = total_budget_s / 2.0
+
+    req_a = build_simple_request(CMD_QUERY_FILE_LIST, request_id)
+    dev.write(OUT_ENDPOINT, req_a, timeout=timeout_ms)
+    first_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=2.0)
+
+    # Request #2 — releases the queued continuation, then sends its own
+    # response. Read everything.
+    req_b = build_simple_request(CMD_QUERY_FILE_LIST, request_id + 1)
+    dev.write(OUT_ENDPOINT, req_b, timeout=timeout_ms)
+    second_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=3.0)
+
+    # After request #2 the firmware still has a continuation queued —
+    # if we just return, the NEXT command issued against the device
+    # (CMD_TRANSFER for a download, typically) will have its response
+    # preceded by the queued continuation and time out.
+    #
+    # Empirically, CMD_QUERY_TIME *clears* the firmware's pending-
+    # continuation state (discovered when priming with it before the
+    # two list writes broke pagination — it was eating the queue we
+    # needed). Here we use that property intentionally: fire a
+    # QUERY_TIME, drain its reply, and the firmware is back to a
+    # clean state ready for CMD_TRANSFER / CMD_QUERY_FILE_COUNT /
+    # whatever comes next.
+    try:
+        send_and_collect(dev, CMD_QUERY_TIME, request_id + 2, timeout_ms=1000, max_reads=4)
+    except Exception:
+        pass
+    drain_input(dev, timeout_ms=150)
+
+    collected = first_batch + second_batch
+
+    if not collected:
         raise HiDockProtocolError("no file list response received")
-    return parse_query_file_list_payload(payloads, expected_count=expected_count)
+
+    # De-dupe exact-duplicate frames (small catalog = both requests
+    # return the same header frame).
+    seen: set[bytes] = set()
+    unique: list[bytes] = []
+    for body in collected:
+        if body not in seen:
+            seen.add(body)
+            unique.append(body)
+
+    # Reassembly: header frame (starts with 0xFFFF + 4-byte total)
+    # must go first so the parser finds the record stream. The
+    # continuation frames go after, keeping their arrival order.
+    header_idx = next(
+        (i for i, body in enumerate(unique) if len(body) >= 2 and body[0] == 0xFF and body[1] == 0xFF),
+        None,
+    )
+    if header_idx is None:
+        raise HiDockProtocolError(
+            f"no header frame in file-list response "
+            f"({len(unique)} frame(s), totalling {sum(len(b) for b in unique)} bytes)"
+        )
+    payloads = [unique[header_idx]] + [b for i, b in enumerate(unique) if i != header_idx]
+
+    # Read the declared total count from the header frame (0xFFFF +
+    # 4-byte big-endian count). Used below for the truncation warning
+    # and stashed on the function object so cmd_status can read it.
+    header = payloads[0]
+    if len(header) >= 6:
+        expected_count = struct.unpack(">I", header[2:6])[0]
+    query_file_list._last_declared_total = expected_count  # type: ignore[attr-defined]
+
+    result = parse_query_file_list_payload(payloads, expected_count=expected_count)
+
+    # Warn only if we truly couldn't get all records. With the new
+    # multi-frame collector this should be rare — mainly for catalogs
+    # that exceed the firmware's own buffer regardless of pagination.
+    if expected_count is not None and len(result) < expected_count:
+        missing = expected_count - len(result)
+        import sys
+        print(
+            f"WARNING: Device has {expected_count} recordings but firmware only returned {len(result)}. "
+            f"{missing} newest recordings are hidden. Delete old recordings from the device to free space.",
+            file=sys.stderr,
+        )
+
+    return result
 
 
 def get_file_metadata(dev, request_id: int = 3, timeout_ms: int = 5000) -> dict | None:
@@ -699,6 +838,32 @@ def transfer_file_stream_to_path(
 ) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(out_path.suffix + '.downloading')
+
+    # Clear stuck firmware queue state before issuing CMD_TRANSFER.
+    # Empirically (2026-05-07): a HiDock H1 with leftover queued state
+    # from a previous transaction (a file-list continuation, an aborted
+    # transfer, or an earlier transfer that ended uncleanly) will
+    # silently swallow the next CMD_TRANSFER request — the read loop
+    # times out with zero bytes after 40s. Reproduced on Rec70 (47MB,
+    # not corrupt — HiDock's own app downloaded it fine) which had
+    # failed three times with three different transfer commands
+    # (CMD_TRANSFER, CMD_TRANSFER_FILE_PARTIAL, CMD_GET_FILE_BLOCK)
+    # until this warm-up was added; with it, the same file pulled
+    # cleanly in 23s on the first try.
+    #
+    # CMD_QUERY_TIME has a side-effect of resetting the firmware's
+    # "continuation pending" state — a property already exploited at
+    # the end of query_file_list to avoid breaking the next command.
+    # Drain before AND after to mop up any orphaned bytes.
+    drain_input(dev, timeout_ms=200)
+    try:
+        send_and_collect(dev, CMD_QUERY_TIME, request_id - 1, timeout_ms=1000, max_reads=4)
+    except Exception:
+        # Warm-up is best-effort. If it fails we still try the transfer;
+        # most files don't need the warm-up at all.
+        pass
+    drain_input(dev, timeout_ms=200)
+
     payload = build_name_only_payload(filename)
     request = build_simple_request(CMD_TRANSFER, request_id, payload)
     dev.write(OUT_ENDPOINT, request, timeout=timeout_ms)
@@ -910,17 +1075,68 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         if stored.get("last_error") and not downloaded:
             status = "failed"
         duration = recording.get("duration", 0.0)
+        # When the file exists locally, prefer filesystem truth for
+        # length and duration over the device's catalog numbers.
+        # Rationale: the user may have trimmed the local file in-place
+        # (Mac app's Trim action), producing a shorter file than the
+        # device still reports. Without this override the UI flips back
+        # to the device-reported (pre-trim) size and duration on every
+        # refresh, confusing the user. Duration from mutagen is
+        # frame-accurate; size is the filesystem byte count.
+        length_for_display = recording.get("length", 0)
+        # `duration_estimated` flips false the moment we successfully
+        # read the duration from the local MP3 via mutagen. The flag
+        # rides through to the desktop UI so the column can show "~"
+        # for any value that is still a `bytes / 8000` guess — useful
+        # when the file is downloaded but the metadata read failed
+        # (e.g. mutagen missing from the venv, which is the bug that
+        # made every P1 recording show ~50% over its real length).
+        duration_estimated = True
         if local_exists:
+            try:
+                local_size = output_path.stat().st_size
+                if local_size > 0:
+                    length_for_display = local_size
+            except OSError as exc:
+                _log_warn(f"length stat failed for {output_path}: {exc}")
             try:
                 from mutagen.mp3 import MP3
                 audio = MP3(str(output_path))
                 duration = audio.info.length
-            except Exception:
-                pass  # keep the estimated duration
+                duration_estimated = False
+            except ImportError as exc:
+                # Hard dependency missing — don't swallow it. Previously
+                # this `except Exception: pass` kept the bad estimate
+                # silently. Log loudly so the next time a venv is missing
+                # mutagen it's obvious in the desktop log.
+                _log_warn(
+                    f"mutagen unavailable; duration for {output_path.name} "
+                    f"is the size/8000 estimate, not the real value ({exc})"
+                )
+            except Exception as exc:
+                _log_warn(f"mutagen read failed for {output_path}: {exc}")
+        # Derive the "trimmed" flag two ways:
+        #   1. Explicit: state.json has `trimmed: true` from a Mac-app
+        #      Trim that ran after the mark-trimmed feature shipped.
+        #   2. Inferred: the local file is meaningfully smaller than the
+        #      device-reported length. Catches files trimmed BEFORE
+        #      mark-trimmed existed — without this, every historical
+        #      trim shows no scissors icon. 5% slack absorbs ID3 / minor
+        #      tag-rewrite differences from non-trim post-processing.
+        device_length = recording.get("length", 0) or 0
+        size_inferred_trim = (
+            local_exists
+            and device_length > 0
+            and length_for_display > 0
+            and length_for_display < device_length * 0.95
+        )
+        trimmed_flag = bool(stored.get("trimmed")) or size_inferred_trim
         items.append(
             {
                 **recording,
+                "length": length_for_display,
                 "duration": duration,
+                "durationEstimated": duration_estimated,
                 "outputPath": str(output_path),
                 "outputName": output_name_for(name),
                 "downloaded": downloaded,
@@ -928,7 +1144,9 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "downloadedAt": stored.get("downloaded_at"),
                 "lastError": stored.get("last_error"),
                 "status": status,
-                "humanLength": human_size(recording["length"]),
+                "humanLength": human_size(length_for_display),
+                "trimmed": trimmed_flag,
+                "removed": bool(stored.get("removed")),
             }
         )
 
@@ -950,12 +1168,21 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         local_exists = output_path.exists()
         length = int(stored.get("length", 0))
         duration = 0.0
+        duration_estimated = True
         if local_exists:
             try:
                 from mutagen.mp3 import MP3
                 audio = MP3(str(output_path))
                 duration = audio.info.length
-            except Exception:
+                duration_estimated = False
+            except ImportError as exc:
+                _log_warn(
+                    f"mutagen unavailable; orphan duration for {output_path.name} "
+                    f"falling back to size/8000 estimate ({exc})"
+                )
+                duration = max(length / 8000.0, 0.0)
+            except Exception as exc:
+                _log_warn(f"mutagen read failed for orphan {output_path}: {exc}")
                 duration = max(length / 8000.0, 0.0)
         ts = bcdish_filename_to_datetime(name)
         items.append(
@@ -965,6 +1192,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "createTime": ts.strftime("%H:%M:%S") if ts else "",
                 "length": length,
                 "duration": duration,
+                "durationEstimated": duration_estimated,
                 "version": 0,
                 "mode": "unknown",
                 "signature": stored.get("signature", md5_hex(name)),
@@ -976,10 +1204,42 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "lastError": stored.get("last_error"),
                 "status": "downloaded" if bool(stored.get("downloaded")) else "missing_local",
                 "humanLength": human_size(length),
+                "trimmed": bool(stored.get("trimmed")),
+                "removed": bool(stored.get("removed")),
             }
         )
     items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
     return items
+
+
+def cached_status_payload(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    state_path: Path = DEFAULT_STATE_PATH,
+    product_id: int | None = None,
+) -> dict:
+    """Return what `status_payload` returns, without touching USB.
+
+    Reads the cached catalog from state.json and enriches it with
+    local download/transcription metadata. `connected` is always
+    False — we haven't verified the device is live; the desktop
+    client can use this for instant startup paint and then do the
+    real USB probe asynchronously to update.
+    """
+    config = load_config(config_path)
+    output_dir = resolved_output_dir(config)
+    state = load_state(state_path)
+    cache_key = str(product_id) if product_id else "default"
+    cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+    return {
+        "connected": False,
+        "outputDir": str(output_dir),
+        "statePath": str(state_path.resolve()),
+        "configPath": str(config_path.resolve()),
+        "recordings": build_recording_status_items(
+            cached_recs, state, output_dir, product_id=product_id
+        ),
+        "cached": True,
+    }
 
 
 def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH, product_id: int | None = None) -> dict:
@@ -1018,33 +1278,58 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         return payload
 
     try:
-        # Fast path: query file count first and compare with cached catalog.
-        # The full file list query can require multiple USB round-trips for
-        # large catalogs, so skip it when the count hasn't changed.
+        # Previously we called query_file_count here as a cache-fast-path
+        # optimisation, but it consumed firmware state in a way that
+        # prevented query_file_list from picking up the full catalog on
+        # the H1. Now we always do a full query_file_list and derive
+        # the declared total from its header frame.
         cache_key = str(product_id) if product_id else "default"
         catalogs = state.get("catalogs", {})
-        cached = catalogs.get(cache_key, {})
-        cached_recordings = cached.get("recordings", [])
 
-        file_count = None
-        try:
-            file_count = query_file_count(dev, request_id=1, timeout_ms=min(timeout_ms, 1000))
-        except Exception:
-            pass
-
-        if file_count is not None and len(cached_recordings) == file_count and cached_recordings:
-            recordings = cached_recordings
-        else:
-            recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
-            # Cache the raw catalog for next time
-            catalogs[cache_key] = {"recordings": recordings}
-            state["catalogs"] = catalogs
-            save_state(state, state_path)
+        recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
+        # Cache the raw catalog for next time
+        catalogs[cache_key] = {"recordings": recordings}
+        state["catalogs"] = catalogs
+        save_state(state, state_path)
 
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
+
+        # Storage stats — the HiDock USB protocol we've implemented doesn't
+        # expose a 'free space' query, so we derive usage from summed file
+        # sizes. If the firmware truncated the list, the sum is a minimum
+        # bound — we flag that to the client.
+        total_bytes = sum(int(r.get("length", 0)) for r in recordings)
+        # query_file_list sets a module-level hint on the function
+        # object when it detects a declared-count > returned-count
+        # scenario, so we can surface truncation accurately.
+        declared = getattr(query_file_list, "_last_declared_total", None)
+        truncated = declared is not None and declared > len(recordings)
+        payload["storage"] = {
+            "totalFiles": declared if declared is not None else len(recordings),
+            "returnedFiles": len(recordings),
+            "totalBytesReturned": total_bytes,
+            "truncated": truncated,
+        }
+
+        if truncated:
+            missing = declared - len(recordings)
+            payload["warning"] = (
+                f"{missing} newest recordings are hidden due to device firmware limits. "
+                f"Delete old recordings from the device to see them all."
+            )
     except Exception as exc:
         payload["error"] = f"Failed to query device: {exc}"
+        # Fall back to the cached catalog so the desktop UI can still
+        # show rows the user has already downloaded/transcribed. Covers
+        # the timeout kill, protocol errors after prepare_device
+        # succeeded, JSON decode failures, etc. The two earlier error
+        # paths (FileNotFoundError, USBError on prepare_device) already
+        # did this; this closes the gap for everything in between.
+        cache_key = str(product_id) if product_id else "default"
+        cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+        if cached_recs:
+            payload["recordings"] = build_recording_status_items(cached_recs, state, output_dir, product_id=product_id)
     finally:
         release_device(dev, interface_number)
     return payload
@@ -1162,16 +1447,31 @@ def download_new(
         if item["downloaded"]:
             skipped.append({"filename": item["name"], "reason": "already_downloaded"})
             continue
-        result = download_one(
-            item["name"],
-            length=item["length"],
-            output_dir=Path(status["outputDir"]),
-            timeout_ms=timeout_ms,
-            config_path=config_path,
-            state_path=state_path,
-            product_id=product_id,
-        )
-        downloaded.append(result)
+        if item.get("removed"):
+            # User deleted the local copy via the Mac app's Remove. Don't
+            # silently re-pull it on the next auto-download cycle —
+            # they'll have to explicitly Unremove first.
+            skipped.append({"filename": item["name"], "reason": "user_removed"})
+            continue
+        # Emit a per-file marker on stderr so the Mac app can paint the
+        # currently-downloading row as "Downloading" (yellow) instead of
+        # leaving every not-yet-downloaded row stuck on "On device" until
+        # the whole batch finishes. PROGRESS lines on the same channel
+        # cover transfer percent; FILE_START / FILE_DONE bracket the file.
+        print(f"FILE_START:{item['name']}", file=sys.stderr, flush=True)
+        try:
+            result = download_one(
+                item["name"],
+                length=item["length"],
+                output_dir=Path(status["outputDir"]),
+                timeout_ms=timeout_ms,
+                config_path=config_path,
+                state_path=state_path,
+                product_id=product_id,
+            )
+            downloaded.append(result)
+        finally:
+            print(f"FILE_DONE:{item['name']}", file=sys.stderr, flush=True)
 
     return {
         "connected": True,
@@ -1286,13 +1586,20 @@ def _audio_file_metadata(audio_path: Path) -> dict:
     mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
     duration = stat.st_size / 16000.0  # rough estimate
+    duration_estimated = True
     try:
         from mutagen import File as MutagenFile
         mf = MutagenFile(str(audio_path))
         if mf and mf.info:
             duration = mf.info.length
-    except Exception:
-        pass
+            duration_estimated = False
+    except ImportError as exc:
+        _log_warn(
+            f"mutagen unavailable; volume duration for {audio_path.name} "
+            f"falling back to size/16000 estimate ({exc})"
+        )
+    except Exception as exc:
+        _log_warn(f"mutagen read failed for volume file {audio_path}: {exc}")
 
     return {
         "name": audio_path.name,
@@ -1300,6 +1607,7 @@ def _audio_file_metadata(audio_path: Path) -> dict:
         "createTime": mtime.strftime("%H:%M:%S"),
         "length": stat.st_size,
         "duration": round(duration, 1),
+        "durationEstimated": duration_estimated,
         "version": 0,
         "mode": "external",
         "signature": md5_hex(f"{audio_path.name}:{stat.st_size}:{int(stat.st_mtime)}"),
@@ -1380,6 +1688,8 @@ def volume_status(
             "lastError": stored.get("last_error"),
             "status": status,
             "humanLength": human_size(meta["length"]),
+            "trimmed": bool(stored.get("trimmed")),
+            "removed": bool(stored.get("removed")),
         })
 
     # Include state-only entries for files no longer on the volume
@@ -1396,6 +1706,7 @@ def volume_status(
             "createTime": "",
             "length": stored.get("length", 0),
             "duration": 0,
+            "durationEstimated": True,
             "version": 0,
             "mode": "external",
             "signature": stored.get("signature", ""),
@@ -1408,6 +1719,8 @@ def volume_status(
             "lastError": stored.get("last_error"),
             "status": "downloaded" if stored.get("downloaded") else "missing_local",
             "humanLength": human_size(stored.get("length", 0)),
+            "trimmed": bool(stored.get("trimmed")),
+            "removed": bool(stored.get("removed")),
         })
 
     items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
@@ -1552,6 +1865,13 @@ def main() -> int:
     status = sub.add_parser("status", help="Report sync status and device recordings as JSON")
     status.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
 
+    # `cached-status` returns what `status` returns when the device is
+    # unreachable: connected=false, recordings from state.json's cached
+    # catalog. Meant for instant startup — desktop clients can show
+    # already-downloaded rows immediately without waiting 10s+ for USB
+    # enumeration to complete.
+    sub.add_parser("cached-status", help="Report cached catalog from state.json without touching USB")
+
     set_output = sub.add_parser("set-output", help="Persist the default output directory")
     set_output.add_argument("path", help="Directory for downloaded recordings")
 
@@ -1569,6 +1889,27 @@ def main() -> int:
     unmark_dl = sub.add_parser("unmark-downloaded", help="Unmark recordings so they can be re-downloaded")
     unmark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to unmark")
     unmark_dl.add_argument("--volume-name", default=None, help="For volume devices")
+
+    mark_trim = sub.add_parser("mark-trimmed", help="Flag recordings as locally trimmed (UI icon + re-download warning)")
+    mark_trim.add_argument("filenames", nargs="+", help="Device-side filenames to flag as trimmed")
+
+    unmark_trim = sub.add_parser("unmark-trimmed", help="Clear the trimmed flag on recordings")
+    unmark_trim.add_argument("filenames", nargs="+", help="Device-side filenames to clear trimmed flag on")
+
+    mark_removed_p = sub.add_parser("mark-removed", help="Flag recordings as locally removed (excluded from auto-download/transcribe)")
+    mark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to flag as removed")
+
+    unmark_removed_p = sub.add_parser("unmark-removed", help="Clear the removed flag on recordings")
+    unmark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to clear removed flag on")
+
+    cand_p = sub.add_parser("merge-candidates",
+                            help="List groups of recordings that look like one conversation split across files")
+    cand_p.add_argument("--include-low-confidence", action="store_true",
+                        help="Also surface candidates below the high-confidence cutoff (score < 8)")
+
+    dismiss_p = sub.add_parser("dismiss-merge-pair",
+                               help="Mark a chain of recordings as 'not the same conversation' (sticky)")
+    dismiss_p.add_argument("filenames", nargs="+", help="Ordered device-side filenames in the chain to dismiss")
 
     download_new_cmd = sub.add_parser("download-new", help="Download every recording not yet present in local state")
     download_new_cmd.add_argument("--timeout-ms", type=int, default=5000, help="USB read/write timeout")
@@ -1690,8 +2031,72 @@ def main() -> int:
         save_state(state)
         print(json.dumps({"unmarked": unmarked}, indent=2))
         return 0
+    if args.command == "mark-trimmed":
+        state = load_state()
+        downloads = state["downloads"]
+        flagged = []
+        for filename in args.filenames:
+            if filename in downloads:
+                downloads[filename]["trimmed"] = True
+                downloads[filename]["updated_at"] = utc_now_iso()
+                flagged.append(filename)
+        save_state(state)
+        print(json.dumps({"trimmed": flagged}, indent=2))
+        return 0
+    if args.command == "unmark-trimmed":
+        state = load_state()
+        downloads = state["downloads"]
+        cleared = []
+        for filename in args.filenames:
+            if filename in downloads and "trimmed" in downloads[filename]:
+                del downloads[filename]["trimmed"]
+                downloads[filename]["updated_at"] = utc_now_iso()
+                cleared.append(filename)
+        save_state(state)
+        print(json.dumps({"untrimmed": cleared}, indent=2))
+        return 0
+    if args.command == "mark-removed":
+        state = load_state()
+        downloads = state["downloads"]
+        flagged = []
+        for filename in args.filenames:
+            if filename in downloads:
+                downloads[filename]["removed"] = True
+                downloads[filename]["updated_at"] = utc_now_iso()
+                flagged.append(filename)
+        save_state(state)
+        print(json.dumps({"removed": flagged}, indent=2))
+        return 0
+    if args.command == "unmark-removed":
+        state = load_state()
+        downloads = state["downloads"]
+        cleared = []
+        for filename in args.filenames:
+            if filename in downloads and "removed" in downloads[filename]:
+                del downloads[filename]["removed"]
+                downloads[filename]["updated_at"] = utc_now_iso()
+                cleared.append(filename)
+        save_state(state)
+        print(json.dumps({"unremoved": cleared}, indent=2))
+        return 0
+    if args.command == "merge-candidates":
+        from shared.merge_finder import find_candidates, candidates_to_payload
+        state = load_state()
+        chains = find_candidates(state.get("downloads", {}))
+        if not args.include_low_confidence:
+            chains = [c for c in chains if c.score >= 8]
+        print(json.dumps(candidates_to_payload(chains), indent=2))
+        return 0
+    if args.command == "dismiss-merge-pair":
+        from shared.merge_finder import dismiss_chain
+        dismiss_chain(args.filenames)
+        print(json.dumps({"dismissed": args.filenames}, indent=2))
+        return 0
     if args.command == "status":
         print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
+        return 0
+    if args.command == "cached-status":
+        print(json.dumps(cached_status_payload(product_id=args.product_id), indent=2))
         return 0
     if args.command == "set-output":
         config = load_config()

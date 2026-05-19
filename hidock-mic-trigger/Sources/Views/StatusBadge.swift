@@ -7,11 +7,20 @@ struct StatusBadge: View {
     private var color: Color {
         switch level {
         case .success: return .green
+        case .transcribed: return .purple   // distinct from Downloaded's green
         case .warning: return .orange
         case .error: return .red
         case .info: return .blue
         case .secondary: return .secondary
         case .normal: return .primary
+        case .skipped: return Color.teal.opacity(0.6)  // dimmed teal — matches Removed's
+                                                       // muted treatment so both
+                                                       // user-driven exclusion states
+                                                       // read at the same visual weight
+                                                       // (just hue distinguishes them)
+        case .removed: return Color.red.opacity(0.6)  // muted red — reminds the user
+                                                      // they took a destructive action
+                                                      // without flagging it as an error
         }
     }
 
@@ -25,13 +34,58 @@ struct StatusBadge: View {
     }
 }
 
+/// Status pill that becomes clickable when the recording carries a
+/// download/import error. Tapping opens an alert with the captured
+/// `lastError` text — same UX as the failed-transcription red X but
+/// for the upstream Failed-to-download case. When there's no error
+/// it renders identically to a plain `StatusBadge`.
+struct ClickableStatusBadge: View {
+    let text: String
+    let level: StatusLevel
+    let errorMessage: String?
+
+    @State private var showingError = false
+
+    var body: some View {
+        if let msg = errorMessage, !msg.isEmpty {
+            Button {
+                showingError = true
+            } label: {
+                StatusBadge(text: text, level: level)
+            }
+            .buttonStyle(.plain)
+            .help("Click to see why this failed")
+            .alert("Download failed", isPresented: $showingError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(msg)
+            }
+        } else {
+            StatusBadge(text: text, level: level)
+        }
+    }
+}
+
 struct TranscriptionIndicator: View {
     let entry: HiDockSyncRecordingEntry
     let transcriptionBusy: Bool
     let transcriptionCurrentFile: String?
     let transcriptionProgress: Int
+    /// True when the most recent transcription attempt for this
+    /// recording ended in failure or was cancelled. Surfaces as a red
+    /// X in the tag column so the user can see retry candidates without
+    /// opening the Queue window. Ignored when the recording has since
+    /// been successfully transcribed.
+    var transcriptionFailed: Bool = false
+    /// Captured stderr / NSError text from the failed run. Shown in an
+    /// alert when the user clicks the red X. Optional because the path
+    /// may have failed before this field existed (older session) or the
+    /// failure happened before we started capturing it.
+    var transcriptionErrorMessage: String? = nil
     var onRevealTranscript: (String) -> Void = { _ in }
     var onOpenTranscriptViewer: ((String) -> Void)? = nil
+
+    @State private var showingError = false
 
     var body: some View {
         if entry.transcribed && entry.speakersTagged {
@@ -67,6 +121,20 @@ struct TranscriptionIndicator: View {
                 Text("\(transcriptionProgress)%")
                     .font(.caption.monospacedDigit())
                     .foregroundColor(.orange)
+            }
+        } else if transcriptionFailed {
+            Button {
+                showingError = true
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Last transcription attempt failed or was cancelled — click to see why")
+            .alert("Transcription failed", isPresented: $showingError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(transcriptionErrorMessage ?? "No error details captured for this attempt. Re-select and click Transcribe Selected to retry — the next failure will record details.")
             }
         } else {
             Text("—")

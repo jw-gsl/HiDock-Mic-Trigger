@@ -1,11 +1,51 @@
-# Core transcription
+# Core transcription — Whisper (multilingual default + non-English fallback)
 openai-whisper>=20240930
 torch>=2.1
 torchaudio>=2.1
 
+# Parakeet TDT v2 MLX backend (English-only, Apple Silicon only, faster than Whisper)
+# Falls back to Whisper on non-Apple-Silicon platforms or non-English audio.
+parakeet-mlx>=0.5.0; sys_platform == "darwin" and platform_machine == "arm64"
+# truststore routes SSL through the OS keychain — works around Python 3.13 /
+# OpenSSL 3.5 strict cert validation that rejects some HF CDN certs.
+truststore>=0.9; python_version >= "3.10"
+
 # Folder watching
 watchdog>=4.0
 
+# Speaker diarization — NeMo Sortformer (nvidia/diar_sortformer_4spk-v1).
+# Active backend when pipeline_backends.json has diarization=sortformer.
+# Pinned to 2.5.3 — 2.6+ adds a dependency on NVIDIA's internal `nv_one_logger`
+# package which isn't published to PyPI. 2.5.3 is the newest version with
+# Sortformer support that builds against public deps.
+nemo-toolkit==2.5.3
+# NeMo's declared deps don't cover the transitive set its modules actually
+# import on macOS Python 3.13. Listing them explicitly so setup-venv.sh
+# produces a working Sortformer environment without a manual chase.
+hydra-core>=1.3
+lightning>=2.0
+fiddle>=0.3
+braceexpand>=0.1
+webdataset>=0.2
+ijson>=3.0
+editdistance>=0.6
+pytorch-lightning>=2.0
+lhotse>=1.30
+cloudpickle>=3.0
+wandb>=0.16
+sentencepiece>=0.2
+text-unidecode>=1.3
+g2p-en>=2.1
+inflect>=7.0
+pyannote.core>=5.0
+pyannote.metrics>=4.0
+einops>=0.7
+transformers>=4.40
+jiwer>=3.0
+datasets>=2.18
+matplotlib>=3.7
+texterrors>=0.5
+ipython>=8.0
 # Speaker diarization (Phase 3 — requires HuggingFace token for first download)
 # Uncomment when ready:
 # pyannote.audio>=3.3

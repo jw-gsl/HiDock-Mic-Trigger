@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
 
 from shared.summarize import _empty_summary, _normalize_summary, summarize
 

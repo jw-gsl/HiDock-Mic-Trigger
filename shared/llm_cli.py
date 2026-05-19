@@ -13,7 +13,6 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Callable
 
 # Detection order — first available wins for "auto" mode
 _CLI_PRIORITY = ["claude", "codex", "gemini", "ollama"]

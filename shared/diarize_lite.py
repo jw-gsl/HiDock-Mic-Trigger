@@ -20,6 +20,7 @@ from scipy.spatial.distance import cosine as cosine_distance
 
 from shared.audio_utils import extract_embedding, load_audio, segment_audio
 from shared.models import ensure_silero_vad
+from shared.voice_library_lite import identify_speaker
 
 _VAD_SR = 16000
 _VAD_WINDOW_SIZE = 256  # 16ms at 16kHz (Silero VAD v5)
@@ -246,10 +247,18 @@ def extract_speaker_embeddings(
         maps each embedding back to its segment index.
     """
     speaker_session = _load_speaker_embed_model()
+    # Log the active embedding backend (lets debug output reflect the
+    # user's Model Manager selection once we have alternatives to
+    # TitaNet; "titanet" is the only one today).
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _emb = active_pipeline().get("embedding", "titanet")
+    except Exception:
+        _emb = "titanet"
     if speaker_session is not None:
-        print("  Using neural speaker embeddings (TitaNet)", file=sys.stderr)
+        print(f"  Using neural speaker embeddings ({_emb})", file=sys.stderr)
     else:
-        print("  Using MFCC speaker embeddings (fallback)", file=sys.stderr)
+        print(f"  Using MFCC speaker embeddings (fallback from {_emb})", file=sys.stderr)
 
     chunks = segment_audio(audio, sr, segments)
     embeddings = []
@@ -276,6 +285,188 @@ def extract_speaker_embeddings(
 
 
 # ── Clustering with running-average templates + post-merge ──────────────────
+
+def _compute_density_prior(
+    speech_segs: list[tuple[float, float]],
+    audio_duration_s: float,
+    embeddings: np.ndarray | None = None,
+) -> tuple[int, int]:
+    """Compute a (min_k, preferred_k) prior for speaker count from turn-taking.
+
+    Uses two signals that are cheap to compute and strong evidence of group size:
+      1. VAD segments per minute — high density of short bursts implies many
+         speakers taking short turns.
+      2. Embedding spread (optional) — if pairwise distances among a sample of
+         embeddings cluster into a wide spread, that's strong evidence of
+         multiple distinct voice identities.
+
+    Returns (min_k, preferred_k): a floor for clustering, and the value we'd
+    bias silhouette scoring toward.
+    """
+    if audio_duration_s < 60 or len(speech_segs) < 4:
+        return (1, 2)
+
+    vad_per_min = len(speech_segs) / max(audio_duration_s / 60.0, 1.0)
+    mean_seg_dur = np.mean([e - s for s, e in speech_segs])
+
+    # Turn-taking density score (higher = more conversational)
+    # A 1:1 tends to have ~5–10 segs/min with long segs (~6–12s avg).
+    # A group of 6+ tends to have 20+ segs/min with short segs (<3s avg).
+    if vad_per_min >= 30 and mean_seg_dur < 2.5:
+        density_prior = 6
+    elif vad_per_min >= 20 and mean_seg_dur < 3.5:
+        density_prior = 5
+    elif vad_per_min >= 12 and mean_seg_dur < 5.0:
+        density_prior = 4
+    elif vad_per_min >= 8:
+        density_prior = 3
+    else:
+        density_prior = 2
+
+    # Embedding spread refinement — if we have embeddings, use pairwise cosine
+    # distance to refine the prior. High spread → bump prior up.
+    if embeddings is not None and len(embeddings) >= 6:
+        # Sample pairwise distances (not all, to stay cheap on big arrays)
+        sample = embeddings[:: max(1, len(embeddings) // 20)][:20]
+        dists = []
+        for i in range(len(sample)):
+            for j in range(i + 1, len(sample)):
+                a, b = sample[i], sample[j]
+                cos_sim = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+                dists.append(1.0 - cos_sim)
+        if dists:
+            # Top-decile distance — how different are the most dissimilar pairs?
+            top_decile = float(np.percentile(dists, 90))
+            spread_ratio = float(np.mean(dists))
+            # Neural embeddings: distance ~0.1 = same speaker, ~0.5+ = different
+            if top_decile > 0.6 and spread_ratio > 0.35:
+                density_prior = max(density_prior, 5)
+            elif top_decile > 0.5 and spread_ratio > 0.28:
+                density_prior = max(density_prior, 4)
+            elif top_decile > 0.4 and spread_ratio > 0.22:
+                density_prior = max(density_prior, 3)
+
+    # Floor is the prior minus 1 — we'd rather slightly under-cluster than force
+    # a speaker count we're not confident in. The preferred value guides scoring.
+    min_k = max(2, density_prior - 1)
+    return (min_k, density_prior)
+
+
+def estimate_speaker_count(
+    audio: np.ndarray, sr: int = 16000,
+    max_speakers: int = 10, n_samples: int = 60,
+) -> int:
+    """Estimate the number of speakers using VAD density + embedding spread.
+
+    Takes ~5–10 seconds. Combines:
+      - Turn-taking density (VAD segs/min, mean segment duration)
+      - Embedding spread (pairwise cosine distance across sampled clips)
+      - Silhouette scoring on k=2..max_speakers, with a bell-curve penalty
+        centred on the density-derived prior.
+
+    Args:
+        audio: Full audio array.
+        sr: Sample rate.
+        max_speakers: Maximum speakers to test (default 10, up from 6).
+        n_samples: Number of sample points to extract (default 60, up from 30).
+
+    Returns:
+        Estimated number of speakers (minimum 2).
+    """
+    from sklearn.metrics import silhouette_score
+
+    audio_duration = len(audio) / sr
+    if audio_duration < 30:
+        return 2  # Too short to estimate
+
+    # Use VAD to find actual speech segments, then sample from those
+    audio_norm = _normalize_audio(audio)
+    speech_segs = detect_speech_segments(audio_norm, sr=sr)
+
+    if len(speech_segs) < 4:
+        return 2
+
+    # Merge adjacent speech for more stable clips
+    speech_segs = _merge_adjacent_speech(speech_segs)
+
+    # Scale samples to recording length — long recordings need more data points
+    target_samples = n_samples
+    if audio_duration > 1800:  # >30 min
+        target_samples = max(n_samples, 100)
+
+    # Pick up to target_samples speech segments, spread across the meeting
+    step = max(1, len(speech_segs) // target_samples)
+    selected = speech_segs[::step][:target_samples]
+
+    # Extract embeddings from speech segments (use original audio for quality)
+    speaker_session = _load_speaker_embed_model()
+    embeddings = []
+
+    for start, end in selected:
+        dur = end - start
+        if dur < 1.5:
+            continue
+        # Cap at 5 seconds
+        end = min(end, start + 5.0)
+        s = int(start * sr)
+        e = int(end * sr)
+        chunk = audio[s:e]
+        if len(chunk) < sr:
+            continue
+        try:
+            emb = extract_embedding(chunk, sr=sr, onnx_session=speaker_session)
+            embeddings.append(emb)
+        except Exception:
+            continue
+
+    if len(embeddings) < 4:
+        return 2  # Not enough data
+
+    embeddings_arr = np.array(embeddings, dtype=np.float32)
+
+    # Compute density-based prior (uses VAD pattern + embedding spread)
+    min_k, preferred_k = _compute_density_prior(speech_segs, audio_duration, embeddings_arr)
+
+    # Try different k values with bell-curve penalty centred on preferred_k.
+    # Previously a flat penalty that favoured k<=4 regardless of content;
+    # now the penalty follows our density-derived expectation.
+    best_k = preferred_k
+    best_score = -1.0
+    k_upper = min(max_speakers + 1, len(embeddings))
+
+    for k in range(min_k, k_upper):
+        try:
+            from scipy.cluster.hierarchy import fcluster, linkage
+            Z = linkage(embeddings_arr, method="average", metric="cosine")
+            labels = fcluster(Z, t=float(k), criterion="maxclust")
+            labels = [int(l) - 1 for l in labels]
+
+            if len(set(labels)) < 2:
+                continue
+
+            score = silhouette_score(embeddings_arr, labels, metric="cosine")
+
+            # Bell-curve penalty: maximum weight at preferred_k, falls off
+            # gradually on both sides. Tolerates ±2 from prior without penalty.
+            distance_from_prior = abs(k - preferred_k)
+            if distance_from_prior <= 1:
+                penalty = 1.0
+            elif distance_from_prior <= 2:
+                penalty = 0.95
+            else:
+                penalty = max(0.5, 1.0 - (distance_from_prior - 2) * 0.08)
+            adjusted_score = score * penalty
+
+            if adjusted_score > best_score:
+                best_score = adjusted_score
+                best_k = k
+        except Exception:
+            continue
+
+    # Never return below the density floor — this is the main fix for group
+    # recordings where silhouette was collapsing to k=2.
+    return max(best_k, min_k)
+
 
 def cluster_speakers(
     embeddings: np.ndarray,
@@ -396,14 +587,29 @@ def _assign_speakers_to_whisper_segments(
     else:
         full_labels = speaker_labels
 
-    # Now assign whisper segments by overlap
+    # Assign whisper segments to VAD speech segments.
+    #
+    # First try max-overlap. When a whisper segment falls in a gap
+    # between VAD segments (music, silence, non-speech, Whisper
+    # hallucinating during a quiet moment) there is NO overlap with
+    # any VAD segment — previously `best_speaker` stayed hardcoded at
+    # 0, which meant every orphan whisper segment silently defaulted
+    # to Speaker 0. Over a long call with normal non-speech gaps
+    # that's hundreds of segments leaking onto Speaker 0 and producing
+    # extreme 95/5-style skews in the final distribution.
+    #
+    # New behaviour: if no overlap, fall back to the nearest-by-midpoint
+    # VAD segment's speaker. That's a better guess than "speaker 0"
+    # because it assumes the speaker didn't change during a brief
+    # silence — which is what conversational audio usually looks like.
     result = []
     for ws in whisper_segments:
         ws_start = ws["start"]
         ws_end = ws["end"]
         best_overlap = 0.0
-        best_speaker = 0
+        best_speaker: int | None = None
 
+        # Pass 1: max overlap
         for idx, (ss_start, ss_end) in enumerate(speech_segments):
             if idx >= len(full_labels):
                 break
@@ -412,7 +618,58 @@ def _assign_speakers_to_whisper_segments(
                 best_overlap = overlap
                 best_speaker = full_labels[idx]
 
-        result.append(best_speaker)
+        # Pass 2: no overlap — nearest VAD segment by midpoint distance
+        if best_speaker is None:
+            ws_mid = (ws_start + ws_end) / 2.0
+            best_dist = float("inf")
+            for idx, (ss_start, ss_end) in enumerate(speech_segments):
+                if idx >= len(full_labels):
+                    break
+                ss_mid = (ss_start + ss_end) / 2.0
+                d = abs(ws_mid - ss_mid)
+                if d < best_dist:
+                    best_dist = d
+                    best_speaker = full_labels[idx]
+
+        # Absolute fallback (e.g. no VAD segments at all)
+        result.append(best_speaker if best_speaker is not None else 0)
+    return result
+
+
+# ── Non-speech event anonymization (from minutes v0.11.0) ──────────────────
+
+import re
+
+_NON_SPEECH_PATTERN = re.compile(
+    r"^\s*\[(?:laughter|laughing|cough|coughing|sneeze|applause|music|noise|"
+    r"silence|inaudible|crosstalk|background noise|phone ringing|door|"
+    r"breathing|sigh|clearing throat|um|uh)\]\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_non_speech(text: str) -> bool:
+    """Check if a segment is a non-speech event marker."""
+    return bool(_NON_SPEECH_PATTERN.match(text.strip()))
+
+
+def _anonymize_non_speech(segments: list[dict]) -> list[dict]:
+    """Remove speaker attribution from non-speech event segments.
+
+    [laughter], [cough] etc. don't belong to any speaker — they're
+    ambient events. Keeping them as anonymous preserves the information
+    without misattributing noise to a person.
+    """
+    result = []
+    for seg in segments:
+        if _is_non_speech(seg.get("text", "")):
+            result.append({
+                **seg,
+                "speaker": "",
+                "speaker_id": -1,  # -1 = no speaker
+            })
+        else:
+            result.append(seg)
     return result
 
 
@@ -521,7 +778,20 @@ def diarize(
 ) -> dict:
     """Run full diarization pipeline."""
     audio_path = Path(audio_path)
-    print(f"Diarizing {audio_path.name}...", file=sys.stderr)
+    # Log the live backend choices so debug output reflects what's
+    # actually running — important now that VAD + embedding can be
+    # swapped via the Model Manager.
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _b = active_pipeline()
+        print(
+            f"Diarizing {audio_path.name}... "
+            f"(backend=lite, vad={_b.get('vad', 'silero')}, "
+            f"embedding={_b.get('embedding', 'titanet')})",
+            file=sys.stderr,
+        )
+    except Exception:
+        print(f"Diarizing {audio_path.name}...", file=sys.stderr)
 
     whisper_segments = _filter_hallucinations(whisper_segments)
     print(f"  Whisper segments: {len(whisper_segments)}", file=sys.stderr)
@@ -537,11 +807,27 @@ def diarize(
     norm_rms = np.sqrt(np.mean(audio_norm ** 2))
     print(f"  Audio: {audio_duration:.1f}s, RMS {raw_rms:.4f}→{norm_rms:.4f}, peak {raw_peak:.3f}", file=sys.stderr)
 
-    # Step 2: Detect speech with normalized audio
-    speech_segments = detect_speech_segments(audio_norm, sr=_VAD_SR)
+    # Step 2: Detect speech with normalized audio. Route through the
+    # pipeline dispatcher so the user's VAD selection (Silero or TEN)
+    # is honoured — dispatcher falls back to Silero if the selected
+    # backend isn't installed.
+    try:
+        from shared.pipeline_dispatch import detect_speech_segments as dispatched_vad
+        speech_segments = dispatched_vad(audio_norm, sr=_VAD_SR)
+    except Exception:
+        # Safety net: if the dispatcher itself blows up, fall back to
+        # the in-tree Silero implementation so the diarizer can still
+        # complete.
+        speech_segments = detect_speech_segments(audio_norm, sr=_VAD_SR)
     total_speech = sum(e - s for s, e in speech_segments)
     vad_per_min = len(speech_segments) / max(audio_duration / 60, 0.1)
-    print(f"  VAD pass 1: {len(speech_segments)} segs, {total_speech:.0f}s speech, {vad_per_min:.1f}/min", file=sys.stderr)
+    # Include which VAD backend ran so debug logs are self-describing.
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _vad_name = active_pipeline().get("vad", "silero")
+    except Exception:
+        _vad_name = "silero"
+    print(f"  VAD pass 1 ({_vad_name}): {len(speech_segments)} segs, {total_speech:.0f}s speech, {vad_per_min:.1f}/min", file=sys.stderr)
 
     # Step 3: Peak normalization retry if VAD still poor (minutes approach)
     if vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE and raw_peak < 0.5:
@@ -558,7 +844,7 @@ def diarize(
     # Step 4: Whisper boundary fallback
     use_whisper_boundaries = False
     if len(whisper_segments) > 5 and vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE:
-        print(f"  VAD insufficient, using Whisper boundaries", file=sys.stderr)
+        print("  VAD insufficient, using Whisper boundaries", file=sys.stderr)
         speech_segments = _whisper_segments_as_speech(whisper_segments)
         use_whisper_boundaries = True
 
@@ -574,11 +860,23 @@ def diarize(
     embeddings, valid_indices = extract_speaker_embeddings(audio_raw, _VAD_SR, speech_segments)
     print(f"  Embeddings: {embeddings.shape} ({len(valid_indices)} valid of {len(speech_segments)})", file=sys.stderr)
 
-    # Step 6: Force minimum speakers for long meetings
+    # Step 6: Estimate speaker count (pre-pass)
     effective_n = n_speakers
-    if effective_n is None and audio_duration > 300 and len(valid_indices) >= 4:
-        effective_n = _MIN_SPEAKERS_FOR_LONG_AUDIO
-        print(f"  Forcing min {effective_n} speakers (>{audio_duration / 60:.0f}min)", file=sys.stderr)
+    if effective_n is None and audio_duration > 60 and len(valid_indices) >= 4:
+        estimated = estimate_speaker_count(audio_raw, sr=_VAD_SR)
+        # Use density-based floor for long recordings — combines VAD turn-taking
+        # with embedding spread. Short recordings keep a minimum of 1.
+        if audio_duration > 300 and len(embeddings) >= 6:
+            floor_min_k, _ = _compute_density_prior(speech_segments, audio_duration, embeddings)
+            effective_n = max(estimated, floor_min_k)
+        else:
+            effective_n = max(estimated, _MIN_SPEAKERS_FOR_LONG_AUDIO if audio_duration > 300 else 1)
+        vad_per_min_log = len(speech_segments) / max(audio_duration / 60.0, 1.0)
+        print(
+            f"  Speaker count estimate: {estimated} (using {effective_n}, "
+            f"vad/min={vad_per_min_log:.1f}, dur={audio_duration:.0f}s)",
+            file=sys.stderr,
+        )
 
     # Step 7: Cluster with post-merge pass
     speaker_labels = cluster_speakers(embeddings, n_speakers=effective_n)
@@ -614,16 +912,62 @@ def diarize(
     n_final = len(seen)
     print(f"  Final speakers: {n_final}", file=sys.stderr)
 
-    # Step 10: Build output, merge same-speaker, split long segments
+    # Step 10: Auto-match against voice library (from minutes v0.10.0)
     speaker_names = {}
+    for spk_id in range(n_final):
+        # Compute centroid for this speaker
+        spk_indices = [i for i, s in enumerate(ws_speakers) if s == spk_id]
+        if not spk_indices:
+            speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+            continue
+
+        # Get embeddings for this speaker's whisper segments via speech segments
+        spk_embeddings = []
+        for wi in spk_indices:
+            ws = whisper_segments[wi]
+            ws_mid = (ws["start"] + ws["end"]) / 2
+            # Find the closest speech segment with a valid embedding
+            best_dist = float("inf")
+            best_emb_idx = None
+            for vi, emb_idx in enumerate(valid_indices):
+                if emb_idx < len(speech_segments):
+                    ss_start, ss_end = speech_segments[emb_idx]
+                    ss_mid = (ss_start + ss_end) / 2
+                    dist = abs(ws_mid - ss_mid)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_emb_idx = vi
+            if best_emb_idx is not None and best_emb_idx < len(embeddings):
+                spk_embeddings.append(embeddings[best_emb_idx])
+
+        if spk_embeddings:
+            centroid = np.mean(spk_embeddings, axis=0).astype(np.float32)
+            norm = np.linalg.norm(centroid)
+            if norm > 1e-10:
+                centroid = centroid / norm
+
+            # Check voice library
+            matched_name, confidence = identify_speaker(centroid, threshold=0.55)
+            if matched_name:
+                speaker_names[str(spk_id)] = matched_name
+                print(f"  Auto-matched speaker {spk_id} → {matched_name} ({confidence:.0%})", file=sys.stderr)
+            else:
+                speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+        else:
+            speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+
+    # Step 11: Build output, merge same-speaker, split long segments
     raw_segments = []
     for ws, spk in zip(whisper_segments, ws_speakers):
-        speaker_names[str(spk)] = f"Speaker {spk + 1}"
         raw_segments.append({
             "start": ws["start"], "end": ws["end"],
             "text": ws.get("text", "").strip(),
-            "speaker": f"Speaker {spk + 1}", "speaker_id": spk,
+            "speaker": speaker_names.get(str(spk), f"Speaker {spk + 1}"),
+            "speaker_id": spk,
         })
+
+    # Anonymize non-speech events (from minutes v0.11.0)
+    raw_segments = _anonymize_non_speech(raw_segments)
 
     # Merge consecutive same-speaker
     segments_out = []

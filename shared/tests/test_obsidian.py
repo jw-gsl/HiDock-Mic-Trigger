@@ -80,7 +80,7 @@ class TestSyncTranscript:
     def test_custom_subfolder(self, vault_env):
         vault, transcripts = vault_env
         sync = VaultSync(vault_path=vault, transcripts_dir=transcripts, subfolder="Notes/Meetings")
-        result = sync.sync_transcript(transcripts / "meeting1.md")
+        sync.sync_transcript(transcripts / "meeting1.md")
         assert (vault / "Notes" / "Meetings" / "meeting1.md").exists()
 
 

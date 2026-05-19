@@ -77,6 +77,39 @@ final class ShortenMicNameTests: XCTestCase {
     }
 }
 
+final class HidockSKUTests: XCTestCase {
+
+    func testP1MatchedOnFullName() {
+        XCTAssertEqual(hidockSKU(for: "HiDock P1"), .p1)
+    }
+
+    func testH1MatchedOnFullName() {
+        XCTAssertEqual(hidockSKU(for: "HiDock H1"), .h1)
+    }
+
+    func testH1eMatchedBeforeH1() {
+        XCTAssertEqual(hidockSKU(for: "HiDock H1e"), .h1e)
+        XCTAssertEqual(hidockSKU(for: "H1E"), .h1e)
+    }
+
+    func testDockAloneDoesNotMatchH1() {
+        // Regression: "HiDock" alone (no model) used to match H1 via the "dock"
+        // alias, which then broke "HiDock P1" because the H1 rule ran first.
+        XCTAssertNil(hidockSKU(for: "HiDock"))
+    }
+
+    func testVolumeIsAlwaysNil() {
+        XCTAssertNil(hidockSKU(for: "HiDock P1", deviceType: .volume))
+    }
+
+    func testDeviceIconUsesSKU() {
+        XCTAssertEqual(hidockDeviceIcon("HiDock P1"), "waveform.and.mic")
+        XCTAssertEqual(hidockDeviceIcon("HiDock H1"), "hifispeaker")
+        XCTAssertEqual(hidockDeviceIcon("HiDock H1e"), "hifispeaker")
+        XCTAssertEqual(hidockDeviceIcon("USB volume", deviceType: .volume), "externaldrive")
+    }
+}
+
 final class SanitizeDeviceNameTests: XCTestCase {
 
     func testRemovesSerialInParentheses() {

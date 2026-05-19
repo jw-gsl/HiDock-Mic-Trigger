@@ -18,7 +18,7 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 | `hidock-mic-trigger/` | macOS | Desktop app (Swift/AppKit) — unified UI for mic trigger, USB sync, and transcription |
 | `mic-trigger/` | macOS | Swift CLI that watches a USB mic and keeps the HiDock input open via ffmpeg |
 | `usb-extractor/` | macOS | Python extractor — downloads from HiDock over USB and imports audio from generic USB volumes |
-| `transcription-pipeline/` | macOS | Transcription pipeline — whisper.cpp (bundled) or OpenAI Whisper on MPS (dev) |
+| `transcription-pipeline/` | macOS | Transcription pipeline — Whisper (bundled whisper.cpp or Python MPS), with Parakeet TDT v2 (MLX) and Cohere Transcribe + forced alignment as alternative backends |
 | `Windows-App/` | Windows | Desktop app (PyQt6) — Windows port of the macOS app |
 | `Windows-Script/` | Windows | Python extractor and background watcher — HiDock USB and volume device support |
 | `shared/` | Cross-platform | Python modules for structured transcripts, LLM summarization, knowledge graph, Obsidian sync, config, and hooks |
@@ -29,16 +29,108 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 
 ## How it works
 
+At a high level:
+
 1. **Mic Trigger** — watches your USB mic (e.g. Samson Q2U) via CoreAudio. When it detects the mic is in use, it silently opens the HiDock's audio input using `ffmpeg`, causing the HiDock to auto-record.
 2. **USB Sync** — pairs with HiDock devices over USB or generic USB volumes (audio recorders, SD cards) and downloads/imports recordings to a local folder. The Device Manager supports multiple paired devices of both types.
-3. **Transcription** — runs Whisper `large-v3-turbo` (via whisper.cpp) to transcribe downloaded recordings to Markdown files with YAML frontmatter. The ~550 MB model is downloaded on first use.
-4. **Summarization** (optional) — sends transcripts to an available LLM CLI (`claude`, `codex`, `gemini`, or `ollama`) to extract titles, action items, decisions, key points, and tags. No API keys needed — uses existing AI subscriptions.
-5. **Knowledge Graph** — indexes all transcripts into a SQLite database for full-text search, people tracking, and action item management.
-6. **Obsidian Sync** (optional) — syncs transcripts into an Obsidian vault with `[[wikilinks]]`, auto-generated person notes, and daily notes integration.
-7. **MCP Server** — exposes meeting knowledge to AI agents via the Model Context Protocol. Ask Claude "what did I promise Sarah last week?" and get an answer.
-8. **Post-transcription Hooks** — run custom shell commands after transcription (e.g. send a Slack notification, sync to cloud).
+3. **Transcription pipeline** — a multi-stage processing chain detailed below. All local, no network, no API keys.
+4. **Integrations** — optional Knowledge Graph indexing, Obsidian vault sync, custom shell hooks, and an MCP server that exposes meeting knowledge to AI agents.
 
-All processing happens locally on a single desktop app with menu bar integration (macOS) or system tray (Windows). LLM summarization is optional and uses your existing subscriptions.
+## The transcription pipeline
+
+Every recording runs through nine stages. Some stages use downloadable models (shown with size); others are pure-logic steps (rule-based filters, clustering, file writing). Only a handful of stages have swappable alternatives — most are fixed infrastructure.
+
+```
+┌─ 1. AUDIO LOAD ────────────────────────────────────────────┐
+│   shared/audio_utils.py — ffmpeg-based mp3 → 16kHz mono    │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 2. AUDIO PREP (rule-based, no model) ─────────────────────┐
+│   Silence stripping (_replace_silence_with_padding) —      │
+│   cuts long dead-air sections before Whisper sees them,    │
+│   saving compute and preventing silence-hallucination      │
+│   loops. RMS + peak-normalisation fallback for quiet audio.│
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 3. VOICE ACTIVITY DETECTION ──────────────────────────────┐
+│  ● Silero VAD                          2 MB   (default)    │
+│  ○ TEN VAD                             306 KB (planned)    │
+│   Identifies speech vs non-speech frames. Re-used in       │
+│   stage 6 for diarization speech boundaries.               │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 4. SPEECH-TO-TEXT ────────────────────────────────────────┐
+│  ● Whisper large-v3-turbo              547 MB              │
+│    whisper.cpp (bundled) or Python Whisper on MPS (dev)    │
+│    99 languages, auto-detect, per-segment timestamps       │
+│  ○ Parakeet TDT v2 (MLX)               1.2 GB (prototype)  │
+│    Apple Silicon native, ~60× real-time, English only      │
+│  ○ Cohere Transcribe 03-2026           4.0 GB (prototype)  │
+│    14 languages, #1 HF leaderboard (5.42% WER)             │
+│    No timestamps — requires stage 4.5                      │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 4.5. FORCED ALIGNMENT (only for Cohere) ──────────────────┐
+│  ☐ wav2vec2-CTC per language           1.2 GB each         │
+│    torchaudio.functional.forced_align reconstructs word    │
+│    timestamps from Cohere's plain-text output.             │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 5. TEXT CLEANUP (rule-based, no model) ───────────────────┐
+│   Whisper-Guard — 7-layer text hallucination filter:       │
+│     • Consecutive dedup  (A→A→A)                           │
+│     • Interleaved dedup  (A→B→A→B)                         │
+│     • Foreign-script stripping                             │
+│     • Noise-phrase removal ("amara.org", "thanks for…")    │
+│     • Trailing-noise trimming                              │
+│     • Minimum-word-count sanity check                      │
+│     • Repetition-density hallucination flag                │
+│   Corrections dictionary (user-configured vocab swaps,     │
+│   e.g. "volaris" → "Volaris")                              │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 6. SPEAKER DIARIZATION (optional but usually on) ─────────┐
+│   Re-uses Silero VAD from stage 3 for speech boundaries    │
+│   Speech-segment merging & filtering                       │
+│  ● TitaNet Small (speaker embeddings)       10 MB          │
+│  ○ CAM++         (speaker embeddings)       28 MB          │
+│   Speaker-count estimation (VAD density + embedding        │
+│   spread + silhouette scoring with bell-curve penalty)     │
+│   Hierarchical clustering (scipy, no model)                │
+│   Post-cluster centroid merge                              │
+│   Voice Library matching — identifies known speakers       │
+│   across meetings using cached embeddings                  │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 7. OUTPUT WRITING (no models) ────────────────────────────┐
+│   Markdown transcript with YAML frontmatter                │
+│   _whisper.json — raw Whisper/ASR segments                 │
+│   _diarized.json — speaker-labelled segments               │
+│   state.json — pipeline state for resume / re-queue        │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 8. LLM SUMMARISATION (optional, uses existing CLI) ───────┐
+│   Auto-detects local CLI in PATH:                          │
+│     claude → codex → gemini → ollama                       │
+│   Map-reduce chunking for long transcripts                 │
+│   Produces: title, action items, decisions, key points,    │
+│   tags, attendees — added to the frontmatter               │
+│   No API keys — uses your existing AI subscription.        │
+└────────────────────────────────────────────────────────────┘
+        │
+┌─ 9. INTEGRATIONS (optional, user-configured) ──────────────┐
+│   Knowledge graph indexing → SQLite + FTS5 for search      │
+│   Obsidian vault sync     → [[wikilinks]], person notes    │
+│   Custom shell hook        → Slack/email/anything          │
+│   MCP server exposure      → AI agents query your meetings │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Stages with swappable models** (selectable in the Models Manager): 3, 4, 6, and 4.5 (auto-added when Cohere is selected in stage 4).
+
+**Stages that are pure logic** (no model, always the same code): 1, 2, 5, 7, 8 (CLI detection, not a model), 9.
+
+All processing happens locally on a single desktop app with menu bar integration (macOS) or system tray (Windows). LLM summarisation is optional and uses your existing CLI subscriptions. The pipeline is detailed further in [`docs/PLAN-asr-model-evaluation.md`](docs/PLAN-asr-model-evaluation.md).
 
 ## Prerequisites
 
@@ -108,12 +200,22 @@ All files are stored under `~/HiDock/`:
 
 ```
 ~/HiDock/
-  Recordings/          # Downloaded MP3 files
-  Raw Transcripts/     # Whisper transcription output (.md with YAML frontmatter)
-  Speech-to-Text/      # Whisper model cache
-  Voice Library/       # Speaker embeddings (when diarization is enabled)
-  knowledge.db         # SQLite knowledge graph index (rebuildable from transcripts)
+  Recordings/                       # Downloaded MP3 files
+  Raw Transcripts/                  # Transcription output for each recording:
+    <basename>.md                   #   Markdown with YAML frontmatter
+    <basename>_whisper.json         #   Raw ASR segments (Whisper/Parakeet/Cohere)
+    <basename>_diarized.json        #   Speaker-labelled segments
+  Summaries/                        # LLM-generated structured summaries (if enabled)
+  Transcriptions/                   # Enriched human-readable meeting notes
+  Speech-to-Text/                   # Downloaded model weights (Whisper, TitaNet, VAD)
+  Voice Library/                    # Cross-meeting speaker embeddings
+  transcription-pipeline/
+    state.json                      # Pipeline state for resume/re-queue
+    .transcribe.lock                # Advisory lock preventing concurrent runs
+  knowledge.db                      # SQLite knowledge graph (rebuildable)
 ```
+
+Parakeet weights, when enabled, live under `~/.cache/huggingface/hub/` rather than `Speech-to-Text/` — the parakeet-mlx library manages its own cache.
 
 ### Transcript format
 

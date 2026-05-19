@@ -96,6 +96,135 @@ private func formatTime(seconds: Double) -> String {
     return String(format: "%02d:%02d", minutes, secs)
 }
 
+// MARK: - FlowLayout
+
+/// Word-token wrapping layout. Originally used inside the split-segment
+/// sheet (Layer 1 v1); now reused for the inline word-token row that
+/// replaced it (Layer 1 v2). macOS 13+ Layout protocol — flow children
+/// left-to-right, wrap when the next child would exceed the proposed
+/// width.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+    var lineSpacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0
+        for sub in subviews {
+            let s = sub.sizeThatFits(.unspecified)
+            if x > 0, x + s.width > maxWidth {
+                y += rowHeight + lineSpacing
+                x = 0
+                rowHeight = 0
+            }
+            x += s.width + spacing
+            totalWidth = max(totalWidth, x)
+            rowHeight = max(rowHeight, s.height)
+        }
+        return CGSize(width: totalWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x: CGFloat = bounds.minX
+        var y: CGFloat = bounds.minY
+        var rowHeight: CGFloat = 0
+        for sub in subviews {
+            let s = sub.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + s.width > bounds.maxX {
+                y += rowHeight + lineSpacing
+                x = bounds.minX
+                rowHeight = 0
+            }
+            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing
+            rowHeight = max(rowHeight, s.height)
+        }
+    }
+}
+
+// MARK: - Layer 1 v2 word-range selection
+
+/// Identifies which segment currently has an active word-range
+/// selection and what that range is. Only one segment can have a
+/// selection at a time — starting a drag in another segment moves the
+/// selection there.
+struct SegmentSelection: Equatable {
+    let segmentIndex: Int
+    var range: ClosedRange<Int>
+}
+
+/// Lets word-token views inside a row publish their frames (in the
+/// row's local coordinate space) so a single drag gesture on the
+/// container can hit-test which word the pointer is over.
+private struct WordFramesKey: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
+/// Renders a segment's text as a flow of clickable word tokens with a
+/// drag-to-select range. A single tap selects one word; dragging
+/// extends the range. The selected range tints blue. Pure UI — the
+/// caller owns the selection state via `activeRange` / `onRangeChange`.
+private struct WordTokensView: View {
+    let words: [String]
+    let activeRange: ClosedRange<Int>?
+    let onRangeChange: (ClosedRange<Int>) -> Void
+
+    @State private var wordFrames: [Int: CGRect] = [:]
+    @State private var dragStart: Int? = nil
+
+    var body: some View {
+        // Reads as a normal paragraph: each word carries its own
+        // trailing space so the natural inter-word gap is the font's
+        // own space-glyph width, not a padding constant. FlowLayout
+        // spacing is 0 so adjacent highlighted words have backgrounds
+        // that touch edge-to-edge (matching native text-selection).
+        FlowLayout(spacing: 0, lineSpacing: 1) {
+            ForEach(Array(words.enumerated()), id: \.offset) { i, w in
+                let inRange = activeRange.map { $0.contains(i) } ?? false
+                let display = (i == words.count - 1) ? w : "\(w) "
+                Text(display)
+                    .font(.body)
+                    .background(inRange ? Color.blue.opacity(0.28) : Color.clear)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: WordFramesKey.self,
+                                value: [i: proxy.frame(in: .named("wordFlow"))]
+                            )
+                        }
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .coordinateSpace(name: "wordFlow")
+        .contentShape(Rectangle())
+        .onPreferenceChange(WordFramesKey.self) { wordFrames = $0 }
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named("wordFlow"))
+                .onChanged { value in
+                    guard let idx = wordIndex(at: value.location) else { return }
+                    if dragStart == nil { dragStart = idx }
+                    let lower = min(dragStart!, idx)
+                    let upper = max(dragStart!, idx)
+                    onRangeChange(lower...upper)
+                }
+                .onEnded { _ in
+                    dragStart = nil
+                }
+        )
+    }
+
+    private func wordIndex(at point: CGPoint) -> Int? {
+        wordFrames.first(where: { $0.value.contains(point) })?.key
+    }
+}
+
 // MARK: - TranscriptViewerView
 
 struct TranscriptViewerView: View {
@@ -104,11 +233,20 @@ struct TranscriptViewerView: View {
     @State var editingName: String = ""
     @State var rediarizeNSpeakers: Int = 2
     @State var transcriptHistory: [DiarizedTranscript] = []
+    /// Layer 1 v2 — currently active mid-segment word-range selection.
+    /// Drives the inline speaker bar that appears below the affected
+    /// segment row. Only one segment can have a selection at a time.
+    @State var selection: SegmentSelection? = nil
     @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
     let onEnrollSpeaker: (String, String, Double, Double) -> Void
     var onRediarize: ((String, Int?) -> Void)?
+    /// Layer 2 callback — fires `transcribe.py recluster-with-anchors`
+    /// against the current diarized.json, treating every segment with
+    /// a user-edited speaker name as an anchor centroid. Optional so
+    /// older call-sites (rediarize-only flow) keep compiling.
+    var onReclusterWithLabels: ((String) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -121,6 +259,20 @@ struct TranscriptViewerView: View {
 
     private func speakerName(for id: Int) -> String {
         transcript.speakerNames["\(id)"] ?? "Speaker \(id + 1)"
+    }
+
+    /// True when at least one speaker has been renamed away from the
+    /// auto-generated "Speaker N" — the signal we use to know we have
+    /// anchor labels worth re-clustering against (Layer 2).
+    private var hasUserNamedSpeakers: Bool {
+        for (idStr, name) in transcript.speakerNames {
+            guard let id = Int(idStr) else { continue }
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if trimmed == "Speaker \(id + 1)" { continue }
+            return true
+        }
+        return false
     }
 
     // MARK: - Computed Stats
@@ -197,6 +349,22 @@ struct TranscriptViewerView: View {
                     .controlSize(.small)
                 }
 
+                // Layer 2 — re-cluster the rest of the transcript using
+                // the segments the user has already named as anchors.
+                // Only useful when at least one speaker has been
+                // renamed away from the default "Speaker N", so we
+                // hide the button otherwise.
+                if onReclusterWithLabels != nil, hasUserNamedSpeakers {
+                    Button {
+                        onReclusterWithLabels?(filePath)
+                    } label: {
+                        Label("Re-cluster from my labels", systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Use the speakers you've named as anchors and re-assign every other segment to its closest match. The pieces of the conversation you've already corrected stay put.")
+                }
+
                 Button {
                     copyAllToClipboard()
                 } label: {
@@ -255,8 +423,8 @@ struct TranscriptViewerView: View {
             // Segments list
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(transcript.segments) { segment in
-                        segmentRow(segment: segment)
+                    ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
+                        segmentRow(segmentIndex: idx, segment: segment)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -264,6 +432,147 @@ struct TranscriptViewerView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 400)
+    }
+
+    // MARK: - Inline word-range split (Layer 1 v2)
+
+    /// Lowest unused speakerId — used when the user picks "New speaker"
+    /// in the inline speaker bar.
+    private func nextNewSpeakerId() -> Int {
+        let used = Set(transcript.segments.map(\.speakerId))
+        var n = 0
+        while used.contains(n) { n += 1 }
+        return n
+    }
+
+    /// Inline speaker bar that appears directly below a segment row when
+    /// the user has selected a word range inside it. Click a speaker
+    /// pill to assign the range to that speaker; the segment splits
+    /// into up to three pieces depending on whether the range hits the
+    /// start, middle, or end of the segment.
+    @ViewBuilder
+    private func inlineSpeakerBar(segmentIndex idx: Int, range: ClosedRange<Int>) -> some View {
+        let count = range.upperBound - range.lowerBound + 1
+        HStack(spacing: 8) {
+            Image(systemName: "scissors")
+                .foregroundColor(.blue)
+                .font(.caption)
+            Text("Assign \(count) word\(count == 1 ? "" : "s") to:")
+                .font(.caption.weight(.medium))
+                .foregroundColor(.secondary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(uniqueSpeakerIds, id: \.self) { sid in
+                        Button {
+                            applyRangeSplit(segmentIndex: idx, wordRange: range, newSpeakerId: sid)
+                            selection = nil
+                        } label: {
+                            speakerPill(speakerId: sid, interactive: false)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button {
+                        applyRangeSplit(segmentIndex: idx, wordRange: range, newSpeakerId: nextNewSpeakerId())
+                        selection = nil
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                            Text("New speaker")
+                                .font(.caption.weight(.medium))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.15))
+                        .cornerRadius(12)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Spacer()
+
+            Button {
+                selection = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+                    .font(.body)
+            }
+            .buttonStyle(.plain)
+            .help("Cancel selection")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.leading, 76)
+        .padding(.trailing, 4)
+    }
+
+    /// Layer 1 v2 split. Takes a closed word range inside `segments[idx]`
+    /// and assigns those words to `newSpeakerId`. Up to three pieces:
+    /// optional head (original speaker, words before the range),
+    /// the range itself (new speaker), optional tail (original speaker,
+    /// words after the range). Time boundaries via linear interpolation
+    /// over word count — same approach as the original sheet-based
+    /// Layer 1, kept because it's cheap and TitaNet's effective
+    /// resolution swallows the per-word imprecision.
+    private func applyRangeSplit(segmentIndex idx: Int, wordRange: ClosedRange<Int>, newSpeakerId: Int) {
+        guard idx >= 0, idx < transcript.segments.count else { return }
+        let segment = transcript.segments[idx]
+        let words = segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        let startWord = wordRange.lowerBound
+        let endWord = wordRange.upperBound
+        guard startWord >= 0, endWord < words.count, startWord <= endWord else { return }
+
+        transcriptHistory.append(transcript)
+
+        let duration = max(segment.end - segment.start, 0.001)
+        let totalWords = Double(words.count)
+        let rangeStartTime = segment.start + (Double(startWord) / totalWords) * duration
+        let rangeEndTime = segment.start + (Double(endWord + 1) / totalWords) * duration
+
+        var replacement: [DiarizedSegment] = []
+        if startWord > 0 {
+            let headText = words[0..<startWord].joined(separator: " ")
+            replacement.append(DiarizedSegment(
+                start: segment.start,
+                end: rangeStartTime,
+                speakerId: segment.speakerId,
+                text: headText
+            ))
+        }
+        let rangeText = words[startWord...endWord].joined(separator: " ")
+        replacement.append(DiarizedSegment(
+            start: rangeStartTime,
+            end: rangeEndTime,
+            speakerId: newSpeakerId,
+            text: rangeText
+        ))
+        if endWord < words.count - 1 {
+            let tailText = words[(endWord + 1)..<words.count].joined(separator: " ")
+            replacement.append(DiarizedSegment(
+                start: rangeEndTime,
+                end: segment.end,
+                speakerId: segment.speakerId,
+                text: tailText
+            ))
+        }
+
+        var updated = transcript.segments
+        updated.remove(at: idx)
+        for (offset, seg) in replacement.enumerated() {
+            updated.insert(seg, at: idx + offset)
+        }
+        transcript.segments = updated
+
+        // Enrol the range as a sample for the new speaker — cleaner
+        // provenance than the whole-segment sample we used to take
+        // from the second half of a single-cut split.
+        let speakerNameForEnrol = speakerName(for: newSpeakerId)
+        onEnrollSpeaker(speakerNameForEnrol, audioPath, rangeStartTime, rangeEndTime)
+
+        saveTranscript()
     }
 
     // MARK: - Stats Header
@@ -354,39 +663,51 @@ struct TranscriptViewerView: View {
     }
 
     @ViewBuilder
-    private func segmentRow(segment: DiarizedSegment) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            // Play button
-            Button {
-                if audioPlayer.playingSegmentId == segment.id {
-                    audioPlayer.stop()
-                } else {
-                    audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id)
+    private func segmentRow(segmentIndex idx: Int, segment: DiarizedSegment) -> some View {
+        let words = segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        let activeRange: ClosedRange<Int>? = (selection?.segmentIndex == idx) ? selection?.range : nil
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .top, spacing: 8) {
+                // Play button
+                Button {
+                    if audioPlayer.playingSegmentId == segment.id {
+                        audioPlayer.stop()
+                    } else {
+                        audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id)
+                    }
+                } label: {
+                    Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
+                        .foregroundColor(audioPlayer.playingSegmentId == segment.id ? .blue : .secondary)
                 }
-            } label: {
-                Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
-                    .foregroundColor(audioPlayer.playingSegmentId == segment.id ? .blue : .secondary)
+                .buttonStyle(.plain)
+                .frame(width: 18)
+
+                Text("[\(formatTime(seconds: segment.start))]")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .frame(width: 50, alignment: .leading)
+
+                if hasSpeakers {
+                    speakerPill(speakerId: segment.speakerId, interactive: true)
+                }
+
+                WordTokensView(
+                    words: words,
+                    activeRange: activeRange,
+                    onRangeChange: { newRange in
+                        selection = SegmentSelection(segmentIndex: idx, range: newRange)
+                    }
+                )
+
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-            .frame(width: 18)
+            .padding(.vertical, 2)
 
-            Text("[\(formatTime(seconds: segment.start))]")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 50, alignment: .leading)
-
-            if hasSpeakers {
-                speakerPill(speakerId: segment.speakerId, interactive: true)
+            if let active = activeRange {
+                inlineSpeakerBar(segmentIndex: idx, range: active)
             }
-
-            Text(segment.text)
-                .font(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-
-            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
     }
 
     // MARK: - Actions

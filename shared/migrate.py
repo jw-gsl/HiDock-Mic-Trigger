@@ -20,7 +20,6 @@ from pathlib import Path
 from shared.transcript_writer import (
     auto_title,
     build_frontmatter,
-    parse_frontmatter,
 )
 
 

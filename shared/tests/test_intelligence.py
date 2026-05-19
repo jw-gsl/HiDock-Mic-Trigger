@@ -7,7 +7,6 @@ import pytest
 
 from shared.intelligence import MeetingIntelligence
 from shared.knowledge import KnowledgeGraph
-from shared.transcript_writer import write_transcript
 
 
 def _write_meeting(
@@ -23,14 +22,6 @@ def _write_meeting(
 ) -> Path:
     """Helper to write a transcript with specific metadata."""
     date = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
-    summary = {
-        "title": title,
-        "action_items": action_items or [],
-        "decisions": decisions or [],
-        "key_points": ["Point 1"],
-        "tags": tags or [],
-        "summary_text": f"Summary of {title}",
-    }
     path = transcripts_dir / f"{name}.md"
     from shared.transcript_writer import build_frontmatter
     frontmatter = build_frontmatter(

@@ -34,7 +34,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from shared.knowledge import KnowledgeGraph
 from shared.intelligence import MeetingIntelligence
-from shared.transcript_writer import parse_frontmatter
 
 # Server metadata
 SERVER_NAME = "meetings"

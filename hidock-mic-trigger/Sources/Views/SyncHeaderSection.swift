@@ -6,11 +6,14 @@ struct SyncHeaderSection: View {
     private var statusColor: Color {
         switch viewModel.syncStatusLevel {
         case .success: return .green
+        case .transcribed: return .purple
         case .warning: return .orange
         case .error: return .red
         case .info: return .blue
         case .secondary: return .secondary
         case .normal: return .primary
+        case .skipped: return Color.teal.opacity(0.6)
+        case .removed: return Color.red.opacity(0.6)
         }
     }
 
@@ -19,88 +22,58 @@ struct SyncHeaderSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Status row
-            HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            // Device strip — one card per paired device, plus an imports
+            // card when relevant. Every fact about a device (connected /
+            // recording / unreachable / storage / reconnect / filter)
+            // lives on its own card, so the header doesn't need separate
+            // status / storage / filter rows any more.
+            DeviceStripView(viewModel: viewModel)
+
+            // Generic pipeline-status line: transcription progress, skip
+            // confirmations, auto-flow messages. Per-device connection
+            // state lives on the cards above, so this row is hidden when
+            // there's no pipeline message to surface — prevents the
+            // redundant "Connected — 🔊 P1" line showing the same thing
+            // as the cards.
+            //
+            // Hidden entirely when the TranscriptionProgressBar (top of
+            // MainWindowView) is already rendering a live
+            // "Transcribing N/M — p% · <stage>" line with its own
+            // progress bar and cancel button. Two places showing the
+            // same transcription status ended up racing each other;
+            // one well-designed indicator wins.
+            if !viewModel.transcriptionBusy && !viewModel.trimBusy
+                && (!viewModel.syncStatus.isEmpty || !viewModel.syncSummary.isEmpty) {
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 8, height: 8)
-                    Text(viewModel.syncStatus)
-                        .font(.body.weight(.medium))
+                    if !viewModel.syncStatus.isEmpty {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 8, height: 8)
+                        Text(viewModel.syncStatus)
+                            .font(.caption)
+                            .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
+                    }
+                    Spacer()
+                    if !viewModel.syncSummary.isEmpty {
+                        Text(viewModel.syncSummary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
-                Spacer()
-                Text(viewModel.syncSummary)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
-            // Folder paths + download buttons on same row
-            HStack(spacing: 12) {
-                if let folder = viewModel.syncOutputFolder {
-                    Label {
-                        Text(folder)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "folder")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                }
-
-                if let folder = viewModel.syncTranscriptFolder {
-                    Label {
-                        Text(folder)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "doc.text")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                // Download buttons on same row as paths
-                HStack(spacing: 6) {
-                    Button {
-                        viewModel.onDownloadSelected()
-                    } label: {
-                        Label("Download Selected", systemImage: "arrow.down.circle")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
-
-                    Button {
-                        viewModel.onDownloadNew()
-                    } label: {
-                        Label("Download New", systemImage: "arrow.down.to.line")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.syncPaired)
-
-                    Button {
-                        viewModel.onMarkDownloaded()
-                    } label: {
-                        Label("Skip", systemImage: "forward.fill")
-                    }
-                    .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-
-                    if viewModel.anySelectedMarkedOnly {
-                        Button {
-                            viewModel.onUnmarkDownloaded()
-                        } label: {
-                            Label("Unskip", systemImage: "backward.fill")
-                        }
-                        .disabled(viewModel.syncBusy)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
+            // Action buttons (Download Selected, Download New, Skip,
+            // Unskip) used to live here. They migrated to the toolbar
+            // below as part of the 2026-04-26 layout consolidation —
+            // Skip joined Merge/Trim/Remove on the actions row, and
+            // Download Selected sits on the select/filter row, since
+            // "select rows → choose what → click Download Selected"
+            // reads as a left-to-right verb on a single line. Unskip
+            // remained available via the row's right-click context
+            // menu (which it also was before).
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(isConnected ? Color.green.opacity(0.04) : Color.clear)
     }
 }

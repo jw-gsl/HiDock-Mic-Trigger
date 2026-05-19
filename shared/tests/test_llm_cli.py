@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
 
 from shared.llm_cli import (
     LLMEngine,
@@ -82,7 +81,6 @@ class TestQuery:
             assert result is None
 
     def test_returns_none_on_timeout(self):
-        import subprocess
 
         engine = LLMEngine(name="test", command=["sleep", "10"], description="test")
         result = query("test", engine=engine, timeout=1)

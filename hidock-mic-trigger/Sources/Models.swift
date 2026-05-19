@@ -17,6 +17,34 @@ struct HiDockSyncRecording: Codable {
     let lastError: String?
     let status: String
     let humanLength: String
+    /// True when the local file has been trimmed in-place via the
+    /// Mac app's Trim action. Flows from state.json through the
+    /// extractor's status response. Decoded optionally for backward
+    /// compatibility with older state.json entries.
+    let trimmed: Bool?
+    /// True when `duration` is the extractor's `bytes / 8000` fallback
+    /// rather than the authoritative value read from MP3 frame headers.
+    /// Drives the table column's `~` prefix even on downloaded rows
+    /// where mutagen failed (e.g. missing dep). Optional for backward
+    /// compatibility — older payloads default to "treat as estimated
+    /// when not local, authoritative when local" per the previous
+    /// behaviour.
+    let durationEstimated: Bool?
+    /// True when the user removed the local copy via the Mac app's
+    /// Remove action. Excludes the row from auto-download (extractor
+    /// skips with reason `user_removed`) and auto-transcribe. Surfaces
+    /// as a "Removed" status pill — semantically the same UX as
+    /// Skipped but with a different intent (deleted on purpose vs
+    /// never wanted). Optional for state.json entries written before
+    /// the field existed.
+    let removed: Bool?
+}
+
+struct HiDockStorageStats: Codable {
+    let totalFiles: Int
+    let returnedFiles: Int
+    let totalBytesReturned: Int
+    let truncated: Bool
 }
 
 struct HiDockSyncStatusResponse: Codable {
@@ -26,6 +54,7 @@ struct HiDockSyncStatusResponse: Codable {
     let configPath: String
     let recordings: [HiDockSyncRecording]
     let error: String?
+    let storage: HiDockStorageStats?
 }
 
 struct HiDockSyncDownloadResult: Codable {
@@ -184,8 +213,13 @@ struct HiDockSyncRecordingEntry: Identifiable {
     var transcriptPath: String? = nil
     var speakersTagged: Bool = false
     var summaryPath: String? = nil
+    /// User explicitly opted out of transcribing this recording. The file
+    /// is downloaded but they don't want it in the transcription queue.
+    /// Independent of `transcribed` — if false and skipped is true, the
+    /// UI shows "Skipped" and auto-transcribe filters it out.
+    var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -195,20 +229,84 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.transcriptPath = transcriptPath
         self.speakersTagged = speakersTagged
         self.summaryPath = summaryPath
+        self.transcriptionSkipped = transcriptionSkipped
     }
 
+    /// Cascading lifecycle: On device → Downloaded → Transcribed.
+    /// Each step implies the earlier ones (you can't transcribe a file
+    /// you haven't downloaded, you can't download one that isn't on the
+    /// device). The Tagged column is separate — that's about speaker
+    /// tagging on top of the transcription.
     var statusText: String {
-        if recording.downloaded && recording.localExists { return "Downloaded" }
+        // Cascade order:
+        //   Transcribed > Removed > Skipped > Imported > Downloaded > Failed > On device
+        //
+        // Transcribed first — it's the pipeline-end state and always
+        // overrides earlier ones (an imported-then-transcribed row
+        // shouldn't read "Imported" forever).
+        //
+        // Removed and Skipped sit together right after — both are
+        // user-driven exclusions ("don't process this"), and the user
+        // wants their explicit intent surfaced before metadata-derived
+        // labels like "Imported" or "Downloaded". A downloaded file
+        // that the user transcription-skipped now correctly shows
+        // "Skipped", not "Downloaded" — making the opt-out visible.
+        if transcribed { return "Transcribed" }
+        if recording.removed == true { return "Removed" }
+        // `downloaded == true` + `localExists == false` in the extractor
+        // state means the user marked it downloaded without ever pulling
+        // it (the old "Skip" flow to stop the device showing it).
         if recording.downloaded && !recording.localExists { return "Skipped" }
+        if transcriptionSkipped { return "Skipped" }
+        if deviceId == "imported:local" { return "Imported" }
+        // Filesystem wins over metadata: if the MP3 is on disk, it's
+        // downloaded regardless of what the extractor's state.json says.
+        if recording.localExists { return "Downloaded" }
         if recording.lastError != nil { return "Failed" }
         return "On device"
     }
 
     var statusLevel: StatusLevel {
-        if recording.downloaded && recording.localExists { return .success }
-        if recording.downloaded && !recording.localExists { return .info }
-        if recording.lastError != nil { return .error }
-        return .secondary
+        if transcribed { return .transcribed }                       // purple: "fully processed"
+        if recording.removed == true { return .removed }             // muted red: "I deleted this"
+        if recording.downloaded && !recording.localExists { return .skipped }
+        if transcriptionSkipped { return .skipped }                  // cyan: "I told it to skip"
+        if deviceId == "imported:local" { return .info }             // blue: source marker, not a warning
+        if recording.localExists { return .success }                 // green: "got the bytes"
+        if recording.lastError != nil { return .error }              // red: needs attention
+        return .secondary                                            // grey: not yet acted on
+    }
+}
+
+/// User-selectable filter that restricts the recordings table to a
+/// pipeline-stage subset. Distinct from the per-device filter (which
+/// is set by clicking the filter icon on a device card) — both can be
+/// active simultaneously and are AND-ed together.
+enum SyncStatusFilter: String, CaseIterable, Identifiable {
+    case all
+    case onDevice
+    case downloaded
+    case untranscribed
+    case transcribed
+    case skipped
+    case removed
+    case failed
+    case imported
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: return "All"
+        case .onDevice: return "On device"
+        case .downloaded: return "Downloaded"
+        case .untranscribed: return "Untranscribed"
+        case .transcribed: return "Transcribed"
+        case .skipped: return "Skipped"
+        case .removed: return "Removed"
+        case .failed: return "Failed"
+        case .imported: return "Imported"
+        }
     }
 }
 
@@ -228,6 +326,18 @@ enum DisplayRow: Identifiable {
 
 enum StatusLevel {
     case normal, success, warning, error, info, secondary
+    /// Used for the "Transcribed" status — distinct from `.success`
+    /// (which remains green for "Downloaded") so Downloaded and
+    /// Transcribed rows are visually distinguishable at a glance.
+    case transcribed
+    /// User-driven opt-out: "I told you to skip this." Cyan reads as a
+    /// deliberate choice — distinct from grey ("not yet acted on")
+    /// and from blue (informational).
+    case skipped
+    /// User-driven destructive action: "I deleted the local copy."
+    /// Renders as muted red — reminds the user a destructive action
+    /// was taken without screaming "error" the way full red would.
+    case removed
 }
 
 struct MergeGroup: Codable, Identifiable {
@@ -248,12 +358,49 @@ struct MergeGroup: Codable, Identifiable {
     }
 }
 
+/// One detected merge-candidate chain: 2+ recordings on the same
+/// device, small wall-clock gaps, transcripts present on every piece.
+/// Decoded from `extractor.py merge-candidates` JSON output.
+struct MergeCandidate: Codable, Identifiable {
+    struct Piece: Codable {
+        let device_name: String   // e.g. "2026Apr22-203106-Rec52.hda"
+        let mp3_name: String
+        let mp3_path: String
+        let start: String         // ISO-8601
+        let duration_s: Double
+        let pid: Int?
+    }
+    let score: Int
+    let high_confidence: Bool
+    let total_min: Double
+    let max_gap_s: Double
+    let continuity_signals: [String]
+    let pair_key: String          // stable order-independent key for dismiss
+    let pieces: [Piece]
+
+    /// Identifiable conformance — pair_key is stable across rescans
+    /// (sorted concat of first+last filename), so SwiftUI can keep
+    /// row identity even when scores or signals change.
+    var id: String { pair_key }
+}
+
+struct MergeCandidatesPayload: Codable {
+    let chains: [MergeCandidate]
+    let high_confidence_count: Int
+    let total_count: Int
+}
+
 struct TranscriptionQueueItem: Identifiable {
     let id: String
     let path: String
     let filename: String
     var status: TranscriptionQueueStatus
     var progress: Int = 0
+    /// Captured on `.failed` / `.cancelled`. Drives the clickable
+    /// red-X icon in the recordings table — tapping it surfaces the
+    /// actual stderr or NSError text instead of forcing the user to
+    /// dig through the menu-bar log file.
+    var errorMessage: String? = nil
 
     init(path: String) {
         self.id = path
