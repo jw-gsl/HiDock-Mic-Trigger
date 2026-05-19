@@ -6413,18 +6413,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let errPipe = Pipe()
             process.standardError = errPipe
 
+            // Drain stdout/stderr concurrently with the child. `transcribe.py
+            // status` prints the full state.json (>100 KB once the backlog
+            // grows) and the macOS pipe buffer is only ~16–64 KB, so a
+            // read-after-waitUntilExit pattern deadlocks: child blocks on
+            // write(), parent blocks on waitUntilExit. Because this runs on
+            // the same serial `transcriptionDispatchQueue` as the actual
+            // transcribe subprocess, that deadlock wedges the entire
+            // transcription queue.
+            var outData = Data()
+            let outQueue = DispatchQueue(label: "hidock.refreshTranscriptionState.stdout")
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if !chunk.isEmpty { outQueue.sync { outData.append(chunk) } }
+            }
+            var errData = Data()
+            let errQueue = DispatchQueue(label: "hidock.refreshTranscriptionState.stderr")
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if !chunk.isEmpty { errQueue.sync { errData.append(chunk) } }
+            }
+
             do {
                 try process.run()
                 process.waitUntilExit()
             } catch {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
                 self.log("refreshTranscriptionState: failed to run process: \(error.localizedDescription)")
                 return
             }
 
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            pipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            let tailOut = pipe.fileHandleForReading.readDataToEndOfFile()
+            if !tailOut.isEmpty { outQueue.sync { outData.append(tailOut) } }
+            let tailErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+            if !tailErr.isEmpty { errQueue.sync { errData.append(tailErr) } }
+
+            let data = outQueue.sync { outData }
             if process.terminationStatus != 0 {
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let errMsg = String(data: errData, encoding: .utf8) ?? "unknown error"
+                let stderrBytes = errQueue.sync { errData }
+                let errMsg = String(data: stderrBytes, encoding: .utf8) ?? "unknown error"
                 self.log("refreshTranscriptionState: exit=\(process.terminationStatus), stderr=\(errMsg.prefix(400))")
                 return
             }
