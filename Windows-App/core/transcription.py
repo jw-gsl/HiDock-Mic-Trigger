@@ -107,7 +107,12 @@ def transcribe_file(
         diarized_result = None
         if diarize:
             try:
-                from shared.diarize_lite import diarize as run_diarize
+                # Route through the dispatcher so the Windows path
+                # respects pipeline_backends.json (lite vs sortformer).
+                # Importing diarize_lite directly bypassed the user's
+                # backend selection — same fix applied in
+                # transcription-pipeline/transcribe.py.
+                from shared.pipeline_dispatch import diarize as run_diarize
                 from shared.voice_library_lite import identify_speakers
                 from shared.audio_utils import load_audio, extract_embedding, segment_audio
 

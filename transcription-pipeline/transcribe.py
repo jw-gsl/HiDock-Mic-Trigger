@@ -217,13 +217,20 @@ def transcribe_file(
                     transcribe_path,
                     language=config.WHISPER_LANGUAGE,
                     verbose=False,
+                    word_timestamps=True,
                 )
                 active_model_name = config.WHISPER_MODEL
         else:
+            # word_timestamps=True so the diarizer can do per-word
+            # speaker alignment. Whisper supports this natively at no
+            # extra model cost; the only overhead is per-segment DTW
+            # alignment. Lite diarizer ignores the `words` field;
+            # Sortformer's word-level path consumes it.
             result = model.transcribe(
                 transcribe_path,
                 language=config.WHISPER_LANGUAGE,
                 verbose=False,
+                word_timestamps=True,
             )
             active_model_name = config.WHISPER_MODEL
         progress(85)
@@ -648,7 +655,11 @@ def cmd_rediarize(args):
         print(f"No _whisper.json found, using existing {len(segments)} segments", file=sys.stderr)
     progress(5)
 
-    from shared.diarize_lite import diarize as run_diarize
+    # Route through the dispatcher so rediarize respects the active
+    # backend from pipeline_backends.json (lite vs sortformer). Without
+    # this, flipping the user's backend choice had no effect on this
+    # command path.
+    from shared.pipeline_dispatch import diarize as run_diarize
     progress(10)
 
     n_speakers = args.n_speakers if hasattr(args, "n_speakers") else None
