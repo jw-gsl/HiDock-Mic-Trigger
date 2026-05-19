@@ -114,6 +114,28 @@ def load_whisper_model():
     return model
 
 
+def _word_timestamps_safe(model) -> bool:
+    """Whether it's safe to pass ``word_timestamps=True`` to this Whisper
+    model. Whisper's per-word alignment runs DTW on the cross-attention
+    matrix in float64, and Apple Silicon MPS doesn't support float64
+    ("Cannot convert a MPS Tensor to float64 dtype"). Returns False when
+    the model is on MPS so transcription succeeds; the diarizer then
+    falls back to segment-level alignment (which is what existing
+    cached `_whisper.json` files already use)."""
+    try:
+        import torch
+        device = getattr(model, "device", None)
+        if device is None:
+            return True
+        # `device` is a torch.device on a loaded Whisper model.
+        if isinstance(device, torch.device):
+            return device.type != "mps"
+        # Defensive: some paths set a string.
+        return "mps" not in str(device).lower()
+    except Exception:
+        return True
+
+
 def transcribe_file(
     mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
     n_speakers: int | None = None,
@@ -217,20 +239,17 @@ def transcribe_file(
                     transcribe_path,
                     language=config.WHISPER_LANGUAGE,
                     verbose=False,
-                    word_timestamps=True,
+                    word_timestamps=_word_timestamps_safe(model),
                 )
                 active_model_name = config.WHISPER_MODEL
         else:
-            # word_timestamps=True so the diarizer can do per-word
-            # speaker alignment. Whisper supports this natively at no
-            # extra model cost; the only overhead is per-segment DTW
-            # alignment. Lite diarizer ignores the `words` field;
-            # Sortformer's word-level path consumes it.
+            # word_timestamps lets the diarizer do per-word speaker
+            # alignment — see _word_timestamps_safe for the MPS caveat.
             result = model.transcribe(
                 transcribe_path,
                 language=config.WHISPER_LANGUAGE,
                 verbose=False,
-                word_timestamps=True,
+                word_timestamps=_word_timestamps_safe(model),
             )
             active_model_name = config.WHISPER_MODEL
         progress(85)
