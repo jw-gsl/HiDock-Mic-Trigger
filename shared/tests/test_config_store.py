@@ -1,9 +1,7 @@
 """Tests for shared.config_store module."""
 from __future__ import annotations
 
-from pathlib import Path
 
-import pytest
 
 from shared.config_store import ConfigStore, _parse_toml, _serialize_toml
 

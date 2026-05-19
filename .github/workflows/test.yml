@@ -33,16 +33,6 @@ jobs:
       - run: pip install pytest numpy
       - run: python -m pytest tests/ -v
 
-  shared-modules:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install pytest numpy scipy
-      - run: python -m pytest shared/tests/ -v
-
   python-windows-app:
     runs-on: ubuntu-latest
     defaults:
@@ -66,7 +56,16 @@ jobs:
       - run: pip install pytest numpy scipy soundfile mutagen
       - run: python -m pytest shared/tests/ -v
 
-  swift-tests:
+  # No Swift unit tests live in this project — the `hidock-mic-trigger`
+  # target is an app target with no associated test target, so
+  # `xcodebuild test` would fail with "Scheme is not currently configured
+  # for the test action". Until a test target is added, this job
+  # verifies the app compiles cleanly under Debug as a smoke test —
+  # which `build-macos.yml` also does for Release. Keeping it here
+  # so Tests-workflow status reflects Swift health and so future
+  # additions of XCTest can flip this back to `xcodebuild test`
+  # without re-adding the whole job.
+  swift-build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -76,10 +75,12 @@ jobs:
         run: |
           cd hidock-mic-trigger
           xcodegen generate
-      - name: Run Swift tests
+      - name: Build Swift app (Debug)
+        env:
+          CI: "true"
         run: |
           cd hidock-mic-trigger
-          xcodebuild test \
+          xcodebuild build \
             -project hidock-mic-trigger.xcodeproj \
             -scheme hidock-mic-trigger \
             -configuration Debug \
@@ -96,4 +97,10 @@ jobs:
           python-version: "3.11"
       - run: pip install ruff
       - name: Lint Python code
-        run: ruff check --select E,F,W --ignore E501 .
+        # E402 (module import not at top) is intentional in files that
+        # tweak sys.path before importing. E741 (`l` as variable name)
+        # appears in numerical/clustering code where it's a conventional
+        # short name. Ignored so the lint job catches real issues
+        # (F-series pyflakes errors, W-series whitespace) rather than
+        # signalling on accepted project style.
+        run: ruff check --select E,F,W --ignore E501,E402,E741 .

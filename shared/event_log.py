@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum

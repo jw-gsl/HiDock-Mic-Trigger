@@ -20,13 +20,11 @@ Usage:
 """
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from shared.transcript_writer import parse_frontmatter
 

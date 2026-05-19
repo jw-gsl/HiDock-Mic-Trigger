@@ -32,12 +32,11 @@ import json
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 from scipy.spatial.distance import cosine as cosine_distance
 
-from shared.audio_utils import extract_embedding, load_audio, segment_audio
+from shared.audio_utils import extract_embedding, load_audio
 
 
 # Tuned conservatively: 0.55 cosine similarity (= 0.45 cosine distance)

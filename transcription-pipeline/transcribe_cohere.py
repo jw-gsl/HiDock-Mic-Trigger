@@ -185,7 +185,6 @@ def _align_text_to_audio(
     # wav2vec2-large (320 samples at 16 kHz).
     frame_stride_s = 0.02
     token_timings = []
-    current_token_start = 0
     prev = -1
     for i, t in enumerate(alignments[0].tolist()):
         if t != prev and t != 0:  # new non-blank token

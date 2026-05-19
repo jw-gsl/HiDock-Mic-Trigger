@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QDialog,
@@ -393,7 +393,7 @@ class TranscriptViewerDialog(QDialog):
                     self.setWindowTitle(f"Transcript — {self.transcript.get('audio_file', '')}")
                 except Exception as e:
                     print(f"Re-diarize failed: {e}")
-                    self.setWindowTitle(f"Re-diarize failed")
+                    self.setWindowTitle("Re-diarize failed")
 
             threading.Thread(target=_run, daemon=True).start()
         except Exception as e:

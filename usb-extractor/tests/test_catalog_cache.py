@@ -6,11 +6,7 @@ No USB hardware or network access required.
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 # conftest.py sets up the usb mock before this import
 from extractor import (

@@ -11,7 +11,6 @@ Gracefully returns empty results if no LLM engine is available.
 from __future__ import annotations
 
 import sys
-from typing import Any
 
 from shared.llm_cli import LLMEngine, get_engine, query_json
 

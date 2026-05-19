@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial.distance import cosine as cosine_distance
 
 from shared.audio_utils import extract_embedding, load_audio
 from shared.voice_library_lite import (

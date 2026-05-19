@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from typing import Any
 
 from shared.knowledge import KnowledgeGraph
 

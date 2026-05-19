@@ -4,7 +4,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 # Make sibling packages importable when pytest is run from the repo root.
 _ROOT = Path(__file__).resolve().parent.parent

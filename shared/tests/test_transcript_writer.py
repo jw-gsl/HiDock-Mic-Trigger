@@ -1,10 +1,8 @@
 """Tests for shared.transcript_writer module."""
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
-import pytest
 
 from shared.transcript_writer import (
     auto_title,

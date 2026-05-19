@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -95,7 +94,7 @@ class TestAddFrontmatter:
     def test_with_state_metadata(self, transcript_env):
         transcripts_dir, state_path = transcript_env
         state_meta = json.loads(state_path.read_text())["transcriptions"]
-        result = add_frontmatter_to_file(
+        add_frontmatter_to_file(
             transcripts_dir / "old_recording.md",
             state_meta=state_meta,
             dry_run=False,

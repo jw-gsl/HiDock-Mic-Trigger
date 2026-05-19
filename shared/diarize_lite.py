@@ -844,7 +844,7 @@ def diarize(
     # Step 4: Whisper boundary fallback
     use_whisper_boundaries = False
     if len(whisper_segments) > 5 and vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE:
-        print(f"  VAD insufficient, using Whisper boundaries", file=sys.stderr)
+        print("  VAD insufficient, using Whisper boundaries", file=sys.stderr)
         speech_segments = _whisper_segments_as_speech(whisper_segments)
         use_whisper_boundaries = True
 

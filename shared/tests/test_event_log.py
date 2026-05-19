@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 
 from shared.event_log import (
-    EventType, Event, log_event, recent_events, event_counts, errors_since,
+    EventType, log_event, recent_events, event_counts, errors_since,
     set_db_path, close,
 )
 
@@ -49,7 +48,7 @@ class TestLogEvent:
         assert events[0].error == "File corrupt"
 
     def test_string_event_type(self):
-        eid = log_event("custom_event", file_path="x.txt")
+        log_event("custom_event", file_path="x.txt")
         events = recent_events(limit=1)
         assert events[0].event_type == "custom_event"
 
