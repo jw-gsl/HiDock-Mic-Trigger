@@ -80,12 +80,15 @@ jobs:
           CI: "true"
         run: |
           cd hidock-mic-trigger
+          # -arch arm64 + -destination=macOS would clash on newer xcodebuild
+          # ("destination implies architecture, architecture must not also be
+          # specified"). The macos-15 runner is arm64 so platform alone is
+          # enough.
           xcodebuild build \
             -project hidock-mic-trigger.xcodeproj \
             -scheme hidock-mic-trigger \
             -configuration Debug \
             -derivedDataPath /tmp/hidock-test \
-            -arch arm64 \
             -destination 'platform=macOS'
 
   lint-python:
