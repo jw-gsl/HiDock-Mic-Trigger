@@ -56,10 +56,19 @@ def transcribe(audio_path: str | Path, language: str | None = None) -> dict:
 
     model = from_pretrained("mlx-community/parakeet-tdt-0.6b-v2")
 
+    # Chunked decode is mandatory for long-form audio. Without it,
+    # parakeet-mlx tries to process the whole file in one shot — the
+    # attention matrix grows quadratically with sequence length and a
+    # 60-min meeting blows past the Metal allocator's max buffer size
+    # ("Attempting to allocate ~125 GB which is greater than the
+    # maximum allowed buffer size of ~80 GB"). 120 s chunks with the
+    # default 15 s overlap process any-length audio in bounded memory;
+    # short files (< chunk_duration) flow through as a single chunk
+    # so there's no overhead on meeting recordings under 2 minutes.
     # `transcribe` in parakeet-mlx returns an AlignedResult with `text`
     # and segment-level alignment. Shape varies across versions; shield
     # ourselves by defensively extracting what we need.
-    result = model.transcribe(str(audio_path))
+    result = model.transcribe(str(audio_path), chunk_duration=120.0)
 
     text = getattr(result, "text", None) or ""
     segments_raw = getattr(result, "sentences", None) or getattr(result, "segments", None) or []
