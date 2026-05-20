@@ -4150,10 +4150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         guard FileManager.default.fileExists(atPath: scriptPath) else { return }
 
-        // Mark as downloading
+        // Mark as downloading + clear any prior error from a failed attempt.
         DispatchQueue.main.async { [weak self] in
             self?.viewModel.modelStatuses[key]?.downloading = true
             self?.viewModel.modelStatuses[key]?.progress = 0
+            self?.viewModel.modelStatuses[key]?.errorMessage = nil
         }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -4165,11 +4166,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.standardOutput = outPipe
             process.standardError = errPipe
 
-            // Read stderr for progress updates
+            // Drain stdout concurrently — models.py prints a single JSON
+            // result line at exit (and may print "Installing …" status
+            // first). We need the JSON to dispatch on `error_code` for
+            // HF-gated installs; collecting it requires draining the
+            // pipe while the subprocess runs so it doesn't block on a
+            // full pipe buffer.
+            var outData = Data()
+            let outQueue = DispatchQueue(label: "hidock.downloadModel.stdout")
+            outPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if !chunk.isEmpty { outQueue.sync { outData.append(chunk) } }
+            }
+
+            // Read stderr for progress updates (pip emits %% lines)
             errPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-                // Parse percentage from lines like "  42%"
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let pctStr = trimmed.components(separatedBy: "%").first?.trimmingCharacters(in: .whitespaces),
                    let pct = Double(pctStr) {
@@ -4182,27 +4195,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             do {
                 try process.run()
                 process.waitUntilExit()
+                outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
+                let tailOut = outPipe.fileHandleForReading.readDataToEndOfFile()
+                if !tailOut.isEmpty { outQueue.sync { outData.append(tailOut) } }
+
+                // Find the last JSON object on stdout — models.py may
+                // print human-readable status lines before it, so we
+                // can't just JSONDecode the whole buffer.
+                let stdoutText = outQueue.sync { String(data: outData, encoding: .utf8) ?? "" }
+                let jsonResult = Self.lastJSONObject(in: stdoutText)
 
                 DispatchQueue.main.async {
-                    self?.viewModel.modelStatuses[key]?.downloading = false
-                    if process.terminationStatus == 0 {
-                        self?.viewModel.modelStatuses[key]?.installed = true
-                        self?.viewModel.modelStatuses[key]?.progress = 1.0
-                        // Also update modelReady if whisper was downloaded
-                        if key == "whisper" {
-                            self?.viewModel.modelReady = true
-                        }
-                    }
-                    self?.refreshModelStatuses()
+                    self?.handleDownloadModelResult(
+                        key: key,
+                        terminationStatus: process.terminationStatus,
+                        json: jsonResult,
+                    )
                 }
             } catch {
                 self?.log("Failed to download model \(key): \(error)")
                 DispatchQueue.main.async {
                     self?.viewModel.modelStatuses[key]?.downloading = false
+                    self?.viewModel.modelStatuses[key]?.errorMessage = "Install failed: \(error.localizedDescription)"
                 }
             }
         }
+    }
+
+    /// Extract the final JSON object from a buffer of mixed stdout text.
+    /// `models.py download` prints progress strings and a final JSON
+    /// result on stdout; we want only the result. Returns nil when no
+    /// well-formed JSON object can be located.
+    private static func lastJSONObject(in text: String) -> [String: Any]? {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        for line in lines.reversed() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}") else { continue }
+            guard let data = trimmed.data(using: .utf8) else { continue }
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return obj
+            }
+        }
+        return nil
+    }
+
+    /// Apply the result of a `models.py download` invocation. Splits the
+    /// success / generic-error / HF-gated-error paths. HF-gating errors
+    /// open the relevant page in the user's browser so they can accept
+    /// terms or create a token; the row's `errorMessage` carries the
+    /// guidance copy.
+    private func handleDownloadModelResult(
+        key: String,
+        terminationStatus: Int32,
+        json: [String: Any]?,
+    ) {
+        viewModel.modelStatuses[key]?.downloading = false
+
+        if terminationStatus == 0, json?["ok"] as? Bool == true {
+            viewModel.modelStatuses[key]?.installed = true
+            viewModel.modelStatuses[key]?.progress = 1.0
+            viewModel.modelStatuses[key]?.errorMessage = nil
+            if key == "whisper" { viewModel.modelReady = true }
+            refreshModelStatuses()
+            return
+        }
+
+        // Non-zero exit OR ok:false — surface the message to the row.
+        let errorCode = json?["error_code"] as? String
+        let message = (json?["message"] as? String)
+            ?? (json?["error"] as? String)
+            ?? "Install failed (exit \(terminationStatus))."
+
+        if errorCode == "needs_hf_token" || errorCode == "needs_hf_terms" {
+            if let urlStr = json?["open_url"] as? String, let url = URL(string: urlStr) {
+                NSWorkspace.shared.open(url)
+                log("Model Manager: opened \(urlStr) for HF gating (\(errorCode ?? "?"))")
+            }
+            // One-line nudge under the row — the browser does the work,
+            // we just say "click Install again when you're done."
+            let suffix = " Then click Install again."
+            viewModel.modelStatuses[key]?.errorMessage = message + suffix
+        } else {
+            viewModel.modelStatuses[key]?.errorMessage = message
+            log("Model Manager: install failed for \(key) — \(message)")
+        }
+
+        // Intentionally do NOT call refreshModelStatuses() on the error
+        // path — the install state hasn't changed and a refresh would
+        // wipe the errorMessage we just set on the row.
     }
 
     /// Persist a new active backend selection. Calls

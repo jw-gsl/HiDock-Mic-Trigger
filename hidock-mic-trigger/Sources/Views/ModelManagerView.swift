@@ -42,6 +42,14 @@ struct ModelStatus: Identifiable {
     /// True if this entry is installed via pip + uses HuggingFace's
     /// cache rather than MODELS_DIR — e.g. Sortformer via nemo-toolkit.
     var nemoModel: Bool = false
+    /// Last error from an Install attempt, surfaced inline in the row.
+    /// Cleared on successful install or when the user clicks Install
+    /// again. Currently used for HF-gating errors on pyannote: when
+    /// the user needs to set up an HF token or accept model terms,
+    /// the app opens the relevant page in their browser and sets this
+    /// to a one-line guidance message ("Open browser → accept terms →
+    /// click Install again").
+    var errorMessage: String? = nil
 }
 
 /// Format a model size in human-readable form — switches to GB once the
@@ -305,6 +313,16 @@ struct ModelRowView: View {
                     Text("Downloading... \(Int(status.progress * 100))%")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                }
+
+                // Inline error from the last Install attempt. For HF-gated
+                // models (pyannote) this is the "click the browser tab,
+                // accept terms, then click Install again" guidance.
+                if let err = status.errorMessage, !err.isEmpty {
+                    Text(err)
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 

@@ -171,6 +171,34 @@ MODEL_REGISTRY = {
         "depends_on": "Self-contained (no supporting models needed)",
         "description": "State-of-the-art end-to-end neural diarization (CC-BY-4.0). Handles up to 4 speakers with much better per-turn accuracy than the lite pipeline. Includes its own VAD and speaker representation — does not use the Silero / TitaNet entries below. CPU-only on macOS. Installing also installs the NeMo toolkit (~2 GB).",
     },
+    # pyannote.audio — end-to-end neural diarization without Sortformer's
+    # 4-speaker cap. Selected when a meeting has 5+ speakers (manually via
+    # the Model Manager, or automatically when diarization is set to
+    # "auto" and the pre-flight count probe estimates >= 5). The model
+    # weights are HF-gated — installing this entry pip-installs the
+    # package and then probes HF to surface a "needs_hf_terms" /
+    # "needs_hf_token" error so the UI can open the relevant page in
+    # the user's browser.
+    "diarize_pyannote": {
+        "name": "pyannote.audio (no speaker cap)",
+        "stage": "diarization",
+        "stage_label": "Speaker Diarization",
+        "category": "pipeline",
+        "backend_key": "pyannote",
+        "pip_package": "pyannote.audio",
+        "pip_import_name": "pyannote.audio",
+        "hf_gated": True,
+        "hf_gated_models": [
+            "pyannote/speaker-diarization-3.1",
+            "pyannote/segmentation-3.0",
+        ],
+        # Pipeline weights are ~500 MB. pyannote.audio also brings torch
+        # + speechbrain + a few smaller deps — budget around 1 GB total.
+        "size_mb": 1000,
+        "experimental": True,
+        "depends_on": "Self-contained (no supporting models needed)",
+        "description": "Neural diarization (MIT-licensed code, CC-BY-4.0 weights). No speaker cap — discovers however many speakers exist. Used automatically when the meeting has 5+ speakers (Sortformer's limit), or selectable as the active backend. Installing pip-installs pyannote.audio and probes for HF gating; if you haven't accepted the model terms on huggingface.co, the app will open the page in your browser.",
+    },
     "speaker_embed": {
         "name": "TitaNet",
         "filename": "speaker_embedding.onnx",
@@ -477,6 +505,138 @@ def delete_model(model_key: str) -> bool:
     return True
 
 
+# ── HuggingFace gating ──────────────────────────────────────────────────────
+
+
+def _read_hf_token() -> str | None:
+    """Resolve the user's HuggingFace token from the standard places.
+
+    Order:
+      1. `HF_TOKEN` env var (huggingface_hub's default).
+      2. `HUGGING_FACE_HUB_TOKEN` env var (also supported by huggingface_hub).
+      3. `huggingface_token` field in transcription-pipeline/config.json
+         (gitignored — local-only, written by the user manually).
+      4. The standard `~/.cache/huggingface/token` file from `huggingface-cli login`.
+
+    Returns the first non-empty value, or None.
+    """
+    import os
+
+    for env_key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        v = os.environ.get(env_key)
+        if v:
+            return v.strip()
+    # config.json lives alongside the transcription pipeline source.
+    cfg_path = Path(__file__).resolve().parent.parent / "transcription-pipeline" / "config.json"
+    if cfg_path.exists():
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            tok = (cfg or {}).get("huggingface_token")
+            if tok and isinstance(tok, str) and tok.strip():
+                return tok.strip()
+        except Exception:
+            pass
+    # huggingface-cli login persists to ~/.cache/huggingface/token by default.
+    cached = Path.home() / ".cache" / "huggingface" / "token"
+    if cached.exists():
+        try:
+            v = cached.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    return None
+
+
+def _check_hf_gated_models(model_names: list[str]) -> dict:
+    """For each gated model, verify the user can access it.
+
+    Returns:
+        On success: ``{"ok": True}``.
+        On missing token: ``{"ok": False, "error_code": "needs_hf_token",
+            "open_url": "https://huggingface.co/settings/tokens",
+            "message": "..."}`` — the UI opens the URL in a browser.
+        On unaccepted terms / 401 on a specific model:
+            ``{"ok": False, "error_code": "needs_hf_terms",
+                "open_url": "https://huggingface.co/<model>",
+                "model_name": "<model>", "message": "..."}``.
+        On unexpected error: ``{"ok": False, "error_code": "error",
+            "error": "...", "message": "..."}``.
+
+    The structured shape lets the Swift Model Manager dispatch on
+    `error_code` without parsing free-form text — see
+    AppDelegate.swift:downloadModelByKey.
+    """
+    token = _read_hf_token()
+    if not token:
+        return {
+            "ok": False,
+            "error_code": "needs_hf_token",
+            "open_url": "https://huggingface.co/settings/tokens",
+            "message": (
+                "No HuggingFace access token configured. Create one (read access "
+                "is enough) and either set HF_TOKEN in your shell environment or "
+                "add it to transcription-pipeline/config.json as "
+                "\"huggingface_token\". Then re-run Install."
+            ),
+        }
+
+    # Defer the import — huggingface_hub is pulled in by pyannote.audio,
+    # so it'll always be available by the time we hit this check.
+    try:
+        from huggingface_hub import HfApi
+        from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
+    except ImportError as e:
+        return {
+            "ok": False,
+            "error_code": "error",
+            "error": f"huggingface_hub import failed: {e}",
+            "message": "pip install pyannote.audio should have brought huggingface_hub; the install looks incomplete.",
+        }
+
+    api = HfApi(token=token)
+    for model in model_names:
+        try:
+            api.model_info(model)
+        except GatedRepoError:
+            return {
+                "ok": False,
+                "error_code": "needs_hf_terms",
+                "open_url": f"https://huggingface.co/{model}",
+                "model_name": model,
+                "message": (
+                    f"You haven't accepted the terms for '{model}'. Opening the "
+                    "model page in your browser — click 'Agree and access "
+                    "repository', then re-run Install."
+                ),
+            }
+        except RepositoryNotFoundError:
+            # 404 from HF on a model name we control — almost certainly
+            # a token-scope problem (the token doesn't have read access
+            # to gated repos), since pyannote's models genuinely exist.
+            return {
+                "ok": False,
+                "error_code": "needs_hf_terms",
+                "open_url": f"https://huggingface.co/{model}",
+                "model_name": model,
+                "message": (
+                    f"Couldn't see '{model}' with the configured token — most likely "
+                    "the model terms haven't been accepted yet. Opening the model "
+                    "page; click 'Agree and access repository', then re-run Install."
+                ),
+            }
+        except Exception as e:
+            # Generic 401 / network issue — surface the message verbatim so
+            # the user can act on it.
+            return {
+                "ok": False,
+                "error_code": "error",
+                "error": str(e),
+                "message": f"Failed to verify HF access to '{model}': {e}",
+            }
+    return {"ok": True}
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
@@ -525,6 +685,18 @@ def _cli():
                         "error": f"pip install {pkg} failed: {result.stderr[-500:]}",
                     }))
                     sys.exit(1)
+                # HF-gated entries (currently just pyannote): verify the
+                # user can actually fetch the gated model weights. If
+                # not, surface a structured error so the Model Manager
+                # UI can open the relevant browser page — either the
+                # HF tokens settings page (no token configured) or the
+                # specific gated model's terms page (token OK, terms
+                # not accepted).
+                if info.get("hf_gated"):
+                    gate_check = _check_hf_gated_models(info.get("hf_gated_models") or [])
+                    if not gate_check["ok"]:
+                        print(json.dumps(gate_check))
+                        sys.exit(1)
                 print(json.dumps({"ok": True, "pip_package_installed": pkg}))
                 return
             # Regular file download.
