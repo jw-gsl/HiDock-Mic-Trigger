@@ -188,8 +188,14 @@ MODEL_REGISTRY = {
         "pip_package": "pyannote.audio",
         "pip_import_name": "pyannote.audio",
         "hf_gated": True,
+        # pyannote.audio 4.x switched its default public pipeline from
+        # `speaker-diarization-3.1` to `speaker-diarization-community-1`,
+        # which is what `Pipeline.from_pretrained(…3.1)` actually loads
+        # under the hood now. Both repos are HF-gated. We list the
+        # active one + the segmentation model so the gate-check probes
+        # exactly what the runtime will try to fetch on first use.
         "hf_gated_models": [
-            "pyannote/speaker-diarization-3.1",
+            "pyannote/speaker-diarization-community-1",
             "pyannote/segmentation-3.0",
         ],
         # Pipeline weights are ~500 MB. pyannote.audio also brings torch
@@ -584,7 +590,7 @@ def _check_hf_gated_models(model_names: list[str]) -> dict:
     # Defer the import — huggingface_hub is pulled in by pyannote.audio,
     # so it'll always be available by the time we hit this check.
     try:
-        from huggingface_hub import HfApi
+        from huggingface_hub import hf_hub_download
         from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
     except ImportError as e:
         return {
@@ -594,10 +600,15 @@ def _check_hf_gated_models(model_names: list[str]) -> dict:
             "message": "pip install pyannote.audio should have brought huggingface_hub; the install looks incomplete.",
         }
 
-    api = HfApi(token=token)
+    # `HfApi.model_info` returns metadata even for gated repos that the
+    # token can't actually download from — it's not a reliable gate
+    # check. The only reliable test is to ATTEMPT a download. We pull
+    # the smallest file in each repo (config.yaml is universally tiny)
+    # and let it use the local HF cache so this is essentially free on
+    # repeated calls.
     for model in model_names:
         try:
-            api.model_info(model)
+            hf_hub_download(model, filename="config.yaml", token=token)
         except GatedRepoError:
             return {
                 "ok": False,
@@ -611,9 +622,6 @@ def _check_hf_gated_models(model_names: list[str]) -> dict:
                 ),
             }
         except RepositoryNotFoundError:
-            # 404 from HF on a model name we control — almost certainly
-            # a token-scope problem (the token doesn't have read access
-            # to gated repos), since pyannote's models genuinely exist.
             return {
                 "ok": False,
                 "error_code": "needs_hf_terms",
@@ -626,8 +634,14 @@ def _check_hf_gated_models(model_names: list[str]) -> dict:
                 ),
             }
         except Exception as e:
-            # Generic 401 / network issue — surface the message verbatim so
-            # the user can act on it.
+            # The repo might not have a `config.yaml` (some pyannote
+            # subrepos use other filenames). Treat that as "access OK,
+            # filename wrong" — we only care about access here, and a
+            # FileNotFoundError-shape response from HF means we got
+            # past the gate. Detect by looking at the exception text.
+            msg = str(e).lower()
+            if "entry not found" in msg or "404" in msg:
+                continue
             return {
                 "ok": False,
                 "error_code": "error",

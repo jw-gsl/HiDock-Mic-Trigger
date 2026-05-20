@@ -79,6 +79,9 @@ def diarize(audio_path: str | Path, whisper_segments: list[dict], n_speakers: in
     if backend == "sortformer":
         from shared.diarize_sortformer import diarize as sortformer_diarize
         return sortformer_diarize(audio_path, whisper_segments, n_speakers=n_speakers)
+    if backend == "pyannote":
+        from shared.diarize_pyannote import diarize as pyannote_diarize
+        return pyannote_diarize(audio_path, whisper_segments, n_speakers=n_speakers)
     from shared.diarize_lite import diarize as lite_diarize
     return lite_diarize(audio_path, whisper_segments, n_speakers=n_speakers)
 
