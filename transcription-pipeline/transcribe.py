@@ -150,12 +150,27 @@ def transcribe_file(
     state = load_state()
     entry_key = mp3_path.name
 
+    # Resolve the planned ASR backend up front so the in_progress and
+    # failure-path state entries record the right model name. Without
+    # this, both wrote `config.WHISPER_MODEL` unconditionally — making
+    # a Parakeet OOM look like a Whisper failure in state.json and
+    # sending future-you down the wrong investigation. Best-effort: a
+    # broken dispatch shouldn't block the transcription itself.
+    try:
+        from shared.pipeline_dispatch import active_pipeline
+        _planned_backend = (active_pipeline() or {}).get("transcription", "whisper")
+    except Exception:
+        _planned_backend = "whisper"
+    _planned_model_name = (
+        "parakeet-tdt-0.6b-v2" if _planned_backend == "parakeet" else config.WHISPER_MODEL
+    )
+
     # Mark in_progress
     state["transcriptions"][entry_key] = {
         "status": "in_progress",
         "source_path": str(mp3_path),
         "transcript_path": str(transcript_path),
-        "model": config.WHISPER_MODEL,
+        "model": _planned_model_name,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": None,
         "duration_s": None,
@@ -470,11 +485,16 @@ def transcribe_file(
         _log(_ET("TRANSCRIPTION_FAILED"), file_path=str(mp3_path),
              status="error", duration_s=duration_s, error=str(e))
         state = load_state()
+        # Record whichever ASR backend was actually selected this run.
+        # `active_model_name` is set inside the try-block; if the
+        # failure happened before it was assigned, fall back to the
+        # in_progress entry's model so we still surface the right name.
+        _model_on_fail = locals().get("active_model_name") or _planned_model_name
         state["transcriptions"][entry_key] = {
             "status": "failed",
             "source_path": str(mp3_path),
             "transcript_path": str(transcript_path),
-            "model": config.WHISPER_MODEL,
+            "model": _model_on_fail,
             "started_at": state["transcriptions"].get(entry_key, {}).get("started_at"),
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "duration_s": duration_s,
