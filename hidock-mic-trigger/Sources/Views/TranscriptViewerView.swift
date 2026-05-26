@@ -247,6 +247,11 @@ struct TranscriptViewerView: View {
     /// a user-edited speaker name as an anchor centroid. Optional so
     /// older call-sites (rediarize-only flow) keep compiling.
     var onReclusterWithLabels: ((String) -> Void)?
+    /// Open the embedded terminal pre-loaded with `claude` and the
+    /// transcript piped in, so the user can ask follow-up questions
+    /// using their existing Claude Code login. Optional so the same
+    /// viewer is usable from any host without dragging a terminal in.
+    var onAskClaude: ((String) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -373,6 +378,22 @@ struct TranscriptViewerView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
+
+                if onAskClaude != nil {
+                    Button {
+                        // Send the markdown transcript path — Claude
+                        // reads the file directly. _diarized.json is
+                        // the JSON the viewer was opened against; the
+                        // .md sibling is what's worth handing to an LLM.
+                        let mdPath = filePath.replacingOccurrences(of: "_diarized.json", with: ".md")
+                        onAskClaude?(mdPath)
+                    } label: {
+                        Label("Ask Claude", systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Open a terminal with this transcript loaded into Claude — ask follow-up questions, request summaries, draft action items.")
+                }
 
                 Button {
                     // Reveal the markdown transcript file in Finder

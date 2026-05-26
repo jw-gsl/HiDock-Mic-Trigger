@@ -3058,6 +3058,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onReclusterWithLabels: { [weak self] jsonPath in
                 self?.reclusterTranscriptWithLabels(jsonPath: jsonPath)
+            },
+            onAskClaude: { [weak self] mdPath in
+                self?.askClaudeAboutTranscript(transcriptPath: mdPath)
             }
         )
 
@@ -3478,6 +3481,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         terminalWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Open the embedded terminal pre-loaded with `claude` reading the
+    /// given transcript file. The shell launches claude with the
+    /// transcript piped as initial context, then drops to an
+    /// interactive prompt so the user can ask follow-ups, request
+    /// summaries, draft action items, etc.
+    ///
+    /// Uses the user's existing `claude` CLI login — no API key
+    /// management. If claude isn't on PATH the terminal still opens
+    /// and prints a hint, so the user can fix the install in-place.
+    private func askClaudeAboutTranscript(transcriptPath: String) {
+        // Build the initial command. Shell-escape the path so spaces
+        // / quotes in transcript filenames don't break out of the
+        // string. SwiftTerm's PTY runs through a shell anyway, so
+        // single-quote wrapping is the right move.
+        let escaped = transcriptPath.replacingOccurrences(of: "'", with: "'\"'\"'")
+        // `claude --print` reads from stdin and prints the response.
+        // We tee the file in so the user sees what was sent, then drop
+        // back to interactive `claude` so follow-up turns continue the
+        // conversation. `command -v` check keeps the failure mode
+        // self-explanatory if claude isn't installed.
+        let initial = """
+        if ! command -v claude >/dev/null 2>&1; then \
+            echo 'claude CLI not found on PATH. Install with: brew install claude (or visit https://docs.claude.com/claude-code).'; \
+        else \
+            echo '— Asking Claude about: \(escaped) —'; \
+            claude "Summarise the meeting in this transcript, then list action items and decisions: $(cat '\(escaped)')"; \
+        fi
+        """
+        openTerminal(initialCommand: initial)
     }
 
     // MARK: - Firmware
