@@ -79,6 +79,36 @@ In **Settings**:
 - **Start at login** — launches Plaud Sync automatically when you sign in to Windows.
 - **Start minimized** — opens minimized so it runs quietly in the background.
 
+### Work on the transcripts in Claude (the point of syncing)
+
+The goal of syncing is to get your recordings **and their transcripts** into a local folder Claude
+can read directly — no more Plaud → email → upload → Claude round-trip. Plaud Sync saves each
+transcript as a `.txt` right next to the audio (enable **Download transcript** in Settings; turn
+off **Create info .txt** if you only want the transcript text).
+
+**Set it up once:**
+1. In **Settings**, set the **save folder** to a dedicated location you'll point Claude at, e.g.
+   `C:\Users\<you>\PlaudTranscripts` (Windows) or `~/PlaudTranscripts` (macOS).
+2. Enable **Download transcript** and **Auto-sync** so new transcripts land in that folder
+   automatically as you record.
+
+**Then work on them in Claude:**
+- **Claude Code (recommended):** open a terminal in the sync folder and run `claude`. It reads the
+  `.txt` transcripts in place — ask it to summarise a meeting, extract action items, draft a
+  follow-up email, compare two calls, etc. Because the files are local, there's no upload step.
+  ```bash
+  cd ~/PlaudTranscripts      # Windows: cd %USERPROFILE%\PlaudTranscripts
+  claude
+  # e.g. "Summarise today's transcripts and list any action items with owners."
+  ```
+- **Add it as a working folder:** point your editor's Claude integration / Claude Code at that
+  folder so it's always available alongside your other work.
+- **Tip:** the **By Date** folder layout keeps each day's transcripts together, which makes
+  "summarise this week's calls" style prompts easy to scope.
+
+Net effect: record on your Plaud device → it auto-syncs to the folder → the transcript is already
+sitting where Claude can use it.
+
 ### Update
 
 Download the newer installer and run it over the top (it upgrades in place). Your settings,

@@ -74,6 +74,7 @@ jobs:
             plaud-sync/dist/Plaud Sync.app
             plaud-sync/dist/*.dmg
             plaud-sync/dist/Plaud-Sync-macOS.zip
+            plaud-sync/dist/INSTALL.txt
           retention-days: 90
 
   build-windows:

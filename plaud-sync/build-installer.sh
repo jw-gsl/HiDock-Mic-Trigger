@@ -75,6 +75,13 @@ case "$OS" in
     ;;
 esac
 
+# Bundle the install/usage guide alongside the installer so it ends up in the
+# distributed zip.
+if [ -f "$ROOT/INSTALL.txt" ]; then
+  cp "$ROOT/INSTALL.txt" "$DIST/"
+  echo "==> Guide: $DIST/INSTALL.txt"
+fi
+
 du -sh "$DIST"/*
 echo ""
 echo "Done. The app in dist/ is self-contained — end users do not need Node or Rust."
