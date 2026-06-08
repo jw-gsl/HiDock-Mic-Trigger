@@ -1,0 +1,73 @@
+name: Build Plaud Sync
+
+on:
+  push:
+    branches: [main, 'feature/plaud-sync']
+    paths:
+      - 'plaud-sync/**'
+      - '.github/workflows/build-plaud-sync.yml'
+  pull_request:
+    paths:
+      - 'plaud-sync/**'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: plaud-sync
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plaud-sync/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build installer
+        run: chmod +x build-installer.sh && ./build-installer.sh
+
+      - name: Create zip for distribution
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "Plaud Sync.app" "Plaud-Sync-macOS.zip"
+          ls -lh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Plaud-Sync-macOS
+          path: |
+            plaud-sync/dist/Plaud Sync.app
+            plaud-sync/dist/*.dmg
+            plaud-sync/dist/Plaud-Sync-macOS.zip
+          retention-days: 90
+
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: plaud-sync
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plaud-sync/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build installer
+        shell: bash
+        run: ./build-installer.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Plaud-Sync-Windows
+          path: plaud-sync/dist/*
+          retention-days: 90
