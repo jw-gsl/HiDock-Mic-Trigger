@@ -39,6 +39,8 @@ if str(_REPO_ROOT) not in sys.path:
 import usb.core
 import usb.util
 
+import plaud_client
+
 
 VENDOR_ID = 4310
 PRODUCT_ID = 45068
@@ -1885,10 +1887,12 @@ def main() -> int:
     mark_dl = sub.add_parser("mark-downloaded", help="Mark recordings as already downloaded without transferring")
     mark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to mark")
     mark_dl.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
+    mark_dl.add_argument("--plaud-account", default=None, help="For Plaud devices: prefix state keys with plaud:<account>/")
 
     unmark_dl = sub.add_parser("unmark-downloaded", help="Unmark recordings so they can be re-downloaded")
     unmark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to unmark")
     unmark_dl.add_argument("--volume-name", default=None, help="For volume devices")
+    unmark_dl.add_argument("--plaud-account", default=None, help="For Plaud devices")
 
     mark_trim = sub.add_parser("mark-trimmed", help="Flag recordings as locally trimmed (UI icon + re-download warning)")
     mark_trim.add_argument("filenames", nargs="+", help="Device-side filenames to flag as trimmed")
@@ -1898,9 +1902,11 @@ def main() -> int:
 
     mark_removed_p = sub.add_parser("mark-removed", help="Flag recordings as locally removed (excluded from auto-download/transcribe)")
     mark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to flag as removed")
+    mark_removed_p.add_argument("--plaud-account", default=None, help="For Plaud devices")
 
     unmark_removed_p = sub.add_parser("unmark-removed", help="Clear the removed flag on recordings")
     unmark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to clear removed flag on")
+    unmark_removed_p.add_argument("--plaud-account", default=None, help="For Plaud devices")
 
     cand_p = sub.add_parser("merge-candidates",
                             help="List groups of recordings that look like one conversation split across files")
@@ -1970,6 +1976,16 @@ def main() -> int:
     vol_import_new.add_argument("--volume-name", required=True, help="Name of the mounted volume")
     vol_import_new.add_argument("--subpath", default=None, help="Subdirectory within the volume")
 
+    plaud_status = sub.add_parser("plaud-status", help="Report Plaud cloud recordings as JSON")
+    plaud_status.add_argument("--account-id", required=True, help="Stable Plaud account identifier")
+
+    plaud_download = sub.add_parser("plaud-download", help="Download one Plaud cloud recording")
+    plaud_download.add_argument("recording_id", help="Plaud file id")
+    plaud_download.add_argument("--account-id", required=True, help="Stable Plaud account identifier")
+
+    plaud_download_new = sub.add_parser("plaud-download-new", help="Download every new Plaud cloud recording")
+    plaud_download_new.add_argument("--account-id", required=True, help="Stable Plaud account identifier")
+
     args = parser.parse_args()
 
     if args.command == "list-devices":
@@ -1985,6 +2001,51 @@ def main() -> int:
             })
         print(json.dumps({"devices": devices}, indent=2))
         return 0
+    if args.command == "plaud-status":
+        config = load_config()
+        state = load_state()
+        output_dir = resolved_output_dir(config)
+        payload = plaud_client.status_payload(output_dir, state, account_id=args.account_id)
+        payload["statePath"] = str(DEFAULT_STATE_PATH.resolve())
+        payload["configPath"] = str(DEFAULT_CONFIG_PATH.resolve())
+        save_state(state)
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.command == "plaud-download":
+        config = load_config()
+        state = load_state()
+        output_dir = resolved_output_dir(config)
+        try:
+            payload = plaud_client.download_one(
+                args.recording_id,
+                output_dir,
+                state,
+                account_id=args.account_id,
+            )
+            save_state(state)
+        except Exception as exc:
+            state_key = f"plaud:{args.account_id}:{args.recording_id}"
+            downloads = state.setdefault("downloads", {})
+            downloads[state_key] = {
+                **downloads.get(state_key, {}),
+                "downloaded": False,
+                "updated_at": utc_now_iso(),
+                "last_error": str(exc),
+                "source": "plaud",
+                "account_id": args.account_id,
+            }
+            save_state(state)
+            raise
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.command == "plaud-download-new":
+        config = load_config()
+        state = load_state()
+        output_dir = resolved_output_dir(config)
+        payload = plaud_client.download_new(output_dir, state, account_id=args.account_id)
+        save_state(state)
+        print(json.dumps(payload, indent=2))
+        return 0
     if args.command == "mark-downloaded":
         state = load_state()
         downloads = state["downloads"]
@@ -1995,8 +2056,9 @@ def main() -> int:
         cached_recs = {r["name"]: r for r in state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])}
         marked = []
         vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
+        plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
         for filename in args.filenames:
-            state_key = f"{vol_prefix}{filename}"
+            state_key = f"{plaud_prefix}{vol_prefix}{filename}"
             existing = downloads.get(state_key, {})
             # Populate length/output_path from catalog if not already set
             if not existing.get("length") and filename in cached_recs:
@@ -2012,6 +2074,9 @@ def main() -> int:
             }
             if args.product_id is not None:
                 record["product_id"] = args.product_id
+            if args.plaud_account:
+                record["source"] = "plaud"
+                record["account_id"] = args.plaud_account
             downloads[state_key] = record
             marked.append(filename)
         save_state(state)
@@ -2022,8 +2087,9 @@ def main() -> int:
         downloads = state["downloads"]
         unmarked = []
         vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
+        plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
         for filename in args.filenames:
-            state_key = f"{vol_prefix}{filename}"
+            state_key = f"{plaud_prefix}{vol_prefix}{filename}"
             if state_key in downloads:
                 downloads[state_key]["downloaded"] = False
                 downloads[state_key]["updated_at"] = utc_now_iso()
@@ -2059,10 +2125,14 @@ def main() -> int:
         state = load_state()
         downloads = state["downloads"]
         flagged = []
+        plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
         for filename in args.filenames:
-            if filename in downloads:
-                downloads[filename]["removed"] = True
-                downloads[filename]["updated_at"] = utc_now_iso()
+            state_key = f"{plaud_prefix}{filename}"
+            if state_key not in downloads:
+                downloads[state_key] = {"downloaded": False}
+            if state_key in downloads:
+                downloads[state_key]["removed"] = True
+                downloads[state_key]["updated_at"] = utc_now_iso()
                 flagged.append(filename)
         save_state(state)
         print(json.dumps({"removed": flagged}, indent=2))
@@ -2071,10 +2141,12 @@ def main() -> int:
         state = load_state()
         downloads = state["downloads"]
         cleared = []
+        plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
         for filename in args.filenames:
-            if filename in downloads and "removed" in downloads[filename]:
-                del downloads[filename]["removed"]
-                downloads[filename]["updated_at"] = utc_now_iso()
+            state_key = f"{plaud_prefix}{filename}"
+            if state_key in downloads and "removed" in downloads[state_key]:
+                del downloads[state_key]["removed"]
+                downloads[state_key]["updated_at"] = utc_now_iso()
                 cleared.append(filename)
         save_state(state)
         print(json.dumps({"unremoved": cleared}, indent=2))
