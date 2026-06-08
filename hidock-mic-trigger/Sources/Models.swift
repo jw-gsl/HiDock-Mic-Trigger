@@ -103,10 +103,12 @@ struct HiDockDeviceListResponse: Codable {
     let devices: [HiDockDevice]
 }
 
-/// The kind of device: HiDock proprietary USB or generic mass-storage volume.
+/// The kind of device: HiDock proprietary USB, generic mass-storage volume, or
+/// Plaud cloud account.
 enum DeviceType: String, Codable {
     case hidock = "hidock"
     case volume = "volume"
+    case plaud = "plaud"
 }
 
 struct HiDockPairedDevice: Codable, Equatable {
@@ -115,12 +117,16 @@ struct HiDockPairedDevice: Codable, Equatable {
     var deviceType: DeviceType
     var volumeName: String?     // For volume devices: mount name / drive letter
     var subpath: String?        // Optional subfolder to scan on volume
+    var plaudAccountId: String? // For Plaud devices: stable account key
+    var plaudRegion: String?    // "us" or "eu"
+    var plaudEmail: String?
     var pairedAt: String?       // ISO-8601 timestamp
 
     // Custom Codable to handle backwards compatibility with old JSON
     // that only had productId + displayName (no deviceType field).
     enum CodingKeys: String, CodingKey {
-        case productId, displayName, deviceType, volumeName, subpath, pairedAt
+        case productId, displayName, deviceType, volumeName, subpath
+        case plaudAccountId, plaudRegion, plaudEmail, pairedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -130,14 +136,23 @@ struct HiDockPairedDevice: Codable, Equatable {
         self.deviceType = try container.decodeIfPresent(DeviceType.self, forKey: .deviceType) ?? .hidock
         self.volumeName = try container.decodeIfPresent(String.self, forKey: .volumeName)
         self.subpath = try container.decodeIfPresent(String.self, forKey: .subpath)
+        self.plaudAccountId = try container.decodeIfPresent(String.self, forKey: .plaudAccountId)
+        self.plaudRegion = try container.decodeIfPresent(String.self, forKey: .plaudRegion)
+        self.plaudEmail = try container.decodeIfPresent(String.self, forKey: .plaudEmail)
         self.pairedAt = try container.decodeIfPresent(String.self, forKey: .pairedAt)
     }
 
     var cleanName: String {
-        sanitizeDeviceName(displayName)
+        if deviceType == .plaud {
+            return "Plaud"
+        }
+        return sanitizeDeviceName(displayName)
     }
 
     var shortName: String {
+        if deviceType == .plaud {
+            return "Plaud"
+        }
         let name = cleanName
         if name.hasPrefix("HiDock ") {
             return String(name.dropFirst("HiDock ".count))
@@ -152,6 +167,8 @@ struct HiDockPairedDevice: Codable, Equatable {
             return "hidock:\(productId)"
         case .volume:
             return "volume:\(volumeName ?? String(productId))"
+        case .plaud:
+            return "plaud:\(plaudAccountId ?? plaudEmail ?? String(productId))"
         }
     }
 
@@ -166,6 +183,9 @@ struct HiDockPairedDevice: Codable, Equatable {
         self.deviceType = .hidock
         self.volumeName = nil
         self.subpath = nil
+        self.plaudAccountId = nil
+        self.plaudRegion = nil
+        self.plaudEmail = nil
         self.pairedAt = ISO8601DateFormatter().string(from: Date())
     }
 
@@ -186,6 +206,22 @@ struct HiDockPairedDevice: Codable, Equatable {
         self.deviceType = .volume
         self.volumeName = volumeName
         self.subpath = subpath
+        self.plaudAccountId = nil
+        self.plaudRegion = nil
+        self.plaudEmail = nil
+        self.pairedAt = ISO8601DateFormatter().string(from: Date())
+    }
+
+    /// Full init for Plaud cloud accounts.
+    init(plaudAccountId: String, displayName: String, email: String?, region: String) {
+        self.productId = Self.stableHash("plaud:\(plaudAccountId)")
+        self.displayName = displayName
+        self.deviceType = .plaud
+        self.volumeName = nil
+        self.subpath = nil
+        self.plaudAccountId = plaudAccountId
+        self.plaudRegion = region
+        self.plaudEmail = email
         self.pairedAt = ISO8601DateFormatter().string(from: Date())
     }
 }

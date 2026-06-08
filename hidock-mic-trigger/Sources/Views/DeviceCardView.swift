@@ -33,6 +33,11 @@ struct DeviceCardView: View {
         lastError != nil
     }
 
+    private var plaudSignedOut: Bool {
+        guard device.deviceType == .plaud, let (msg, _) = lastError else { return false }
+        return msg.localizedCaseInsensitiveContains("not signed in")
+    }
+
     /// The mic-trigger's ffmpeg currently holds a HiDock open.
     /// Pinned to the specific device it's attached to via the CLI
     /// output line "Using HiDock audio device: <name>". If we haven't
@@ -113,6 +118,12 @@ struct DeviceCardView: View {
             img
                 .resizable()
                 .scaledToFit()
+        } else if let glyph = hidockDeviceGlyph(device.shortName, deviceType: device.deviceType) {
+            glyph
+                .resizable()
+                .scaledToFit()
+                .foregroundColor(.secondary)
+                .padding(6)
         } else {
             Image(systemName: hidockDeviceIcon(device.shortName, deviceType: device.deviceType))
                 .font(.title)
@@ -173,7 +184,12 @@ struct DeviceCardView: View {
     /// Unreachable > Recording > Connected > Connecting > Not connected.
     @ViewBuilder
     private var stateChip: some View {
-        if unreachable {
+        if plaudSignedOut {
+            chip(systemImage: "person.crop.circle.badge.exclamationmark",
+                 text: "Sign in required",
+                 foreground: .orange,
+                 background: Color.orange.opacity(0.15))
+        } else if unreachable {
             chip(systemImage: "exclamationmark.triangle.fill",
                  text: "Unreachable",
                  foreground: .orange,
@@ -269,7 +285,7 @@ struct DeviceCardView: View {
                     .foregroundColor(unreachable ? .orange : .accentColor)
             }
             .buttonStyle(.plain)
-            .help(unreachable ? "\(device.shortName) is unreachable — try reconnecting" : "Reconnect \(device.shortName)")
+            .help(plaudSignedOut ? "Sign in to Plaud again" : (unreachable ? "\(device.shortName) is unreachable — try reconnecting" : "Reconnect \(device.shortName)"))
 
             Button {
                 // Toggle this card as the active filter; clicking an already-
@@ -385,6 +401,7 @@ struct DeviceStripView: View {
                 switch device.deviceType {
                 case .hidock: return true
                 case .volume: return viewModel.syncDeviceConnected[device.deviceId] == true
+                case .plaud: return true
                 }
             }
             .sorted { a, b in

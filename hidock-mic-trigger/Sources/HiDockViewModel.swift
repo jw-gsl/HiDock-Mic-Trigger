@@ -214,11 +214,8 @@ final class HiDockViewModel: ObservableObject {
     var visibleEntries: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
-            // Imported recordings are always visible regardless of the device
-            // filter — they aren't "on" any HiDock, so filtering by a specific
-            // device shouldn't hide them.
             entries = entries.filter {
-                $0.deviceId == filterDeviceId || $0.deviceId == "imported:local"
+                $0.deviceId == filterDeviceId
             }
         }
         // (Hide Downloaded toggle removed in 2026-04-26 cleanup —
@@ -508,6 +505,7 @@ final class HiDockViewModel: ObservableObject {
     var onShowDeviceManager: () -> Void = {}
     var onForgetDevice: (HiDockPairedDevice) -> Void = { _ in }
     var onPairVolume: (String, String?) -> Void = { _, _ in } // volumeName, subpath
+    var onPairPlaud: (String) -> Void = { _ in } // region
     var onScanVolumes: (@escaping ([VolumeScanResult]) -> Void) -> Void = { $0([]) }
 
     // MARK: - Notification Preferences

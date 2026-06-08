@@ -54,6 +54,9 @@ func hidockDeviceIcon(_ shortName: String, deviceType: DeviceType = .hidock) -> 
     if deviceType == .volume {
         return "externaldrive"
     }
+    if deviceType == .plaud {
+        return "waveform.and.mic"
+    }
     switch hidockSKU(for: shortName, deviceType: deviceType) {
     case .h1, .h1e: return "hifispeaker"
     case .p1:       return "waveform.and.mic"
@@ -65,6 +68,9 @@ func hidockDeviceIcon(_ shortName: String, deviceType: DeviceType = .hidock) -> 
 func hidockDeviceEmoji(_ shortName: String, deviceType: DeviceType = .hidock) -> String {
     if deviceType == .volume {
         return "💾"
+    }
+    if deviceType == .plaud {
+        return "▯"
     }
     switch hidockSKU(for: shortName, deviceType: deviceType) {
     case .h1, .h1e: return "🔊"
@@ -95,6 +101,9 @@ func hidockSKU(for shortName: String, deviceType: DeviceType = .hidock) -> HiDoc
 /// window — H1/H1E/P1 are visually distinct at 44pt.
 func hidockDeviceImage(_ shortName: String, deviceType: DeviceType = .hidock, recording: Bool = false) -> Image? {
     _ = recording
+    if deviceType == .plaud {
+        return Image("DeviceRecordingPlaud")
+    }
     guard let sku = hidockSKU(for: shortName, deviceType: deviceType) else { return nil }
     switch sku {
     case .p1:  return Image("DeviceRecordingP1")
@@ -109,6 +118,9 @@ func hidockDeviceImage(_ shortName: String, deviceType: DeviceType = .hidock, re
 /// as a visual cue beside the device name. Falls back to the H1
 /// glyph for H1E because there isn't a dedicated asset yet.
 func hidockDeviceGlyph(_ shortName: String, deviceType: DeviceType = .hidock) -> Image? {
+    if deviceType == .plaud {
+        return Image("DeviceGlyphPlaud")
+    }
     guard let sku = hidockSKU(for: shortName, deviceType: deviceType) else { return nil }
     switch sku {
     case .p1:       return Image("DeviceGlyphP1")

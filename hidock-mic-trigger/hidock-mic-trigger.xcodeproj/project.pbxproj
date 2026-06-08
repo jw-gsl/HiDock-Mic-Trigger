@@ -29,6 +29,7 @@
 		AD84D7F268B99977690E39B6 /* CoworkPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3EB96FF645902287442733 /* CoworkPromptView.swift */; };
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 		AE7DEC1B14636DBD037EC45D /* DeviceCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */; };
+		B4E3F2C1744C4F6887E4F001 /* PlaudAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4E3F2C0744C4F6887E4F001 /* PlaudAuth.swift */; };
 		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
 		C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27867D05F3E255C858BC3F1 /* TerminalView.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
@@ -75,6 +76,7 @@
 		A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedRecordings.swift; sourceTree = "<group>"; };
 		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		B4E3F2C0744C4F6887E4F001 /* PlaudAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaudAuth.swift; sourceTree = "<group>"; };
 		E27867D05F3E255C858BC3F1 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		ED5594D4170BD809E24E4CAC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EF1DDDA37929D179E0CD9B59 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -123,6 +125,7 @@
 				A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */,
 				8CDAD4DE368D4BD1A70444DB /* main.swift */,
 				ED5594D4170BD809E24E4CAC /* Models.swift */,
+				B4E3F2C0744C4F6887E4F001 /* PlaudAuth.swift */,
 				45ECA314D0E3BF8DDD56BEC3 /* SkippedTranscriptions.swift */,
 				A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */,
 				F0F0DB81B248109A976C783F /* Views */,
@@ -309,6 +312,7 @@
 				04DBDCEC87C45FE3A518819A /* ModelManagerView.swift in Sources */,
 				F86651607F00054F72662894 /* Models.swift in Sources */,
 				7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */,
+				B4E3F2C1744C4F6887E4F001 /* PlaudAuth.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,
 				1F28538F2F1601D254A85E9C /* SkippedTranscriptions.swift in Sources */,
 				332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */,

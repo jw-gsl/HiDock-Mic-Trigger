@@ -3,7 +3,7 @@ import SwiftUI
 struct DeviceManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
     @State private var sortOrder: DeviceSortKey = .name
-    @State private var filterType: String = "all" // "all", "hidock", "volume"
+    @State private var filterType: String = "all" // "all", "hidock", "volume", "plaud"
     @State private var searchText = ""
 
     var body: some View {
@@ -21,6 +21,7 @@ struct DeviceManagerView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                PairPlaudButton(viewModel: viewModel)
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
@@ -43,9 +44,10 @@ struct DeviceManagerView: View {
                     Text("All").tag("all")
                     Text("HiDock").tag("hidock")
                     Text("Volume").tag("volume")
+                    Text("Plaud").tag("plaud")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .frame(width: 240)
 
                 Divider().frame(height: 16)
 
@@ -121,6 +123,8 @@ struct DeviceManagerView: View {
             devices = devices.filter { $0.deviceType == .hidock }
         } else if filterType == "volume" {
             devices = devices.filter { $0.deviceType == .volume }
+        } else if filterType == "plaud" {
+            devices = devices.filter { $0.deviceType == .plaud }
         }
 
         if !searchText.isEmpty {
@@ -128,6 +132,7 @@ struct DeviceManagerView: View {
             devices = devices.filter {
                 $0.cleanName.lowercased().contains(query) ||
                 ($0.volumeName?.lowercased().contains(query) ?? false) ||
+                ($0.plaudEmail?.lowercased().contains(query) ?? false) ||
                 $0.deviceId.lowercased().contains(query)
             }
         }
@@ -209,7 +214,7 @@ struct DeviceRowView: View {
                         .cornerRadius(4)
                     }
                     Spacer()
-                    Text(device.deviceType == .hidock ? "HiDock" : "Volume")
+                    Text(deviceTypeLabel)
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
@@ -231,6 +236,16 @@ struct DeviceRowView: View {
                     }
                     if let sub = device.subpath {
                         Label(sub, systemImage: "folder")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let email = device.plaudEmail {
+                        Label(email, systemImage: "person.crop.circle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if device.deviceType == .plaud, let region = device.plaudRegion {
+                        Label(region.uppercased(), systemImage: "globe")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -263,6 +278,14 @@ struct DeviceRowView: View {
         return hidockDeviceIcon(device.shortName, deviceType: device.deviceType)
     }
 
+    private var deviceTypeLabel: String {
+        switch device.deviceType {
+        case .hidock: return "HiDock"
+        case .volume: return "Volume"
+        case .plaud: return "Plaud"
+        }
+    }
+
     private static let isoFormatter = ISO8601DateFormatter()
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -273,6 +296,51 @@ struct DeviceRowView: View {
     private func formatPairedDate(_ iso: String) -> String {
         guard let date = Self.isoFormatter.date(from: iso) else { return iso }
         return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+// MARK: - Pair Plaud Button
+
+struct PairPlaudButton: View {
+    @ObservedObject var viewModel: HiDockViewModel
+    @State private var showPopover = false
+    @State private var region = "us"
+
+    var body: some View {
+        Button {
+            showPopover.toggle()
+        } label: {
+            Label("Connect Plaud", systemImage: "link.badge.plus")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .popover(isPresented: $showPopover) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Connect Plaud")
+                    .font(.headline)
+
+                Picker("Region", selection: $region) {
+                    Text("US").tag("us")
+                    Text("EU").tag("eu")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+
+                HStack {
+                    Button("Cancel") {
+                        showPopover = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+
+                    Button("Sign In") {
+                        viewModel.onPairPlaud(region)
+                        showPopover = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(16)
+        }
     }
 }
 

@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var modelManagerWindow: NSWindow?
     private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
+    private var plaudLoginController: PlaudLoginWindowController?
     private var terminalWindow: NSWindow?
     private weak var speakerLabelsMenuItem: NSMenuItem?
     private var importedRecordings: [ImportedRecordingEntry] = []
@@ -47,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncDeviceStorage: [String: HiDockStorageStats] = [:]
     private var syncDeviceLastError: [String: (String, Date)] = [:]
     private var syncDeviceLastOK: [String: Date] = [:]
+    private let plaudSignedOutMessage = "Plaud is not signed in"
     /// Devices whose last probe timed out with a full 30s hung kill.
     /// Until they're manually reconnected (via the ↻ button) or the
     /// backoff expires, auto-refresh/auto-connect paths skip them so
@@ -531,6 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowDeviceManager = { [weak self] in self?.openDeviceManager() }
         viewModel.onForgetDevice = { [weak self] device in self?.forgetDevice(device) }
         viewModel.onPairVolume = { [weak self] volumeName, subpath in self?.pairVolume(volumeName: volumeName, subpath: subpath) }
+        viewModel.onPairPlaud = { [weak self] region in self?.pairPlaud(region: region) }
         viewModel.onScanVolumes = { [weak self] completion in self?.scanVolumes(completion: completion) }
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
@@ -1741,7 +1744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // idle to pick up new recordings.
             let recording = self.viewModel.hidockRecordingActive
             let probeDevices = devices.filter { device in
-                if device.deviceType == .volume { return true }
+                if device.deviceType == .volume || device.deviceType == .plaud { return true }
                 if !recording { return true }
                 self.log("Auto-connect: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
                 return false
@@ -1792,9 +1795,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case .volume:
                 args = self.volumeExtractorArguments("volume-status", device: device)
                 pid = nil
+            case .plaud:
+                args = self.plaudExtractorArguments("plaud-status", device: device)
+                pid = nil
             }
 
-            self.runExtractor(arguments: args, productId: pid) { [weak self] result in
+            self.runExtractor(arguments: args, productId: pid, environment: self.plaudEnvironment(for: device)) { [weak self] result in
                 guard let self = self else { group.leave(); return }
                 switch result {
                 case .success(let data):
@@ -3717,14 +3723,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let device = syncPairedDevices.first { $0.deviceId == entry.deviceId }
             var args: [String]
             let pid: Int?
+            let environment: [String: String]
             if let device = device, device.deviceType == .volume {
                 args = ["unmark-downloaded", "--volume-name", device.volumeName ?? "", entry.recording.name]
                 pid = nil
+                environment = [:]
+            } else if let device = device, device.deviceType == .plaud {
+                args = ["unmark-downloaded", "--plaud-account", device.plaudAccountId ?? "", entry.recording.name]
+                pid = nil
+                environment = plaudEnvironment(for: device)
             } else {
                 args = ["unmark-downloaded", entry.recording.name]
                 pid = device?.productId
+                environment = [:]
             }
-            runExtractor(arguments: args, productId: pid) { [weak self] _ in
+            runExtractor(arguments: args, productId: pid, environment: environment) { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.refreshSyncStatus()
                 }
@@ -3775,15 +3788,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     ) {
         let args: [String]
         let pid: Int?
+        let environment: [String: String]
         if device.deviceType == .volume {
             args = ["volume-status", "--volume-name", device.volumeName ?? "", "--timeout-ms", "5000"]
             pid = nil
+            environment = [:]
+        } else if device.deviceType == .plaud {
+            args = plaudExtractorArguments("plaud-status", device: device)
+            pid = nil
+            environment = plaudEnvironment(for: device)
         } else {
             args = ["status", "--timeout-ms", "5000"]
             pid = device.productId
+            environment = [:]
         }
 
-        runExtractor(arguments: args, productId: pid) { [weak self] result in
+        runExtractor(arguments: args, productId: pid, environment: environment) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success(let data):
@@ -3894,15 +3914,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let device = syncPairedDevices.first { $0.deviceId == entry.deviceId }
             var args: [String]
             let pid: Int?
+            let environment: [String: String]
             if let device = device, device.deviceType == .volume {
                 args = ["unmark-downloaded", "--volume-name", device.volumeName ?? "", entry.recording.name]
                 pid = nil
+                environment = [:]
+            } else if let device = device, device.deviceType == .plaud {
+                args = ["mark-removed", "--plaud-account", device.plaudAccountId ?? "", entry.recording.name]
+                pid = nil
+                environment = plaudEnvironment(for: device)
             } else {
                 args = ["mark-removed", entry.recording.name]
                 pid = device?.productId
+                environment = [:]
             }
             group.enter()
-            runExtractor(arguments: args, productId: pid) { _ in group.leave() }
+            runExtractor(arguments: args, productId: pid, environment: environment) { _ in group.leave() }
         }
 
         group.notify(queue: .main) { [weak self] in
@@ -3996,6 +4023,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         var devices = syncPairedDevices
         devices.removeAll { $0.deviceId == device.deviceId }
         syncPairedDevices = devices
+        if device.deviceType == .plaud, let accountId = device.plaudAccountId {
+            PlaudAuthStore.delete(accountId: accountId)
+        }
         syncDeviceConnected.removeValue(forKey: device.deviceId)
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncDeviceConnected = syncDeviceConnected
@@ -4026,6 +4056,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = true
         log("Paired volume: \(volumeName) (subpath: \(subpath ?? "none"))")
+    }
+
+    private func pairPlaud(region: String) {
+        log("Starting Plaud sign-in (region=\(region))")
+        let controller = PlaudLoginWindowController(region: region, log: { [weak self] message in
+            self?.log(message)
+        }) { [weak self] result in
+            guard let self = self else { return }
+            self.plaudLoginController = nil
+            switch result {
+            case .success(let session):
+                do {
+                    try PlaudAuthStore.save(session)
+                } catch {
+                    self.showError("Plaud signed in but the session could not be saved:\n\(error.localizedDescription)")
+                    return
+                }
+                let device = HiDockPairedDevice(
+                    plaudAccountId: session.accountId,
+                    displayName: session.displayName,
+                    email: session.email,
+                    region: session.region
+                )
+                var devices = self.syncPairedDevices
+                if let idx = devices.firstIndex(where: { $0.deviceId == device.deviceId }) {
+                    devices[idx] = device
+                } else {
+                    devices.append(device)
+                }
+                self.syncPairedDevices = devices
+                self.syncDeviceConnected.removeValue(forKey: device.deviceId)
+                self.syncDeviceLastError.removeValue(forKey: device.deviceId)
+                self.viewModel.syncPairedDevices = self.syncPairedDevices
+                self.viewModel.syncDeviceConnected = self.syncDeviceConnected
+                self.viewModel.syncDeviceLastError = self.syncDeviceLastError
+                self.viewModel.syncPaired = true
+                self.log("Paired Plaud account: \(session.displayName) (\(session.region))")
+                self.refreshSyncStatus()
+            case .failure(let error):
+                self.log("Plaud sign-in failed: \(error.localizedDescription)")
+                self.showError("Plaud sign-in failed:\n\(error.localizedDescription)")
+            }
+        }
+        plaudLoginController = controller
+        controller.show()
     }
 
     private func scanVolumes(completion: @escaping ([VolumeScanResult]) -> Void) {
@@ -4280,6 +4355,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return args
     }
 
+    private func plaudExtractorArguments(_ command: String, device: HiDockPairedDevice, extra: [String] = []) -> [String] {
+        [command, "--account-id", device.plaudAccountId ?? device.deviceId] + extra
+    }
+
+    private func plaudEnvironment(for device: HiDockPairedDevice) -> [String: String] {
+        guard device.deviceType == .plaud else { return [:] }
+        guard let accountId = device.plaudAccountId,
+              let session = PlaudAuthStore.load(accountId: accountId) else {
+            markPlaudSignedOut(device)
+            return [:]
+        }
+        if syncDeviceLastError[device.deviceId]?.0 == plaudSignedOutMessage {
+            syncDeviceLastError.removeValue(forKey: device.deviceId)
+        }
+        return [
+            "PLAUD_ACCOUNT_ID": accountId,
+            "PLAUD_ACCESS_TOKEN": session.accessToken,
+            "PLAUD_REFRESH_TOKEN": session.refreshToken ?? "",
+            "PLAUD_REGION": session.region
+        ]
+    }
+
+    private func markPlaudSignedOut(_ device: HiDockPairedDevice) {
+        guard device.deviceType == .plaud else { return }
+        syncDeviceConnected[device.deviceId] = false
+        syncDeviceLastError[device.deviceId] = (plaudSignedOutMessage, Date())
+        log("\(device.cleanName): \(plaudSignedOutMessage)")
+        syncViewModelState()
+    }
+
     private func ensureExtractorReady() -> Bool {
         let configHint = "\n\nTo fix, set the repo path via:\n  defaults write com.hidock.mic-trigger \(repoRootKey) /path/to/hidock-tools"
         guard FileManager.default.fileExists(atPath: extractorScriptPath) else {
@@ -4304,7 +4409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// still keeps us from hanging forever on a genuinely wedged device.
     private let extractorProcessTimeout: TimeInterval = 120
 
-    private func runExtractor(arguments: [String], productId: Int? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runExtractor(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         log("runExtractor: \(fullArgs.joined(separator: " "))")
         let deviceKeyForBackoff: String? = productId.map { "hidock:\($0)" }
@@ -4313,6 +4418,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
             process.executableURL = URL(fileURLWithPath: self.extractorPythonPath)
             process.arguments = [self.extractorScriptPath] + fullArgs
+            if !environment.isEmpty {
+                process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+            }
             DispatchQueue.main.async { self.syncExtractorProcess = process }
 
             let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -4413,13 +4521,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func runExtractorWithProgress(arguments: [String], productId: Int? = nil, onProgress: @escaping (Int, Int, Int) -> Void, onFile: ((String, Bool) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runExtractorWithProgress(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], onProgress: @escaping (Int, Int, Int) -> Void, onFile: ((String, Bool) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         syncExtractorQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
             process.executableURL = URL(fileURLWithPath: self.extractorPythonPath)
             process.arguments = [self.extractorScriptPath] + fullArgs
+            if !environment.isEmpty {
+                process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+            }
             DispatchQueue.main.async { self.syncExtractorProcess = process }
 
             let outPipe = Pipe()
@@ -4514,6 +4625,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncDeviceLastOK[device.deviceId] = Date()
             syncDeviceLastError.removeValue(forKey: device.deviceId)
             syncDeviceHungUntil.removeValue(forKey: device.deviceId)
+        } else if device.deviceType == .plaud,
+                  let err = status.error,
+                  err.localizedCaseInsensitiveContains("not signed in") {
+            syncDeviceLastError[device.deviceId] = (plaudSignedOutMessage, Date())
         }
         if let stats = status.storage {
             syncDeviceStorage[device.deviceId] = stats
@@ -4782,7 +4897,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // state" gesture.
         let recording = viewModel.hidockRecordingActive
         let probeDevices = devices.filter { device in
-            if device.deviceType == .volume { return true }
+            if device.deviceType == .volume || device.deviceType == .plaud { return true }
             if !recording { return true }
             log("Refresh: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
             return false
@@ -4829,9 +4944,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case .volume:
                 args = volumeExtractorArguments("volume-status", device: device)
                 pid = nil
+            case .plaud:
+                args = plaudExtractorArguments("plaud-status", device: device)
+                pid = nil
             }
 
-            runExtractor(arguments: args, productId: pid) { [weak self] result in
+            runExtractor(arguments: args, productId: pid, environment: plaudEnvironment(for: device)) { [weak self] result in
                 guard let self = self else { group.leave(); return }
                 switch result {
                 case .success(let data):
@@ -5178,17 +5296,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             var args: [String]
             let pid: Int?
+            let environment: [String: String]
             if let device = device, device.deviceType == .volume {
                 args = ["mark-downloaded", "--volume-name", device.volumeName ?? ""] + filenames
                 pid = nil
+                environment = [:]
+            } else if let device = device, device.deviceType == .plaud {
+                args = ["mark-downloaded", "--plaud-account", device.plaudAccountId ?? ""] + filenames
+                pid = nil
+                environment = plaudEnvironment(for: device)
             } else {
                 args = ["mark-downloaded"] + filenames
                 pid = device?.productId
+                environment = [:]
             }
 
             log("Skip-download[\(device?.shortName ?? deviceId)]: mark-downloaded \(filenames.count) file(s), pid=\(pid.map(String.init) ?? "nil")")
             group.enter()
-            runExtractor(arguments: args, productId: pid) { [weak self] result in
+            runExtractor(arguments: args, productId: pid, environment: environment) { [weak self] result in
                 switch result {
                 case .success(let data):
                     self?.log("Skip-download[\(device?.shortName ?? deviceId)]: ok (\(data.count) bytes)")
@@ -5265,16 +5390,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             var args: [String]
             let pid: Int?
+            let environment: [String: String]
             if let device = device, device.deviceType == .volume {
                 args = ["unmark-downloaded", "--volume-name", device.volumeName ?? ""] + filenames
                 pid = nil
+                environment = [:]
+            } else if let device = device, device.deviceType == .plaud {
+                args = ["unmark-downloaded", "--plaud-account", device.plaudAccountId ?? ""] + filenames
+                pid = nil
+                environment = plaudEnvironment(for: device)
             } else {
                 args = ["unmark-downloaded"] + filenames
                 pid = device?.productId
+                environment = [:]
             }
 
             group.enter()
-            runExtractor(arguments: args, productId: pid) { result in
+            runExtractor(arguments: args, productId: pid, environment: environment) { result in
                 if case .failure(let error) = result {
                     anyError = error.localizedDescription
                 }
@@ -5401,15 +5533,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Choose extractor command based on device type
         let args: [String]
         let pid: Int?
+        let environment: [String: String]
         if let device = pairedDevice(for: current), device.deviceType == .volume {
             args = volumeExtractorArguments("volume-import", device: device, extra: [current.recording.name])
             pid = nil
+            environment = [:]
+        } else if let device = pairedDevice(for: current), device.deviceType == .plaud {
+            args = plaudExtractorArguments("plaud-download", device: device, extra: [current.recording.name])
+            pid = nil
+            environment = plaudEnvironment(for: device)
         } else {
             args = ["download", current.recording.name, "--length", "\(current.recording.length)"]
             pid = current.deviceProductId
+            environment = [:]
         }
 
-        runExtractorWithProgress(arguments: args, productId: pid, onProgress: { [weak self] received, total, pct in
+        runExtractorWithProgress(arguments: args, productId: pid, environment: environment, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
@@ -5502,16 +5641,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Choose extractor command based on device type
         let args: [String]
         let pid: Int?
+        let environment: [String: String]
         switch device.deviceType {
         case .hidock:
             args = ["download-new"]
             pid = device.productId
+            environment = [:]
         case .volume:
             args = volumeExtractorArguments("volume-import-new", device: device)
             pid = nil
+            environment = [:]
+        case .plaud:
+            args = plaudExtractorArguments("plaud-download-new", device: device)
+            pid = nil
+            environment = plaudEnvironment(for: device)
         }
 
-        runExtractorWithProgress(arguments: args, productId: pid, onProgress: { [weak self] received, total, pct in
+        runExtractorWithProgress(arguments: args, productId: pid, environment: environment, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
@@ -5534,6 +5680,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     }
                     deviceDownloaded = payload.downloaded.count
                     devicePayloads = payload.downloaded
+                    if device.deviceType == .plaud && deviceDownloaded > 0 {
+                        self.syncFilterDeviceId = device.deviceId
+                        self.viewModel.syncStatusFilter = .all
+                        self.log("Plaud fresh downloads: showing \(device.cleanName) rows and clearing status filter")
+                    }
                 }
                 self.downloadNewFromDevices(
                     Array(remaining.dropFirst()),

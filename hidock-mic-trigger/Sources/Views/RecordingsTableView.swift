@@ -330,14 +330,15 @@ struct RecordingsTableView: View {
                 // column-aligns between rows.
                 Text(entry.deviceName)
                     .lineLimit(1)
-                if let glyph = hidockDeviceGlyph(entry.deviceName, deviceType: .hidock) {
+                let rowDeviceType: DeviceType = entry.deviceId.hasPrefix("volume:") ? .volume : (entry.deviceId.hasPrefix("plaud:") ? .plaud : .hidock)
+                if let glyph = hidockDeviceGlyph(entry.deviceName, deviceType: rowDeviceType) {
                     glyph
                         .resizable()
                         .scaledToFit()
                         .frame(width: 16, height: 16)
                         .foregroundColor(.secondary)
                 } else {
-                    Image(systemName: hidockDeviceIcon(entry.deviceName, deviceType: entry.deviceId.hasPrefix("volume:") ? .volume : .hidock))
+                    Image(systemName: hidockDeviceIcon(entry.deviceName, deviceType: rowDeviceType))
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .frame(width: 16, height: 16)
