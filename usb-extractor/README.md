@@ -1,6 +1,8 @@
 # HiDock USB Extractor
 
-Python tool for downloading recordings from HiDock devices over USB and importing audio files from generic USB volumes (recorders, SD cards, external drives).
+Python tool for downloading recordings from HiDock devices over USB, importing audio files from generic USB volumes (recorders, SD cards, external drives), and syncing Plaud cloud recordings.
+
+All recording sources are app device providers. New provider work should follow [`../docs/ARCHITECTURE-device-providers.md`](../docs/ARCHITECTURE-device-providers.md), especially the shared status JSON, date/duration formats, provider-scoped state keys, and offline cache behavior.
 
 ## Setup
 
@@ -75,6 +77,26 @@ For generic USB volumes (audio recorders, SD cards mounted as drives):
 ```
 
 Optional `--subpath` flag scopes scanning to a subfolder on the volume.
+
+### Plaud cloud commands
+
+Plaud auth is owned by the desktop app and passed to the extractor through environment variables. The extractor must not persist Plaud access tokens.
+
+```bash
+# Check Plaud recordings for a paired account
+PLAUD_ACCESS_TOKEN=... PLAUD_REFRESH_TOKEN=... PLAUD_REGION=us \
+  .venv/bin/python extractor.py plaud-status --account-id <account-id>
+
+# Download a specific Plaud recording
+PLAUD_ACCESS_TOKEN=... PLAUD_REFRESH_TOKEN=... PLAUD_REGION=us \
+  .venv/bin/python extractor.py plaud-download <recording-id> --account-id <account-id>
+
+# Download all new Plaud recordings
+PLAUD_ACCESS_TOKEN=... PLAUD_REFRESH_TOKEN=... PLAUD_REGION=us \
+  .venv/bin/python extractor.py plaud-download-new --account-id <account-id>
+```
+
+`plaud-status` caches the last successful Plaud catalog in `state.json` and returns those cached rows with `connected:false` when Plaud is signed out or unreachable, matching HiDock's disconnected-device behavior.
 
 ## USB protocol
 

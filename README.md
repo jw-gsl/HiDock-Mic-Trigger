@@ -32,7 +32,7 @@ A suite of tools for working with [HiDock](https://www.hidock.com) USB docking s
 At a high level:
 
 1. **Mic Trigger** — watches your USB mic (e.g. Samson Q2U) via CoreAudio. When it detects the mic is in use, it silently opens the HiDock's audio input using `ffmpeg`, causing the HiDock to auto-record.
-2. **USB Sync** — pairs with HiDock devices over USB or generic USB volumes (audio recorders, SD cards) and downloads/imports recordings to a local folder. The Device Manager supports multiple paired devices of both types.
+2. **Device Sync** — pairs with HiDock devices over USB, generic USB volumes (audio recorders, SD cards), and Plaud cloud accounts, then downloads/imports recordings to a local folder. Device providers must obey the shared contract in [`docs/ARCHITECTURE-device-providers.md`](docs/ARCHITECTURE-device-providers.md).
 3. **Transcription pipeline** — a multi-stage processing chain detailed below. All local, no network, no API keys.
 4. **Integrations** — optional Knowledge Graph indexing, Obsidian vault sync, custom shell hooks, and an MCP server that exposes meeting knowledge to AI agents.
 
