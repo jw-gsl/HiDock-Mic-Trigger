@@ -11,8 +11,38 @@ on:
       - 'plaud-sync/**'
   workflow_dispatch:
 
+# Opt JS-based actions into Node.js 24 (silences the Node 20 deprecation warning).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
+  test:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: plaud-sync
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plaud-sync/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (svelte-check)
+        run: npm run check
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
   build-macos:
+    needs: test
     runs-on: macos-15
     defaults:
       run:
@@ -44,9 +74,11 @@ jobs:
             plaud-sync/dist/Plaud Sync.app
             plaud-sync/dist/*.dmg
             plaud-sync/dist/Plaud-Sync-macOS.zip
+            plaud-sync/dist/INSTALL.txt
           retention-days: 90
 
   build-windows:
+    needs: test
     runs-on: windows-latest
     defaults:
       run:
