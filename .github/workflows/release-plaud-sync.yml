@@ -1,0 +1,93 @@
+name: Release Plaud Sync
+
+# Manually triggered. Builds signed macOS + Windows bundles, generates the
+# updater manifest (latest.json), and publishes them to a rolling GitHub
+# Release tagged `plaud-sync-latest` — which is the URL the app's updater polls
+# (see plugins.updater.endpoints in src-tauri/tauri.conf.json).
+#
+# Prerequisites (one-time, owner-managed):
+#   1. Generate an updater keypair:  npm run tauri signer generate -- -w ~/.tauri/plaud-sync.key
+#   2. Put the PUBLIC key in src-tauri/tauri.conf.json -> plugins.updater.pubkey
+#   3. Add repo secrets:
+#        TAURI_SIGNING_PRIVATE_KEY           (contents of the private key file)
+#        TAURI_SIGNING_PRIVATE_KEY_PASSWORD  (its password, or "" if none)
+#
+# The version shipped comes from src-tauri/tauri.conf.json ("version"); bump it
+# before releasing so clients see a newer version.
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify updater signing is configured
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if grep -q "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY" plaud-sync/src-tauri/tauri.conf.json; then
+            echo "::error::plugins.updater.pubkey is still the placeholder. Generate a keypair and put the public key in src-tauri/tauri.conf.json before releasing."
+            exit 1
+          fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::Secret TAURI_SIGNING_PRIVATE_KEY is not set. Add it (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD) in repo Settings → Secrets."
+            exit 1
+          fi
+
+  build:
+    needs: preflight
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: true
+      # Sequential so the two platforms publish to the same rolling release and
+      # tauri-action can merge each platform into the shared latest.json.
+      max-parallel: 1
+      matrix:
+        include:
+          - os: macos-15
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plaud-sync/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        working-directory: plaud-sync
+        run: npm ci
+
+      - name: Enable updater artifacts for this build
+        working-directory: plaud-sync
+        shell: bash
+        run: |
+          node -e "const f='src-tauri/tauri.conf.json';const c=require('./'+f);c.bundle.createUpdaterArtifacts=true;require('fs').writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
+
+      - name: Build, sign, and publish to the updater release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: plaud-sync
+          tagName: plaud-sync-latest
+          releaseName: "Plaud Sync v__VERSION__"
+          releaseBody: |
+            Automatic update channel for Plaud Sync. Installed apps (v0.2.0+) update themselves from here.
+            New install: download the `.dmg` (macOS) or `-setup.exe` (Windows) below.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

@@ -178,8 +178,11 @@ pub fn get_sync_info(state: State<'_, AppState>) -> Result<SyncInfo, String> {
     let last = state
         .last_sync_epoch
         .load(std::sync::atomic::Ordering::Relaxed);
+    // Auto-sync now checks every tick (see `sync::AUTO_SYNC_TICK_SECS`), not on
+    // the legacy per-minutes interval, so the countdown reflects the real ~60s
+    // cadence rather than `auto_sync_minutes`.
     let seconds_until_next = if settings.auto_sync {
-        let interval = i64::from(settings.auto_sync_minutes.max(1)) * 60;
+        let interval = crate::sync::AUTO_SYNC_TICK_SECS as i64;
         Some((last + interval - crate::state::now_epoch()).max(0))
     } else {
         None

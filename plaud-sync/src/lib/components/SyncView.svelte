@@ -56,7 +56,14 @@
 
   onMount(() => {
     void load();
-    const tick = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 1000);
+    let elapsed = 0;
+    const tick = setInterval(() => {
+      nowSec = Math.floor(Date.now() / 1000);
+      // Auto-sync runs ~every minute and only emits "auto-sync-complete" when
+      // something downloads, so refresh the schedule periodically to keep the
+      // countdown live (cheap, local — no Plaud call).
+      if (syncInfo?.autoSync && ++elapsed % 15 === 0) void refreshSyncInfo();
+    }, 1000);
     const unlistenProgress = listen<SyncProgress>("sync-progress", (e) => {
       progress = e.payload;
     });
