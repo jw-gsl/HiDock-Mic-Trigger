@@ -11,7 +11,6 @@
   let email = $state("");
   let password = $state("");
   let token = $state("");
-  let region = $state("us");
   let loading = $state(false);
   let error = $state("");
 
@@ -19,7 +18,7 @@
     error = "";
     loading = true;
     try {
-      await api.loginWithBrowser(region);
+      await api.loginWithBrowser();
       onSuccess();
     } catch (e) {
       error = String(e);
@@ -33,7 +32,7 @@
     error = "";
     loading = true;
     try {
-      await api.loginWithEmail(email.trim(), password, region);
+      await api.loginWithEmail(email.trim(), password);
       onSuccess();
     } catch (e) {
       error = String(e);
@@ -47,7 +46,7 @@
     error = "";
     loading = true;
     try {
-      await api.loginWithToken(token.trim(), region);
+      await api.loginWithToken(token.trim());
       onSuccess();
     } catch (e) {
       error = String(e);
@@ -66,14 +65,6 @@
   {#if error}
     <div class="status error">{error}</div>
   {/if}
-
-  <div class="field">
-    <label for="region">Region</label>
-    <select id="region" bind:value={region} disabled={loading}>
-      <option value="us">United States</option>
-      <option value="eu">Europe</option>
-    </select>
-  </div>
 
   {#if mode === "browser"}
     <button class="btn btn-primary btn-large browser-btn" onclick={handleBrowserLogin} disabled={loading}>

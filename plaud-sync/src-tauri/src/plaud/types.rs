@@ -55,11 +55,3 @@ pub struct PlaudUserInfo {
     pub email: String,
     pub nickname: String,
 }
-
-#[derive(Debug, Deserialize)]
-pub struct LoginResponse {
-    pub status: i32,
-    pub msg: Option<String>,
-    pub access_token: Option<String>,
-    pub token_type: Option<String>,
-}

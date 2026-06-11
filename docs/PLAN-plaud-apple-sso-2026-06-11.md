@@ -87,6 +87,17 @@ downstream gaps, each found from a real trace and fixed:
       removed investigation-only instrumentation.
 - [x] `cargo check` clean, `cargo test` 10/10, `npm run check` 0 errors. Verified end-to-end live.
 
+## Follow-up — removed the region dropdown (region now fully auto-detected)
+Since the backend tells us the right region, the manual US/EU picker was redundant.
+- **Email/password** (`password_attempt`): reads in-body status; on region mismatch retries
+  against `data.domains.api` (or flips US↔EU), returns the effective region.
+- **Token** (paste JWT): validates against US then EU and keeps whichever the API accepts.
+- **SSO**: already auto-retries (above).
+- Dropped the `region` arg from the three login commands / `api.ts`; removed the dropdown from
+  `LoginView.svelte`. Each path starts at `us` and self-corrects. (`cargo`/`test`/`svelte-check`
+  all green.) Note: email/password and token paths verified by compile + reasoning, not a live
+  run (only Apple SSO was exercised end-to-end).
+
 ## Notes / Follow-ups
 - `about:blank` and `js.stripe.com` sub-frame navigations are blocked by `is_allowed_login_url`
   during the flow; harmless here (sign-in still completes) but logged as WARN noise.

@@ -1,7 +1,7 @@
 use base64::Engine;
 use chrono::Utc;
 
-use super::types::{base_url, LoginResponse, PlaudTokenData, TOKEN_REFRESH_BUFFER_MS};
+use super::types::{base_url, PlaudTokenData, TOKEN_REFRESH_BUFFER_MS};
 use crate::storage::Storage;
 
 pub struct PlaudAuth {
@@ -53,12 +53,15 @@ impl PlaudAuth {
         Err("Not logged in. Please sign in first.".into())
     }
 
+    /// Email/password sign-in. Tries the given region and, on a region mismatch,
+    /// auto-retries against the region Plaud points to (so the user doesn't pick
+    /// it). Returns the region the account actually belongs to.
     pub async fn login_with_credentials(
         &self,
         email: &str,
         password: &str,
         region: &str,
-    ) -> Result<PlaudTokenData, String> {
+    ) -> Result<String, String> {
         self.storage
             .save_credentials(email, region)
             .map_err(|e| e.to_string())?;
@@ -66,10 +69,44 @@ impl PlaudAuth {
             .save_password(password)
             .map_err(|e| e.to_string())?;
 
-        self.login_with_stored_credentials().await
+        match self.password_attempt(region).await? {
+            PwOutcome::Session(_) => Ok(region.to_string()),
+            PwOutcome::RegionRedirect(correct) if correct != region => {
+                crate::login_log::info(&format!(
+                    "password region mismatch — retrying in region '{correct}'"
+                ));
+                // Persist the corrected region so the session uses the right host.
+                self.storage
+                    .save_credentials(email, &correct)
+                    .map_err(|e| e.to_string())?;
+                match self.password_attempt(&correct).await? {
+                    PwOutcome::Session(_) => Ok(correct),
+                    _ => Err("Could not resolve your account's region.".to_string()),
+                }
+            }
+            PwOutcome::RegionRedirect(_) => {
+                Err("Could not resolve your account's region.".to_string())
+            }
+            PwOutcome::Error(msg) => Err(msg),
+        }
     }
 
+    /// Single attempt against the stored region — used to silently refresh the
+    /// token for email/password accounts (region is already known here).
     pub async fn login_with_stored_credentials(&self) -> Result<PlaudTokenData, String> {
+        let region = self.storage.get_region();
+        match self.password_attempt(&region).await? {
+            PwOutcome::Session(token) => Ok(token),
+            PwOutcome::RegionRedirect(_) => {
+                Err("Account region changed; please sign in again.".to_string())
+            }
+            PwOutcome::Error(msg) => Err(msg),
+        }
+    }
+
+    /// One POST to `/auth/access-token` for `region`. On success saves the token;
+    /// otherwise classifies the failure (region redirect vs. surfaced error).
+    async fn password_attempt(&self, region: &str) -> Result<PwOutcome, String> {
         let creds = self
             .storage
             .get_credentials()
@@ -82,7 +119,7 @@ impl PlaudAuth {
 
         let client = reqwest::Client::new();
         let res = client
-            .post(format!("{}/auth/access-token", base_url(&creds.region)))
+            .post(format!("{}/auth/access-token", base_url(region)))
             .form(&[
                 ("username", creds.email.as_str()),
                 ("password", password.as_str()),
@@ -91,24 +128,40 @@ impl PlaudAuth {
             .await
             .map_err(|e| format!("Network error: {e}"))?;
 
-        let data: LoginResponse = res
-            .json()
-            .await
-            .map_err(|e| format!("Invalid login response: {e}"))?;
+        let body_text = res.text().await.unwrap_or_default();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+        let app_status = json["status"].as_i64().unwrap_or(-1);
+        let msg = json["msg"].as_str().unwrap_or("").to_string();
+        crate::login_log::info(&format!(
+            "access-token response region={region} status={app_status} msg=\"{msg}\""
+        ));
 
-        if data.status != 0 {
-            return Err(data.msg.unwrap_or_else(|| "Login failed".to_string()));
+        if app_status == 0 {
+            if let Some(access_token) = json["access_token"].as_str() {
+                let token =
+                    build_token_data(access_token, json["token_type"].as_str())?;
+                self.storage.save_token(&token).map_err(|e| e.to_string())?;
+                return Ok(PwOutcome::Session(token));
+            }
         }
 
-        let access_token = data
-            .access_token
-            .ok_or_else(|| "No access token in response".to_string())?;
+        // Region mismatch: prefer the host Plaud points to, else flip us<->eu.
+        let mismatch = json["data"]["domains"]["api"].is_string()
+            || msg.to_lowercase().contains("region");
+        if mismatch {
+            let correct = json["data"]["domains"]["api"]
+                .as_str()
+                .and_then(region_from_api_host)
+                .unwrap_or_else(|| if region == "eu" { "us" } else { "eu" }.to_string());
+            return Ok(PwOutcome::RegionRedirect(correct));
+        }
 
-        let token = build_token_data(&access_token, data.token_type.as_deref())?;
-        self.storage
-            .save_token(&token)
-            .map_err(|e| e.to_string())?;
-        Ok(token)
+        Ok(PwOutcome::Error(if msg.is_empty() {
+            "Login failed".to_string()
+        } else {
+            msg
+        }))
     }
 
     /// Web SSO sign-in (Google, Apple, Microsoft, …). Replays the exact JSON
@@ -344,6 +397,16 @@ pub enum SsoSession {
     Authenticated { region: String },
     /// SSO identity recognised but not linked to a Plaud account yet.
     NeedsRegistration { sso_email: String },
+}
+
+/// Result of a single `/auth/access-token` (email/password) attempt.
+enum PwOutcome {
+    /// Signed in; token persisted.
+    Session(PlaudTokenData),
+    /// The account lives in another region; value is the region to retry in.
+    RegionRedirect(String),
+    /// A surfaced, user-facing failure.
+    Error(String),
 }
 
 /// Result of a single `/auth/sso-callback` attempt.
