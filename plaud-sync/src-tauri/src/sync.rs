@@ -180,16 +180,22 @@ async fn download_one(
     Ok(())
 }
 
-/// Background loop: when auto-sync is enabled, download new recordings on the
-/// configured interval. Re-reads settings every tick so toggling the setting or
-/// changing the interval takes effect without a restart.
+/// How often the auto-sync loop checks Plaud for new recordings. Plaud has no
+/// push API, so "download new recordings as they arrive" means polling — a
+/// minute keeps new recordings landing promptly without hammering the API.
+pub const AUTO_SYNC_TICK_SECS: u64 = 60;
+
+/// Background loop: when auto-sync is enabled, check Plaud for new recordings
+/// every tick and download anything not already on disk, so recordings land
+/// within ~a minute of appearing. Re-reads settings every tick so toggling
+/// auto-sync takes effect without a restart.
 pub async fn auto_sync_loop(app: AppHandle) {
     use std::sync::atomic::Ordering;
 
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(AUTO_SYNC_TICK_SECS)).await;
 
-        let (storage, settings, logged_in, last) = {
+        let (storage, settings, logged_in) = {
             let state = app.state::<AppState>();
             let Ok(guard) = state.storage.lock() else {
                 continue;
@@ -197,8 +203,7 @@ pub async fn auto_sync_loop(app: AppHandle) {
             let storage = guard.clone();
             let settings = storage.get_settings();
             let logged_in = storage.is_logged_in();
-            let last = state.last_sync_epoch.load(Ordering::Relaxed);
-            (storage, settings, logged_in, last)
+            (storage, settings, logged_in)
         };
 
         if !settings.auto_sync {
@@ -212,24 +217,21 @@ pub async fn auto_sync_loop(app: AppHandle) {
             continue;
         }
 
-        let interval_secs = i64::from(settings.auto_sync_minutes.max(1)) * 60;
-        let due_in = last + interval_secs - crate::state::now_epoch();
-        if due_in > 0 {
-            crate::login_log::debug(&format!("auto-sync: next download in {due_in}s"));
-            continue;
-        }
-
-        crate::login_log::info("auto-sync: downloading new recordings…");
         match sync_recordings(&app, &storage, &settings).await {
             Ok(result) => {
                 app.state::<AppState>()
                     .last_sync_epoch
                     .store(crate::state::now_epoch(), Ordering::Relaxed);
-                crate::login_log::info(&format!(
-                    "auto-sync complete: {} downloaded, {} skipped, {} failed",
-                    result.downloaded, result.skipped, result.failed
-                ));
-                let _ = app.emit("auto-sync-complete", result);
+                // Only announce (and trigger a UI re-list) when something
+                // actually changed — a quiet "nothing new" tick every minute
+                // shouldn't spam the log or refresh the list.
+                if result.downloaded > 0 || result.failed > 0 {
+                    crate::login_log::info(&format!(
+                        "auto-sync: {} downloaded, {} skipped, {} failed",
+                        result.downloaded, result.skipped, result.failed
+                    ));
+                    let _ = app.emit("auto-sync-complete", result);
+                }
             }
             Err(e) => {
                 crate::login_log::error(&format!("auto-sync failed: {e}"));

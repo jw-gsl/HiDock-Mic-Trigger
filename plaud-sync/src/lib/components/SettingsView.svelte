@@ -1,13 +1,22 @@
 <script lang="ts">
   import { api } from "../api";
   import type { AppSettings } from "../types";
+  import type { UpdateStatus } from "../updater";
   import { applyTheme, type Theme } from "../utils";
 
   let {
     onBack,
+    onCheckUpdates,
+    updateStatus,
   }: {
     onBack: () => void;
+    onCheckUpdates: () => void;
+    updateStatus: UpdateStatus;
   } = $props();
+
+  const checkingUpdate = $derived(
+    updateStatus.kind === "checking" || updateStatus.kind === "downloading",
+  );
 
   let settings = $state<AppSettings>({
     downloadDir: "",
@@ -200,15 +209,10 @@
       </div>
 
       {#if settings.autoSync}
-        <div class="field">
-          <label for="auto-interval">Check every</label>
-          <select id="auto-interval" bind:value={settings.autoSyncMinutes}>
-            <option value={15}>15 minutes</option>
-            <option value={30}>30 minutes</option>
-            <option value={60}>1 hour</option>
-            <option value={180}>3 hours</option>
-          </select>
-        </div>
+        <p class="meta auto-note">
+          New recordings download automatically, usually within a minute of appearing in your
+          Plaud account.
+        </p>
       {/if}
 
       <div class="toggle-row">
@@ -244,6 +248,32 @@
       </button>
       <button class:active={settings.theme === "dark"} onclick={() => setTheme("dark")}>
         Dark
+      </button>
+    </div>
+  </fieldset>
+
+  <fieldset class="field">
+    <legend>Updates</legend>
+    <div class="toggle-row">
+      <div>
+        <strong>App updates</strong>
+        <div class="meta">
+          Plaud Sync checks for new versions on launch and installs them with your approval.
+          {#if updateStatus.kind === "available"}
+            Version {updateStatus.version} is available.
+          {:else if updateStatus.kind === "downloading"}
+            Downloading… {updateStatus.percent}%
+          {:else if updateStatus.kind === "ready"}
+            Update installed — restart to finish.
+          {:else if updateStatus.kind === "uptodate"}
+            You're on the latest version.
+          {:else if updateStatus.kind === "error"}
+            Last check failed: {updateStatus.message}
+          {/if}
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick={onCheckUpdates} disabled={checkingUpdate}>
+        {checkingUpdate ? "Checking…" : "Check for updates"}
       </button>
     </div>
   </fieldset>

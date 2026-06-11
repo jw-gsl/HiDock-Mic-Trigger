@@ -278,6 +278,17 @@ pub async fn login_with_browser<R: Runtime>(
     let default_region = region.to_string();
     let popup_region = region.to_string();
 
+    // Reading cookies (`read_session_cookie` -> wry `cookies_for_url`) spins a
+    // nested run loop on the *main* thread until WebKit's `getAllCookies`
+    // callback fires. Doing that on a tight timer wedges the main thread during
+    // the OAuth flow and hangs the whole app (the login window then can't even
+    // close). Instead, only read cookies when a real navigation/page-load tells
+    // us the session may have changed, and after it has settled. Seeded `true`
+    // so an already-authenticated webview is captured on first load.
+    let cookie_check = Arc::new(AtomicBool::new(true));
+    let nav_cookie_check = cookie_check.clone();
+    let load_cookie_check = cookie_check.clone();
+
     let window = WebviewWindowBuilder::new(
         app,
         LOGIN_WINDOW_LABEL,
@@ -291,11 +302,20 @@ pub async fn login_with_browser<R: Runtime>(
     .inner_size(520.0, 760.0)
     .center()
     .initialization_script(&script)
-    .on_navigation(move |url| handle_navigation(&app_handle, &default_region, &url))
+    .on_navigation(move |url| {
+        // A real page navigation (not one of our `plaudsync://` callback/log
+        // pings) can mean the session cookie just appeared — schedule one
+        // settled cookie read rather than polling continuously.
+        if url.scheme() != CALLBACK_SCHEME {
+            nav_cookie_check.store(true, Ordering::Relaxed);
+        }
+        handle_navigation(&app_handle, &default_region, &url)
+    })
     .on_new_window(move |url, _features| handle_new_window(&app_for_popup, &popup_region, &url))
-    .on_page_load(|window, payload| {
+    .on_page_load(move |window, payload| {
         login_log::info(&format!("page load: {}", payload.url()));
         let _ = window.eval(FLUSH_JS_LOGS_SCRIPT);
+        load_cookie_check.store(true, Ordering::Relaxed);
     })
     .build()
     .map_err(|e| {
@@ -324,16 +344,30 @@ pub async fn login_with_browser<R: Runtime>(
     let poll_app = app.clone();
     let poll_stop_flag = poll_stop.clone();
     let poll_region = region.to_string();
+    let poll_cookie_check = cookie_check.clone();
     tokio::spawn(async move {
         while !poll_stop_flag.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if poll_app.get_webview_window(LOGIN_WINDOW_LABEL).is_none() {
+                break;
+            }
+            // Cheap and non-blocking — safe to do on every tick.
+            flush_js_logs(&poll_app);
+
+            // Only touch cookies when a navigation/page-load asked us to (see
+            // `cookie_check` above). This is the primary capture path: once
+            // web.plaud.ai has a session its pld_ut cookie is present in the
+            // webview. Robust to any SSO provider and to an already-authenticated
+            // webview — without continuously wedging the main thread.
+            if !poll_cookie_check.swap(false, Ordering::Relaxed) {
+                continue;
+            }
+            // Let the just-loaded page settle so WebKit's cookie store is idle
+            // when we query it (its callback runs on the main thread).
             tokio::time::sleep(Duration::from_millis(400)).await;
             let Some(window) = poll_app.get_webview_window(LOGIN_WINDOW_LABEL) else {
                 break;
             };
-            flush_js_logs(&poll_app);
-            // Primary capture: once web.plaud.ai has a session, its pld_ut
-            // cookie is present in the webview — read it directly. Robust to any
-            // SSO provider and to an already-authenticated webview.
             if let Some(login) = read_session_cookie(&window, &poll_region) {
                 login_log::info("captured pld_ut session cookie from login webview");
                 resolve_login(&poll_app, Ok(login));

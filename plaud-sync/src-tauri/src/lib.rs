@@ -16,6 +16,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Self-update: `tauri_plugin_updater` checks the configured endpoint and
+        // downloads/installs signed updates; `tauri_plugin_process` provides the
+        // relaunch the frontend calls after an update is applied.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
