@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use crate::app_types::AuthStatus;
 use crate::login_log;
 use crate::state::{AppState, BrowserLogin};
-use crate::plaud::{PlaudAuth, PlaudClient};
+use crate::plaud::{PlaudAuth, PlaudClient, SsoSession};
 use crate::storage::Storage;
 
 const LOGIN_WINDOW_LABEL: &str = "plaud-login";
@@ -89,25 +89,41 @@ const TOKEN_WATCHER_SCRIPT: &str = r#"
     window.location.replace("plaudsync://auth?" + params.toString());
   }
 
-  // Hand a Google id_token to the native side, which exchanges it via
-  // /auth/sso-callback for a Plaud session.
-  function finishSso(idToken, userArea) {
-    if (completed || !looksLikeJwt(idToken)) return;
+  // Hand an SSO credential to the native side via a hidden iframe so this
+  // window doesn't navigate to a blank plaudsync:// page (which left a white
+  // window behind). The native side POSTs it to /auth/sso-callback.
+  function shipSso(params) {
+    if (completed) return;
     completed = true;
-    plog("captured Google id_token, handing off to native sso-callback");
-    // Close the Google popup we opened (only the opener can).
+    // Close the provider popup we opened (only the opener can).
     try { if (window.__plaudPopup && !window.__plaudPopup.closed) window.__plaudPopup.close(); } catch (_) {}
-    // Signal the native side through a hidden iframe so this window doesn't
-    // navigate to a blank plaudsync:// page (which left a white window behind).
-    const params = new URLSearchParams({ id_token: idToken, user_area: userArea || "", region: detectedRegion });
+    params.region = params.region || detectedRegion;
+    const qs = new URLSearchParams(params).toString();
     try {
       const frame = document.createElement("iframe");
       frame.style.display = "none";
-      frame.src = "plaudsync://sso?" + params.toString();
+      frame.src = "plaudsync://sso?" + qs;
       (document.body || document.documentElement).appendChild(frame);
     } catch (_) {
-      window.location.replace("plaudsync://sso?" + params.toString());
+      window.location.replace("plaudsync://sso?" + qs);
     }
+  }
+
+  // Preferred: replay the exact JSON body web.plaud.ai POSTs to
+  // /auth/sso-callback — carries the correct sso_type / fields for ANY provider
+  // (Google, Apple, Microsoft) without us reconstructing them.
+  function finishSsoBody(rawBody) {
+    if (completed || !rawBody) return;
+    plog("captured sso-callback body, handing to native: " + String(rawBody).slice(0, 300));
+    shipSso({ body: String(rawBody) });
+  }
+
+  // Fallback for when only an id_token is available (e.g. the GIS opener path):
+  // the native side reconstructs a Google-style body.
+  function finishSso(idToken, userArea) {
+    if (completed || !looksLikeJwt(idToken)) return;
+    plog("captured id_token (opener path), handing off to native sso-callback");
+    shipSso({ id_token: idToken, sso_type: "google", user_area: userArea || "" });
   }
 
   // A GIS credential can arrive as a raw JWT string or as an object with a
@@ -184,21 +200,23 @@ const TOKEN_WATCHER_SCRIPT: &str = r#"
   window.fetch = function (...args) {
     const reqUrl = typeof args[0] === "string" ? args[0] : args[0]?.url;
     updateRegionFromUrl(reqUrl);
-    // If web.plaud.ai itself posts the Google id_token to sso-callback, grab it
-    // from the request body and run our own exchange.
+    // When web.plaud.ai posts an SSO credential to sso-callback, capture the
+    // exact request body and replay it natively (works for Google, Apple,
+    // Microsoft — the body already carries the right sso_type).
     try {
       if (reqUrl && String(reqUrl).indexOf("/auth/sso-callback") !== -1 && args[1] && typeof args[1].body === "string") {
-        const parsed = JSON.parse(args[1].body);
-        if (parsed && parsed.id_token) finishSso(parsed.id_token, parsed.user_area || detectedRegion);
+        const raw = args[1].body;
+        const parsed = JSON.parse(raw);
+        if (parsed && (parsed.id_token || parsed.code)) finishSsoBody(raw);
       }
     } catch (_) {}
     return originalFetch.apply(this, args);
   };
 
-  // web.plaud.ai performs the Google exchange over XHR (not fetch), so the
-  // id_token must be read from the XHR *request* body of sso-callback. Do NOT
-  // grab the access_token from /auth/access-token-other-web — that is a
-  // Frill-scoped token the main API rejects ("invalid auth header").
+  // web.plaud.ai performs the SSO exchange over XHR (not fetch), so the body
+  // must be read from the XHR *request* body of sso-callback. Do NOT grab the
+  // access_token from /auth/access-token-other-web — that is a Frill-scoped
+  // token the main API rejects ("invalid auth header").
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this.__plaudUrl = String(url || "");
@@ -211,8 +229,9 @@ const TOKEN_WATCHER_SCRIPT: &str = r#"
     const xhrUrl = this.__plaudUrl || "";
     try {
       if (xhrUrl.indexOf("/auth/sso-callback") !== -1 && typeof args[0] === "string") {
-        const parsed = JSON.parse(args[0]);
-        if (parsed && parsed.id_token) finishSso(parsed.id_token, parsed.user_area || detectedRegion);
+        const raw = args[0];
+        const parsed = JSON.parse(raw);
+        if (parsed && (parsed.id_token || parsed.code)) finishSsoBody(raw);
       }
     } catch (_) {}
     return send.apply(this, args);
@@ -401,28 +420,69 @@ pub async fn login_with_browser<R: Runtime>(
         }
     };
 
+    flush_js_logs(app);
+    login_log::info("credential captured, completing login");
+
+    // Keep the webview open while completing: an SSO identity with no linked
+    // Plaud account (new sign-up) needs the user to finish registering on
+    // web.plaud.ai, after which the session is captured from the webview cookies.
+    let mut captured = captured;
+    let result = loop {
+        match captured {
+            BrowserLogin::Jwt { token, region } => {
+                break complete_browser_auth(storage.clone(), &token, &region).await;
+            }
+            BrowserLogin::SessionCookie {
+                user_token,
+                refresh_token,
+                region,
+            } => {
+                break complete_session_cookie(
+                    storage.clone(),
+                    &user_token,
+                    refresh_token.as_deref(),
+                    &region,
+                )
+                .await;
+            }
+            BrowserLogin::Sso { body, region } => {
+                match complete_sso(storage.clone(), &body, &region).await {
+                    Ok(Some(status)) => break Ok(status),
+                    Err(e) => break Err(append_log_hint(e)),
+                    // Needs registration: leave the window open, re-arm the
+                    // channel, and wait for the cookie poll to capture the
+                    // session once the user finishes signing up.
+                    Ok(None) => {
+                        login_log::info("waiting for sign-up to complete in the webview…");
+                        let (tx2, rx2) = oneshot::channel::<Result<BrowserLogin, String>>();
+                        if let Ok(mut slot) = app.state::<AppState>().browser_login_tx.lock() {
+                            *slot = Some(tx2);
+                        }
+                        cookie_check.store(true, Ordering::Relaxed);
+                        match timeout(LOGIN_TIMEOUT, rx2).await {
+                            Ok(Ok(Ok(next))) => {
+                                captured = next;
+                                continue;
+                            }
+                            Ok(Ok(Err(e))) => break Err(append_log_hint(e)),
+                            Ok(Err(_)) => {
+                                break Err(append_log_hint("Sign-up was interrupted.".into()))
+                            }
+                            Err(_) => break Err(append_log_hint(
+                                "Sign-up timed out. Finish creating your Plaud account, then try again.".into(),
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     poll_stop.store(true, Ordering::Relaxed);
     flush_js_logs(app);
     close_login_window(app);
-
-    login_log::info("credential captured, completing login");
     clear_login_channel(state);
-
-    match captured {
-        BrowserLogin::Jwt { token, region } => {
-            complete_browser_auth(storage, &token, &region).await
-        }
-        BrowserLogin::GoogleSso {
-            id_token,
-            user_area,
-            region,
-        } => complete_google_sso(storage, &id_token, &user_area, &region).await,
-        BrowserLogin::SessionCookie {
-            user_token,
-            refresh_token,
-            region,
-        } => complete_session_cookie(storage, &user_token, refresh_token.as_deref(), &region).await,
-    }
+    result
 }
 
 /// Read the Plaud session cookies (`pld_ut` / `pld_urt`) from the login webview.
@@ -489,39 +549,55 @@ async fn complete_session_cookie(
     })
 }
 
-async fn complete_google_sso(
+/// Complete an SSO exchange. Returns `Ok(Some(status))` once signed in, or
+/// `Ok(None)` if the SSO identity isn't linked to a Plaud account yet — in which
+/// case the caller keeps the webview open so the user can finish sign-up and the
+/// session is then captured from the webview cookies.
+async fn complete_sso(
     storage: Storage,
-    id_token: &str,
-    user_area: &str,
+    body: &str,
     region: &str,
-) -> Result<AuthStatus, String> {
+) -> Result<Option<AuthStatus>, String> {
     let auth = PlaudAuth::new(storage.clone());
-    auth.login_with_google_sso(id_token, user_area, region).await?;
+    // `login_with_sso` may switch to the account's real region (e.g. the user
+    // picked US but the account is EU); use the returned region from here on.
+    let region = match auth.login_with_sso(body, region).await? {
+        SsoSession::Authenticated { region, .. } => region,
+        SsoSession::NeedsRegistration { sso_email } => {
+            login_log::info(&format!(
+                "sso identity {sso_email} not linked to a Plaud account — awaiting sign-up in webview"
+            ));
+            return Ok(None);
+        }
+    };
 
-    let mut client = PlaudClient::new(PlaudAuth::new(storage.clone()), region.to_string());
+    let mut client = PlaudClient::new(PlaudAuth::new(storage.clone()), region.clone());
     let user = client.get_user_info().await?;
 
     if !user.email.is_empty() {
         storage
-            .save_credentials(&user.email, region)
+            .save_credentials(&user.email, &region)
             .map_err(|e| e.to_string())?;
     }
     if !user.nickname.is_empty() {
         let _ = storage.save_display_name(&user.nickname);
     }
 
-    login_log::info(&format!("google sign-in complete for {}", user.email));
+    login_log::info(&format!(
+        "sso sign-in complete for {} (region={region})",
+        user.email
+    ));
 
-    Ok(AuthStatus {
+    Ok(Some(AuthStatus {
         logged_in: true,
         email: if user.email.is_empty() {
             None
         } else {
             Some(user.email)
         },
-        region: Some(region.to_string()),
+        region: Some(region),
         name: storage.get_display_name(),
-    })
+    }))
 }
 
 fn append_log_hint(message: String) -> String {
@@ -642,13 +718,28 @@ fn parse_callback(url: &Url, default_region: &str) -> Option<Result<BrowserLogin
             Some(Ok(BrowserLogin::Jwt { token, region }))
         }
         Some("sso") => {
+            // Preferred: the exact JSON body web.plaud.ai POSTed to
+            // /auth/sso-callback (carries the right sso_type for any provider).
+            if let Some(body) = query.get("body").cloned().filter(|b| !b.is_empty()) {
+                return Some(Ok(BrowserLogin::Sso { body, region }));
+            }
+            // Fallback: only an id_token was captured (e.g. the GIS opener path).
+            // Reconstruct the Google-style body the backend expects.
             let id_token = query.get("id_token").cloned().filter(|t| !t.is_empty())?;
+            let sso_type = query
+                .get("sso_type")
+                .cloned()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "google".to_string());
             let user_area = query.get("user_area").cloned().unwrap_or_default();
-            Some(Ok(BrowserLogin::GoogleSso {
-                id_token,
-                user_area,
-                region,
-            }))
+            let body = serde_json::json!({
+                "sso_from": "web",
+                "sso_type": sso_type,
+                "id_token": id_token,
+                "user_area": user_area,
+            })
+            .to_string();
+            Some(Ok(BrowserLogin::Sso { body, region }))
         }
         _ => Some(Err("Unexpected sign-in callback.".into())),
     }
