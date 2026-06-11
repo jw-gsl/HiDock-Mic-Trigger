@@ -42,6 +42,15 @@ import usb.util
 import plaud_client
 
 
+def _attach_refreshed_plaud_tokens(payload: dict, account_id: str) -> None:
+    """If the Plaud user token was refreshed during this command, attach the
+    (possibly rotated) tokens so the app can persist them. The Python side does
+    not store secrets, so without this the next run reuses the stale env token."""
+    refreshed = plaud_client.pop_refreshed_tokens(account_id)
+    if refreshed:
+        payload["refreshedTokens"] = refreshed
+
+
 VENDOR_ID = 4310
 PRODUCT_ID = 45068
 OUT_ENDPOINT = 1
@@ -2008,6 +2017,7 @@ def main() -> int:
         payload = plaud_client.status_payload(output_dir, state, account_id=args.account_id)
         payload["statePath"] = str(DEFAULT_STATE_PATH.resolve())
         payload["configPath"] = str(DEFAULT_CONFIG_PATH.resolve())
+        _attach_refreshed_plaud_tokens(payload, args.account_id)
         save_state(state)
         print(json.dumps(payload, indent=2))
         return 0
@@ -2036,6 +2046,7 @@ def main() -> int:
             }
             save_state(state)
             raise
+        _attach_refreshed_plaud_tokens(payload, args.account_id)
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "plaud-download-new":
@@ -2043,6 +2054,7 @@ def main() -> int:
         state = load_state()
         output_dir = resolved_output_dir(config)
         payload = plaud_client.download_new(output_dir, state, account_id=args.account_id)
+        _attach_refreshed_plaud_tokens(payload, args.account_id)
         save_state(state)
         print(json.dumps(payload, indent=2))
         return 0

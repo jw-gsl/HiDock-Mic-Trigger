@@ -56,10 +56,44 @@ def transcribe(audio_path: str | Path, language: str | None = None) -> dict:
 
     model = from_pretrained("mlx-community/parakeet-tdt-0.6b-v2")
 
+    # Chunk long audio. Feeding a multi-hour file to MLX in a single
+    # `transcribe()` call builds one enormous Metal command buffer; on
+    # Apple Silicon that overflows a GPU limit and the buffer fails at
+    # completion time. parakeet-mlx surfaces that via
+    # `mlx::core::gpu::check_error`, which THROWS from a Metal completion
+    # handler thread — there is no Python frame to catch it, so the
+    # process hits std::terminate -> SIGABRT (the crash seen on 3h+
+    # recordings). Splitting into overlapping chunks keeps each eval's
+    # command buffer bounded; parakeet-mlx stitches the pieces back into a
+    # single AlignedResult with globally-correct timestamps, so the output
+    # shape below is unchanged.
+    #
+    # Defaults mirror the parakeet-mlx CLI (chunk 120s, overlap 15s) and
+    # honour the same env vars, so behaviour can be tuned without a code
+    # change. `chunk_duration=0` disables chunking (whole-file path).
+    import os
+
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        try:
+            return float(raw) if raw else default
+        except ValueError:
+            return default
+
+    chunk_duration = _env_float("PARAKEET_CHUNK_DURATION", 120.0)
+    overlap_duration = _env_float("PARAKEET_OVERLAP_DURATION", 15.0)
+
     # `transcribe` in parakeet-mlx returns an AlignedResult with `text`
     # and segment-level alignment. Shape varies across versions; shield
     # ourselves by defensively extracting what we need.
-    result = model.transcribe(str(audio_path))
+    if chunk_duration and chunk_duration > 0:
+        result = model.transcribe(
+            str(audio_path),
+            chunk_duration=chunk_duration,
+            overlap_duration=overlap_duration,
+        )
+    else:
+        result = model.transcribe(str(audio_path))
 
     text = getattr(result, "text", None) or ""
     segments_raw = getattr(result, "sentences", None) or getattr(result, "segments", None) or []

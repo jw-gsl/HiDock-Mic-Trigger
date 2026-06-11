@@ -3,12 +3,12 @@ import type { AppSettings, AuthStatus, Recording, SyncInfo, SyncResult } from ".
 
 export const api = {
   getAuthStatus: () => invoke<AuthStatus>("get_auth_status"),
-  loginWithBrowser: (region: string) =>
-    invoke<AuthStatus>("login_with_browser", { region }),
-  loginWithEmail: (email: string, password: string, region: string) =>
-    invoke<AuthStatus>("login_with_email", { email, password, region }),
-  loginWithToken: (token: string, region: string) =>
-    invoke<AuthStatus>("login_with_token", { token, region }),
+  // Region is detected automatically from the account, so it's not passed in.
+  loginWithBrowser: () => invoke<AuthStatus>("login_with_browser"),
+  loginWithEmail: (email: string, password: string) =>
+    invoke<AuthStatus>("login_with_email", { email, password }),
+  loginWithToken: (token: string) =>
+    invoke<AuthStatus>("login_with_token", { token }),
   logout: () => invoke<void>("logout"),
   listRecordings: () => invoke<Recording[]>("list_recordings"),
   getCachedRecordings: () => invoke<Recording[]>("get_cached_recordings"),

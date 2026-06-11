@@ -4,13 +4,21 @@ This module deliberately mirrors extractor.py's JSON contracts so Plaud can be
 treated as another paired device by the Swift app. Authentication is owned by
 the app and passed to this subprocess via environment variables; this file does
 not persist Plaud secrets.
+
+The short-lived Plaud user token (`pld_ut`) is a JWT that expires within hours.
+When it is near expiry we transparently refresh it with the long-lived refresh
+token (`pld_urt`), mirroring the plaud-sync app. Because the refresh token may
+rotate, any refreshed tokens are surfaced via `pop_refreshed_tokens()` so the
+app can persist them — this file still never writes secrets to disk itself.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,6 +68,89 @@ def _get_auth(account_id: str | None = None) -> tuple[str, str | None, str]:
     if not access:
         raise PlaudError("Plaud is not signed in")
     return access, refresh, region
+
+
+# Refresh the user token once it is within this many seconds of expiry,
+# matching plaud-sync's TOKEN_REFRESH_BUFFER_MS (5 minutes).
+TOKEN_REFRESH_BUFFER_S = 5 * 60
+
+# Tokens refreshed during this process, keyed by account id:
+# {account: (access_token, refresh_token, region)}. Populated by
+# `_ensure_fresh_token` and drained by `pop_refreshed_tokens` so the app can
+# persist the (possibly rotated) tokens. Cached per process so we refresh at
+# most once per account — a second refresh with the already-rotated refresh
+# token would fail.
+_REFRESHED: dict[str, tuple[str, str | None, str]] = {}
+
+
+def _account_key(account_id: str | None) -> str:
+    return account_id or os.environ.get("PLAUD_ACCOUNT_ID", "default")
+
+
+def _jwt_exp(token: str) -> int | None:
+    """Return the `exp` (unix seconds) claim from a JWT, or None if it can't
+    be decoded (opaque token / malformed)."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)  # restore base64 padding
+    try:
+        raw = base64.urlsafe_b64decode(payload)
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    exp = data.get("exp")
+    return int(exp) if isinstance(exp, (int, float)) else None
+
+
+def _is_expiring_soon(token: str) -> bool:
+    exp = _jwt_exp(token)
+    if exp is None:
+        # Can't read expiry — don't force a refresh on an opaque token.
+        return False
+    return time.time() + TOKEN_REFRESH_BUFFER_S > exp
+
+
+def _ensure_fresh_token(account_id: str | None = None) -> tuple[str, str]:
+    """Return a (access_token, region) good for API calls, refreshing the
+    user token first if it is near expiry and a refresh token is available.
+
+    Refreshing is best-effort: if the refresh call fails we fall back to the
+    existing token rather than blocking the user (same as plaud-sync's
+    get_token()). Refreshed tokens are stashed in `_REFRESHED` for the app to
+    persist via `pop_refreshed_tokens`."""
+    account = _account_key(account_id)
+    cached = _REFRESHED.get(account)
+    if cached:
+        access, _refresh, region = cached
+        return access, region
+
+    access, refresh, region = _get_auth(account_id)
+    if refresh and _is_expiring_soon(access):
+        try:
+            new_access, new_refresh = refresh_user_token(refresh, region)
+        except PlaudError as exc:
+            print(f"Plaud token refresh failed, using existing token: {exc}", file=sys.stderr)
+        else:
+            _REFRESHED[account] = (new_access, new_refresh or refresh, region)
+            return new_access, region
+    return access, region
+
+
+def pop_refreshed_tokens(account_id: str | None = None) -> dict[str, str] | None:
+    """Return and clear any tokens refreshed during this process for
+    `account_id`. The extractor includes these in its JSON output so the app
+    can persist the rotated tokens; otherwise the next run reuses the stale
+    env token and the refresh token rotation is lost."""
+    rec = _REFRESHED.pop(_account_key(account_id), None)
+    if not rec:
+        return None
+    access, refresh, region = rec
+    out = {"accessToken": access, "region": region}
+    if refresh:
+        out["refreshToken"] = refresh
+    return out
 
 
 def _request_json(
@@ -149,7 +240,7 @@ def refresh_user_token(refresh_token: str, region: str) -> tuple[str, str | None
 
 
 def list_recordings(account_id: str | None = None) -> list[dict[str, Any]]:
-    token, _refresh, region = _get_auth(account_id)
+    token, region = _ensure_fresh_token(account_id)
     data = _request_json("/file/simple/web", token=token, region=region)
     raw_items = data.get("data_file_list") or data.get("data") or []
     if not isinstance(raw_items, list):
@@ -510,7 +601,7 @@ def download_one(
     account_id: str,
     include_transcript: bool = True,
 ) -> dict[str, Any]:
-    token, _refresh, region = _get_auth(account_id)
+    token, region = _ensure_fresh_token(account_id)
     items = list_recordings(account_id)
     item = next((r for r in items if _recording_id(r) == recording_id), None)
     if item is None:

@@ -13,16 +13,21 @@ pub fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-/// What the login webview captured. Either a Plaud JWT detected directly, or a
-/// Google `id_token` that still needs to be exchanged via `/auth/sso-callback`.
+/// What the login webview captured. Either a Plaud JWT detected directly, an
+/// SSO payload that still needs to be exchanged via `/auth/sso-callback`, or a
+/// session captured straight from the webview cookies.
 pub enum BrowserLogin {
     Jwt {
         token: String,
         region: String,
     },
-    GoogleSso {
-        id_token: String,
-        user_area: String,
+    /// An SSO credential captured from the login webview. `body` is the JSON
+    /// payload to POST to `/auth/sso-callback` — either the exact body
+    /// web.plaud.ai itself sent (so it carries the correct `sso_type` for
+    /// Google, Apple, Microsoft, …) or one reconstructed from a captured
+    /// `id_token`. Replaying the real body avoids guessing per-provider fields.
+    Sso {
+        body: String,
         region: String,
     },
     /// The login webview already holds a Plaud session — captured directly from

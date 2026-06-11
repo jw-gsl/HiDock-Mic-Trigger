@@ -1,7 +1,7 @@
 use base64::Engine;
 use chrono::Utc;
 
-use super::types::{base_url, LoginResponse, PlaudTokenData, TOKEN_REFRESH_BUFFER_MS};
+use super::types::{base_url, PlaudTokenData, TOKEN_REFRESH_BUFFER_MS};
 use crate::storage::Storage;
 
 pub struct PlaudAuth {
@@ -53,12 +53,15 @@ impl PlaudAuth {
         Err("Not logged in. Please sign in first.".into())
     }
 
+    /// Email/password sign-in. Tries the given region and, on a region mismatch,
+    /// auto-retries against the region Plaud points to (so the user doesn't pick
+    /// it). Returns the region the account actually belongs to.
     pub async fn login_with_credentials(
         &self,
         email: &str,
         password: &str,
         region: &str,
-    ) -> Result<PlaudTokenData, String> {
+    ) -> Result<String, String> {
         self.storage
             .save_credentials(email, region)
             .map_err(|e| e.to_string())?;
@@ -66,10 +69,44 @@ impl PlaudAuth {
             .save_password(password)
             .map_err(|e| e.to_string())?;
 
-        self.login_with_stored_credentials().await
+        match self.password_attempt(region).await? {
+            PwOutcome::Session(_) => Ok(region.to_string()),
+            PwOutcome::RegionRedirect(correct) if correct != region => {
+                crate::login_log::info(&format!(
+                    "password region mismatch — retrying in region '{correct}'"
+                ));
+                // Persist the corrected region so the session uses the right host.
+                self.storage
+                    .save_credentials(email, &correct)
+                    .map_err(|e| e.to_string())?;
+                match self.password_attempt(&correct).await? {
+                    PwOutcome::Session(_) => Ok(correct),
+                    _ => Err("Could not resolve your account's region.".to_string()),
+                }
+            }
+            PwOutcome::RegionRedirect(_) => {
+                Err("Could not resolve your account's region.".to_string())
+            }
+            PwOutcome::Error(msg) => Err(msg),
+        }
     }
 
+    /// Single attempt against the stored region — used to silently refresh the
+    /// token for email/password accounts (region is already known here).
     pub async fn login_with_stored_credentials(&self) -> Result<PlaudTokenData, String> {
+        let region = self.storage.get_region();
+        match self.password_attempt(&region).await? {
+            PwOutcome::Session(token) => Ok(token),
+            PwOutcome::RegionRedirect(_) => {
+                Err("Account region changed; please sign in again.".to_string())
+            }
+            PwOutcome::Error(msg) => Err(msg),
+        }
+    }
+
+    /// One POST to `/auth/access-token` for `region`. On success saves the token;
+    /// otherwise classifies the failure (region redirect vs. surfaced error).
+    async fn password_attempt(&self, region: &str) -> Result<PwOutcome, String> {
         let creds = self
             .storage
             .get_credentials()
@@ -82,7 +119,7 @@ impl PlaudAuth {
 
         let client = reqwest::Client::new();
         let res = client
-            .post(format!("{}/auth/access-token", base_url(&creds.region)))
+            .post(format!("{}/auth/access-token", base_url(region)))
             .form(&[
                 ("username", creds.email.as_str()),
                 ("password", password.as_str()),
@@ -91,69 +128,168 @@ impl PlaudAuth {
             .await
             .map_err(|e| format!("Network error: {e}"))?;
 
-        let data: LoginResponse = res
-            .json()
-            .await
-            .map_err(|e| format!("Invalid login response: {e}"))?;
+        let body_text = res.text().await.unwrap_or_default();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+        let app_status = json["status"].as_i64().unwrap_or(-1);
+        let msg = json["msg"].as_str().unwrap_or("").to_string();
+        crate::login_log::info(&format!(
+            "access-token response region={region} status={app_status} msg=\"{msg}\""
+        ));
 
-        if data.status != 0 {
-            return Err(data.msg.unwrap_or_else(|| "Login failed".to_string()));
+        if app_status == 0 {
+            if let Some(access_token) = json["access_token"].as_str() {
+                let token =
+                    build_token_data(access_token, json["token_type"].as_str())?;
+                self.storage.save_token(&token).map_err(|e| e.to_string())?;
+                return Ok(PwOutcome::Session(token));
+            }
         }
 
-        let access_token = data
-            .access_token
-            .ok_or_else(|| "No access token in response".to_string())?;
+        // Region mismatch: prefer the host Plaud points to, else flip us<->eu.
+        let mismatch = json["data"]["domains"]["api"].is_string()
+            || msg.to_lowercase().contains("region");
+        if mismatch {
+            let correct = json["data"]["domains"]["api"]
+                .as_str()
+                .and_then(region_from_api_host)
+                .unwrap_or_else(|| if region == "eu" { "us" } else { "eu" }.to_string());
+            return Ok(PwOutcome::RegionRedirect(correct));
+        }
 
-        let token = build_token_data(&access_token, data.token_type.as_deref())?;
-        self.storage
-            .save_token(&token)
-            .map_err(|e| e.to_string())?;
-        Ok(token)
+        Ok(PwOutcome::Error(if msg.is_empty() {
+            "Login failed".to_string()
+        } else {
+            msg
+        }))
     }
 
-    /// Google (and other web SSO) sign-in. Exchanges a Google `id_token` for a
-    /// Plaud session via `/auth/sso-callback`, which returns the user token
-    /// (`pld_ut`) and refresh token (`pld_urt`) as Set-Cookie headers. We use
-    /// `pld_ut` as a normal Bearer token (verified against the live API).
-    pub async fn login_with_google_sso(
-        &self,
-        id_token: &str,
-        user_area: &str,
-        region: &str,
-    ) -> Result<PlaudTokenData, String> {
+    /// Web SSO sign-in (Google, Apple, Microsoft, …). Replays the exact JSON
+    /// `body` that web.plaud.ai POSTs to `/auth/sso-callback` — so the correct
+    /// `sso_type` and provider-specific fields are carried through without us
+    /// guessing them. The endpoint returns the user token (`pld_ut`) and refresh
+    /// token (`pld_urt`) as Set-Cookie headers; we use `pld_ut` as a normal
+    /// Bearer token (verified against the live API).
+    ///
+    /// If the account belongs to another region, Plaud replies `200 OK` with an
+    /// in-body `{status:-302, msg:"user region mismatch", data.domains.api}` and
+    /// no session cookie. We detect that and retry against the indicated region
+    /// once, so the user doesn't have to pre-select the right region. Returns the
+    /// token and the region the session actually belongs to.
+    pub async fn login_with_sso(&self, body: &str, region: &str) -> Result<SsoSession, String> {
+        let outcome = match self.sso_attempt(body, region).await? {
+            SsoOutcome::RegionRedirect(correct) if correct != region => {
+                crate::login_log::info(&format!(
+                    "sso region mismatch — retrying in region '{correct}'"
+                ));
+                // Carry the resolved region with the session.
+                match self.sso_attempt(body, &correct).await? {
+                    SsoOutcome::Session => {
+                        return Ok(SsoSession::Authenticated { region: correct })
+                    }
+                    other => other,
+                }
+            }
+            other => other,
+        };
+
+        match outcome {
+            SsoOutcome::Session => Ok(SsoSession::Authenticated {
+                region: region.to_string(),
+            }),
+            SsoOutcome::NeedsRegistration { sso_email } => {
+                Ok(SsoSession::NeedsRegistration { sso_email })
+            }
+            SsoOutcome::RegionRedirect(_) => {
+                Err("Could not resolve your account's region.".to_string())
+            }
+            SsoOutcome::Error(msg) => Err(msg),
+        }
+    }
+
+    /// One POST to `/auth/sso-callback` for `region`. On success saves the token
+    /// and returns it; otherwise classifies the failure (region redirect vs. a
+    /// surfaced error message).
+    async fn sso_attempt(&self, body: &str, region: &str) -> Result<SsoOutcome, String> {
         let client = reqwest::Client::new();
         let res = client
             .post(format!("{}/auth/sso-callback", base_url(region)))
             .header("app-platform", "web")
-            .json(&serde_json::json!({
-                "sso_from": "web",
-                "sso_type": "google",
-                "id_token": id_token,
-                "user_area": user_area,
-            }))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
             .send()
             .await
             .map_err(|e| format!("Network error: {e}"))?;
 
-        if !res.status().is_success() {
-            return Err(format!("Google sign-in failed: {}", res.status()));
-        }
+        let status = res.status();
+        let headers = res.headers().clone();
+        let cookie_names: Vec<String> = headers
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|s| s.split('=').next().unwrap_or("").trim().to_string())
+            .collect();
+        let body_text = res.text().await.unwrap_or_default();
+        // Parse once; log a concise summary (no raw body — it carries a token id).
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+        crate::login_log::info(&format!(
+            "sso-callback response region={} http={} cookies=[{}] body.status={} msg=\"{}\"",
+            region,
+            status,
+            cookie_names.join(","),
+            json["status"].as_i64().unwrap_or(0),
+            json["msg"].as_str().unwrap_or("")
+        ));
 
-        let user_token = extract_set_cookie(res.headers(), "pld_ut")
-            .ok_or_else(|| "Google sign-in did not return a session token.".to_string())?;
-        let refresh_token = extract_set_cookie(res.headers(), "pld_urt");
-
-        let token = build_token_data(&user_token, Some("Bearer"))?;
-        self.storage
-            .save_credentials("google-sso", region)
-            .map_err(|e| e.to_string())?;
-        self.storage.save_token(&token).map_err(|e| e.to_string())?;
-        if let Some(refresh_token) = refresh_token {
+        // Success is signalled by the session cookie, regardless of HTTP/body
+        // status quirks.
+        if let Some(user_token) = extract_set_cookie(&headers, "pld_ut") {
+            let refresh_token = extract_set_cookie(&headers, "pld_urt");
+            let token = build_token_data(&user_token, Some("Bearer"))?;
             self.storage
-                .save_refresh_token(&refresh_token)
+                .save_credentials("sso", region)
                 .map_err(|e| e.to_string())?;
+            self.storage.save_token(&token).map_err(|e| e.to_string())?;
+            if let Some(refresh_token) = refresh_token {
+                self.storage
+                    .save_refresh_token(&refresh_token)
+                    .map_err(|e| e.to_string())?;
+            }
+            return Ok(SsoOutcome::Session);
         }
-        Ok(token)
+
+        // No session cookie — inspect Plaud's in-body status. A region mismatch
+        // tells us the correct API host; anything else is a surfaced error.
+        {
+            if let Some(api) = json["data"]["domains"]["api"].as_str() {
+                if let Some(correct) = region_from_api_host(api) {
+                    return Ok(SsoOutcome::RegionRedirect(correct));
+                }
+            }
+            // Recognised SSO identity but no linked Plaud account: the backend
+            // echoes the SSO identity with a null account `email`. This means the
+            // user must complete sign-up/registration in the webview.
+            if json["sso_id"].as_str().is_some() && json["email"].is_null() {
+                let sso_email = json["sso_email"].as_str().unwrap_or("").to_string();
+                return Ok(SsoOutcome::NeedsRegistration { sso_email });
+            }
+
+            let app_status = json["status"].as_i64().unwrap_or(0);
+            if app_status != 0 {
+                let msg = json["msg"].as_str().unwrap_or("").trim();
+                if !msg.is_empty() {
+                    return Ok(SsoOutcome::Error(format!("Sign-in failed: {msg}")));
+                }
+            }
+        }
+
+        if !status.is_success() {
+            return Ok(SsoOutcome::Error(format!("SSO sign-in failed: {status}")));
+        }
+        Ok(SsoOutcome::Error(
+            "SSO sign-in did not return a session token.".to_string(),
+        ))
     }
 
     /// Adopt session tokens captured directly from the login webview's cookies
@@ -250,6 +386,51 @@ fn extract_set_cookie(headers: &reqwest::header::HeaderMap, name: &str) -> Optio
         }
     }
     found
+}
+
+/// Outcome of `login_with_sso`: either a live Plaud session, or the SSO identity
+/// is recognised but not yet linked to a Plaud account (the user must finish
+/// sign-up in the webview).
+pub enum SsoSession {
+    /// Signed in; the session token is already persisted. `region` is the region
+    /// the account actually belongs to (may differ from the requested one).
+    Authenticated { region: String },
+    /// SSO identity recognised but not linked to a Plaud account yet.
+    NeedsRegistration { sso_email: String },
+}
+
+/// Result of a single `/auth/access-token` (email/password) attempt.
+enum PwOutcome {
+    /// Signed in; token persisted.
+    Session(PlaudTokenData),
+    /// The account lives in another region; value is the region to retry in.
+    RegionRedirect(String),
+    /// A surfaced, user-facing failure.
+    Error(String),
+}
+
+/// Result of a single `/auth/sso-callback` attempt.
+enum SsoOutcome {
+    /// A Plaud session was established and persisted (`pld_ut` captured).
+    Session,
+    /// The SSO identity is recognised but not linked to a Plaud account yet.
+    NeedsRegistration { sso_email: String },
+    /// The account lives in another region; value is the region to retry in.
+    RegionRedirect(String),
+    /// A surfaced, user-facing failure.
+    Error(String),
+}
+
+/// Map a Plaud API host (from a region-mismatch response) to our region key.
+/// e.g. `https://api-euc1.plaud.ai` → `eu`, `https://api.plaud.ai` → `us`.
+fn region_from_api_host(api: &str) -> Option<String> {
+    if api.contains("euc1") || api.contains("-eu") {
+        Some("eu".to_string())
+    } else if api.contains("api.plaud.ai") {
+        Some("us".to_string())
+    } else {
+        None
+    }
 }
 
 fn is_expiring_soon(token: &PlaudTokenData) -> bool {
