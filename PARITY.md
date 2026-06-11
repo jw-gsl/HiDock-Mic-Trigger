@@ -82,6 +82,8 @@ Last reviewed: 2026-04-22
 | Auto-download on refresh | Configurable | Configurable | Both | |
 | Volume device downloads (volume-import) | `AppDelegate.swift` | `main_window.py` | Both | |
 | Download complete notification | User notification | Status bar message only | Partial | Windows missing tray notification |
+| Plaud cloud sync (account login + cloud recordings) | `PlaudAuth.swift` + `plaud_client.py` | — | macOS only | Windows has no Plaud support |
+| Plaud cloud token auto-refresh | `plaud_client.py` refreshes the short-lived `pld_ut`; rotated tokens persisted to Keychain via `PlaudSession.applyingRefreshedTokens` | — | macOS only | 2026-06-11 — without it an expired token returns an empty cloud list ("connected, 0 recordings"); mirrors the plaud-sync app |
 
 ## Transcription
 

@@ -4359,6 +4359,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         [command, "--account-id", device.plaudAccountId ?? device.deviceId] + extra
     }
 
+    /// If a Plaud extractor command refreshed the user token, persist the
+    /// rotated tokens to the Keychain so the next sync uses a fresh token.
+    /// Keyed off PLAUD_ACCOUNT_ID in the command's environment, so it runs
+    /// for every Plaud command (status/download/download-new) and is a no-op
+    /// for HiDock/volume commands. Must run on the main thread.
+    private func persistRefreshedPlaudTokens(from outData: Data, environment: [String: String]) {
+        guard let accountId = environment["PLAUD_ACCOUNT_ID"], !accountId.isEmpty,
+              let existing = PlaudAuthStore.load(accountId: accountId),
+              let updated = PlaudSession.applyingRefreshedTokens(outData, to: existing) else { return }
+        do {
+            try PlaudAuthStore.save(updated)
+            log("Plaud: refreshed and persisted user token for \(updated.displayName)")
+        } catch {
+            log("Plaud: failed to persist refreshed token: \(error.localizedDescription)")
+        }
+    }
+
     private func plaudEnvironment(for device: HiDockPairedDevice) -> [String: String] {
         guard device.deviceType == .plaud else { return [:] }
         guard let accountId = device.plaudAccountId,
@@ -4477,7 +4494,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 try? FileManager.default.removeItem(at: errURL)
 
                 if process.terminationStatus == 0 {
-                    DispatchQueue.main.async { completion(.success(outData)) }
+                    DispatchQueue.main.async {
+                        self.persistRefreshedPlaudTokens(from: outData, environment: environment)
+                        completion(.success(outData))
+                    }
                 } else if weKilledIt {
                     // A full timeout (we killed the process after
                     // extractorProcessTimeout) usually means the device
@@ -4593,7 +4613,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let finalErr = errQueue.sync { stderrData }
 
                 if process.terminationStatus == 0 {
-                    DispatchQueue.main.async { completion(.success(finalOut)) }
+                    DispatchQueue.main.async {
+                        self.persistRefreshedPlaudTokens(from: finalOut, environment: environment)
+                        completion(.success(finalOut))
+                    }
                 } else {
                     let message = String(data: finalErr.isEmpty ? finalOut : finalErr, encoding: .utf8) ?? "Extractor failed"
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [

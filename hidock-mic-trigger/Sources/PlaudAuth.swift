@@ -12,6 +12,32 @@ struct PlaudSession: Codable {
     let refreshToken: String?
 }
 
+extension PlaudSession {
+    /// Build an updated session from an extractor's `refreshedTokens` JSON
+    /// payload, or nil if there is nothing new to persist. The Plaud user
+    /// token (`pld_ut`) is short-lived; the extractor refreshes it with the
+    /// refresh token and reports the rotated tokens here so we can keep the
+    /// Keychain copy current — otherwise the next sync reuses a stale token
+    /// and the cloud returns an empty recording list. Pure (no Keychain) so
+    /// it can be unit-tested.
+    static func applyingRefreshedTokens(_ outData: Data, to existing: PlaudSession) -> PlaudSession? {
+        guard
+            let json = try? JSONSerialization.jsonObject(with: outData) as? [String: Any],
+            let tokens = json["refreshedTokens"] as? [String: Any],
+            let access = tokens["accessToken"] as? String, !access.isEmpty,
+            access != existing.accessToken
+        else { return nil }
+        return PlaudSession(
+            accountId: existing.accountId,
+            email: existing.email,
+            displayName: existing.displayName,
+            region: (tokens["region"] as? String) ?? existing.region,
+            accessToken: access,
+            refreshToken: (tokens["refreshToken"] as? String) ?? existing.refreshToken
+        )
+    }
+}
+
 struct PlaudUser: Decodable {
     let email: String
     let nickname: String
