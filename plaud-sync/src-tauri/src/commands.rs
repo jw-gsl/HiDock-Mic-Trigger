@@ -91,7 +91,7 @@ pub async fn login_with_token(
     // A pasted JWT carries no region, so validate it against each region and
     // keep the one whose API accepts it.
     let mut last_err = "Token did not validate.".to_string();
-    for region in ["us", "eu"] {
+    for region in ["us", "eu", "apac"] {
         let auth = PlaudAuth::new(storage.clone());
         // A decode failure is region-independent — fail fast.
         auth.login_with_jwt(token, region)?;
@@ -114,7 +114,7 @@ pub async fn login_with_token(
         }
     }
     Err(format!(
-        "Could not validate this token in the US or EU region. {last_err}"
+        "Could not validate this token in the US, EU, or APAC region. {last_err}"
     ))
 }
 

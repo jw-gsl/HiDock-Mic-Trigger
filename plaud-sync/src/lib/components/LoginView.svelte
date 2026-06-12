@@ -94,6 +94,11 @@
       <button class="btn btn-primary btn-large" type="submit" disabled={loading}>
         {loading ? "Signing in..." : "Continue"}
       </button>
+      <p class="hint warn-hint">
+        If you originally signed up to Plaud with Google or Apple, email/password sign-in may log
+        you into a separate, empty account and your recordings won't appear. Use <strong>Browser</strong>
+        sign-in instead.
+      </p>
     </form>
   {:else}
     <form onsubmit={handleTokenLogin}>
@@ -139,6 +144,10 @@
 
   .debug-hint {
     margin-top: 8px;
+  }
+
+  .warn-hint {
+    margin-top: 12px;
   }
 
   .advanced {
