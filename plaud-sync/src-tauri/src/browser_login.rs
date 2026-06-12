@@ -138,6 +138,7 @@ const TOKEN_WATCHER_SCRIPT: &str = r#"
   function updateRegionFromUrl(url) {
     const text = String(url || "");
     if (text.includes("api-euc1") || text.includes("euc1")) detectedRegion = "eu";
+    else if (text.includes("api-apse1") || text.includes("apse1")) detectedRegion = "apac";
     else if (text.includes("api.plaud.ai")) detectedRegion = "us";
   }
 

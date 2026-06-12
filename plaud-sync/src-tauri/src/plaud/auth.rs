@@ -1,7 +1,9 @@
 use base64::Engine;
 use chrono::Utc;
 
-use super::types::{base_url, PlaudTokenData, TOKEN_REFRESH_BUFFER_MS};
+use super::types::{
+    base_url, browser_headers, region_from_redirect, PlaudTokenData, TOKEN_REFRESH_BUFFER_MS,
+};
 use crate::storage::Storage;
 
 pub struct PlaudAuth {
@@ -118,8 +120,7 @@ impl PlaudAuth {
             .ok_or_else(|| "No password stored.".to_string())?;
 
         let client = reqwest::Client::new();
-        let res = client
-            .post(format!("{}/auth/access-token", base_url(region)))
+        let res = browser_headers(client.post(format!("{}/auth/access-token", base_url(region))))
             .form(&[
                 ("username", creds.email.as_str()),
                 ("password", password.as_str()),
@@ -152,7 +153,7 @@ impl PlaudAuth {
         if mismatch {
             let correct = json["data"]["domains"]["api"]
                 .as_str()
-                .and_then(region_from_api_host)
+                .and_then(region_from_redirect)
                 .unwrap_or_else(|| if region == "eu" { "us" } else { "eu" }.to_string());
             return Ok(PwOutcome::RegionRedirect(correct));
         }
@@ -212,8 +213,7 @@ impl PlaudAuth {
     /// surfaced error message).
     async fn sso_attempt(&self, body: &str, region: &str) -> Result<SsoOutcome, String> {
         let client = reqwest::Client::new();
-        let res = client
-            .post(format!("{}/auth/sso-callback", base_url(region)))
+        let res = browser_headers(client.post(format!("{}/auth/sso-callback", base_url(region))))
             .header("app-platform", "web")
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string())
@@ -263,7 +263,7 @@ impl PlaudAuth {
         // tells us the correct API host; anything else is a surfaced error.
         {
             if let Some(api) = json["data"]["domains"]["api"].as_str() {
-                if let Some(correct) = region_from_api_host(api) {
+                if let Some(correct) = region_from_redirect(api) {
                     return Ok(SsoOutcome::RegionRedirect(correct));
                 }
             }
@@ -325,13 +325,13 @@ impl PlaudAuth {
         let region = self.storage.get_region();
 
         let client = reqwest::Client::new();
-        let res = client
-            .post(format!("{}/auth/refresh-user-token", base_url(&region)))
-            .header("app-platform", "web")
-            .header("Cookie", format!("pld_urt={refresh_token}"))
-            .send()
-            .await
-            .map_err(|e| format!("Network error: {e}"))?;
+        let res =
+            browser_headers(client.post(format!("{}/auth/refresh-user-token", base_url(&region))))
+                .header("app-platform", "web")
+                .header("Cookie", format!("pld_urt={refresh_token}"))
+                .send()
+                .await
+                .map_err(|e| format!("Network error: {e}"))?;
 
         if !res.status().is_success() {
             return Err(format!("Session refresh failed: {}", res.status()));
@@ -419,18 +419,6 @@ enum SsoOutcome {
     RegionRedirect(String),
     /// A surfaced, user-facing failure.
     Error(String),
-}
-
-/// Map a Plaud API host (from a region-mismatch response) to our region key.
-/// e.g. `https://api-euc1.plaud.ai` → `eu`, `https://api.plaud.ai` → `us`.
-fn region_from_api_host(api: &str) -> Option<String> {
-    if api.contains("euc1") || api.contains("-eu") {
-        Some("eu".to_string())
-    } else if api.contains("api.plaud.ai") {
-        Some("us".to_string())
-    } else {
-        None
-    }
 }
 
 fn is_expiring_soon(token: &PlaudTokenData) -> bool {

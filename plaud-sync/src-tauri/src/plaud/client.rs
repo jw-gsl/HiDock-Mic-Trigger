@@ -1,7 +1,10 @@
 use serde_json::Value;
 
 use super::auth::PlaudAuth;
-use super::types::{base_url, PlaudRecording, PlaudRecordingDetail, PlaudUserInfo};
+use super::types::{
+    base_url, browser_headers, region_from_redirect, PlaudRecording, PlaudRecordingDetail,
+    PlaudUserInfo,
+};
 
 pub struct PlaudClient {
     auth: PlaudAuth,
@@ -18,7 +21,7 @@ impl PlaudClient {
         }
     }
 
-    fn base_url(&self) -> &str {
+    fn base_url(&self) -> String {
         base_url(&self.region)
     }
 
@@ -26,11 +29,10 @@ impl PlaudClient {
         let token = self.auth.get_token().await?;
         let url = format!("{}{}", self.base_url(), path);
 
-        let res = self
-            .http
-            .get(&url)
+        let res = browser_headers(self.http.get(&url))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
+            .header("app-platform", "web")
             .send()
             .await
             .map_err(|e| format!("Network error: {e}"))?;
@@ -45,16 +47,16 @@ impl PlaudClient {
             .map_err(|e| format!("Invalid API response: {e}"))?;
 
         if data.get("status").and_then(|s| s.as_i64()) == Some(-302) {
-            if let Some(domain) = data
-                .pointer("/data/domains/api")
-                .and_then(|d| d.as_str())
-            {
-                self.region = if domain.contains("euc1") {
-                    "eu".to_string()
-                } else {
-                    "us".to_string()
-                };
-                return Box::pin(self.request(path)).await;
+            if let Some(domain) = data.pointer("/data/domains/api").and_then(|d| d.as_str()) {
+                // Trust the host Plaud points us at (validated to a plaud.ai
+                // host). Only retry if it actually changes our base URL, so a
+                // redirect that resolves to the same host can't loop forever.
+                if let Some(region) = region_from_redirect(domain) {
+                    if base_url(&region) != self.base_url() {
+                        self.region = region;
+                        return Box::pin(self.request(path)).await;
+                    }
+                }
             }
         }
 
@@ -161,13 +163,15 @@ impl PlaudClient {
         }
 
         let token = self.auth.get_token().await?;
-        let res = self
-            .http
-            .get(format!("{}/file/download/{id}", self.base_url()))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .map_err(|e| format!("Download failed: {e}"))?;
+        let res = browser_headers(
+            self.http
+                .get(format!("{}/file/download/{id}", self.base_url())),
+        )
+        .header("Authorization", format!("Bearer {token}"))
+        .header("app-platform", "web")
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {e}"))?;
 
         if !res.status().is_success() {
             return Err(format!("Download failed: {}", res.status()));
