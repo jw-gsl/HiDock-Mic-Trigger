@@ -28,3 +28,8 @@ base64 = "0.22"
 keyring = "3"
 dirs = "6"
 open = "5"
+
+# macOS-only: close the orphaned OAuth provider popup (e.g. Google's account
+# chooser) that WebKit won't close via JavaScript. Raw AppKit window sweep.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"

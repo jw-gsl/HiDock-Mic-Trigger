@@ -92,11 +92,28 @@ const TOKEN_WATCHER_SCRIPT: &str = r#"
   // Hand an SSO credential to the native side via a hidden iframe so this
   // window doesn't navigate to a blank plaudsync:// page (which left a white
   // window behind). The native side POSTs it to /auth/sso-callback.
+  function closePopup() {
+    try { if (window.__plaudPopup && !window.__plaudPopup.closed) window.__plaudPopup.close(); } catch (_) {}
+  }
+
   function shipSso(params) {
     if (completed) return;
     completed = true;
-    // Close the provider popup we opened (only the opener can).
-    try { if (window.__plaudPopup && !window.__plaudPopup.closed) window.__plaudPopup.close(); } catch (_) {}
+    // Close the provider popup we opened (only the opener can — wry popups
+    // aren't Tauri windows). Apple's web_message flow self-closes its popup, but
+    // Google's GIS account chooser does not, so a single close() that's missed
+    // (e.g. if the opener is torn down right after) leaves it orphaned. Retry a
+    // few times; the native side also keeps this window alive a beat and
+    // re-issues the close (see close_oauth_popup).
+    closePopup();
+    var popupTries = 0;
+    var popupTimer = setInterval(function () {
+      popupTries++;
+      closePopup();
+      if (popupTries >= 8 || !window.__plaudPopup || window.__plaudPopup.closed) {
+        clearInterval(popupTimer);
+      }
+    }, 150);
     params.region = params.region || detectedRegion;
     const qs = new URLSearchParams(params).toString();
     try {
@@ -481,6 +498,9 @@ pub async fn login_with_browser<R: Runtime>(
 
     poll_stop.store(true, Ordering::Relaxed);
     flush_js_logs(app);
+    // Close the orphaned provider popup (e.g. Google's account chooser) before
+    // tearing down the login window, so nothing lingers after sign-in.
+    close_oauth_popup(app);
     close_login_window(app);
     clear_login_channel(state);
     result
@@ -690,7 +710,11 @@ fn handle_navigation<R: Runtime>(app: &AppHandle<R>, default_region: &str, url: 
             }
             resolve_login(app, result);
         }
-        close_login_window(app);
+        // Don't tear the login window down here — that races with the OAuth
+        // popup's close() and can orphan it (notably Google's GIS account
+        // chooser). Just nudge the popup closed; the main sign-in flow closes
+        // this window once the credential has been processed.
+        close_oauth_popup(app);
         return false;
     }
 
@@ -803,6 +827,70 @@ fn clear_login_channel(state: State<'_, AppState>) {
 /// Close the login window and any auxiliary popups (e.g. the Google credential
 /// picker, which doesn't always close itself in the embedded webview). Leaves
 /// the main app window ("main") untouched.
+/// Close the provider OAuth popup (Google account chooser, Apple ID, …) the
+/// login webview opened via `window.open`.
+///
+/// Two mechanisms: a best-effort JS `close()` (honored by some webviews), and —
+/// on macOS — a native AppKit sweep, because WebKit ignores an opener-initiated
+/// `close()` for these popups, leaving them orphaned (Google's GIS chooser in
+/// particular). The JS attempt is harmless where the native sweep does the work.
+fn close_oauth_popup<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
+        let _ = window.eval(
+            "try { if (window.__plaudPopup && !window.__plaudPopup.closed) window.__plaudPopup.close(); } catch (e) {}",
+        );
+    }
+    #[cfg(target_os = "macos")]
+    close_orphaned_login_windows(app);
+}
+
+/// macOS: close any visible app window that isn't one of Tauri's own (the main
+/// window or the login window). During the login flow the only such window is
+/// the OAuth provider popup WebKit opened via `window.open` — which isn't a
+/// Tauri window and can't be closed from JS, so we close its NSWindow directly.
+/// Dispatched to the main thread (AppKit requirement).
+#[cfg(target_os = "macos")]
+fn close_orphaned_login_windows<R: Runtime>(app: &AppHandle<R>) {
+    // Pointers to the NSWindows Tauri owns — captured now, never closed.
+    let tracked: Vec<usize> = app
+        .webview_windows()
+        .values()
+        .filter_map(|w| w.ns_window().ok())
+        .map(|p| p as usize)
+        .collect();
+
+    let _ = app.run_on_main_thread(move || {
+        use objc::runtime::{Object, BOOL, YES};
+        use objc::{class, msg_send, sel, sel_impl};
+
+        unsafe {
+            let ns_app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+            if ns_app.is_null() {
+                return;
+            }
+            let windows: *mut Object = msg_send![ns_app, windows];
+            if windows.is_null() {
+                return;
+            }
+            let count: usize = msg_send![windows, count];
+            for i in 0..count {
+                let window: *mut Object = msg_send![windows, objectAtIndex: i];
+                if window.is_null() || tracked.contains(&(window as usize)) {
+                    continue;
+                }
+                // Only sweep visible windows — leave hidden/auxiliary AppKit
+                // windows (panels, offscreen helpers) untouched.
+                let visible: BOOL = msg_send![window, isVisible];
+                if visible != YES {
+                    continue;
+                }
+                login_log::info("closing orphaned OAuth popup window (native)");
+                let _: () = msg_send![window, close];
+            }
+        }
+    });
+}
+
 pub fn close_login_window<R: Runtime>(app: &AppHandle<R>) {
     for (label, window) in app.webview_windows() {
         if label != "main" {
