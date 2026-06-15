@@ -105,15 +105,63 @@ jobs:
             sed -i '' "s|^home = .*|home = .|" "$VENV_DIR/pyvenv.cfg"
             find "$VENV_DIR/bin" -type f -exec sed -i '' "1s|^#!.*python.*|#!/usr/bin/env python3|" {} \; 2>/dev/null || true
           done
-      - name: Code sign and zip
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
-          find "$APP/Contents/Resources" -type f \( -name "*.dylib" -o -name "*.so" \) -exec codesign --force --sign - {} \;
-          find "$APP/Contents/Resources" -type f -name "python*" -path "*/bin/*" -exec codesign --force --sign - {} \;
-          find "$APP/Contents/MacOS" -type f -exec codesign --force --sign - {} \;
-          codesign --force --sign - "$APP"
-          cd "/tmp/hidock-build/Build/Products/Release"
-          ditto -c -k --sequesterRsrc --keepParent "HiDock Mic Trigger.app" "HiDock-Mic-Trigger-macOS.zip"
+          set -euo pipefail
+          KP="$(uuidgen)"
+          security create-keychain -p "$KP" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KP" build.keychain
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security import "$RUNNER_TEMP/devid.p12" -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KP" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          rm -f "$RUNNER_TEMP/devid.p12"
+
+      - name: Code sign (Developer ID), notarize, staple, zip
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          DIR="/tmp/hidock-build/Build/Products/Release"
+          APP="$DIR/HiDock Mic Trigger.app"
+          ENT="$GITHUB_WORKSPACE/hidock-mic-trigger/signing/entitlements.plist"
+          OPTS=(--force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY")
+
+          # Deep-sign inner → outer with the Developer ID. Libraries take no
+          # entitlements; executables (Python, CLI, app) take the hardened-runtime
+          # entitlements so the notarized app can load the bundled native libs.
+          find "$APP/Contents/Resources" -type f \( -name "*.dylib" -o -name "*.so" \) \
+            -exec codesign "${OPTS[@]}" {} \;
+          find "$APP/Contents/Resources" -type f -name "python*" -path "*/bin/*" \
+            -exec codesign "${OPTS[@]}" --entitlements "$ENT" {} \;
+          if [ -d "$APP/Contents/Frameworks" ]; then
+            find "$APP/Contents/Frameworks" -maxdepth 1 -name "*.framework" \
+              -exec codesign "${OPTS[@]}" {} \; || true
+          fi
+          find "$APP/Contents/MacOS" -type f \
+            -exec codesign "${OPTS[@]}" --entitlements "$ENT" {} \;
+          codesign "${OPTS[@]}" --entitlements "$ENT" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          # Notarize (App Store Connect API key), then staple the ticket.
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          ( cd "$DIR" && ditto -c -k --sequesterRsrc --keepParent "HiDock Mic Trigger.app" notarize.zip )
+          xcrun notarytool submit "$DIR/notarize.zip" \
+            --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$DIR/notarize.zip"
+          xcrun stapler staple "$APP"
+          spctl -a -t exec -vvv "$APP" || true
+
+          # Zip the *stapled* app for distribution + the auto-updater.
+          ( cd "$DIR" && ditto -c -k --sequesterRsrc --keepParent "HiDock Mic Trigger.app" "HiDock-Mic-Trigger-macOS.zip" )
       - uses: actions/upload-artifact@v4
         with:
           name: macos-zip
