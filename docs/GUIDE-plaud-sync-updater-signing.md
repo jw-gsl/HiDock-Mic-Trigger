@@ -11,6 +11,15 @@ run the workflow.
 > downloaded update against it, and refuses anything that doesn't match. The release
 > workflow currently fails on purpose (`preflight` step) until this is configured.
 
+> **Two independent signing systems — don't confuse them:**
+> 1. **Updater signing** (Steps 1–4 below) — Tauri's own key pair. Free, self-generated.
+>    Proves an auto-update came from you.
+> 2. **OS code signing** (the "macOS Code Signing" sections further down) — Apple
+>    Developer ID + notarization. Paid Apple membership. Stops the macOS "unidentified
+>    developer" warning. Windows is a separate ecosystem again (not yet set up).
+>
+> They're orthogonal: you can have one without the other. A release ideally has both.
+
 ---
 
 ## What you'll end up with
@@ -137,3 +146,101 @@ That's it. From now on, releasing = bump version → run workflow.
 | Key password goes in | GitHub secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
 | Update channel | release tag `plaud-sync-latest` |
 | Release workflow | `.github/workflows/release-plaud-sync.yml` |
+
+---
+
+# macOS Code Signing & Notarization
+
+Separate from updater signing. This is what removes the macOS "unidentified developer"
+Gatekeeper warning, so the app opens with a normal double-click and no `xattr -cr`.
+
+Requires a paid **Apple Developer Program** membership (~$99/year).
+
+## One-time Apple setup (already done — recorded here for reference)
+
+1. **Developer ID Application certificate** — created via Xcode → Settings → Accounts →
+   Manage Certificates, or Keychain Access CSR + developer.apple.com. It lives in the
+   login keychain with its private key. Confirm with:
+   ```bash
+   security find-identity -v -p codesigning
+   # → "Developer ID Application: James Whiting (ZFFL33SU92)"
+   ```
+2. **App Store Connect API key** (for notarization) — App Store Connect → Users and
+   Access → Integrations → App Store Connect API → generate (Developer role). Gives:
+   - **Issuer ID** (UUID), **Key ID** (10 chars), and a one-time-download **`.p8`** file.
+
+## Local signed + notarized build
+
+Credentials live in **`plaud-sync/.signing/signing.env`** (git-ignored, never committed)
+plus the `.p8` dropped into `plaud-sync/.signing/`. Then:
+
+```bash
+cd plaud-sync
+./sign-build-local.sh
+```
+
+The script validates the credentials (and that the identity is in your keychain), then
+runs `npm run tauri build`, which signs → notarizes → staples automatically. Output:
+`src-tauri/target/release/bundle/{macos,dmg}/`. Note: a local build targets your Mac's
+architecture only (e.g. `aarch64`); use CI for a build other Macs' arch can run.
+
+Verify any build with:
+```bash
+spctl -a -t exec -vvv "path/to/Plaud Sync.app"   # expect: accepted / Notarized Developer ID
+xcrun stapler validate "path/to/Plaud Sync.app"
+```
+
+> **DMG note:** Tauri notarizes the `.app`, not the `.dmg` wrapper. The app inside is
+> stapled so the normal mount→drag→launch flow works offline regardless. To staple the
+> DMG itself too (belt-and-braces), after the build run:
+> ```bash
+> cd plaud-sync && source .signing/signing.env
+> DMG="src-tauri/target/release/bundle/dmg/Plaud Sync_<ver>_aarch64.dmg"
+> xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+> xcrun stapler staple "$DMG"
+> ```
+
+## macOS signing in CI (release workflow)
+
+`release-plaud-sync.yml` is already wired to sign + notarize on the macOS runner. It just
+needs these **six repo secrets** (the `preflight` job fails with a clear message if any
+are missing). The CLI can't use the login keychain, so the cert is supplied as a base64
+`.p12`.
+
+**First, export the cert as a `.p12`** (Keychain Access → right-click *Developer ID
+Application: …* → Export → set a password). Then, run on your Mac (values never pass
+through anyone else):
+
+```bash
+# Cert: base64 the .p12 and store it + its export password
+base64 -i ~/Desktop/plaud-sync-devid.p12 | gh secret set APPLE_CERTIFICATE
+gh secret set APPLE_CERTIFICATE_PASSWORD          # prompts for the .p12 export password
+
+# Signing identity (not secret, but the workflow reads it from a secret)
+printf 'Developer ID Application: James Whiting (ZFFL33SU92)' | gh secret set APPLE_SIGNING_IDENTITY
+
+# Notarization API key — use the values from your local .signing/signing.env
+printf '<YOUR_ISSUER_ID>' | gh secret set APPLE_API_ISSUER   # the UUID
+printf '<YOUR_KEY_ID>'    | gh secret set APPLE_API_KEY       # the 10-char Key ID
+base64 -i plaud-sync/.signing/AuthKey_<YOUR_KEY_ID>.p8 | gh secret set APPLE_API_KEY_BASE64
+```
+
+The workflow decodes `APPLE_API_KEY_BASE64` back to a `.p8` at build time and passes the
+identity/cert/key to `tauri-action`, which signs and notarizes. Windows in the same matrix
+ignores these.
+
+| Secret | Value |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 of the exported `.p12` (Developer ID Application cert + key) |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: James Whiting (ZFFL33SU92)` |
+| `APPLE_API_ISSUER` | App Store Connect API Issuer ID (UUID) |
+| `APPLE_API_KEY` | App Store Connect API Key ID (10 chars) |
+| `APPLE_API_KEY_BASE64` | base64 of the `.p8` key file |
+
+## Windows code signing
+
+Not set up yet. Post-2023, publicly-trusted Windows certs require the private key on
+certified hardware (HSM/token), so the old "drop a `.pfx` in CI" approach is gone. The
+CI-friendly modern option is **Azure Trusted Signing** (cloud HSM). Until then, Windows
+builds are unsigned and show a SmartScreen "unknown publisher" prompt. (To be documented.)
