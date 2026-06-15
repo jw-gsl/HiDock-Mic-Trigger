@@ -72,11 +72,14 @@ impl PlaudClient {
             .cloned()
             .unwrap_or_default();
 
-        let recordings: Vec<PlaudRecording> = list
+        let mut recordings: Vec<PlaudRecording> = list
             .into_iter()
             .filter(|item| !item.get("is_trash").and_then(|v| v.as_bool()).unwrap_or(false))
             .filter_map(|item| parse_recording(&item))
             .collect();
+
+        // Newest first — the Plaud API doesn't guarantee an order.
+        recordings.sort_by(|a, b| b.start_time.cmp(&a.start_time));
 
         Ok(recordings)
     }
