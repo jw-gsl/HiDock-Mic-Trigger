@@ -30,7 +30,13 @@ from typing import Any
 
 API_US = "https://api.plaud.ai"
 API_EU = "https://api-euc1.plaud.ai"
+API_APAC = "https://api-apse1.plaud.ai"
 AUDIO_EXTENSIONS = {".mp3", ".opus"}
+
+# Surfaced when the session is unusable (expired access token + dead/absent
+# refresh token, or an HTTP 401). Must contain "not signed in" — the desktop
+# app maps that phrase to its signed-out state and prompts re-authentication.
+SIGNED_OUT_MESSAGE = "Plaud is not signed in: your session expired, please sign in again"
 
 
 class PlaudError(RuntimeError):
@@ -41,8 +47,42 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _is_valid_plaud_api_url(url: str) -> bool:
+    """HTTPS + ``*.plaud.ai`` host. Guards against trusting a malformed or
+    hostile redirect host from a ``-302`` response."""
+    if not url.startswith("https://"):
+        return False
+    authority = url[len("https://"):].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    host = authority.rsplit("@", 1)[-1].split(":", 1)[0]  # drop userinfo + port
+    return host == "plaud.ai" or host.endswith(".plaud.ai")
+
+
 def _base_url(region: str) -> str:
-    return API_EU if region == "eu" else API_US
+    # A region redirect may have handed us a full API base; trust it if it's a
+    # valid Plaud host, so a region Plaud adds later works without a code change.
+    if region.startswith("http"):
+        return region.rstrip("/") if _is_valid_plaud_api_url(region) else API_US
+    if region == "eu":
+        return API_EU
+    if region in ("apac", "apse1"):
+        return API_APAC
+    return API_US
+
+
+def _region_from_redirect(api: str) -> str | None:
+    """Resolve a ``-302`` ``data.domains.api`` value to the region string we
+    use: a key for the three known hosts, the full validated URL for any other
+    Plaud region, or ``None`` if it isn't a valid Plaud host (ignore it)."""
+    if not _is_valid_plaud_api_url(api):
+        return None
+    api = api.rstrip("/")
+    if "euc1" in api:
+        return "eu"
+    if "apse1" in api:
+        return "apac"
+    if "api.plaud.ai" in api:
+        return "us"
+    return api
 
 
 def _token_env_name(account_id: str, suffix: str) -> str:
@@ -112,6 +152,13 @@ def _is_expiring_soon(token: str) -> bool:
     return time.time() + TOKEN_REFRESH_BUFFER_S > exp
 
 
+def _is_expired(token: str) -> bool:
+    """True only if the JWT `exp` is already in the past (no buffer). Opaque
+    tokens return False — we can't prove a token we can't read is dead."""
+    exp = _jwt_exp(token)
+    return exp is not None and time.time() >= exp
+
+
 def _ensure_fresh_token(account_id: str | None = None) -> tuple[str, str]:
     """Return a (access_token, region) good for API calls, refreshing the
     user token first if it is near expiry and a refresh token is available.
@@ -127,14 +174,21 @@ def _ensure_fresh_token(account_id: str | None = None) -> tuple[str, str]:
         return access, region
 
     access, refresh, region = _get_auth(account_id)
-    if refresh and _is_expiring_soon(access):
-        try:
-            new_access, new_refresh = refresh_user_token(refresh, region)
-        except PlaudError as exc:
-            print(f"Plaud token refresh failed, using existing token: {exc}", file=sys.stderr)
-        else:
-            _REFRESHED[account] = (new_access, new_refresh or refresh, region)
-            return new_access, region
+    if _is_expiring_soon(access):
+        if refresh:
+            try:
+                new_access, new_refresh = refresh_user_token(refresh, region)
+            except PlaudError as exc:
+                print(f"Plaud token refresh failed: {exc}", file=sys.stderr)
+            else:
+                _REFRESHED[account] = (new_access, new_refresh or refresh, region)
+                return new_access, region
+        # Refresh unavailable or failed. If the existing token is actually
+        # expired, the session is dead — surface a signed-out error rather than
+        # sending a dead token, which Plaud answers with an empty 200 that
+        # otherwise masquerades as "connected, 0 recordings".
+        if _is_expired(access):
+            raise PlaudError(SIGNED_OUT_MESSAGE)
     return access, region
 
 
@@ -161,6 +215,7 @@ def _request_json(
     method: str = "GET",
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
+    _redirects: int = 0,
 ) -> dict[str, Any]:
     url = f"{_base_url(region)}{path}"
     req_headers = {
@@ -182,8 +237,12 @@ def _request_json(
         with urllib.request.urlopen(req, timeout=30) as res:
             raw = res.read()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
-        detail = f": {body[:500]}" if body else ""
+        body_text = exc.read().decode("utf-8", errors="replace").strip()
+        if exc.code == 401:
+            # Auth rejected — treat as signed out so the app prompts re-login
+            # instead of surfacing a raw HTTP 401.
+            raise PlaudError(SIGNED_OUT_MESSAGE) from exc
+        detail = f": {body_text[:500]}" if body_text else ""
         raise PlaudError(f"Plaud API error: HTTP {exc.code}{detail}") from exc
     except urllib.error.URLError as exc:
         raise PlaudError(f"Plaud network error: {exc.reason}") from exc
@@ -193,12 +252,22 @@ def _request_json(
     except Exception as exc:
         raise PlaudError("Invalid Plaud API response") from exc
 
-    if data.get("status") == -302:
+    if data.get("status") == -302 and _redirects < 3:
         domain = (((data.get("data") or {}).get("domains") or {}).get("api") or "")
-        if "euc1" in domain and region != "eu":
-            return _request_json(path, token=token, region="eu", method=method, body=body, headers=headers)
-        if domain and "euc1" not in domain and region != "us":
-            return _request_json(path, token=token, region="us", method=method, body=body, headers=headers)
+        # Trust the host Plaud points us at (validated to a plaud.ai host), and
+        # only retry if it actually changes the base URL — so a redirect that
+        # resolves to the same host can't loop forever.
+        target = _region_from_redirect(domain)
+        if target and _base_url(target) != _base_url(region):
+            return _request_json(
+                path,
+                token=token,
+                region=target,
+                method=method,
+                body=body,
+                headers=headers,
+                _redirects=_redirects + 1,
+            )
     return data
 
 
