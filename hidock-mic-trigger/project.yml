@@ -10,6 +10,17 @@ packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
     from: 1.13.0
+schemes:
+  hidock-mic-trigger:
+    build:
+      targets:
+        hidock-mic-trigger: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - hidock-mic-trigger-tests
 targets:
   hidock-mic-trigger:
     type: application
@@ -105,7 +116,8 @@ targets:
       - Tests
     dependencies:
       - target: hidock-mic-trigger
+    # Host-less logic tests. macOS unit tests can @testable import the app
+    # target without a running host app; a TEST_HOST pointing at the agent
+    # app (LSUIElement) made `xcodebuild test` fail to resolve the host.
     settings:
-      TEST_HOST: "$(BUILT_PRODUCTS_DIR)/HiDock Mic Trigger.app/Contents/MacOS/hidock-mic-trigger"
-      BUNDLE_LOADER: "$(TEST_HOST)"
       GENERATE_INFOPLIST_FILE: YES

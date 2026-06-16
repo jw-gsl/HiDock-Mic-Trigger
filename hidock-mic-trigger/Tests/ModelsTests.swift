@@ -70,7 +70,9 @@ final class PairedDeviceVolumeTests: XCTestCase {
 
     func testVolumeShortName() {
         let dev = HiDockPairedDevice(volumeName: "ZOOM_H1", displayName: "ZOOM_H1")
-        XCTAssertEqual(dev.shortName, "ZOOM_H1")
+        // cleanName runs sanitizeDeviceName, which humanises underscores to
+        // spaces for display.
+        XCTAssertEqual(dev.shortName, "ZOOM H1")
     }
 
     func testVolumeCodableRoundTrip() throws {
@@ -178,7 +180,8 @@ final class SyncRecordingEntryTests: XCTestCase {
             length: 1000, duration: 10.0, version: 1, mode: "normal",
             signature: "abc", outputPath: "/tmp/test.wav", outputName: "test.wav",
             downloaded: false, localExists: false, downloadedAt: nil,
-            lastError: nil, status: "on_device", humanLength: "1 KB"
+            lastError: nil, status: "on_device", humanLength: "1 KB",
+            trimmed: nil, durationEstimated: nil, removed: nil
         )
         let entry = HiDockSyncRecordingEntry(
             recording: recording,
