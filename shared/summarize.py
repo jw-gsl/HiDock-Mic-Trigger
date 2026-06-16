@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 
+from shared.config_store import get_config
 from shared.llm_cli import LLMEngine, get_engine, query_json
 
 # Maximum transcript length per LLM call (chars).
@@ -104,7 +105,7 @@ SECTION SUMMARIES:
 
 def summarize(
     transcript_text: str,
-    engine_name: str = "auto",
+    engine_name: str | None = None,
     timeout: int = 120,
 ) -> dict:
     """Summarize a transcript and extract structured information.
@@ -115,7 +116,10 @@ def summarize(
 
     Args:
         transcript_text: The full transcript text (may include speaker labels).
-        engine_name: LLM engine to use ("auto", "claude", "codex", etc.)
+        engine_name: LLM engine to use ("auto", "claude", "codex", etc.).
+            If None (the default), it's read from the config store's
+            [summarization].engine — so the provider is user-configurable
+            rather than hard-coded.
         timeout: Max seconds to wait for LLM response.
 
     Returns:
@@ -123,6 +127,8 @@ def summarize(
         summary_text. Returns empty/default values if no LLM is available
         or if summarization fails.
     """
+    if engine_name is None:
+        engine_name = get_config().get("summarization", "engine", "auto")
     engine = get_engine(engine_name)
     if engine is None:
         print("No LLM engine available, skipping summarization", file=sys.stderr)
