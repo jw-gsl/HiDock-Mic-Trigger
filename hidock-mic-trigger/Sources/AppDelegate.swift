@@ -1632,12 +1632,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// preserves any new recordings that have appeared on the device
     /// since state.json was last written.
     private func loadCachedCatalogsForPaintOnLaunch() {
-        let devices = syncPairedDevices.filter { $0.deviceType == .hidock }
-        guard !devices.isEmpty else { return }
+        let hidocks = syncPairedDevices.filter { $0.deviceType == .hidock }
+        // Plaud accounts paint from cache too, so already-downloaded recordings
+        // show instantly on launch instead of waiting for the (slow, networked)
+        // live cloud probe to connect.
+        let plauds = syncPairedDevices.filter { $0.deviceType == .plaud }
+        guard !hidocks.isEmpty || !plauds.isEmpty else { return }
         guard ensureExtractorReady() else { return }
-        log("Paint-from-cache: loading cached catalogs for \(devices.count) paired HiDock(s)")
+        log("Paint-from-cache: \(hidocks.count) HiDock(s), \(plauds.count) Plaud account(s)")
         let group = DispatchGroup()
-        for device in devices {
+        for device in hidocks {
             group.enter()
             runExtractor(arguments: ["cached-status"], productId: device.productId) { [weak self] result in
                 defer { group.leave() }
@@ -1645,6 +1649,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard case .success(let data) = result,
                       let payload = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) else {
                     self.log("Paint-from-cache: no cached data for \(device.cleanName)")
+                    return
+                }
+                self.renderSyncStatus(payload, device: device)
+            }
+        }
+        for device in plauds {
+            group.enter()
+            // Network-free cached read — no tokens needed, so pass an empty env
+            // (avoids the signed-out side effect of plaudEnvironment).
+            runExtractor(arguments: plaudExtractorArguments("plaud-cached-status", device: device),
+                         productId: device.productId,
+                         environment: [:]) { [weak self] result in
+                defer { group.leave() }
+                guard let self = self else { return }
+                guard case .success(let data) = result,
+                      let payload = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) else {
+                    self.log("Paint-from-cache: no cached Plaud data for \(device.cleanName)")
                     return
                 }
                 self.renderSyncStatus(payload, device: device)

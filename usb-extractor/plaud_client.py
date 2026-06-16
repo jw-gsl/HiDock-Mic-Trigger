@@ -605,6 +605,35 @@ def _recordings_from_downloads(
     return out
 
 
+def cached_status_payload(
+    output_dir: Path,
+    state: dict[str, Any],
+    *,
+    account_id: str,
+) -> dict[str, Any]:
+    """Network-free status for painting the table instantly on launch: the
+    cached catalog from state.json if present, else locally-downloaded files.
+    Never touches the cloud, so it returns in milliseconds and works offline.
+    `connected` stays False — the live plaud-status probe sets that later."""
+    payload: dict[str, Any] = {
+        "connected": False,
+        "outputDir": str(output_dir),
+        "statePath": "",
+        "configPath": "",
+        "recordings": [],
+        "cached": True,
+    }
+    cache_key = _catalog_key(account_id)
+    cached_items = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
+    if cached_items:
+        _apply_storage(payload, _status_recordings_from_items(output_dir, state, account_id, cached_items))
+    else:
+        local = _recordings_from_downloads(state, account_id)
+        if local:
+            _apply_storage(payload, local)
+    return payload
+
+
 def status_payload(
     output_dir: Path,
     state: dict[str, Any],

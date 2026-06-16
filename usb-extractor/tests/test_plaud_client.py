@@ -144,3 +144,26 @@ def test_status_payload_shows_downloaded_when_signed_out(tmp_path, monkeypatch):
     assert "not signed in" in payload.get("error", "").lower()
     assert [r["name"] for r in payload["recordings"]] == ["rec123"]
     assert payload.get("cached") is True
+
+
+def test_cached_status_payload_is_network_free(tmp_path, monkeypatch):
+    f = tmp_path / "Plaud" / "2026-06-09" / "2026-06-09 15-03-56.mp3"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"\x00" * 1024)
+
+    # Hard-fail if it touches the network at all.
+    def _boom(*a, **k):
+        raise AssertionError("cached_status_payload must not hit the network")
+
+    monkeypatch.setattr(pc, "list_recordings", _boom)
+    monkeypatch.setattr(pc, "_request_json", _boom)
+    payload = pc.cached_status_payload(tmp_path, _state_with_download(f), account_id="acct")
+    assert payload["connected"] is False
+    assert payload["cached"] is True
+    assert [r["name"] for r in payload["recordings"]] == ["rec123"]
+
+
+def test_cached_status_payload_empty_when_nothing_cached(tmp_path):
+    payload = pc.cached_status_payload(tmp_path, {"downloads": {}}, account_id="acct")
+    assert payload["recordings"] == []
+    assert payload["connected"] is False

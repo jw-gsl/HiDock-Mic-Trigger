@@ -1988,6 +1988,9 @@ def main() -> int:
     plaud_status = sub.add_parser("plaud-status", help="Report Plaud cloud recordings as JSON")
     plaud_status.add_argument("--account-id", required=True, help="Stable Plaud account identifier")
 
+    plaud_cached = sub.add_parser("plaud-cached-status", help="Report cached Plaud catalog / local downloads from state.json without touching the network")
+    plaud_cached.add_argument("--account-id", required=True, help="Stable Plaud account identifier")
+
     plaud_download = sub.add_parser("plaud-download", help="Download one Plaud cloud recording")
     plaud_download.add_argument("recording_id", help="Plaud file id")
     plaud_download.add_argument("--account-id", required=True, help="Stable Plaud account identifier")
@@ -2019,6 +2022,17 @@ def main() -> int:
         payload["configPath"] = str(DEFAULT_CONFIG_PATH.resolve())
         _attach_refreshed_plaud_tokens(payload, args.account_id)
         save_state(state)
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.command == "plaud-cached-status":
+        # Network-free: paint cached catalog / local downloads instantly on
+        # launch, before the live plaud-status cloud probe resolves.
+        config = load_config()
+        state = load_state()
+        output_dir = resolved_output_dir(config)
+        payload = plaud_client.cached_status_payload(output_dir, state, account_id=args.account_id)
+        payload["statePath"] = str(DEFAULT_STATE_PATH.resolve())
+        payload["configPath"] = str(DEFAULT_CONFIG_PATH.resolve())
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "plaud-download":
