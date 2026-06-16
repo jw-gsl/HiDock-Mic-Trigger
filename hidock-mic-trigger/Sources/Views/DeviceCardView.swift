@@ -63,6 +63,11 @@ struct DeviceCardView: View {
     /// Known capacities. Matches the table in HiDockViewModel.storageSummary —
     /// kept in-sync manually until we have a device-info query in the protocol.
     private var capacityBytes: Int64? {
+        // Plaud Note Pro ships with 64 GB of onboard storage. The app can't yet
+        // tell Plaud models apart (no model field on the account), so assume Pro.
+        if device.deviceType == .plaud {
+            return 64 * 1_073_741_824
+        }
         switch device.shortName {
         case "H1", "H1E": return 32 * 1_073_741_824
         case "P1":        return 64 * 1_073_741_824
