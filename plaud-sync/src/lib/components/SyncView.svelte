@@ -40,12 +40,15 @@
   const showChecks = $derived(!syncInfo?.autoSync);
 
   const visible = $derived(
-    recordings.filter((r) => {
-      if (filter === "new" && r.downloaded) return false;
-      if (filter === "downloaded" && !r.downloaded) return false;
-      const q = search.trim().toLowerCase();
-      return !q || r.filename.toLowerCase().includes(q);
-    }),
+    recordings
+      .filter((r) => {
+        if (filter === "new" && r.downloaded) return false;
+        if (filter === "downloaded" && !r.downloaded) return false;
+        const q = search.trim().toLowerCase();
+        return !q || r.filename.toLowerCase().includes(q);
+      })
+      // Newest first, regardless of source order (fresh list or cache).
+      .sort((a, b) => b.startTime - a.startTime),
   );
   const visibleNew = $derived(visible.filter((r) => !r.downloaded));
 
