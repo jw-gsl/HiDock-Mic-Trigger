@@ -116,6 +116,7 @@ def load_whisper_model():
 
 def transcribe_file(
     mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
+    summarize_engine: str | None = None,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
     from shared.transcript_writer import write_transcript
@@ -219,7 +220,7 @@ def transcribe_file(
             try:
                 from shared.summarize import summarize as run_summarize
                 progress(90)
-                summary = run_summarize(text)
+                summary = run_summarize(text, engine_name=summarize_engine)
             except Exception as e:
                 print(f"Summarization failed (non-fatal): {e}", file=sys.stderr)
 
@@ -320,6 +321,7 @@ def cmd_transcribe(args):
             mp3_path,
             diarize=getattr(args, "diarize", False),
             summarize=getattr(args, "summarize", False),
+            summarize_engine=getattr(args, "summarize_engine", None),
         )
     finally:
         release_lock(lock)
@@ -361,6 +363,7 @@ def cmd_transcribe_batch(args):
                 model=model,
                 diarize=getattr(args, "diarize", False),
                 summarize=getattr(args, "summarize", False),
+                summarize_engine=getattr(args, "summarize_engine", None),
             )
             results.append(result)
     finally:
@@ -417,11 +420,13 @@ def main():
     p_transcribe.add_argument("mp3_path", help="Path to audio file")
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
+    p_transcribe.add_argument("--summarize-engine", default=None, help="LLM engine for summarization (e.g. claude, ollama). Default: config [summarization].engine / auto.")
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
     p_batch.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_batch.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
+    p_batch.add_argument("--summarize-engine", default=None, help="LLM engine for summarization (e.g. claude, ollama). Default: config [summarization].engine / auto.")
     p_batch.set_defaults(func=cmd_transcribe_batch)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
