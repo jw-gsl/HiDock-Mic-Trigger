@@ -8,6 +8,7 @@ struct StatusBadge: View {
         switch level {
         case .success: return .green
         case .transcribed: return .purple   // distinct from Downloaded's green
+        case .summarised: return .indigo    // one step beyond transcribed
         case .warning: return .orange
         case .error: return .red
         case .info: return .blue

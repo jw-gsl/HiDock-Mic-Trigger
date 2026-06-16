@@ -356,12 +356,14 @@ struct RecordingsTableView: View {
             let isDownloadingRow = viewModel.currentlyDownloadingName == entry.recording.name
             let isTranscribingRow = viewModel.transcriptionBusy
                 && viewModel.transcriptionCurrentFile == entry.recording.outputName
+            let isSummarisingRow = viewModel.summarisingNames.contains(entry.recording.outputName)
             let badgeText: String = {
                 if isDownloadingRow { return "Downloading" }
                 if isTranscribingRow { return "Transcribing" }
+                if isSummarisingRow { return "Summarising" }
                 return entry.statusText
             }()
-            let badgeLevel: StatusLevel = (isDownloadingRow || isTranscribingRow) ? .warning : entry.statusLevel
+            let badgeLevel: StatusLevel = (isDownloadingRow || isTranscribingRow || isSummarisingRow) ? .warning : entry.statusLevel
             ClickableStatusBadge(
                 text: badgeText,
                 level: badgeLevel,
@@ -537,6 +539,28 @@ struct RecordingsTableView: View {
                     viewModel.onDismissMergeCandidate(cand)
                 } label: {
                     Label("Dismiss merge suggestion", systemImage: "xmark.circle")
+                }
+            }
+            Divider()
+        }
+        if entry.transcribed {
+            let summarising = viewModel.summarisingNames.contains(entry.recording.outputName)
+            Button {
+                viewModel.onSummariseRecording(entry)
+            } label: {
+                Label(summarising ? "Summarising…" : "Summarise with Claude Code", systemImage: "sparkles")
+            }
+            .disabled(summarising)
+            Button {
+                viewModel.onAskClaudeRecording(entry)
+            } label: {
+                Label("Ask Claude Code…", systemImage: "terminal")
+            }
+            if let sp = entry.summaryPath, !sp.isEmpty {
+                Button {
+                    viewModel.onViewSummary(sp)
+                } label: {
+                    Label("View Summary", systemImage: "doc.text.magnifyingglass")
                 }
             }
             Divider()

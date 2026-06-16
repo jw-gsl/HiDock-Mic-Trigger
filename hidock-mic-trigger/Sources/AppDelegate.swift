@@ -542,6 +542,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onOpenTranscriptViewer = { [weak self] path in
             self?.openTranscriptViewer(transcriptMdPath: path)
         }
+        viewModel.onSummariseRecording = { [weak self] entry in self?.summariseRecording(entry) }
+        viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
+        viewModel.onViewSummary = { path in
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
         viewModel.onShowCoworkPrompt = { [weak self] in self?.showCoworkPrompt() }
         viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
         viewModel.onTrimRecording = { [weak self] path in self?.showTrimDialog(for: path) }
@@ -3570,6 +3575,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         terminalWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// One-shot typed summary of an already-transcribed recording via Claude
+    /// Code. Marks the row "Summarising", runs `transcribe_cpp.py summarize`,
+    /// then flips it to "Summarised" when the summary file is produced.
+    private func summariseRecording(_ entry: HiDockSyncRecordingEntry) {
+        guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
+            showError("No transcript found for \(entry.recording.outputName). Transcribe it first.")
+            return
+        }
+        let name = entry.recording.outputName
+        guard !viewModel.summarisingNames.contains(name) else { return }
+        viewModel.summarisingNames.insert(name)
+        syncViewModelState()
+
+        var args = ["summarize", transcript]
+        if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
+        runTranscription(arguments: args, timeout: 300) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.viewModel.summarisingNames.remove(name)
+                if case .success(let data) = result,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   (json["summarized"] as? Bool) == true,
+                   let path = json["summary_path"] as? String {
+                    if let i = self.syncEntries.firstIndex(where: { $0.recording.outputName == name }) {
+                        self.syncEntries[i].summaryPath = path
+                    }
+                    self.log("Summarised \(name) -> \(path)")
+                } else {
+                    self.log("Summarise: no summary produced for \(name)")
+                }
+                self.syncViewModelState()
+            }
+        }
+    }
+
+    /// Open the embedded terminal running Claude Code on this recording's
+    /// transcript — interactive, uses the user's Claude Code login (no keys).
+    private func askClaudeAboutRecording(_ entry: HiDockSyncRecordingEntry) {
+        guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
+            showError("No transcript found for \(entry.recording.outputName). Transcribe it first.")
+            return
+        }
+        let dir = (transcript as NSString).deletingLastPathComponent
+        let file = (transcript as NSString).lastPathComponent
+        let cmd = "cd \"\(dir)\" && claude \"Read the transcript '\(file)' and help me summarise it and answer questions about it.\""
+        openTerminal(initialCommand: cmd)
     }
 
     // MARK: - Firmware
