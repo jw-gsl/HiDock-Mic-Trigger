@@ -287,6 +287,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
         // labels like "Imported" or "Downloaded". A downloaded file
         // that the user transcription-skipped now correctly shows
         // "Skipped", not "Downloaded" — making the opt-out visible.
+        if summaryPath != nil { return "Summarised" }
         if transcribed { return "Transcribed" }
         if recording.removed == true { return "Removed" }
         // `downloaded == true` + `localExists == false` in the extractor
@@ -303,6 +304,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
     }
 
     var statusLevel: StatusLevel {
+        if summaryPath != nil { return .summarised }                 // indigo: "summarised"
         if transcribed { return .transcribed }                       // purple: "fully processed"
         if recording.removed == true { return .removed }             // muted red: "I deleted this"
         if recording.downloaded && !recording.localExists { return .skipped }
@@ -366,6 +368,9 @@ enum StatusLevel {
     /// (which remains green for "Downloaded") so Downloaded and
     /// Transcribed rows are visually distinguishable at a glance.
     case transcribed
+    /// "Summarised" — a transcript that also has a typed summary. Indigo,
+    /// distinct from transcribed purple, reads as "one step further processed".
+    case summarised
     /// User-driven opt-out: "I told you to skip this." Cyan reads as a
     /// deliberate choice — distinct from grey ("not yet acted on")
     /// and from blue (informational).

@@ -154,6 +154,9 @@ final class HiDockViewModel: ObservableObject {
     @Published var transcriptionBusy = false
     @Published var transcriptionCurrentFile: String?
     @Published var transcriptionProgress: Int = 0
+    /// Recordings (by outputName) currently being summarised — drives the
+    /// transient "Summarising" status pill, mirroring transcriptionCurrentFile.
+    @Published var summarisingNames: Set<String> = []
     @Published var transcriptionFileIndex: Int = 0
     @Published var transcriptionFileCount: Int = 0
     @Published var transcriptionStatus: String = ""
@@ -470,6 +473,12 @@ final class HiDockViewModel: ObservableObject {
     var onRevealTranscript: (String) -> Void = { _ in }
     var onExportSRT: (String) -> Void = { _ in }
     var onOpenTranscriptViewer: (String) -> Void = { _ in }
+    /// Summarisation actions (Phase 1). Summarise = one-shot typed summary via
+    /// Claude Code; AskClaude = open the embedded terminal on the transcript;
+    /// ViewSummary = open the produced summary file.
+    var onSummariseRecording: (HiDockSyncRecordingEntry) -> Void = { _ in }
+    var onAskClaudeRecording: (HiDockSyncRecordingEntry) -> Void = { _ in }
+    var onViewSummary: (String) -> Void = { _ in }
     var onSendFeedback: () -> Void = {}
     var onShowFeedbackHistory: () -> Void = {}
     var onShowCoworkPrompt: () -> Void = {}
