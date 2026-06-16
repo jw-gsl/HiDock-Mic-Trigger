@@ -508,6 +508,12 @@ final class HiDockViewModel: ObservableObject {
     var onPairPlaud: (String) -> Void = { _ in } // region
     var onScanVolumes: (@escaping ([VolumeScanResult]) -> Void) -> Void = { $0([]) }
 
+    // MARK: - Session activity badge
+    /// Count of recordings transcribed while the main window wasn't focused —
+    /// shown as a Dock badge (and menu-bar fallback). Cleared when the user
+    /// focuses the main window. Session-scoped (resets on relaunch).
+    @Published var sessionTranscribedCount: Int = 0
+
     // MARK: - Notification Preferences
     @Published var notifyTranscriptionComplete: Bool = true
     @Published var notifyDownloadComplete: Bool = true
