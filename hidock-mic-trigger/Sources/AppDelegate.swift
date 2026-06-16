@@ -1415,8 +1415,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } else {
             title += " · No Mic"
         }
+        // Menu-bar fallback for the transcribed badge (the Dock badge only shows
+        // in .regular mode / when a window is open).
+        if viewModel.sessionTranscribedCount > 0 {
+            title += " · ✓\(viewModel.sessionTranscribedCount)"
+        }
         statusItem.button?.title = title
         syncViewModelState()
+    }
+
+    /// Reflect the session transcribed count on the Dock icon (badge) and the
+    /// menu-bar title. Call after the count changes.
+    private func updateTranscribedBadge() {
+        let n = viewModel.sessionTranscribedCount
+        NSApp.dockTile.badgeLabel = n > 0 ? String(n) : nil
+        updateMenuState()
+    }
+
+    /// Focusing the main window means the user has seen recent completions —
+    /// clear the transcribed activity badge.
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let win = notification.object as? NSWindow, win === syncWindow else { return }
+        if viewModel.sessionTranscribedCount != 0 {
+            viewModel.sessionTranscribedCount = 0
+            updateTranscribedBadge()
+        }
     }
 
     private func startUptimeTimer() {
@@ -6115,6 +6138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     )
                     self.viewModel.syncStatus = "Transcription complete"
                     self.viewModel.syncStatusLevel = .success
+                    // Badge completions that finish while the user isn't looking
+                    // at the main window; focusing it clears the count.
+                    if self.syncWindow?.isKeyWindow != true {
+                        self.viewModel.sessionTranscribedCount += 1
+                        self.updateTranscribedBadge()
+                    }
                 } else {
                     let errorMsg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String ?? "Unknown error"
                     self.log("Transcription failed for \(filename): \(errorMsg)")
