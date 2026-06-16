@@ -138,6 +138,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let notifyDownloadKey = "notifyDownloadComplete"
     private let notifyMicChangesKey = "notifyMicChanges"
 
+    // Summarisation provider (LLM engine used after transcription). "auto" lets
+    // the pipeline detect/config-choose; a specific id is passed via
+    // --summarize-engine. Mirrors shared/llm_cli.py's engine ids.
+    private let summarizeEngineKey = "summarizeEngine"
+    private var summarizeEngine: String { UserDefaults.standard.string(forKey: summarizeEngineKey) ?? "auto" }
+    private let summarizeEngineOptions: [(id: String, label: String)] = [
+        ("auto", "Auto (detect)"),
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+        ("gemini", "Gemini"),
+        ("ollama", "Ollama (local)"),
+    ]
+    private var summarizeSubmenu: NSMenu!
+    private var summarizeMenuItem: NSMenuItem!
+
     /// Repo root resolved from UserDefaults, falling back to the default home directory path.
     private var repoRoot: String {
         if let saved = UserDefaults.standard.string(forKey: repoRootKey), !saved.isEmpty {
@@ -386,7 +401,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu == micSubmenu {
             rebuildMicSubmenu()
+        } else if menu == summarizeSubmenu {
+            rebuildSummarizeSubmenu()
         }
+    }
+
+    private func rebuildSummarizeSubmenu() {
+        summarizeSubmenu.removeAllItems()
+        let current = summarizeEngine
+        for opt in summarizeEngineOptions {
+            let item = NSMenuItem(title: opt.label, action: #selector(selectSummarizeEngine(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = opt.id
+            item.state = (opt.id == current) ? .on : .off
+            summarizeSubmenu.addItem(item)
+        }
+    }
+
+    @objc private func selectSummarizeEngine(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(id, forKey: summarizeEngineKey)
+        rebuildSummarizeSubmenu()
+        log("Summarisation provider set to \(id)")
     }
 
     // MARK: - UNUserNotificationCenterDelegate
@@ -1051,6 +1087,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         micMenuItem = NSMenuItem(title: "Trigger Mic", action: nil, keyEquivalent: "")
         micMenuItem.submenu = micSubmenu
 
+        summarizeSubmenu = NSMenu()
+        summarizeSubmenu.delegate = self
+        summarizeMenuItem = NSMenuItem(title: "Summarisation Provider", action: nil, keyEquivalent: "")
+        summarizeMenuItem.submenu = summarizeSubmenu
+
         let logsItem = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
         let statusInfoItem = NSMenuItem(title: "Show Status", action: #selector(showStatus), keyEquivalent: "i")
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
@@ -1064,6 +1105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(NSMenuItem.separator())
         menu.addItem(micMenuItem)
         menu.addItem(autoStartItem)
+        menu.addItem(summarizeMenuItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(syncWindowItem)
         menu.addItem(NSMenuItem.separator())
@@ -5953,6 +5995,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+        // Single chokepoint for the summarisation provider: when a run asks to
+        // summarise and the user picked a specific engine, pass it through.
+        // "auto" omits the flag so the pipeline keeps its config/auto default.
+        var arguments = arguments
+        if arguments.contains("--summarize"), summarizeEngine != "auto",
+           !arguments.contains("--summarize-engine") {
+            arguments.append(contentsOf: ["--summarize-engine", summarizeEngine])
+        }
         log("runTranscription: \(arguments.joined(separator: " "))")
         transcriptionDispatchQueue.async {
             let process = Process()
