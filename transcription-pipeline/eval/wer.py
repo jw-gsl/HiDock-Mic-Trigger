@@ -46,11 +46,14 @@ def wer(ref: list[str], hyp: list[str]) -> tuple[float, int, int, int]:
         if i > 0 and j > 0 and ref[i - 1] == hyp[j - 1]:
             i, j = i - 1, j - 1
         elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
-            s += 1; i, j = i - 1, j - 1
+            s += 1
+            i, j = i - 1, j - 1
         elif j > 0 and dp[i][j] == dp[i][j - 1] + 1:
-            ins += 1; j -= 1
+            ins += 1
+            j -= 1
         else:
-            d += 1; i -= 1
+            d += 1
+            i -= 1
     total = dp[n][m]
     return (total / n if n else 0.0), s, ins, d
 
