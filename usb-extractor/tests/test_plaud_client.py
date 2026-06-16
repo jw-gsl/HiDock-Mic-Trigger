@@ -94,3 +94,53 @@ def test_valid_token_returns_without_network(monkeypatch):
     access, region = pc._ensure_fresh_token("test-account-valid")
     assert access == token
     assert region == "eu"
+
+
+# --- offline / signed-out: downloaded files still show --------------------
+
+def _state_with_download(path) -> dict:
+    return {
+        "downloads": {
+            "plaud:acct:rec123": {
+                "downloaded": True,
+                "output_path": str(path),
+                "length": 1024,
+                "signature": "rec123",
+                "source": "plaud",
+                "account_id": "acct",
+                "downloaded_at": "2026-06-09T15:00:00+00:00",
+            }
+        }
+    }
+
+
+def test_recordings_from_downloads_lists_existing_files(tmp_path):
+    f = tmp_path / "Plaud" / "2026-06-09" / "2026-06-09 15-03-56.mp3"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"\x00" * 1024)
+    recs = pc._recordings_from_downloads(_state_with_download(f), "acct")
+    assert len(recs) == 1
+    assert recs[0]["name"] == "rec123"
+    assert recs[0]["downloaded"] is True
+    assert recs[0]["createDate"] == "2026/06/09"  # from the YYYY-MM-DD folder
+
+
+def test_recordings_from_downloads_skips_missing_files(tmp_path):
+    missing = tmp_path / "Plaud" / "gone.mp3"
+    assert pc._recordings_from_downloads(_state_with_download(missing), "acct") == []
+
+
+def test_status_payload_shows_downloaded_when_signed_out(tmp_path, monkeypatch):
+    f = tmp_path / "Plaud" / "2026-06-09" / "2026-06-09 15-03-56.mp3"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"\x00" * 1024)
+
+    def _raise(account_id=None):
+        raise pc.PlaudError(pc.SIGNED_OUT_MESSAGE)
+
+    monkeypatch.setattr(pc, "list_recordings", _raise)
+    payload = pc.status_payload(tmp_path, _state_with_download(f), account_id="acct")
+    assert payload["connected"] is False
+    assert "not signed in" in payload.get("error", "").lower()
+    assert [r["name"] for r in payload["recordings"]] == ["rec123"]
+    assert payload.get("cached") is True

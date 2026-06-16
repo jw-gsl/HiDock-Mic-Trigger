@@ -552,6 +552,59 @@ def _apply_storage(payload: dict[str, Any], recordings: list[dict[str, Any]]) ->
     }
 
 
+def _recordings_from_downloads(
+    state: dict[str, Any], account_id: str
+) -> list[dict[str, Any]]:
+    """Build recording rows from locally-downloaded files recorded in `state`,
+    so saved Plaud recordings still show when the cloud is unavailable / signed
+    out. Only files that actually exist on disk are included."""
+    out: list[dict[str, Any]] = []
+    prefix = f"plaud:{account_id}:"
+    for key, stored in (state.get("downloads") or {}).items():
+        if not key.startswith(prefix):
+            continue
+        if stored.get("source") and stored.get("source") != "plaud":
+            continue
+        base = Path(stored["output_path"]) if stored.get("output_path") else None
+        existing = _matching_existing_file(base) if base else None
+        if existing is None:
+            continue
+        rid = stored.get("signature") or key[len(prefix):]
+        length = existing.stat().st_size
+        duration, duration_estimated = _local_audio_duration(existing)
+        # Prefer the YYYY-MM-DD parent folder for the date; fall back to mtime.
+        date, create_time = "", ""
+        try:
+            dt = datetime.strptime(existing.parent.name, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            date = dt.strftime("%Y/%m/%d")
+        except ValueError:
+            dt = datetime.fromtimestamp(existing.stat().st_mtime, tz=timezone.utc)
+            date, create_time = dt.strftime("%Y/%m/%d"), dt.strftime("%H:%M:%S")
+        out.append({
+            "name": rid,
+            "createDate": date,
+            "createTime": create_time,
+            "length": length,
+            "duration": duration,
+            "durationEstimated": duration_estimated,
+            "version": 0,
+            "mode": "plaud",
+            "signature": rid,
+            "outputPath": str(existing),
+            "outputName": existing.name,
+            "downloaded": True,
+            "localExists": True,
+            "downloadedAt": stored.get("downloaded_at"),
+            "lastError": None,
+            "status": "downloaded",
+            "humanLength": _human_size(length),
+            "trimmed": bool(stored.get("trimmed")),
+            "removed": bool(stored.get("removed")),
+        })
+    out.sort(key=lambda r: f'{r["createDate"]} {r["createTime"]}', reverse=True)
+    return out
+
+
 def status_payload(
     output_dir: Path,
     state: dict[str, Any],
@@ -574,6 +627,14 @@ def status_payload(
         if cached_items:
             _apply_storage(payload, _status_recordings_from_items(output_dir, state, account_id, cached_items))
             payload["cached"] = True
+        else:
+            # No usable catalog (never populated, or a dead session left it
+            # empty). Still surface locally-downloaded recordings so saved files
+            # don't vanish from the list while offline / signed out.
+            local = _recordings_from_downloads(state, account_id)
+            if local:
+                _apply_storage(payload, local)
+                payload["cached"] = True
         return payload
 
     catalogs = state.setdefault("catalogs", {})
