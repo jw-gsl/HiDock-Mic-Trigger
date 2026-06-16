@@ -207,6 +207,20 @@ struct SyncToolbarSection: View {
                 }
                 .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
 
+                // Summarise Selected sits right after Transcribe Selected —
+                // the natural next verb once rows are transcribed. Runs the
+                // typed Claude Code summary (one at a time, queued) for each
+                // selected transcribed row; untranscribed selections are
+                // skipped. Independent of transcription, so it isn't gated on
+                // transcriptionBusy.
+                Button {
+                    viewModel.onSummariseSelected()
+                } label: {
+                    Label("Summarise Selected", systemImage: "sparkles")
+                }
+                .disabled(viewModel.syncDownloading || !viewModel.hasSelection)
+                .help("Generate a typed summary (via Claude Code) for each selected transcribed recording. Untranscribed selections are skipped.")
+
                 // (Download New removed in 2026-04-26 cleanup — it was
                 // dead UI in every realistic state. Auto-download
                 // covers the "I want the new ones" case when on; when
@@ -230,6 +244,17 @@ struct SyncToolbarSection: View {
                     set: { _ in viewModel.onToggleAutoTranscribe() }
                 ))
                 .toggleStyle(.checkbox)
+
+                // When on, each recording that finishes transcribing this
+                // session is automatically given a typed summary via Claude
+                // Code. Newly-transcribed files only — backlog is left to the
+                // Summarise Selected button to avoid fanning out many runs.
+                Toggle("Auto-summarise", isOn: Binding(
+                    get: { viewModel.syncAutoSummarise },
+                    set: { _ in viewModel.onToggleAutoSummarise() }
+                ))
+                .toggleStyle(.checkbox)
+                .help("Automatically summarise (via Claude Code) each recording as it finishes transcribing. Applies to newly-transcribed files; use Summarise Selected for the backlog.")
             }
             .font(.caption)
             .buttonStyle(.bordered)

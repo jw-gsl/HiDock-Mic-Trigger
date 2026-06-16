@@ -24,6 +24,10 @@ struct RecordingsTableView: View {
                 // Transcribed is now part of the main Status cascade:
                 // On device → Downloaded → Transcribed.
                 headerButton("Tagged", key: nil, width: 90)
+                // Summary column — mirrors Tagged: a tick that opens the
+                // generated summary. No sort key (summary state isn't a
+                // sortable scalar the way name/date are).
+                headerButton("Summary", key: nil, width: 80)
                 headerButton("Recording", key: "name", width: 220)
                 headerButton("Created", key: "created", width: 155)
                 headerButton("Length", key: "duration", width: 70)
@@ -180,6 +184,13 @@ struct RecordingsTableView: View {
             // Transcription state for merged file
             mergeTranscriptionIndicator(group: group)
                 .frame(width: 90, alignment: .leading)
+
+            // Summary column placeholder — merge groups don't carry a
+            // per-entry summaryPath; dash keeps the columns aligned with
+            // the regular rows.
+            Text("—")
+                .foregroundColor(.secondary.opacity(0.5))
+                .frame(width: 80, alignment: .leading)
 
             // Recording name — truncate to match regular row length
             let displayName = group.outputName.count > 30
@@ -382,6 +393,29 @@ struct RecordingsTableView: View {
                 onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer
             )
             .frame(width: 90, alignment: .leading)
+
+            // Summary column — indigo doc tick when a typed summary exists
+            // (click opens it), spinner while summarising, dash otherwise.
+            // Same open-on-click affordance as the Tagged column.
+            Group {
+                if isSummarisingRow {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else if let sp = entry.summaryPath, !sp.isEmpty {
+                    Button {
+                        viewModel.onViewSummary(sp)
+                    } label: {
+                        Image(systemName: "doc.text.fill")
+                            .foregroundColor(.indigo)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Summary ready — click to open")
+                } else {
+                    Text("—")
+                        .foregroundColor(.secondary.opacity(0.5))
+                }
+            }
+            .frame(width: 80, alignment: .leading)
 
             Text(entry.recording.outputName)
                 .lineLimit(1)

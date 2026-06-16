@@ -38,6 +38,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncAutoDownload = false
     private var syncAutoTranscribe = false
     private let syncAutoTranscribeKey = "hidockSyncAutoTranscribe"
+    private var syncAutoSummarise = false
+    private let syncAutoSummariseKey = "hidockSyncAutoSummarise"
+    // Serial summarise queue — shared by the row action, the
+    // "Summarise Selected" toolbar button, and the auto-summarise
+    // pipeline. One Claude Code summarise runs at a time so we never
+    // fan out N concurrent CLI processes.
+    private var summariseQueue: [HiDockSyncRecordingEntry] = []
+    private var summariseBusy = false
+    // mp3 outputNames that finished transcribing this session and are
+    // waiting for their transcriptPath to be populated by the next
+    // refreshTranscriptionState, at which point auto-summarise queues them.
+    private var pendingAutoSummariseNames: Set<String> = []
     private var mergeGroups: [MergeGroup] = []
     private let mergeGroupsPath = "\(NSHomeDirectory())/HiDock/merge_groups.json"
     private var diarizeEnabled = false
@@ -482,6 +494,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncAutoDownload = viewModel.syncAutoDownload
         viewModel.syncAutoTranscribe = UserDefaults.standard.bool(forKey: syncAutoTranscribeKey)
         syncAutoTranscribe = viewModel.syncAutoTranscribe
+        viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
+        syncAutoSummarise = viewModel.syncAutoSummarise
         // Default diarization to ON — speaker labels are almost always wanted
         if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "diarizeEnabled")
@@ -527,8 +541,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onUnmarkDownloaded = { [weak self] in self?.unmarkSyncRecordingsAsDownloaded() }
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onToggleAutoTranscribe = { [weak self] in self?.toggleAutoTranscribe() }
+        viewModel.onToggleAutoSummarise = { [weak self] in self?.toggleAutoSummarise() }
         viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
+        viewModel.onSummariseSelected = { [weak self] in self?.summariseSelectedRecordings() }
         viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
         viewModel.onRevealRecording = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -649,6 +665,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncCheckedRecordings = syncCheckedRecordings
         viewModel.syncAutoDownload = syncAutoDownload
         viewModel.syncAutoTranscribe = syncAutoTranscribe
+        viewModel.syncAutoSummarise = syncAutoSummarise
         viewModel.diarizeEnabled = diarizeEnabled
         viewModel.syncFilterDeviceId = syncFilterDeviceId
         viewModel.syncPairedDevices = syncPairedDevices
@@ -3580,13 +3597,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// One-shot typed summary of an already-transcribed recording via Claude
     /// Code. Marks the row "Summarising", runs `transcribe_cpp.py summarize`,
     /// then flips it to "Summarised" when the summary file is produced.
+    /// Row-action entry point — queue a single recording for a typed summary.
     private func summariseRecording(_ entry: HiDockSyncRecordingEntry) {
         guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
             showError("No transcript found for \(entry.recording.outputName). Transcribe it first.")
             return
         }
+        enqueueSummaries([entry])
+    }
+
+    /// "Summarise Selected" toolbar button — summarise every ticked
+    /// transcribed row. If all selected rows already have a summary, offer
+    /// to re-summarise (mirrors the Transcribe Selected re-run prompt).
+    private func summariseSelectedRecordings() {
+        let selected = selectedSyncEntries().filter {
+            $0.transcribed && ($0.transcriptPath.map { !$0.isEmpty } ?? false)
+        }
+        guard !selected.isEmpty else {
+            viewModel.syncStatus = "No transcribed recordings selected to summarise"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+        let pending = selected.filter { $0.summaryPath == nil }
+        let toRun: [HiDockSyncRecordingEntry]
+        if pending.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Already Summarised"
+            alert.informativeText = "\(selected.count) selected recording\(selected.count == 1 ? " is" : "s are") already summarised.\n\nRe-summarise?"
+            alert.addButton(withTitle: "Re-summarise")
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .informational
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            toRun = selected
+        } else {
+            toRun = pending
+        }
+        log("Summarise selected: \(toRun.count) recording(s)")
+        enqueueSummaries(toRun)
+    }
+
+    /// Add transcribed entries to the serial summarise queue (deduped
+    /// against the queue and anything already in flight), then kick the
+    /// pump. Used by the row action, the toolbar button, and auto-summarise.
+    private func enqueueSummaries(_ entries: [HiDockSyncRecordingEntry]) {
+        var added = 0
+        for entry in entries {
+            let name = entry.recording.outputName
+            guard let t = entry.transcriptPath, !t.isEmpty else { continue }
+            guard !viewModel.summarisingNames.contains(name) else { continue }
+            guard !summariseQueue.contains(where: { $0.recording.outputName == name }) else { continue }
+            summariseQueue.append(entry)
+            added += 1
+        }
+        if added > 0 { log("Summarise: queued \(added) recording(s) (\(summariseQueue.count) pending)") }
+        processNextSummary()
+    }
+
+    private func processNextSummary() {
+        guard !summariseBusy, !summariseQueue.isEmpty else { return }
+        let entry = summariseQueue.removeFirst()
         let name = entry.recording.outputName
-        guard !viewModel.summarisingNames.contains(name) else { return }
+        guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
+            processNextSummary(); return
+        }
+        summariseBusy = true
         viewModel.summarisingNames.insert(name)
         syncViewModelState()
 
@@ -3596,6 +3671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.viewModel.summarisingNames.remove(name)
+                self.summariseBusy = false
                 if case .success(let data) = result,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    (json["summarized"] as? Bool) == true,
@@ -3608,6 +3684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Summarise: no summary produced for \(name)")
                 }
                 self.syncViewModelState()
+                self.processNextSummary()
             }
         }
     }
@@ -4959,6 +5036,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    private func toggleAutoSummarise() {
+        syncAutoSummarise.toggle()
+        UserDefaults.standard.set(syncAutoSummarise, forKey: syncAutoSummariseKey)
+        syncViewModelState()
+    }
+
     private func toggleDiarize() {
         diarizeEnabled.toggle()
         UserDefaults.standard.set(diarizeEnabled, forKey: "diarizeEnabled")
@@ -6247,6 +6330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.viewModel.sessionTranscribedCount += 1
                         self.updateTranscribedBadge()
                     }
+                    if self.syncAutoSummarise { self.pendingAutoSummariseNames.insert(filename) }
                 } else {
                     let errorMsg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String ?? "Unknown error"
                     self.log("Transcription failed for \(filename): \(errorMsg)")
@@ -6560,6 +6644,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 case .success:
                     self.pendingTranscriptionQueue[idx].status = .completed
                     self.pendingTranscriptionQueue[idx].errorMessage = nil
+                    // Flag for auto-summarise; refreshTranscriptionState
+                    // (called just below) populates transcriptPath, then
+                    // queues the typed summary for these names.
+                    if self.syncAutoSummarise { self.pendingAutoSummariseNames.insert(filename) }
                 case .failure(let err):
                     self.pendingTranscriptionQueue[idx].status = .failed
                     // The NSError carries the trimmed stderr text
@@ -6842,6 +6930,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.mergedFileTranscriptPaths = mergedPaths
                 if !mergedTranscribed.isEmpty {
                     self.log("refreshTranscriptionState: \(mergedTranscribed.count) merged file(s) transcribed, \(mergedTranscribed.count - mergedTagged.count) need tagging")
+                }
+
+                // Auto-summarise: recordings that finished transcribing this
+                // session (captured in pendingAutoSummariseNames) now have
+                // their transcriptPath populated above — queue them for a
+                // typed summary. Scoped to newly-transcribed files only; we
+                // deliberately don't sweep the historical backlog (that could
+                // fan out dozens of Claude Code runs). Use "Summarise
+                // Selected" for backlog.
+                if self.syncAutoSummarise, !self.pendingAutoSummariseNames.isEmpty {
+                    let due = self.syncEntries.filter {
+                        self.pendingAutoSummariseNames.contains($0.recording.outputName)
+                            && $0.transcribed
+                            && ($0.transcriptPath.map { !$0.isEmpty } ?? false)
+                            && $0.summaryPath == nil
+                            && !self.viewModel.summarisingNames.contains($0.recording.outputName)
+                    }
+                    self.pendingAutoSummariseNames.removeAll()
+                    if !due.isEmpty {
+                        self.log("Auto-summarise: \(due.count) newly-transcribed recording(s)")
+                        self.enqueueSummaries(due)
+                    }
                 }
 
                 self.syncViewModelState()
