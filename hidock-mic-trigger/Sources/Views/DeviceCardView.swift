@@ -38,6 +38,10 @@ struct DeviceCardView: View {
         return msg.localizedCaseInsensitiveContains("not signed in")
     }
 
+    /// Region to re-authenticate this Plaud account against (its last-known
+    /// region, defaulting to US). Used by the "Sign in required" affordances.
+    private var plaudRegion: String { device.plaudRegion ?? "us" }
+
     /// The mic-trigger's ffmpeg currently holds a HiDock open.
     /// Pinned to the specific device it's attached to via the CLI
     /// output line "Using HiDock audio device: <name>". If we haven't
@@ -185,10 +189,18 @@ struct DeviceCardView: View {
     @ViewBuilder
     private var stateChip: some View {
         if plaudSignedOut {
-            chip(systemImage: "person.crop.circle.badge.exclamationmark",
-                 text: "Sign in required",
-                 foreground: .orange,
-                 background: Color.orange.opacity(0.15))
+            // The chip is the obvious thing to click when signed out — make it
+            // actually launch the Plaud sign-in rather than just label the state.
+            Button {
+                viewModel.onPairPlaud(plaudRegion)
+            } label: {
+                chip(systemImage: "person.crop.circle.badge.exclamationmark",
+                     text: "Sign in required",
+                     foreground: .orange,
+                     background: Color.orange.opacity(0.15))
+            }
+            .buttonStyle(.plain)
+            .help("Sign in to Plaud")
         } else if unreachable {
             chip(systemImage: "exclamationmark.triangle.fill",
                  text: "Unreachable",
@@ -278,11 +290,17 @@ struct DeviceCardView: View {
     private var actionsColumn: some View {
         VStack(spacing: 4) {
             Button {
-                viewModel.onReconnectDevice(device.deviceId)
+                if plaudSignedOut {
+                    viewModel.onPairPlaud(plaudRegion)
+                } else {
+                    viewModel.onReconnectDevice(device.deviceId)
+                }
             } label: {
-                Image(systemName: unreachable ? "arrow.clockwise.circle.fill" : "arrow.clockwise.circle")
+                Image(systemName: plaudSignedOut
+                        ? "person.crop.circle.badge.plus"
+                        : (unreachable ? "arrow.clockwise.circle.fill" : "arrow.clockwise.circle"))
                     .font(.title3)
-                    .foregroundColor(unreachable ? .orange : .accentColor)
+                    .foregroundColor(plaudSignedOut || unreachable ? .orange : .accentColor)
             }
             .buttonStyle(.plain)
             .help(plaudSignedOut ? "Sign in to Plaud again" : (unreachable ? "\(device.shortName) is unreachable — try reconnecting" : "Reconnect \(device.shortName)"))
