@@ -79,6 +79,23 @@ class TestSummarize:
             result = summarize("Some transcript text")
             assert result == _empty_summary()
 
+    def test_engine_name_defaults_from_config(self):
+        # With no explicit engine_name, the provider is read from
+        # [summarization].engine instead of being hard-coded to "auto".
+        with patch("shared.summarize.get_config") as cfg, \
+             patch("shared.summarize.get_engine", return_value=None) as ge:
+            cfg.return_value.get.return_value = "claude"
+            summarize("text")
+            cfg.return_value.get.assert_called_once_with("summarization", "engine", "auto")
+            ge.assert_called_once_with("claude")
+
+    def test_explicit_engine_name_bypasses_config(self):
+        with patch("shared.summarize.get_config") as cfg, \
+             patch("shared.summarize.get_engine", return_value=None) as ge:
+            summarize("text", engine_name="ollama")
+            cfg.return_value.get.assert_not_called()
+            ge.assert_called_once_with("ollama")
+
     def test_returns_empty_on_failure(self):
         from shared.llm_cli import LLMEngine
         fake_engine = LLMEngine(name="test", command=["test"], description="test")
