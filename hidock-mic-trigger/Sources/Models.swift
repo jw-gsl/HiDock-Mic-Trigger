@@ -314,6 +314,21 @@ struct HiDockSyncRecordingEntry: Identifiable {
         if recording.lastError != nil { return .error }              // red: needs attention
         return .secondary                                            // grey: not yet acted on
     }
+
+    /// The classification type of this recording's summary, e.g. "Brainstorming".
+    /// Parsed from the summary filename, which is "<stem> - <Type> - <Area> -
+    /// <Desc>.md" — we strip the known recording stem prefix so the type is
+    /// unambiguous even if the Area/Desc contain " - ". nil when not summarised.
+    var summaryType: String? {
+        guard let sp = summaryPath, !sp.isEmpty else { return nil }
+        let base = ((sp as NSString).lastPathComponent as NSString).deletingPathExtension
+        let stem = (recording.outputName as NSString).deletingPathExtension
+        let prefix = stem + " - "
+        guard base.hasPrefix(prefix) else { return nil }
+        let rest = String(base.dropFirst(prefix.count))
+        if let r = rest.range(of: " - ") { return String(rest[..<r.lowerBound]) }
+        return rest.isEmpty ? nil : rest
+    }
 }
 
 /// User-selectable filter that restricts the recordings table to a
