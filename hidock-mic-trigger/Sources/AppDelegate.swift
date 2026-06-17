@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var syncWindow: NSWindow?
     private var transcriptViewerWindow: NSWindow?
+    private var summaryViewerWindow: NSWindow?
     private var voiceLibraryWindow: NSWindow?
     private var voiceTrainingWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
@@ -582,8 +583,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         viewModel.onSummariseRecording = { [weak self] entry in self?.summariseRecording(entry) }
         viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
-        viewModel.onViewSummary = { path in
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        viewModel.onViewSummary = { [weak self] path in
+            self?.openSummaryViewer(summaryMdPath: path)
         }
         viewModel.onShowCoworkPrompt = { [weak self] in self?.showCoworkPrompt() }
         viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
@@ -3214,6 +3215,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         win.contentView = NSHostingView(rootView: viewer)
 
         transcriptViewerWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Open a generated summary .md in an in-app window (mirrors the
+    /// transcript viewer) instead of launching the external editor.
+    private func openSummaryViewer(summaryMdPath: String) {
+        guard FileManager.default.fileExists(atPath: summaryMdPath) else {
+            showError("Summary file not found:\n\(summaryMdPath)")
+            return
+        }
+        let viewer = SummaryViewerView(summaryPath: summaryMdPath)
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Summary — \((summaryMdPath as NSString).lastPathComponent)"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 460, height: 360)
+        win.contentView = NSHostingView(rootView: viewer)
+        summaryViewerWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
