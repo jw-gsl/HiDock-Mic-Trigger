@@ -176,28 +176,57 @@ def _read_transcript_text(transcript_path: Path) -> str:
     return ""
 
 
-def classify(text: str, engine, names: list[str]) -> str:
-    """Pick the best-matching template name via the LLM (falls back safely)."""
+def classify(text: str, engine, names: list[str]) -> tuple[str, str]:
+    """Pick the best-matching template name via the LLM (falls back safely).
+    Returns (template_name, one_line_reason)."""
     menu = "\n".join(f"- {n}: {TYPE_HINTS.get(n, 'custom template')}" for n in names)
     prompt = (
         "Classify this transcript by choosing the single best-matching template "
         "name from the list (consider participants, topics, tone, structure).\n\n"
         f"Templates:\n{menu}\n\n"
-        'Respond ONLY as JSON: {"template": "<exact name from the list>"}.\n\n'
+        'Respond ONLY as JSON: {"template": "<exact name from the list>", '
+        '"reason": "<one short sentence explaining the choice>"}.\n\n'
         f"Transcript (first 6000 chars):\n{text[:6000]}"
     )
     res = query_json(prompt, engine=engine) or {}
     choice = str(res.get("template", "")).strip().lower()
+    reason = " ".join(str(res.get("reason", "")).split()).strip()
     for n in names:
         if n.lower() == choice:
-            return n
-    return "General Meeting" if "General Meeting" in names else names[0]
+            return n, (reason or f"Best match for a {n} discussion.")
+    fallback = "General Meeting" if "General Meeting" in names else names[0]
+    return fallback, (reason or "No clear match; used the general template.")
+
+
+def _delete_prior_summaries(stem: str) -> None:
+    """Remove any existing summaries for this source recording so a
+    re-summarise / reclassify REPLACES rather than piling up duplicates.
+    Summary files are named '<stem> - <Type> - <Area> - <Desc>.md'."""
+    if not SUMMARIES_DIR.exists():
+        return
+    for p in SUMMARIES_DIR.glob(f"{stem} - *.md"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _frontmatter(fields: dict[str, str]) -> str:
+    """A minimal one-line-per-key YAML block the Swift viewer parses for its
+    classification header. Values are single-line."""
+    lines = ["---"]
+    for k, v in fields.items():
+        clean = " ".join(str(v).split())  # collapse to one line
+        lines.append(f"{k}: {clean}")
+    lines.append("---")
+    return "\n".join(lines)
 
 
 def summarise_typed(
     transcript_path: Path,
     engine_name: str | None = None,
     stream: bool = True,
+    force_template: str | None = None,
 ) -> dict:
     """Classify + template-summarise a transcript, write the typed summary file.
 
@@ -205,6 +234,9 @@ def summarise_typed(
     streaming engine and Claude's output is forwarded to stderr live (plus
     coarse ``STAGE:`` markers), so the desktop app's CLI pane shows progress.
     The final JSON result still goes to stdout for the caller.
+
+    ``force_template`` (e.g. from the viewer's Reclassify dropdown) skips
+    auto-classification and uses that template by name.
 
     Returns a JSON-able dict; never raises for the common 'no LLM' / 'no text'
     cases (returns {"summarized": False, "error": ...})."""
@@ -221,10 +253,15 @@ def summarise_typed(
     if not templates:
         return {"summarized": False, "error": f"No templates in {TEMPLATES_DIR}"}
 
-    _emit("STAGE: Classifying transcript…")
-    tname = classify(text, engine, list(templates.keys()))
+    if force_template and force_template in templates:
+        tname = force_template
+        reason = f"Manually set to “{tname}”."
+        _emit(f"STAGE: Reclassified to {tname} — summarising…")
+    else:
+        _emit("STAGE: Classifying transcript…")
+        tname, reason = classify(text, engine, list(templates.keys()))
+        _emit(f"STAGE: Classified as {tname} — summarising…")
     tcontent = templates[tname].read_text(encoding="utf-8")
-    _emit(f"STAGE: Type: {tname} — summarising…")
 
     # Recording date/time recovered from the filename so the summary can fill a
     # "Date & Time" field instead of "Not specified".
@@ -274,6 +311,22 @@ def summarise_typed(
     area = _sanitize(area_raw or "Other", 40)
     desc = _sanitize(title_raw or transcript_path.stem, 50)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Replace any prior summaries for this recording (re-summarise / reclassify
+    # should not pile up duplicate files).
+    _delete_prior_summaries(transcript_path.stem)
+
+    front = _frontmatter({
+        "type": tname,
+        "area": area,
+        "title": desc,
+        "recorded": rec_dt,
+        "classified": reason,
+        "transcript": str(transcript_path),
+    })
     out = SUMMARIES_DIR / f"{transcript_path.stem} - {tname} - {area} - {desc}.md"
-    out.write_text(md.rstrip() + "\n", encoding="utf-8")
-    return {"summarized": True, "summary_path": str(out), "type": tname, "area": area, "title": desc}
+    out.write_text(front + "\n\n" + md.rstrip() + "\n", encoding="utf-8")
+    return {
+        "summarized": True, "summary_path": str(out),
+        "type": tname, "area": area, "title": desc, "classified": reason,
+    }

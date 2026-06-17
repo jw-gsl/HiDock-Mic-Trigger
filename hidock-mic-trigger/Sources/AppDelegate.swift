@@ -3246,12 +3246,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Open a generated summary .md in an in-app window (mirrors the
     /// transcript viewer) instead of launching the external editor.
+    /// Clean template names (emoji prefix stripped) — matches the keys
+    /// `typed_summarize.available_templates()` uses, so they can be passed to
+    /// `summarize --template`.
+    private func availableTemplateNames() -> [String] {
+        let dir = templatesDir()
+        guard let urls = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return [] }
+        return urls
+            .filter { $0.lowercased().hasSuffix(".md") }
+            .map { name -> String in
+                let stem = (name as NSString).deletingPathExtension
+                let cleaned = String(stem.drop(while: { !$0.isLetter && !$0.isNumber }))
+                    .trimmingCharacters(in: .whitespaces)
+                return cleaned.isEmpty ? stem : cleaned
+            }
+            .sorted()
+    }
+
     private func openSummaryViewer(summaryMdPath: String) {
         guard FileManager.default.fileExists(atPath: summaryMdPath) else {
             showError("Summary file not found:\n\(summaryMdPath)")
             return
         }
-        let viewer = SummaryViewerView(summaryPath: summaryMdPath)
+        // Replace any previously-open summary window so reclassify reopens
+        // cleanly on the new file.
+        summaryViewerWindow?.close()
+        let viewer = SummaryViewerView(
+            summaryPath: summaryMdPath,
+            templates: availableTemplateNames(),
+            onReclassify: { [weak self] transcriptPath, template in
+                self?.reclassifySummary(transcriptPath: transcriptPath, template: template)
+            }
+        )
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3266,6 +3292,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         summaryViewerWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Re-run the AI summary for a recording against a user-chosen template
+    /// (from the viewer's Reclassify dropdown). Streams into the CLI pane,
+    /// replaces the old summary file, and reopens the viewer on the new one.
+    private func reclassifySummary(transcriptPath: String, template: String) {
+        guard !transcriptPath.isEmpty else { return }
+        viewModel.cliPaneVisible = true
+        viewModel.terminalController.appendActivity("")
+        viewModel.terminalController.appendActivity("──── Reclassifying as \(template) ────")
+        var args = ["summarize", transcriptPath, "--template", template]
+        if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
+        runTranscription(arguments: args, timeout: 300, onLine: { [weak self] line in
+            guard let self = self else { return }
+            if line.hasPrefix("STAGE:") {
+                let label = String(line.dropFirst("STAGE:".count)).trimmingCharacters(in: .whitespaces)
+                self.viewModel.terminalController.appendActivity("  › " + label)
+            } else if !line.isEmpty {
+                self.viewModel.terminalController.appendActivity(line)
+            }
+        }) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if case .success(let data) = result,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   (json["summarized"] as? Bool) == true,
+                   let path = json["summary_path"] as? String {
+                    self.viewModel.terminalController.appendActivity("──── Saved ✓ \((path as NSString).lastPathComponent) ────")
+                    self.viewModel.terminalController.appendActivity("")
+                    self.refreshTranscriptionState()   // updates the Summary tick / entry path
+                    self.openSummaryViewer(summaryMdPath: path)
+                } else {
+                    self.log("Reclassify failed for \(transcriptPath) -> \(template)")
+                    self.showError("Reclassify failed — see the CLI pane for details.")
+                }
+            }
+        }
     }
 
     // MARK: - Voice Library

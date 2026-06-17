@@ -596,7 +596,11 @@ def cmd_summarize(args):
     dev (transcribe.py) and bundled (transcribe_cpp.py) pipelines behave the
     same."""
     from shared.typed_summarize import summarise_typed
-    res = summarise_typed(Path(args.transcript_path).expanduser(), engine_name=args.summarize_engine)
+    res = summarise_typed(
+        Path(args.transcript_path).expanduser(),
+        engine_name=args.summarize_engine,
+        force_template=getattr(args, "template", None),
+    )
     print(json.dumps(res))
 
 
@@ -1011,6 +1015,7 @@ def main():
     p_summarize = sub.add_parser("summarize", help="Type-aware template summary of an existing transcript -> ~/HiDock/Summaries/")
     p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")
     p_summarize.add_argument("--summarize-engine", default=None, help="LLM engine (e.g. claude). Default: config [summarization].engine / auto.")
+    p_summarize.add_argument("--template", default=None, help="Force a specific template by name (skip auto-classification).")
     p_summarize.set_defaults(func=cmd_summarize)
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
