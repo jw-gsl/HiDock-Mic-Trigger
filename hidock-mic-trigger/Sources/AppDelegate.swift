@@ -22,7 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var voiceTrainingWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
     private var templatesManagerWindow: NSWindow?
-    private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
     private var plaudLoginController: PlaudLoginWindowController?
     private var terminalWindow: NSWindow?
@@ -167,16 +166,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var summarizeSubmenu: NSMenu!
     private var summarizeMenuItem: NSMenuItem!
 
-    /// The interactive CLI binary for the user's selected AI engine, used to
-    /// launch "Ask AI" / template iteration in the CLI pane. "auto" resolves
-    /// to claude (the detection-priority head). The summarise subprocess
-    /// itself receives the engine separately via --summarize-engine.
-    private var aiCliBinary: String {
-        switch summarizeEngine {
+    /// Which engine "auto" currently resolves to, as reported by the pipeline's
+    /// `detect-engine` (PATH detection, same logic the auto summariser uses).
+    /// Refreshed at launch and whenever the engine is set to auto, so the
+    /// interactive Ask AI / template commands pick the *same* engine the auto
+    /// summariser would. Defaults to claude until the first detect returns.
+    private var resolvedAutoEngine: String = "claude"
+
+    /// Map an engine name to the interactive CLI invocation used in the pane.
+    private func cliBinary(forEngine name: String) -> String {
+        switch name {
         case "codex": return "codex"
         case "gemini": return "gemini"
         case "ollama": return "ollama run llama3.2"
-        default: return "claude"   // "claude" or "auto"
+        default: return "claude"
+        }
+    }
+
+    /// The interactive CLI binary for the user's selected AI engine, used to
+    /// launch "Ask AI" / template iteration in the CLI pane. "auto" uses the
+    /// detected engine (resolvedAutoEngine) so it matches the summariser. The
+    /// summarise subprocess itself receives the engine via --summarize-engine.
+    private var aiCliBinary: String {
+        let engine = (summarizeEngine == "auto") ? resolvedAutoEngine : summarizeEngine
+        return cliBinary(forEngine: engine)
+    }
+
+    /// Ask the pipeline which engine 'auto' resolves to and cache it.
+    private func refreshResolvedAutoEngine() {
+        runTranscription(arguments: ["detect-engine"], timeout: 30) { [weak self] result in
+            guard let self = self else { return }
+            guard case .success(let data) = result,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = json["engine"] as? String, !name.isEmpty else { return }
+            self.resolvedAutoEngine = name
+            self.log("AI auto-detect resolved to: \(name)")
         }
     }
 
@@ -456,6 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         UserDefaults.standard.set(id, forKey: summarizeEngineKey)
         viewModel.summarizeEngine = id
         rebuildSummarizeSubmenu()
+        if id == "auto" { refreshResolvedAutoEngine() }
         log("Summarisation provider set to \(id)")
     }
 
@@ -519,6 +544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
         syncAutoSummarise = viewModel.syncAutoSummarise
         viewModel.summarizeEngine = summarizeEngine
+        refreshResolvedAutoEngine()
         // Default diarization to ON — speaker labels are almost always wanted
         if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "diarizeEnabled")
@@ -586,7 +612,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onViewSummary = { [weak self] path in
             self?.openSummaryViewer(summaryMdPath: path)
         }
-        viewModel.onShowCoworkPrompt = { [weak self] in self?.showCoworkPrompt() }
         viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
         viewModel.onTrimRecording = { [weak self] path in self?.showTrimDialog(for: path) }
         viewModel.onShowTranscriptionQueue = { [weak self] in self?.showTranscriptionQueueWindow() }
@@ -3245,8 +3270,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Voice Library
 
-    // MARK: - Cowork Prompt
-
     // MARK: - Voice Training
 
     private func showVoiceTraining() {
@@ -3320,28 +3343,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             DispatchQueue.main.async { completion(clusters) }
         }
-    }
-
-    private func showCoworkPrompt() {
-        if let existing = coworkPromptWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let view = CoworkPromptView()
-        let hostingView = NSHostingView(rootView: view)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        window.title = "Cowork Setup"
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        coworkPromptWindow = window
     }
 
     @objc private func openVoiceLibraryMenu() {
@@ -4443,6 +4444,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func templatesDir() -> String { "\(NSHomeDirectory())/HiDock/Summary Templates" }
 
+    /// Drop a PreToolUse hook into the templates folder's `.claude/settings.json`
+    /// so any AI CLI session launched there is *deterministically* forced to ask
+    /// for the user's approval before Write/Edit/MultiEdit — regardless of the
+    /// user's permission mode (accept-edits / auto would otherwise skip the
+    /// built-in prompt). A prompt instruction alone can't guarantee this; the
+    /// hook can. Idempotent: only writes if our hook isn't already present.
+    private func ensureTemplatesApprovalHook() {
+        let claudeDir = "\(templatesDir())/.claude"
+        let settingsPath = "\(claudeDir)/settings.json"
+        let reason = "HiDock: approve this template change before it is saved"
+        if let existing = try? String(contentsOfFile: settingsPath, encoding: .utf8),
+           existing.contains("permissionDecision"), existing.contains(reason) {
+            return  // our hook is already installed
+        }
+        // The hook command prints an "ask" decision for the matched edit tools.
+        let hookCommand = "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"\(reason)\"}}'"
+        let settings: [String: Any] = [
+            "hooks": [
+                "PreToolUse": [
+                    [
+                        "matcher": "Write|Edit|MultiEdit",
+                        "hooks": [
+                            ["type": "command", "command": hookCommand]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        do {
+            try FileManager.default.createDirectory(atPath: claudeDir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted])
+            try data.write(to: URL(fileURLWithPath: settingsPath))
+            log("Installed templates approval hook at \(settingsPath)")
+        } catch {
+            log("Failed to install templates approval hook: \(error.localizedDescription)")
+        }
+    }
+
     private func openTemplatesManager() {
         if let existing = templatesManagerWindow, existing.isVisible {
             existing.makeKeyAndOrderFront(nil)
@@ -4472,9 +4511,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func iterateTemplate(_ url: URL) {
         let dir = templatesDir()
         let file = url.lastPathComponent
+        ensureTemplatesApprovalHook()
         showSyncWindow()
         viewModel.cliPaneVisible = true
-        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Read the summary template '\(file)', suggest and apply improvements to its section structure and 'Extraction guidance' notes, then save the changes back to the file.\""
+        // Human-in-the-loop: the AI must PROPOSE and wait for approval before
+        // writing — template files are user-curated, so we never let it edit
+        // silently. (Claude Code's own edit-permission prompt is a second gate.)
+        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Read the summary template '\(file)' and propose improvements to its section structure and 'Extraction guidance' notes. Show me the proposed changes as a clear diff or summary and ask for my approval. Do NOT modify the file until I explicitly approve — then save only the changes I approved.\""
         viewModel.terminalController.runCommand(cmd)
     }
 
@@ -4482,9 +4525,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// templates folder.
     private func createTemplateWithClaude() {
         let dir = templatesDir()
+        ensureTemplatesApprovalHook()
         showSyncWindow()
         viewModel.cliPaneVisible = true
-        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Help me create a new summary template as a markdown file in this folder. Ask what kind of recording it's for, then write it with section headings and 'Extraction guidance' notes matching the style of the existing .md templates here, and save it.\""
+        // Human-in-the-loop: propose the full file and wait for approval
+        // before writing anything.
+        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Help me create a new summary template as a markdown file in this folder. Ask what kind of recording it's for, then show me the full proposed template content (section headings + 'Extraction guidance' notes matching the style of the existing .md templates here) and ask for my approval. Do NOT write any file until I explicitly approve, then save it.\""
         viewModel.terminalController.runCommand(cmd)
     }
 

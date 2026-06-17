@@ -579,6 +579,16 @@ def cmd_transcribe_batch(args):
     }))
 
 
+def cmd_detect_engine(_args):
+    """Report which AI CLI 'auto' resolves to (PATH detection, priority order
+    claude > codex > gemini > ollama). Used by the desktop app so its
+    interactive 'Ask AI' / template commands pick the same engine the auto
+    summariser would. Prints {"engine": "<name>"|null}."""
+    from shared.llm_cli import get_engine
+    eng = get_engine("auto")
+    print(json.dumps({"engine": eng.name if eng else None}))
+
+
 def cmd_summarize(args):
     """Type-aware, template-driven summary of an existing transcript via the
     configured AI CLI -> ~/HiDock/Summaries/. No-ops cleanly if no LLM /
@@ -1002,6 +1012,9 @@ def main():
     p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")
     p_summarize.add_argument("--summarize-engine", default=None, help="LLM engine (e.g. claude). Default: config [summarization].engine / auto.")
     p_summarize.set_defaults(func=cmd_summarize)
+
+    p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
+    p_detect.set_defaults(func=cmd_detect_engine)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):
