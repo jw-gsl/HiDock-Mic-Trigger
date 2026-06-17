@@ -27,11 +27,6 @@ def _emit(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def _stream_to_stderr(delta: str) -> None:
-    sys.stderr.write(delta)
-    sys.stderr.flush()
-
-
 def _parse_headered(text: str) -> tuple[str, str, str]:
     """Parse the streamed response shaped as:
         AREA: <area>
@@ -60,7 +55,61 @@ def _parse_headered(text: str) -> tuple[str, str, str]:
     if body.startswith("```"):
         body = re.sub(r"^```[a-zA-Z]*\n", "", body)
         body = re.sub(r"\n```$", "", body).strip()
+    # Drop any "> **Extraction guidance** …" lines: those are template
+    # instructions FOR the model, not summary content. The model sometimes
+    # echoes them verbatim; strip them from the saved file.
+    body = "\n".join(
+        ln for ln in body.split("\n")
+        if not ln.lstrip().startswith("> **Extraction guidance")
+    ).strip()
     return area, title, body
+
+
+def _recording_dt_from_stem(stem: str) -> str:
+    """Recover a human date/time from a recording filename stem like
+    '2026-06-13 04-04-24' -> '2026-06-13 04:04:24'. Returns '' if it doesn't
+    match, so the summary can fall back to 'Not specified'."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[ _T](\d{2})[-:](\d{2})[-:](\d{2})", stem)
+    if not m:
+        return ""
+    return f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}"
+
+
+class _StreamBodyFilter:
+    """Forwards only the human-readable summary body to stderr (the CLI pane):
+    skips the AREA/TITLE/'---' metadata header and any '> **Extraction
+    guidance**' lines, so the streamed output reads cleanly instead of showing
+    the machine header and template instructions."""
+
+    def __init__(self):
+        self._buf = ""
+        self._in_body = False
+
+    def __call__(self, delta: str) -> None:
+        self._buf += delta
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit(line)
+
+    def flush(self) -> None:
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
+
+    def _emit(self, line: str) -> None:
+        if not self._in_body:
+            s = line.strip()
+            if re.match(r"(?i)^(AREA|TITLE):", s):
+                return
+            if s == "---":
+                self._in_body = True
+                return
+            # No header used by the model — treat this as the start of body.
+            self._in_body = True
+        if line.lstrip().startswith("> **Extraction guidance"):
+            return
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
 
 HIDOCK = Path.home() / "HiDock"
 RAW_DIR = HIDOCK / "Raw Transcripts"
@@ -177,12 +226,21 @@ def summarise_typed(
     tcontent = templates[tname].read_text(encoding="utf-8")
     _emit(f"STAGE: Type: {tname} — summarising…")
 
+    # Recording date/time recovered from the filename so the summary can fill a
+    # "Date & Time" field instead of "Not specified".
+    rec_dt = _recording_dt_from_stem(transcript_path.stem)
+    dt_line = f"The recording's date and time is: {rec_dt}.\n\n" if rec_dt else ""
+
     # Headered text (not JSON) so the streamed output is human-readable in the
     # CLI pane; we still recover the structured Area/Title from the header.
     prompt = (
-        f"Summarise the transcript by completing this '{tname}' template, following ALL "
+        f"Summarise the transcript by completing this '{tname}' template, applying ALL "
         "the 'Extraction guidance' notes inside it and keeping its section structure. "
-        "Use only information present in the transcript.\n\n"
+        "Use only information present in the transcript. "
+        "IMPORTANT: the '> **Extraction guidance**' lines are instructions for you "
+        "ONLY — do NOT copy them into your output; produce just the finished summary "
+        "content under each heading.\n\n"
+        f"{dt_line}"
         "Begin your response with exactly these two header lines, then a line "
         "containing only '---', then the completed summary in markdown:\n"
         "AREA: <the Area you selected, or Other>\n"
@@ -193,7 +251,12 @@ def summarise_typed(
     )
 
     if stream:
-        full = query_streaming(prompt, engine=engine, timeout=240, on_text=_stream_to_stderr)
+        # Filter the streamed view so the CLI pane shows clean body text (no
+        # AREA/TITLE/--- header, no guidance lines). The full text is still
+        # captured by query_streaming for parsing/saving.
+        sink = _StreamBodyFilter()
+        full = query_streaming(prompt, engine=engine, timeout=240, on_text=sink)
+        sink.flush()
         sys.stderr.write("\n")
         sys.stderr.flush()
     else:

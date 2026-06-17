@@ -3720,7 +3720,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // manual summarise flow through here). The authoritative run is the
         // managed subprocess below; the pane shows event-level activity.
         viewModel.cliPaneVisible = true
-        viewModel.terminalController.appendActivity("▶ Summarising \(name) …")
+        viewModel.terminalController.appendActivity("")
+        viewModel.terminalController.appendActivity("──── Summarising \(name) ────")
         syncViewModelState()
 
         var args = ["summarize", transcript]
@@ -3748,10 +3749,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].summaryPath = path
                     }
                     self.log("Summarised \(name) -> \(path)")
-                    self.viewModel.terminalController.appendActivity("✓ \(name) → \((path as NSString).lastPathComponent)")
+                    self.viewModel.terminalController.appendActivity("──── Saved ✓ \((path as NSString).lastPathComponent) — click the Summary tick to read it formatted ────")
+                    self.viewModel.terminalController.appendActivity("")
                 } else {
                     self.log("Summarise: no summary produced for \(name)")
-                    self.viewModel.terminalController.appendActivity("✗ \(name) — no summary produced")
+                    self.viewModel.terminalController.appendActivity("──── ✗ \(name): no summary produced ────")
                 }
                 self.syncViewModelState()
                 self.processNextSummary()

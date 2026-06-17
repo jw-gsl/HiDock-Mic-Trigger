@@ -378,7 +378,12 @@ def _date_parts(timestamp: Any) -> tuple[str, str]:
     ts = _coerce_timestamp_seconds(timestamp)
     if ts <= 0:
         return "", ""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    # Render in the machine's LOCAL timezone, not UTC. Plaud names the file in
+    # local wall-clock (e.g. "2026-06-13 04-04-24" in BST), but createTime was
+    # rendered in UTC — so the "Created" column showed an hour earlier than the
+    # filename. astimezone() (no arg) converts the UTC instant to local so the
+    # two agree. On a UTC host (e.g. CI) this is a no-op.
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
     return dt.strftime("%Y/%m/%d"), dt.strftime("%H:%M:%S")
 
 
@@ -386,7 +391,8 @@ def _folder_date(timestamp: Any) -> str:
     ts = _coerce_timestamp_seconds(timestamp)
     if ts <= 0:
         return ""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    # Local timezone, matching _date_parts and the Plaud filename.
+    return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().strftime("%Y-%m-%d")
 
 
 def _duration_milliseconds(duration: int | float) -> float:
