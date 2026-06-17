@@ -15,9 +15,52 @@ Cowork folder mapping.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
-from shared.llm_cli import get_engine, query_json
+from shared.llm_cli import get_engine, query_json, query_streaming
+
+
+def _emit(msg: str) -> None:
+    """Coarse progress marker → stderr (the desktop app streams stderr into
+    the CLI pane, so the user sees 'how far it's progressed')."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _stream_to_stderr(delta: str) -> None:
+    sys.stderr.write(delta)
+    sys.stderr.flush()
+
+
+def _parse_headered(text: str) -> tuple[str, str, str]:
+    """Parse the streamed response shaped as:
+        AREA: <area>
+        TITLE: <title>
+        ---
+        <markdown body>
+    Falls back gracefully (Other / stem / whole text) if the model didn't
+    follow the header convention."""
+    area, title = "Other", ""
+    lines = text.splitlines()
+    sep_idx = None
+    for i, ln in enumerate(lines[:8]):
+        s = ln.strip()
+        if s == "---":
+            sep_idx = i
+            break
+        m = re.match(r"(?i)^AREA:\s*(.+)$", s)
+        if m:
+            area = m.group(1).strip()
+            continue
+        m = re.match(r"(?i)^TITLE:\s*(.+)$", s)
+        if m:
+            title = m.group(1).strip()
+    body = "\n".join(lines[sep_idx + 1:]).strip() if sep_idx is not None else text.strip()
+    # If the body came back fenced (```markdown … ```), unwrap it.
+    if body.startswith("```"):
+        body = re.sub(r"^```[a-zA-Z]*\n", "", body)
+        body = re.sub(r"\n```$", "", body).strip()
+    return area, title, body
 
 HIDOCK = Path.home() / "HiDock"
 RAW_DIR = HIDOCK / "Raw Transcripts"
@@ -102,8 +145,18 @@ def classify(text: str, engine, names: list[str]) -> str:
     return "General Meeting" if "General Meeting" in names else names[0]
 
 
-def summarise_typed(transcript_path: Path, engine_name: str | None = None) -> dict:
+def summarise_typed(
+    transcript_path: Path,
+    engine_name: str | None = None,
+    stream: bool = True,
+) -> dict:
     """Classify + template-summarise a transcript, write the typed summary file.
+
+    When ``stream`` is True (default), the summary is generated with the
+    streaming engine and Claude's output is forwarded to stderr live (plus
+    coarse ``STAGE:`` markers), so the desktop app's CLI pane shows progress.
+    The final JSON result still goes to stdout for the caller.
+
     Returns a JSON-able dict; never raises for the common 'no LLM' / 'no text'
     cases (returns {"summarized": False, "error": ...})."""
     transcript_path = Path(transcript_path)
@@ -119,25 +172,45 @@ def summarise_typed(transcript_path: Path, engine_name: str | None = None) -> di
     if not templates:
         return {"summarized": False, "error": f"No templates in {TEMPLATES_DIR}"}
 
+    _emit("STAGE: Classifying transcript…")
     tname = classify(text, engine, list(templates.keys()))
     tcontent = templates[tname].read_text(encoding="utf-8")
+    _emit(f"STAGE: Type: {tname} — summarising…")
 
+    # Headered text (not JSON) so the streamed output is human-readable in the
+    # CLI pane; we still recover the structured Area/Title from the header.
     prompt = (
         f"Summarise the transcript by completing this '{tname}' template, following ALL "
         "the 'Extraction guidance' notes inside it and keeping its section structure. "
         "Use only information present in the transcript.\n\n"
-        f"=== TEMPLATE ===\n{tcontent}\n\n=== TRANSCRIPT ===\n{text}\n\n"
-        'Respond ONLY as JSON: {"area": "<Area you selected, or Other>", '
-        '"short_description": "<3-6 word title>", "summary_markdown": "<completed summary in markdown>"}.'
+        "Begin your response with exactly these two header lines, then a line "
+        "containing only '---', then the completed summary in markdown:\n"
+        "AREA: <the Area you selected, or Other>\n"
+        "TITLE: <a 3-6 word title>\n"
+        "---\n"
+        "<the completed summary in markdown>\n\n"
+        f"=== TEMPLATE ===\n{tcontent}\n\n=== TRANSCRIPT ===\n{text}\n"
     )
-    res = query_json(prompt, engine=engine, timeout=240) or {}
-    md = res.get("summary_markdown")
-    if not md or not str(md).strip():
+
+    if stream:
+        full = query_streaming(prompt, engine=engine, timeout=240, on_text=_stream_to_stderr)
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+    else:
+        from shared.llm_cli import query
+        full = query(prompt, engine=engine, timeout=240)
+
+    if not full or not full.strip():
         return {"summarized": False, "error": "Summarisation produced no content"}
 
-    area = _sanitize(res.get("area") or "Other", 40)
-    desc = _sanitize(res.get("short_description") or transcript_path.stem, 50)
+    area_raw, title_raw, md = _parse_headered(full)
+    if not md.strip():
+        return {"summarized": False, "error": "Summarisation produced no content"}
+
+    _emit("STAGE: Writing summary…")
+    area = _sanitize(area_raw or "Other", 40)
+    desc = _sanitize(title_raw or transcript_path.stem, 50)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
     out = SUMMARIES_DIR / f"{transcript_path.stem} - {tname} - {area} - {desc}.md"
-    out.write_text(str(md).rstrip() + "\n", encoding="utf-8")
+    out.write_text(md.rstrip() + "\n", encoding="utf-8")
     return {"summarized": True, "summary_path": str(out), "type": tname, "area": area, "title": desc}

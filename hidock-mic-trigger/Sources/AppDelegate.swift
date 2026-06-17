@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var voiceLibraryWindow: NSWindow?
     private var voiceTrainingWindow: NSWindow?
     private var modelManagerWindow: NSWindow?
+    private var templatesManagerWindow: NSWindow?
     private var coworkPromptWindow: NSWindow?
     private var deviceManagerWindow: NSWindow?
     private var plaudLoginController: PlaudLoginWindowController?
@@ -587,6 +588,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowVoiceTraining = { [weak self] in self?.showVoiceTraining() }
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
+        viewModel.onShowTemplatesManager = { [weak self] in self?.openTemplatesManager() }
+        viewModel.onIterateTemplate = { [weak self] url in self?.iterateTemplate(url) }
+        viewModel.onCreateTemplate = { [weak self] in self?.createTemplateWithClaude() }
         viewModel.onShowDeviceManager = { [weak self] in self?.openDeviceManager() }
         viewModel.onForgetDevice = { [weak self] device in self?.forgetDevice(device) }
         viewModel.onPairVolume = { [weak self] volumeName, subpath in self?.pairVolume(volumeName: volumeName, subpath: subpath) }
@@ -3673,7 +3677,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var args = ["summarize", transcript]
         if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
-        runTranscription(arguments: args, timeout: 300) { [weak self] result in
+        // Stream the summarise subprocess's stderr (Claude's live output +
+        // STAGE: markers) into the CLI pane so the user watches it progress.
+        runTranscription(arguments: args, timeout: 300, onLine: { [weak self] line in
+            guard let self = self else { return }
+            if line.hasPrefix("STAGE:") {
+                let label = String(line.dropFirst("STAGE:".count)).trimmingCharacters(in: .whitespaces)
+                self.viewModel.terminalController.appendActivity("  › " + label)
+            } else if !line.isEmpty {
+                self.viewModel.terminalController.appendActivity(line)
+            }
+        }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.viewModel.summarisingNames.remove(name)
@@ -4376,6 +4390,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         modelManagerWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Summary Templates Manager
+
+    private func templatesDir() -> String { "\(NSHomeDirectory())/HiDock/Summary Templates" }
+
+    private func openTemplatesManager() {
+        if let existing = templatesManagerWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = TemplatesManagerView(viewModel: viewModel)
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.center()
+        win.title = "Summary Templates"
+        win.isReleasedWhenClosed = false
+        win.minSize = NSSize(width: 460, height: 360)
+        win.contentView = NSHostingView(rootView: view)
+        templatesManagerWindow = win
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Open Claude Code in the embedded CLI pane, cd'd into the templates
+    /// folder, to refine an existing template. Brings the main window forward
+    /// so the pane is visible. No API keys — uses the user's Claude Code login.
+    private func iterateTemplate(_ url: URL) {
+        let dir = templatesDir()
+        let file = url.lastPathComponent
+        showSyncWindow()
+        viewModel.cliPaneVisible = true
+        let cmd = "cd \"\(dir)\" && claude \"Read the summary template '\(file)', suggest and apply improvements to its section structure and 'Extraction guidance' notes, then save the changes back to the file.\""
+        viewModel.terminalController.runCommand(cmd)
+    }
+
+    /// Open Claude Code in the CLI pane to author a brand-new template in the
+    /// templates folder.
+    private func createTemplateWithClaude() {
+        let dir = templatesDir()
+        showSyncWindow()
+        viewModel.cliPaneVisible = true
+        let cmd = "cd \"\(dir)\" && claude \"Help me create a new summary template as a markdown file in this folder. Ask what kind of recording it's for, then write it with section headings and 'Extraction guidance' notes matching the style of the existing .md templates here, and save it.\""
+        viewModel.terminalController.runCommand(cmd)
     }
 
     private func modelsScriptPath() -> String {
@@ -6141,7 +6204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, onLine: ((String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         // Single chokepoint for the summarisation provider: when a run asks to
         // summarise and the user picked a specific engine, pass it through.
         // "auto" omits the flag so the pipeline keeps its config/auto default.
@@ -6198,6 +6261,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     while let range = lineBuffer.range(of: "\n") {
                         let line = String(lineBuffer[lineBuffer.startIndex..<range.lowerBound])
                         lineBuffer = String(lineBuffer[range.upperBound...])
+                        if let onLine = onLine {
+                            DispatchQueue.main.async { onLine(line) }
+                        }
                         if line.hasPrefix("STAGE:") {
                             // STAGE:2/5:Transcribing
                             let parts = String(line.dropFirst("STAGE:".count)).split(separator: ":", maxSplits: 1)

@@ -520,6 +520,13 @@ final class HiDockViewModel: ObservableObject {
     var onSetActiveModelByKey: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
 
+    // MARK: - Summary Templates Manager
+    var onShowTemplatesManager: () -> Void = {}
+    /// Open Claude Code in the CLI pane to refine an existing template file.
+    var onIterateTemplate: (URL) -> Void = { _ in }
+    /// Open Claude Code in the CLI pane to author a new template.
+    var onCreateTemplate: () -> Void = {}
+
     // MARK: - Device Manager
     var onShowDeviceManager: () -> Void = {}
     var onForgetDevice: (HiDockPairedDevice) -> Void = { _ in }

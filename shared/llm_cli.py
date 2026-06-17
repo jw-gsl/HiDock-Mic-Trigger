@@ -156,6 +156,107 @@ def query(
         return None
 
 
+def query_streaming(
+    prompt: str,
+    engine: LLMEngine | None = None,
+    timeout: int = 240,
+    on_text=None,
+) -> str | None:
+    """Stream an LLM response, invoking ``on_text(delta)`` as text arrives.
+
+    For the ``claude`` engine this uses ``--output-format stream-json
+    --include-partial-messages`` and forwards each ``content_block_delta``
+    text fragment to ``on_text`` as it streams, returning the full text from
+    the final ``result`` event (authoritative) or the accumulated deltas.
+
+    For other engines (no realtime stream-json support) it falls back to a
+    single blocking ``query()`` and calls ``on_text`` once with the whole
+    response. Returns the full text, or None on failure.
+    """
+    if engine is None:
+        engine = get_engine("auto")
+    if engine is None:
+        return None
+
+    if engine.name != "claude":
+        full = query(prompt, engine=engine, timeout=timeout)
+        if full and on_text:
+            on_text(full)
+        return full
+
+    cmd = [
+        "claude", "--print",
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,   # claude's own banner/escapes — discard
+            text=True,
+            bufsize=1,                   # line-buffered so deltas arrive promptly
+        )
+    except FileNotFoundError:
+        print("LLM CLI (claude) not found", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"LLM CLI (claude) streaming error: {e}", file=sys.stderr)
+        return None
+
+    try:
+        if proc.stdin:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return None
+
+    chunks: list[str] = []
+    result_text: str | None = None
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:               # blocks per line; EOF when claude exits
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue                        # skip terminal-escape / non-JSON noise
+            etype = ev.get("type")
+            if etype == "stream_event":
+                inner = ev.get("event") or {}
+                if inner.get("type") == "content_block_delta":
+                    delta = inner.get("delta") or {}
+                    txt = delta.get("text")
+                    if txt:
+                        chunks.append(txt)
+                        if on_text:
+                            try:
+                                on_text(txt)
+                            except Exception:
+                                pass
+            elif etype == "result":
+                if not ev.get("is_error"):
+                    result_text = ev.get("result")
+        proc.wait(timeout=10)
+    except Exception as e:
+        print(f"LLM CLI (claude) streaming read error: {e}", file=sys.stderr)
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    full = result_text if result_text is not None else "".join(chunks)
+    return full.strip() if full else None
+
+
 def query_json(
     prompt: str,
     engine: LLMEngine | None = None,
