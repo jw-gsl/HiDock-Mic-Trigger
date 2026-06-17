@@ -166,6 +166,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var summarizeSubmenu: NSMenu!
     private var summarizeMenuItem: NSMenuItem!
 
+    /// The interactive CLI binary for the user's selected AI engine, used to
+    /// launch "Ask AI" / template iteration in the CLI pane. "auto" resolves
+    /// to claude (the detection-priority head). The summarise subprocess
+    /// itself receives the engine separately via --summarize-engine.
+    private var aiCliBinary: String {
+        switch summarizeEngine {
+        case "codex": return "codex"
+        case "gemini": return "gemini"
+        case "ollama": return "ollama run llama3.2"
+        default: return "claude"   // "claude" or "auto"
+        }
+    }
+
     /// Repo root resolved from UserDefaults, falling back to the default home directory path.
     private var repoRoot: String {
         if let saved = UserDefaults.standard.string(forKey: repoRootKey), !saved.isEmpty {
@@ -433,7 +446,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func selectSummarizeEngine(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
+        setSummarizeEngine(id)
+    }
+
+    /// Single setter for the AI summariser engine — used by both the menu-bar
+    /// submenu and the Models-window picker so they stay in sync.
+    private func setSummarizeEngine(_ id: String) {
         UserDefaults.standard.set(id, forKey: summarizeEngineKey)
+        viewModel.summarizeEngine = id
         rebuildSummarizeSubmenu()
         log("Summarisation provider set to \(id)")
     }
@@ -497,6 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncAutoTranscribe = viewModel.syncAutoTranscribe
         viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
         syncAutoSummarise = viewModel.syncAutoSummarise
+        viewModel.summarizeEngine = summarizeEngine
         // Default diarization to ON — speaker labels are almost always wanted
         if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "diarizeEnabled")
@@ -588,6 +609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onShowVoiceTraining = { [weak self] in self?.showVoiceTraining() }
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
+        viewModel.onSetSummarizeEngine = { [weak self] id in self?.setSummarizeEngine(id) }
         viewModel.onShowTemplatesManager = { [weak self] in self?.openTemplatesManager() }
         viewModel.onIterateTemplate = { [weak self] url in self?.iterateTemplate(url) }
         viewModel.onCreateTemplate = { [weak self] in self?.createTemplateWithClaude() }
@@ -3711,8 +3733,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// Run Claude Code on this recording's transcript inside the embedded
-    /// CLI pane — interactive, uses the user's Claude Code login (no keys).
+    /// Run the selected AI CLI on this recording's transcript inside the
+    /// embedded CLI pane — interactive, uses the user's CLI login (no keys).
     /// Opens the pane (so the user sees it) and types the command into the
     /// pane's shell.
     private func askClaudeAboutRecording(_ entry: HiDockSyncRecordingEntry) {
@@ -3722,7 +3744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let dir = (transcript as NSString).deletingLastPathComponent
         let file = (transcript as NSString).lastPathComponent
-        let cmd = "cd \"\(dir)\" && claude \"Read the transcript '\(file)' and help me summarise it and answer questions about it.\""
+        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Read the transcript '\(file)' and help me summarise it and answer questions about it.\""
         viewModel.cliPaneVisible = true
         viewModel.terminalController.runCommand(cmd)
     }
@@ -4427,7 +4449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let file = url.lastPathComponent
         showSyncWindow()
         viewModel.cliPaneVisible = true
-        let cmd = "cd \"\(dir)\" && claude \"Read the summary template '\(file)', suggest and apply improvements to its section structure and 'Extraction guidance' notes, then save the changes back to the file.\""
+        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Read the summary template '\(file)', suggest and apply improvements to its section structure and 'Extraction guidance' notes, then save the changes back to the file.\""
         viewModel.terminalController.runCommand(cmd)
     }
 
@@ -4437,7 +4459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let dir = templatesDir()
         showSyncWindow()
         viewModel.cliPaneVisible = true
-        let cmd = "cd \"\(dir)\" && claude \"Help me create a new summary template as a markdown file in this folder. Ask what kind of recording it's for, then write it with section headings and 'Extraction guidance' notes matching the style of the existing .md templates here, and save it.\""
+        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Help me create a new summary template as a markdown file in this folder. Ask what kind of recording it's for, then write it with section headings and 'Extraction guidance' notes matching the style of the existing .md templates here, and save it.\""
         viewModel.terminalController.runCommand(cmd)
     }
 

@@ -131,7 +131,7 @@ struct MainWindowView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(viewModel.cliPaneVisible ? .accentColor : nil)
-                .help("Show/hide the embedded CLI pane — runs Ask Claude Code and shows live summarise activity")
+                .help("Show/hide the embedded CLI pane — runs Ask AI and shows live summarise activity")
 
                 Button {
                     viewModel.onShowCoworkPrompt()
@@ -177,7 +177,7 @@ struct MainWindowView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Manage summary templates — import, edit/iterate with Claude Code, delete")
+                .help("Manage summary templates — import, edit/iterate with AI, delete")
 
                 Button {
                     viewModel.onShowVoiceLibrary()

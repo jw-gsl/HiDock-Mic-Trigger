@@ -579,6 +579,17 @@ def cmd_transcribe_batch(args):
     }))
 
 
+def cmd_summarize(args):
+    """Type-aware, template-driven summary of an existing transcript via the
+    configured AI CLI -> ~/HiDock/Summaries/. No-ops cleanly if no LLM /
+    templates are available. Mirrors transcribe_cpp.cmd_summarize so the
+    dev (transcribe.py) and bundled (transcribe_cpp.py) pipelines behave the
+    same."""
+    from shared.typed_summarize import summarise_typed
+    res = summarise_typed(Path(args.transcript_path).expanduser(), engine_name=args.summarize_engine)
+    print(json.dumps(res))
+
+
 def cmd_status(_args):
     """Print transcription state as JSON."""
     state = load_state()
@@ -986,6 +997,11 @@ def main():
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)
+
+    p_summarize = sub.add_parser("summarize", help="Type-aware template summary of an existing transcript -> ~/HiDock/Summaries/")
+    p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")
+    p_summarize.add_argument("--summarize-engine", default=None, help="LLM engine (e.g. claude). Default: config [summarization].engine / auto.")
+    p_summarize.set_defaults(func=cmd_summarize)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):
