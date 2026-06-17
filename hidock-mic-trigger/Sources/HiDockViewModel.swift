@@ -48,6 +48,13 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
     @Published var syncAutoSummarise = false
+    /// Whether the right-hand embedded CLI pane is shown. Toggled by the
+    /// bottom-bar "CLI" button; auto-set true when an Ask Claude Code or a
+    /// summarise run starts so the user sees the activity.
+    @Published var cliPaneVisible = false
+    /// Shared embedded-terminal controller — the SwiftUI pane displays it,
+    /// AppDelegate drives it (runs Ask Claude Code, feeds summarise activity).
+    let terminalController = TerminalPaneController()
     @Published var mergeGroups: [MergeGroup] = []
     @Published var expandedMergeGroups: Set<String> = []
     @Published var syncBusy = false

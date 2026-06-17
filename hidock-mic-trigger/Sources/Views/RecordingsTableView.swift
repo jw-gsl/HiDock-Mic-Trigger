@@ -154,11 +154,9 @@ struct RecordingsTableView: View {
             .labelsHidden()
             .frame(width: 36)
 
-            // Device + expand arrow — line glyph to the right of the
-            // name so rows column-align.
+            // Device + expand arrow — glyph first (left of the name) to
+            // match the regular rows so glyphs line up down the column.
             HStack(spacing: 6) {
-                Text(deviceName)
-                    .lineLimit(1)
                 if let glyph = hidockDeviceGlyph(deviceName, deviceType: .hidock) {
                     glyph
                         .resizable()
@@ -166,6 +164,8 @@ struct RecordingsTableView: View {
                         .frame(width: 16, height: 16)
                         .foregroundColor(.secondary)
                 }
+                Text(deviceName)
+                    .lineLimit(1)
                 Button {
                     viewModel.onToggleMergeExpand(group.id)
                 } label: {
@@ -337,10 +337,10 @@ struct RecordingsTableView: View {
                 // Line-glyph (flat SVG, monochrome) for a compact visual
                 // cue beside the device name — the product-photo assets
                 // live on the big cards at the top; in the table they'd
-                // be too busy. Glyph goes AFTER the name so the text
-                // column-aligns between rows.
-                Text(entry.deviceName)
-                    .lineLimit(1)
+                // be too busy. Glyph goes FIRST (left of the name) so the
+                // glyphs line up down the column; the always-present 16pt
+                // frame (glyph or SF Symbol fallback) keeps the names
+                // column-aligned too.
                 let rowDeviceType: DeviceType = entry.deviceId.hasPrefix("volume:") ? .volume : (entry.deviceId.hasPrefix("plaud:") ? .plaud : .hidock)
                 if let glyph = hidockDeviceGlyph(entry.deviceName, deviceType: rowDeviceType) {
                     glyph
@@ -354,6 +354,8 @@ struct RecordingsTableView: View {
                         .foregroundColor(.secondary)
                         .frame(width: 16, height: 16)
                 }
+                Text(entry.deviceName)
+                    .lineLimit(1)
             }
             .frame(width: 120, alignment: .leading)
 
