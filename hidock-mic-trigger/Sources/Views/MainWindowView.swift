@@ -170,6 +170,16 @@ struct MainWindowView: View {
                 .controlSize(.small)
 
                 Button {
+                    viewModel.onShowTemplatesManager()
+                } label: {
+                    Label("Templates", systemImage: "doc.text")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Manage summary templates — import, edit/iterate with Claude Code, delete")
+
+                Button {
                     viewModel.onShowVoiceLibrary()
                 } label: {
                     Label("Voice Library", systemImage: "person.2")
