@@ -41,7 +41,7 @@ struct TemplatesManagerView: View {
                     Image(systemName: "tray").font(.largeTitle).foregroundColor(.secondary)
                     Text("No templates yet")
                         .font(.callout)
-                    Text("Import a .md template, or create one with Claude Code.")
+                    Text("Import a .md template, or create one with AI.")
                         .font(.caption).foregroundColor(.secondary)
                     Spacer()
                 }
@@ -59,7 +59,7 @@ struct TemplatesManagerView: View {
                                 Label("Iterate", systemImage: "sparkles")
                             }
                             .buttonStyle(.borderless)
-                            .help("Open Claude Code in the CLI pane to refine this template")
+                            .help("Open the AI CLI in the pane to refine this template")
                             Menu {
                                 Button {
                                     NSWorkspace.shared.activateFileViewerSelecting([t.url])
@@ -96,7 +96,7 @@ struct TemplatesManagerView: View {
                     Label("Import…", systemImage: "square.and.arrow.down")
                 }
                 Button { viewModel.onCreateTemplate() } label: {
-                    Label("New via Claude Code", systemImage: "sparkles")
+                    Label("New via AI", systemImage: "sparkles")
                 }
                 Spacer()
                 Button {

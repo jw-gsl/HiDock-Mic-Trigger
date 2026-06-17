@@ -520,6 +520,19 @@ final class HiDockViewModel: ObservableObject {
     var onSetActiveModelByKey: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
 
+    // MARK: - AI summariser engine
+    /// Which CLI runs Summarise / Ask AI (claude/codex/gemini/ollama/auto).
+    /// Mirrors the menu-bar provider submenu; also surfaced in the Models window.
+    @Published var summarizeEngine: String = "auto"
+    let summarizeEngineChoices: [(id: String, label: String)] = [
+        ("auto", "Auto (detect)"),
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+        ("gemini", "Gemini"),
+        ("ollama", "Ollama (local)"),
+    ]
+    var onSetSummarizeEngine: (String) -> Void = { _ in }
+
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
     /// Open Claude Code in the CLI pane to refine an existing template file.

@@ -74,9 +74,22 @@ targets:
           rm -rf "$HOME/Applications/$APP_NAME"
           rm -rf "$HOME/Applications/HiDock Mic Trigger Dev.app"
 
-          # Install fresh build and re-sign
+          # Install fresh build and re-sign.
           cp -R "$BUILT_APP" "$INSTALL_DIR/$APP_NAME"
-          codesign --force --deep --sign - "$INSTALL_DIR/$APP_NAME"
+          # Prefer a stable Developer ID identity: ad-hoc ("-") produces a
+          # different code signature every build, so macOS treats the app as
+          # new each time and re-prompts for keychain access ("Always Allow"
+          # never sticks). A Developer ID identity has a stable designated
+          # requirement, so keychain trust persists across rebuilds.
+          # Falls back to ad-hoc when no cert is present (CI / other machines).
+          SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          if [ -n "$SIGN_ID" ]; then
+            echo "Signing with: $SIGN_ID"
+            codesign --force --deep --sign "$SIGN_ID" "$INSTALL_DIR/$APP_NAME"
+          else
+            echo "No Developer ID cert found — signing ad-hoc (keychain may re-prompt each build)"
+            codesign --force --deep --sign - "$INSTALL_DIR/$APP_NAME"
+          fi
           /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "$INSTALL_DIR/$APP_NAME"
 
           open -a "$INSTALL_DIR/$APP_NAME"

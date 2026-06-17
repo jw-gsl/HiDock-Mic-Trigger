@@ -584,13 +584,13 @@ struct RecordingsTableView: View {
             Button {
                 viewModel.onSummariseRecording(entry)
             } label: {
-                Label(summarising ? "Summarising…" : "Summarise with Claude Code", systemImage: "sparkles")
+                Label(summarising ? "Summarising…" : "Summarise with AI", systemImage: "sparkles")
             }
             .disabled(summarising)
             Button {
                 viewModel.onAskClaudeRecording(entry)
             } label: {
-                Label("Ask Claude Code…", systemImage: "terminal")
+                Label("Ask AI…", systemImage: "terminal")
             }
             if let sp = entry.summaryPath, !sp.isEmpty {
                 Button {

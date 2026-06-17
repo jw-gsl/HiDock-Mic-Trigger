@@ -81,6 +81,31 @@ struct ModelManagerView: View {
 
             Divider()
 
+            // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "sparkles").foregroundColor(.indigo)
+                    Text("AI Summariser").fontWeight(.medium)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { viewModel.summarizeEngine },
+                        set: { viewModel.onSetSummarizeEngine($0) }
+                    )) {
+                        ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
+                            Text(choice.label).tag(choice.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                }
+                Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+
+            Divider()
+
             if viewModel.modelStatuses.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
