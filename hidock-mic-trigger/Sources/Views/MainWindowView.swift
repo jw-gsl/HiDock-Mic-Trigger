@@ -134,15 +134,6 @@ struct MainWindowView: View {
                 .help("Show/hide the embedded CLI pane — runs Ask AI and shows live summarise activity")
 
                 Button {
-                    viewModel.onShowCoworkPrompt()
-                } label: {
-                    Label("Cowork", systemImage: "sparkles")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
                     viewModel.onCheckForUpdates()
                 } label: {
                     Label("Check for Updates", systemImage: "arrow.triangle.2.circlepath")
