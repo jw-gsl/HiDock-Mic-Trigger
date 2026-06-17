@@ -74,6 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncAutoDownloadTimer: Timer?
     private var syncExtractorProcess: Process?
     private let syncExtractorQueue = DispatchQueue(label: "hidock.extractor", qos: .userInitiated)
+    // Concurrent queue used ONLY for launch cache-paint reads (cached-status /
+    // plaud-cached-status). Those are pure catalog reads — no USB open, no
+    // token mutation — so they can run in parallel, letting HiDock and Plaud
+    // paint together instead of one-after-another on the serial queue above.
+    private let cacheReadQueue = DispatchQueue(label: "hidock.cacheread", qos: .userInitiated, attributes: .concurrent)
     private var syncDownloadStartDate: Date?
     private var syncDownloadTimer: Timer?
     private var syncDownloadStopping = false
@@ -1782,7 +1787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let group = DispatchGroup()
         for device in hidocks {
             group.enter()
-            runExtractor(arguments: ["cached-status"], productId: device.productId) { [weak self] result in
+            runCachedExtractor(arguments: ["cached-status"], productId: device.productId) { [weak self] result in
                 defer { group.leave() }
                 guard let self = self else { return }
                 guard case .success(let data) = result,
@@ -1797,9 +1802,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             group.enter()
             // Network-free cached read — no tokens needed, so pass an empty env
             // (avoids the signed-out side effect of plaudEnvironment).
-            runExtractor(arguments: plaudExtractorArguments("plaud-cached-status", device: device),
-                         productId: device.productId,
-                         environment: [:]) { [weak self] result in
+            runCachedExtractor(arguments: plaudExtractorArguments("plaud-cached-status", device: device),
+                               productId: device.productId,
+                               environment: [:]) { [weak self] result in
                 defer { group.leave() }
                 guard let self = self else { return }
                 guard case .success(let data) = result,
@@ -4873,6 +4878,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// user's H1 crossed the threshold. 120s gives plenty of headroom and
     /// still keeps us from hanging forever on a genuinely wedged device.
     private let extractorProcessTimeout: TimeInterval = 120
+
+    /// Lightweight CONCURRENT extractor runner for launch cache-paint reads
+    /// only (cached-status / plaud-cached-status). Pure catalog reads — no USB
+    /// open, no token persistence, no backoff/cooldown — so several can run at
+    /// once. Keeps the serial `runExtractor` for everything that touches the
+    /// device or downloads.
+    private func runCachedExtractor(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], completion: @escaping (Result<Data, Error>) -> Void) {
+        let fullArgs = extractorArguments(arguments, productId: productId)
+        log("runCachedExtractor: \(fullArgs.joined(separator: " "))")
+        cacheReadQueue.async {
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: self.extractorRoot)
+            process.executableURL = URL(fileURLWithPath: self.extractorPythonPath)
+            process.arguments = [self.extractorScriptPath] + fullArgs
+            if !environment.isEmpty {
+                process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+            }
+            let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            let outURL = tempDir.appendingPathComponent("hidock-cache-\(UUID().uuidString).out")
+            let errURL = tempDir.appendingPathComponent("hidock-cache-\(UUID().uuidString).err")
+            do {
+                FileManager.default.createFile(atPath: outURL.path, contents: nil)
+                FileManager.default.createFile(atPath: errURL.path, contents: nil)
+                let outHandle = try FileHandle(forWritingTo: outURL)
+                let errHandle = try FileHandle(forWritingTo: errURL)
+                process.standardOutput = outHandle
+                process.standardError = errHandle
+                try process.run()
+                let deadline = Date().addingTimeInterval(self.extractorProcessTimeout)
+                while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+                if process.isRunning { process.terminate(); process.waitUntilExit() }
+                try? outHandle.close()
+                try? errHandle.close()
+                let outData = (try? Data(contentsOf: outURL)) ?? Data()
+                try? FileManager.default.removeItem(at: outURL)
+                try? FileManager.default.removeItem(at: errURL)
+                if process.terminationStatus == 0 {
+                    DispatchQueue.main.async { completion(.success(outData)) }
+                } else {
+                    DispatchQueue.main.async {
+                        completion(.failure(NSError(domain: "HiDockCache", code: Int(process.terminationStatus))))
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
 
     private func runExtractor(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
