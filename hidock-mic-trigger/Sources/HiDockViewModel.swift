@@ -73,6 +73,9 @@ final class HiDockViewModel: ObservableObject {
     /// `.all`. Combined with `syncFilterDeviceId` (AND) and the
     /// user's sort key inside `visibleEntries`.
     @Published var syncStatusFilter: SyncStatusFilter = .all
+    /// Optional filter by summary classification type (e.g. "Brainstorming").
+    /// nil = all types. AND-ed with the status + device filters.
+    @Published var summaryTypeFilter: String? = nil
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
     @Published var syncPaired = false
@@ -222,6 +225,12 @@ final class HiDockViewModel: ObservableObject {
         transcriptionQueue.first(where: { $0.path == path })?.errorMessage
     }
 
+    /// Distinct summary classification types present across all recordings,
+    /// for the Type filter menu. Empty until something has been summarised.
+    var summaryTypeOptions: [String] {
+        Array(Set(syncEntries.compactMap { $0.summaryType })).sorted()
+    }
+
     var visibleEntries: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
@@ -260,6 +269,11 @@ final class HiDockViewModel: ObservableObject {
             entries = entries.filter { $0.statusText == "Failed" }
         case .imported:
             entries = entries.filter { $0.deviceId == "imported:local" }
+        }
+        // Summary-type filter (AND-ed with the above). Only summarised rows
+        // carry a type, so a non-nil filter implicitly hides un-summarised rows.
+        if let type = summaryTypeFilter {
+            entries = entries.filter { $0.summaryType == type }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording

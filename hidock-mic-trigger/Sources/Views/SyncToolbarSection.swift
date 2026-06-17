@@ -180,6 +180,45 @@ struct SyncToolbarSection: View {
                 .fixedSize()
                 .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
 
+                // Summary-type filter — only shown once something has been
+                // summarised. Lets the user narrow to one classification
+                // (e.g. just "Brainstorming"). AND-ed with the Filter above.
+                if !viewModel.summaryTypeOptions.isEmpty {
+                    Menu {
+                        Button {
+                            viewModel.summaryTypeFilter = nil
+                        } label: {
+                            HStack {
+                                Image(systemName: viewModel.summaryTypeFilter == nil
+                                      ? "checkmark.circle.fill" : "circle")
+                                Text("All types")
+                            }
+                        }
+                        Divider()
+                        ForEach(viewModel.summaryTypeOptions, id: \.self) { type in
+                            Button {
+                                viewModel.summaryTypeFilter = type
+                            } label: {
+                                HStack {
+                                    Image(systemName: viewModel.summaryTypeFilter == type
+                                          ? "checkmark.circle.fill" : "circle")
+                                    Text(type)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(
+                            viewModel.summaryTypeFilter == nil
+                                ? "Type"
+                                : "Type: \(viewModel.summaryTypeFilter!)",
+                            systemImage: "tag"
+                        )
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Show only recordings whose summary was classified as this type.")
+                }
+
                 // "Process selected rows" verbs cluster here: Download
                 // Selected and Transcribe Selected sit side-by-side
                 // because they're the two things the user does to
