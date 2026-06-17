@@ -4,6 +4,25 @@ struct MainWindowView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
+        HStack(spacing: 0) {
+            mainColumn
+            if viewModel.cliPaneVisible {
+                Divider()
+                EmbeddedTerminalPane(
+                    controller: viewModel.terminalController,
+                    onClose: { viewModel.cliPaneVisible = false }
+                )
+                .frame(minWidth: 340, idealWidth: 420, maxWidth: 560)
+                .transition(.move(edge: .trailing))
+            }
+        }
+        .frame(minWidth: viewModel.cliPaneVisible ? 1320 : 980, minHeight: 510)
+        .sheet(isPresented: $viewModel.showOnboarding) {
+            OnboardingView(viewModel: viewModel)
+        }
+    }
+
+    private var mainColumn: some View {
         VStack(spacing: 4) {
             MicTriggerSection(viewModel: viewModel)
             SyncHeaderSection(viewModel: viewModel)
@@ -101,6 +120,19 @@ struct MainWindowView: View {
                 .fixedSize()
                 .help("Change appearance")
 
+                // Bottom-bar CLI toggle — opens/closes the embedded
+                // terminal pane (Claude Code + summarise activity).
+                Button {
+                    viewModel.cliPaneVisible.toggle()
+                } label: {
+                    Label("CLI", systemImage: "terminal")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(viewModel.cliPaneVisible ? .accentColor : nil)
+                .help("Show/hide the embedded CLI pane — runs Ask Claude Code and shows live summarise activity")
+
                 Button {
                     viewModel.onShowCoworkPrompt()
                 } label: {
@@ -167,10 +199,6 @@ struct MainWindowView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
             .padding(.top, 2)
-        }
-        .frame(minWidth: 980, minHeight: 510)
-        .sheet(isPresented: $viewModel.showOnboarding) {
-            OnboardingView(viewModel: viewModel)
         }
     }
 }

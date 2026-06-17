@@ -3663,6 +3663,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         summariseBusy = true
         viewModel.summarisingNames.insert(name)
+        // Surface the activity in the CLI pane: auto-open it and print a
+        // start marker so the user sees what's happening (both auto- and
+        // manual summarise flow through here). The authoritative run is the
+        // managed subprocess below; the pane shows event-level activity.
+        viewModel.cliPaneVisible = true
+        viewModel.terminalController.appendActivity("▶ Summarising \(name) …")
         syncViewModelState()
 
         var args = ["summarize", transcript]
@@ -3680,8 +3686,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].summaryPath = path
                     }
                     self.log("Summarised \(name) -> \(path)")
+                    self.viewModel.terminalController.appendActivity("✓ \(name) → \((path as NSString).lastPathComponent)")
                 } else {
                     self.log("Summarise: no summary produced for \(name)")
+                    self.viewModel.terminalController.appendActivity("✗ \(name) — no summary produced")
                 }
                 self.syncViewModelState()
                 self.processNextSummary()
@@ -3689,8 +3697,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// Open the embedded terminal running Claude Code on this recording's
-    /// transcript — interactive, uses the user's Claude Code login (no keys).
+    /// Run Claude Code on this recording's transcript inside the embedded
+    /// CLI pane — interactive, uses the user's Claude Code login (no keys).
+    /// Opens the pane (so the user sees it) and types the command into the
+    /// pane's shell.
     private func askClaudeAboutRecording(_ entry: HiDockSyncRecordingEntry) {
         guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
             showError("No transcript found for \(entry.recording.outputName). Transcribe it first.")
@@ -3699,7 +3709,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let dir = (transcript as NSString).deletingLastPathComponent
         let file = (transcript as NSString).lastPathComponent
         let cmd = "cd \"\(dir)\" && claude \"Read the transcript '\(file)' and help me summarise it and answer questions about it.\""
-        openTerminal(initialCommand: cmd)
+        viewModel.cliPaneVisible = true
+        viewModel.terminalController.runCommand(cmd)
     }
 
     // MARK: - Firmware
