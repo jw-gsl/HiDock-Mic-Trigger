@@ -47,6 +47,7 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncCheckedRecordings: Set<String> = []
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
+    @Published var syncAutoSummarise = false
     @Published var mergeGroups: [MergeGroup] = []
     @Published var expandedMergeGroups: Set<String> = []
     @Published var syncBusy = false
@@ -466,8 +467,10 @@ final class HiDockViewModel: ObservableObject {
     var onUnmarkDownloaded: () -> Void = {}
     var onToggleAutoDownload: () -> Void = {}
     var onToggleAutoTranscribe: () -> Void = {}
+    var onToggleAutoSummarise: () -> Void = {}
     var onToggleMergeExpand: (String) -> Void = { _ in }
     var onTranscribeSelected: () -> Void = {}
+    var onSummariseSelected: () -> Void = {}
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
