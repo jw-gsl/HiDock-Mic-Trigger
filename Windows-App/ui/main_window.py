@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
     _model_download_error_signal = pyqtSignal(str)
     _txq_update_signal = pyqtSignal()                   # transcription queue changed
     _plaud_signal = pyqtSignal(object, object)          # (entries, error) from a Plaud cloud query
+    _merge_candidates_signal = pyqtSignal(object)       # set[str] of candidate mp3 paths
 
     def __init__(self, tray_icon: QSystemTrayIcon | None = None):
         super().__init__()
@@ -494,6 +495,13 @@ class MainWindow(QMainWindow):
         row4.addWidget(self.auto_summarise_check)
 
         root.addLayout(row4)
+
+        # ── Device card strip (per-device state + filter + reconnect) ───
+        from ui.device_strip import DeviceStrip
+        self.device_strip = DeviceStrip(self)
+        self.device_strip.reconnect_requested.connect(self._on_device_reconnect)
+        self.device_strip.filter_toggled.connect(self._on_device_card_filter)
+        root.addWidget(self.device_strip)
 
         # ── Recording table ─────────────────────────────────────────────
         self.table_model = RecordingTableModel()
@@ -1031,6 +1039,7 @@ class MainWindow(QMainWindow):
         self._progress_signal.connect(self._on_progress)
         self._txq_update_signal.connect(self._on_txq_update)
         self._plaud_signal.connect(self._on_plaud_merged)
+        self._merge_candidates_signal.connect(self._on_merge_candidates)
 
     # ── Settings ────────────────────────────────────────────────────────
 
@@ -1286,6 +1295,9 @@ class MainWindow(QMainWindow):
         # Merge Plaud cloud recordings (async network query).
         self._refresh_plaud(live=True)
 
+        # Detect split-recording chains and tint candidate rows (async).
+        self._detect_merge_candidates()
+
         # Download-complete toast (armed by _run_download_commands). Mirrors the
         # macOS download-complete notification, which the Windows app lacked.
         if self._notify_download_on_complete:
@@ -1337,6 +1349,98 @@ class MainWindow(QMainWindow):
             ]
         self.table_model.set_entries(visible)
         self._update_summary()
+        self._refresh_device_strip()
+
+    def _refresh_device_strip(self):
+        """Build per-device cards from current entries + the active filter."""
+        from core.imports import IMPORTED_DEVICE_ID
+        active = self.device_filter_combo.currentData()
+        order = []
+        agg: dict[str, dict] = {}
+        for e in self._entries:
+            did = e.device_id or "hidock:unknown"
+            if did not in agg:
+                if did == IMPORTED_DEVICE_ID:
+                    kind = "imported"
+                elif did.startswith("volume:"):
+                    kind = "volume"
+                elif did.startswith("plaud:"):
+                    kind = "plaud"
+                else:
+                    kind = "hidock"
+                agg[did] = {
+                    "device_id": did, "name": e.device_name or did, "kind": kind,
+                    "connected": False, "recording_count": 0, "downloaded_count": 0,
+                    "storage_text": None, "filter_active": did == active,
+                }
+                order.append(did)
+            agg[did]["recording_count"] += 1
+            if e.recording.downloaded:
+                agg[did]["downloaded_count"] += 1
+        # Imported + Plaud are "present" by virtue of having rows; HiDock/volume
+        # connection is best-effort from the last sync (rows imply reachable).
+        for card in agg.values():
+            card["connected"] = card["recording_count"] > 0
+        self.device_strip.set_devices([agg[d] for d in order])
+
+    def _on_device_reconnect(self, device_id: str):
+        # Force a fresh status query for all devices (per-device reconnect maps
+        # to a refresh; the extractor re-probes reachable devices).
+        self._refresh_status()
+
+    def _on_device_card_filter(self, device_id: str):
+        """Card click toggles the table device filter (empty string = clear)."""
+        combo = self.device_filter_combo
+        target = device_id or None
+        for i in range(combo.count()):
+            if combo.itemData(i) == target:
+                combo.setCurrentIndex(i)
+                return
+        combo.setCurrentIndex(0)  # fall back to "All"
+
+    def _detect_merge_candidates(self):
+        """Detect split-recording chains and tint candidate rows.
+
+        Mirrors the macOS auto-detection (shared/merge_finder). This is the
+        detection + highlight layer; the user multi-selects tinted rows and
+        uses the Merge button. (The macOS expandable parent/child rows are a
+        further UI layer not yet ported.)
+        """
+        downloads = {
+            e.recording.name: {
+                "output_path": e.recording.output_path,
+                "product_id": e.device_product_id or None,
+            }
+            for e in self._entries
+            if e.recording.output_path and e.recording.local_exists
+        }
+        if not downloads:
+            self._merge_candidates_signal.emit(set())
+            return
+
+        def _worker():
+            try:
+                from shared.merge_finder import find_candidates
+                chains = find_candidates(downloads, use_llm=False)
+                paths: set[str] = set()
+                for ch in chains:
+                    for piece in ch.pieces:
+                        paths.add(piece.mp3_path)
+                self._merge_candidates_signal.emit(paths)
+            except Exception as e:
+                self._log_signal.emit(f"Merge detection failed: {e}")
+                self._merge_candidates_signal.emit(set())
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @pyqtSlot(object)
+    def _on_merge_candidates(self, paths):
+        self.table_model.set_merge_candidates(paths or set())
+        n = len(paths or set())
+        if n >= 2:
+            self.statusBar().showMessage(
+                f"{n} possible split-recording pieces detected — select & Merge", 4000
+            )
 
     def _update_summary(self):
         total = len(self._entries)

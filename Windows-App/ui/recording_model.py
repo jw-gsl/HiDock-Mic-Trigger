@@ -29,15 +29,28 @@ _SECONDARY = QColor("#a6adc8")
 _ACCENT = QColor("#89b4fa")
 
 
+_MERGE_TINT = QColor(137, 180, 250, 28)  # faint accent wash on merge-candidate rows
+
+
 class RecordingTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entries: list[SyncRecordingEntry] = []
+        self._merge_candidate_paths: set[str] = set()
 
     def set_entries(self, entries: list[SyncRecordingEntry]):
         self.beginResetModel()
         self._entries = entries
         self.endResetModel()
+
+    def set_merge_candidates(self, paths: set[str]):
+        """Paths that belong to a detected split-recording chain — tinted so
+        the user can spot and multi-select them for Merge."""
+        self._merge_candidate_paths = paths or set()
+        if self._entries:
+            top = self.index(0, 0)
+            bottom = self.index(len(self._entries) - 1, len(COLUMNS) - 1)
+            self.dataChanged.emit(top, bottom)
 
     def entries(self) -> list[SyncRecordingEntry]:
         return self._entries
@@ -113,6 +126,10 @@ class RecordingTableModel(QAbstractTableModel):
                 return _PURPLE if rec.summary_path else _GRAY
             elif col_key == "path":
                 return _SECONDARY
+
+        elif role == Qt.ItemDataRole.BackgroundRole:
+            if rec.output_path and rec.output_path in self._merge_candidate_paths:
+                return _MERGE_TINT
 
         elif role == Qt.ItemDataRole.ToolTipRole:
             if col_key == "status":
