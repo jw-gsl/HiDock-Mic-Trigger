@@ -79,15 +79,23 @@ def run_extractor(
     arguments: list[str],
     product_id: int | None = None,
     timeout: float = 30,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the extractor and return parsed JSON output.
 
+    ``env`` (when given) is merged over the current process environment — used
+    to pass Plaud session tokens (PLAUD_* vars) to the cloud commands.
+
     Raises RuntimeError on failure.
     """
+    import os
+
     cmd = [str(EXTRACTOR_PYTHON), str(EXTRACTOR_SCRIPT)]
     if product_id is not None:
         cmd.extend(["--product-id", str(product_id)])
     cmd.extend(arguments)
+
+    proc_env = {**os.environ, **env} if env else None
 
     try:
         result = subprocess.run(
@@ -96,6 +104,7 @@ def run_extractor(
             text=True,
             timeout=timeout,
             cwd=str(EXTRACTOR_DIR),
+            env=proc_env,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Extractor timed out after {timeout}s")

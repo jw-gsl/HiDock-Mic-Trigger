@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
     _model_download_done_signal = pyqtSignal()
     _model_download_error_signal = pyqtSignal(str)
     _txq_update_signal = pyqtSignal()                   # transcription queue changed
+    _plaud_signal = pyqtSignal(object, object)          # (entries, error) from a Plaud cloud query
 
     def __init__(self, tray_icon: QSystemTrayIcon | None = None):
         super().__init__()
@@ -637,7 +638,40 @@ class MainWindow(QMainWindow):
             menu.exec(self.table_view.viewport().mapToGlobal(pos))
 
     def _ctx_download(self, entry: SyncRecordingEntry):
+        if entry.device_id.startswith("plaud:"):
+            self._plaud_download(entry)
+            return
         self._run_download(["download", entry.recording.name])
+
+    def _plaud_download(self, entry: SyncRecordingEntry):
+        """Download one Plaud cloud recording in a background thread."""
+        from core import plaud
+        account_id = entry.device_id.split(":", 1)[1]
+        acct = plaud.get_account(account_id, self.settings)
+        if acct is None:
+            self.statusBar().showMessage("Plaud account not found — sign in again", 5000)
+            return
+        env = plaud.plaud_env(acct)
+        self._show_progress(0, 0, f"Downloading {entry.recording.name}...")
+
+        def _worker():
+            err = None
+            try:
+                data = run_extractor(
+                    ["plaud-download", entry.recording.name, "--account-id", account_id],
+                    env=env, timeout=300,
+                )
+                if data and data.get("refreshedTokens"):
+                    plaud.apply_refreshed_tokens(account_id, data["refreshedTokens"], self.settings)
+            except Exception as e:
+                err = str(e)
+            # Re-query Plaud so the row flips to downloaded; hide progress.
+            self._progress_signal.emit(-1, -1, "")
+            # Sentinel asks the GUI thread to re-run the cached-status merge
+            # (QSettings/account load must happen on the main thread).
+            self._plaud_signal.emit("__refresh__", err)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _ctx_mark_downloaded(self, entry: SyncRecordingEntry):
         try:
@@ -760,6 +794,77 @@ class MainWindow(QMainWindow):
         from core import imports
         non_imported = [e for e in self._entries if e.device_id != imports.IMPORTED_DEVICE_ID]
         self._entries = non_imported + self._imported_entries()
+
+    # ── Plaud cloud sync ─────────────────────────────────────────────────
+
+    def _plaud_devices(self) -> list:
+        from core.models import DeviceType, load_paired_devices
+        return [d for d in load_paired_devices(self.settings)
+                if d.device_type == DeviceType.PLAUD]
+
+    def _refresh_plaud(self, live: bool = True):
+        """Query each paired Plaud account and merge its cloud recordings.
+
+        Runs in a background thread (network). Paints cached status first for
+        an instant table, then the live cloud list. Mirrors the macOS Plaud
+        card flow incl. token-refresh persistence.
+        """
+        devices = self._plaud_devices()
+        if not devices:
+            return
+        from core import plaud
+
+        def _worker():
+            all_entries = []
+            err = None
+            for dev in devices:
+                acct = plaud.get_account(dev.plaud_account_id, self.settings)
+                if acct is None:
+                    continue
+                env = plaud.plaud_env(acct)
+                cmd = "plaud-status" if live else "plaud-cached-status"
+                try:
+                    data = run_extractor(
+                        [cmd, "--account-id", acct.account_id],
+                        env=env, timeout=120,
+                    )
+                except Exception as e:
+                    err = str(e)
+                    data = None
+                if not data:
+                    continue
+                # Persist rotated tokens so the next query keeps working.
+                if data.get("refreshedTokens"):
+                    plaud.apply_refreshed_tokens(
+                        acct.account_id, data["refreshedTokens"], self.settings
+                    )
+                device_id = f"plaud:{acct.account_id}"
+                name = acct.display_name or acct.email or "Plaud"
+                for r in data.get("recordings", []):
+                    rec = SyncRecording.from_dict(r)
+                    all_entries.append(SyncRecordingEntry(
+                        recording=rec, device_id=device_id, device_name=name,
+                    ))
+            self._plaud_signal.emit(all_entries, err)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @pyqtSlot(object, object)
+    def _on_plaud_merged(self, entries, error):
+        # Sentinel from a completed Plaud download: re-query on the GUI thread.
+        if entries == "__refresh__":
+            if error:
+                self.statusBar().showMessage(f"Plaud: {error}", 5000)
+            self._refresh_plaud(live=False)
+            return
+        # Replace any prior Plaud entries with the fresh set.
+        non_plaud = [e for e in self._entries if not e.device_id.startswith("plaud:")]
+        self._entries = non_plaud + (entries or [])
+        self._refresh_device_filter_combo()
+        self._refresh_transcription_state()
+        self._update_table()
+        if error and not entries:
+            self.statusBar().showMessage(f"Plaud: {error}", 5000)
 
     def _ctx_remove_import(self, entry: SyncRecordingEntry):
         from core import imports
@@ -916,6 +1021,7 @@ class MainWindow(QMainWindow):
         self._transcription_status_signal.connect(self._on_transcription_status)
         self._progress_signal.connect(self._on_progress)
         self._txq_update_signal.connect(self._on_txq_update)
+        self._plaud_signal.connect(self._on_plaud_merged)
 
     # ── Settings ────────────────────────────────────────────────────────
 
@@ -1168,6 +1274,9 @@ class MainWindow(QMainWindow):
         self._update_tray_tooltip()
         self.statusBar().showMessage(f"Loaded {len(entries)} recordings", 3000)
 
+        # Merge Plaud cloud recordings (async network query).
+        self._refresh_plaud(live=True)
+
         # Download-complete toast (armed by _run_download_commands). Mirrors the
         # macOS download-complete notification, which the Windows app lacked.
         if self._notify_download_on_complete:
@@ -1302,6 +1411,11 @@ class MainWindow(QMainWindow):
         # Build per-device download commands
         commands: list[tuple[list[str], int | None]] = []
         for entry in selected:
+            # Plaud cloud recordings need env tokens — route them through the
+            # dedicated env-aware path instead of the generic command batch.
+            if entry.device_id.startswith("plaud:"):
+                self._plaud_download(entry)
+                continue
             device = devices.get(entry.device_id)
             if device and device.device_type == DeviceType.VOLUME:
                 args = ["volume-import", entry.recording.name, "--volume-name", device.volume_name or ""]
@@ -1311,7 +1425,8 @@ class MainWindow(QMainWindow):
             else:
                 commands.append((["download", entry.recording.name, "--length", str(entry.recording.length)], entry.device_product_id or None))
 
-        self._run_download_commands(commands)
+        if commands:
+            self._run_download_commands(commands)
 
     @pyqtSlot()
     def _download_new(self):
@@ -1324,14 +1439,44 @@ class MainWindow(QMainWindow):
 
         commands: list[tuple[list[str], int | None]] = []
         for device in devices:
-            if device.device_type == DeviceType.VOLUME:
+            if device.device_type == DeviceType.PLAUD:
+                self._plaud_download_new(device.plaud_account_id)
+            elif device.device_type == DeviceType.VOLUME:
                 args = ["volume-import-new", "--volume-name", device.volume_name or ""]
                 if device.subpath:
                     args += ["--subpath", device.subpath]
                 commands.append((args, None))
             else:
                 commands.append((["download-new"], device.product_id))
-        self._run_download_commands(commands)
+        if commands:
+            self._run_download_commands(commands)
+
+    def _plaud_download_new(self, account_id: str | None):
+        """Download all new Plaud cloud recordings for one account."""
+        from core import plaud
+        if not account_id:
+            return
+        acct = plaud.get_account(account_id, self.settings)
+        if acct is None:
+            return
+        env = plaud.plaud_env(acct)
+        self._show_progress(0, 0, "Downloading new Plaud recordings...")
+
+        def _worker():
+            err = None
+            try:
+                data = run_extractor(
+                    ["plaud-download-new", "--account-id", account_id],
+                    env=env, timeout=600,
+                )
+                if data and data.get("refreshedTokens"):
+                    plaud.apply_refreshed_tokens(account_id, data["refreshedTokens"], self.settings)
+            except Exception as e:
+                err = str(e)
+            self._progress_signal.emit(-1, -1, "")
+            self._plaud_signal.emit("__refresh__", err)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _run_download(self, args: list[str], product_id: int | None = None):
         self._run_download_commands([(args, product_id)])

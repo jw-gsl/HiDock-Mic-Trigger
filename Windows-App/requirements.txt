@@ -1,5 +1,8 @@
 # UI
 PyQt6>=6.6
+# Optional: embedded browser for the Plaud cloud sign-in (Google/Apple SSO).
+# Without it the Plaud sign-in dialog falls back to a manual token-paste form.
+# PyQt6-WebEngine>=6.6
 
 # USB (shared with Windows-Script)
 pyusb>=1.2

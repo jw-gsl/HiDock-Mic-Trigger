@@ -19,6 +19,7 @@ def _stable_hash(s: str) -> int:
 class DeviceType(str, Enum):
     HIDOCK = "hidock"
     VOLUME = "volume"
+    PLAUD = "plaud"
 
 
 @dataclass
@@ -31,11 +32,17 @@ class PairedDevice:
     volume_name: str | None = None
     subpath: str | None = None
     paired_at: str | None = None
+    # Plaud cloud account fields (only populated for DeviceType.PLAUD).
+    plaud_account_id: str | None = None
+    plaud_email: str | None = None
+    plaud_region: str | None = None
 
     @property
     def device_id(self) -> str:
         if self.device_type == DeviceType.HIDOCK:
             return f"hidock:{self.product_id}"
+        if self.device_type == DeviceType.PLAUD:
+            return f"plaud:{self.plaud_account_id or self.product_id}"
         return f"volume:{self.volume_name or self.product_id}"
 
     @property
@@ -53,6 +60,9 @@ class PairedDevice:
             "volume_name": self.volume_name,
             "subpath": self.subpath,
             "paired_at": self.paired_at,
+            "plaud_account_id": self.plaud_account_id,
+            "plaud_email": self.plaud_email,
+            "plaud_region": self.plaud_region,
         }
 
     @classmethod
@@ -64,6 +74,9 @@ class PairedDevice:
             volume_name=d.get("volume_name"),
             subpath=d.get("subpath"),
             paired_at=d.get("paired_at"),
+            plaud_account_id=d.get("plaud_account_id"),
+            plaud_email=d.get("plaud_email"),
+            plaud_region=d.get("plaud_region"),
         )
 
     @classmethod
@@ -83,6 +96,24 @@ class PairedDevice:
             product_id=_stable_hash(volume_name),
             volume_name=volume_name,
             subpath=subpath,
+            paired_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    @classmethod
+    def plaud(
+        cls,
+        account_id: str,
+        display_name: str,
+        email: str | None = None,
+        region: str = "us",
+    ) -> PairedDevice:
+        return cls(
+            device_type=DeviceType.PLAUD,
+            display_name=display_name,
+            product_id=_stable_hash(account_id),
+            plaud_account_id=account_id,
+            plaud_email=email,
+            plaud_region=region,
             paired_at=datetime.now(timezone.utc).isoformat(),
         )
 

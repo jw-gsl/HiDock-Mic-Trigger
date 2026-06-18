@@ -24,6 +24,14 @@ from core.models import DeviceType, PairedDevice
 from ui.device_icons import connected_badge_pixmap, device_glyph_pixmap
 
 
+def _type_label(device_type: DeviceType) -> str:
+    if device_type == DeviceType.HIDOCK:
+        return "HiDock"
+    if device_type == DeviceType.PLAUD:
+        return "Plaud"
+    return "Volume"
+
+
 class DeviceRowWidget(QWidget):
     """A single row showing one paired device."""
 
@@ -74,7 +82,7 @@ class DeviceRowWidget(QWidget):
 
         name_row.addStretch()
 
-        type_badge = QLabel("HiDock" if device.device_type == DeviceType.HIDOCK else "Volume")
+        type_badge = QLabel(_type_label(device.device_type))
         type_badge.setStyleSheet(
             "color: gray; font-size: 10px; background: rgba(128,128,128,0.15); "
             "padding: 1px 5px; border-radius: 3px;"
@@ -86,6 +94,10 @@ class DeviceRowWidget(QWidget):
         details = []
         if device.device_type == DeviceType.HIDOCK:
             details.append(f"Product ID: {device.product_id}")
+        if device.device_type == DeviceType.PLAUD:
+            details.append(f"Account: {device.plaud_email or device.plaud_account_id or '?'}")
+            if device.plaud_region:
+                details.append(f"Region: {device.plaud_region}")
         if device.volume_name:
             details.append(f"Volume: {device.volume_name}")
         if device.subpath:
@@ -115,12 +127,16 @@ class DeviceRowWidget(QWidget):
         # Prefer the bespoke HiDock glyph for P1/H1/H1e; fall back to emoji when
         # the SKU isn't recognised, the SVG plugin fails, or the asset is missing.
         is_volume = self.device.device_type == DeviceType.VOLUME
-        pm = device_glyph_pixmap(self.device.display_name, is_volume, size=22)
-        if pm is not None:
-            self.icon_label.clear()
-            self.icon_label.setPixmap(pm)
-            return
-        if is_volume:
+        is_plaud = self.device.device_type == DeviceType.PLAUD
+        if not is_plaud:
+            pm = device_glyph_pixmap(self.device.display_name, is_volume, size=22)
+            if pm is not None:
+                self.icon_label.clear()
+                self.icon_label.setPixmap(pm)
+                return
+        if is_plaud:
+            icon = "☁"  # cloud
+        elif is_volume:
             icon = "\U0001F4BE"  # floppy disk / external drive
         elif "h1" in self.device.display_name.lower() or "dock" in self.device.display_name.lower():
             icon = "\U0001F50A"  # speaker
@@ -207,6 +223,7 @@ class DeviceManagerDialog(QDialog):
 
     deviceForgotten = pyqtSignal(str)   # device_id — emitted so parent can update state
     volumePaired = pyqtSignal(str, str)  # volume_name, subpath
+    plaudPaired = pyqtSignal(object)     # core.plaud.PlaudAccount — emitted on Plaud sign-in
 
     def __init__(self, devices: list[PairedDevice], connected_ids: set[str] | None = None, parent=None):
         super().__init__(parent)
@@ -248,7 +265,7 @@ class DeviceManagerDialog(QDialog):
 
         toolbar.addWidget(QLabel("Type:"))
         self._type_filter = QComboBox()
-        self._type_filter.addItems(["All", "HiDock", "Volume"])
+        self._type_filter.addItems(["All", "HiDock", "Volume", "Plaud"])
         self._type_filter.currentIndexChanged.connect(self._rebuild)
         toolbar.addWidget(self._type_filter)
 
@@ -286,6 +303,11 @@ class DeviceManagerDialog(QDialog):
         self.pair_widget = PairVolumeWidget()
         self.pair_widget.pairRequested.connect(self._on_pair_volume)
         footer.addWidget(self.pair_widget)
+
+        self.pair_plaud_btn = QPushButton("Pair Plaud")
+        self.pair_plaud_btn.setToolTip("Sign in to a Plaud cloud account")
+        self.pair_plaud_btn.clicked.connect(self._on_pair_plaud)
+        footer.addWidget(self.pair_plaud_btn)
 
         footer.addStretch()
         close_btn = QPushButton("Close")
@@ -329,6 +351,8 @@ class DeviceManagerDialog(QDialog):
             devices = [d for d in devices if d.device_type == DeviceType.HIDOCK]
         elif type_idx == 2:
             devices = [d for d in devices if d.device_type == DeviceType.VOLUME]
+        elif type_idx == 3:
+            devices = [d for d in devices if d.device_type == DeviceType.PLAUD]
 
         # Search
         query = self._search.text().strip().lower()
@@ -348,6 +372,15 @@ class DeviceManagerDialog(QDialog):
 
     @pyqtSlot(str)
     def _on_forget(self, device_id: str):
+        # If a Plaud account is being forgotten, also drop its stored tokens.
+        gone = next((d for d in self._devices if d.device_id == device_id), None)
+        if gone is not None and gone.device_type == DeviceType.PLAUD and gone.plaud_account_id:
+            try:
+                from core import plaud as plaud_store
+
+                plaud_store.forget_account(gone.plaud_account_id)
+            except Exception:
+                pass
         self._devices = [d for d in self._devices if d.device_id != device_id]
         self.deviceForgotten.emit(device_id)
         self._rebuild()
@@ -356,3 +389,31 @@ class DeviceManagerDialog(QDialog):
     def _on_pair_volume(self, volume_name: str, subpath: str):
         self.volumePaired.emit(volume_name, subpath)
         # The parent should call set_devices() to refresh
+
+    def _on_pair_plaud(self):
+        """Open the Plaud sign-in dialog; on success persist the account and a
+        PLAUD PairedDevice, then refresh the list."""
+        from ui.plaud_signin_dialog import PlaudSignInDialog
+
+        dialog = PlaudSignInDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        account = dialog.result_account()
+        if account is None or not account.access_token:
+            return
+
+        from core import plaud as plaud_store
+
+        plaud_store.save_account(account)
+
+        device = PairedDevice.plaud(
+            account_id=account.account_id,
+            display_name=account.display_name or "Plaud",
+            email=account.email,
+            region=account.region,
+        )
+        # Replace any existing paired device for this account, then add.
+        self._devices = [d for d in self._devices if d.device_id != device.device_id]
+        self._devices.append(device)
+        self.plaudPaired.emit(account)
+        self._rebuild()
