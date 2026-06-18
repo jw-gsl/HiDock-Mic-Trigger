@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         self._txq_dialog = None
         self._notify_download_on_complete = False
         self._downloaded_before = 0
+        self._session_transcribed_count = 0  # macOS dock-badge equivalent (shown in tray)
 
         self._init_menu_bar()
         self._init_ui()
@@ -1156,18 +1157,37 @@ class MainWindow(QMainWindow):
                 self.trigger_uptime_label.setText(f"Uptime: {h}h {m:02d}m {s:02d}s")
             else:
                 self.trigger_uptime_label.setText(f"Uptime: {m}m {s:02d}s")
+        # Trigger health: distinguish Waiting (running, no mic) from Active
+        # (holding the HiDock open), mirroring the macOS trigger-health states.
+        try:
+            running = self.mic_trigger.is_running()
+            holding = self.mic_trigger.is_holding()
+        except TypeError:  # tolerate a property-style attr if it changes
+            running = bool(self.mic_trigger.is_running)
+            holding = bool(getattr(self.mic_trigger, "_holding", False))
+        if not running:
+            return  # _stop_trigger owns the Stopped label
+        if holding:
+            self.trigger_status_label.setText("Active · holding mic")
+            self.trigger_status_dot.setObjectName("statusDotRunning")
+        else:
+            self.trigger_status_label.setText("Waiting for mic")
+            self.trigger_status_dot.setObjectName("statusDotStopped")
+        self.trigger_status_dot.setStyle(self.trigger_status_dot.style())
 
     def _update_tray_tooltip(self):
         if self._tray_icon:
             parts = ["HiDock Tools"]
-            if self.mic_trigger.is_running:
-                parts.append("Trigger: Running")
+            if self.mic_trigger.is_running():
+                parts.append("Trigger: Active" if self.mic_trigger.is_holding() else "Trigger: Waiting")
             else:
                 parts.append("Trigger: Stopped")
             total = len(self._entries)
             if total:
                 downloaded = sum(1 for e in self._entries if e.recording.downloaded)
                 parts.append(f"{total} recordings, {downloaded} downloaded")
+            if self._session_transcribed_count > 0:
+                parts.append(f"✓ {self._session_transcribed_count} transcribed this session")
             self._tray_icon.setToolTip(" | ".join(parts))
 
     # ── USB Sync ────────────────────────────────────────────────────────
@@ -1965,6 +1985,11 @@ class MainWindow(QMainWindow):
         transcript_paths = data.get("transcript_paths", [])
         self.statusBar().showMessage(f"Transcribed {succeeded}/{total} files", 5000)
         self._hide_progress()
+        # Session transcribed tally (surfaced in the tray tooltip while the
+        # window is hidden — the Windows stand-in for the macOS dock badge).
+        if not self.isActiveWindow():
+            self._session_transcribed_count += succeeded
+            self._update_tray_tooltip()
         self._refresh_transcription_state()
         self._update_table()
 
@@ -2283,6 +2308,16 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_run, daemon=True).start()
 
     # ── Window events ───────────────────────────────────────────────────
+
+    def changeEvent(self, event):
+        from PyQt6.QtCore import QEvent
+        # Clear the session-transcribed tally once the user looks at the window
+        # (mirrors the macOS dock badge clearing on refocus).
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            if self._session_transcribed_count:
+                self._session_transcribed_count = 0
+                self._update_tray_tooltip()
+        super().changeEvent(event)
 
     def closeEvent(self, event):
         """Minimize to tray on close, unless force-quitting."""
