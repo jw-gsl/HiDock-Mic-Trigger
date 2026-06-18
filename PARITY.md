@@ -30,20 +30,19 @@ ported that work. Status of the previously macOS-only subsystems:
 | Download-complete toast | **Both** | Was status-bar only. |
 | Cache-paint on launch | **Both** (imported + Plaud) | HiDock cached-paint-before-probe not yet (see Partial). |
 | Trigger health (Stopped/Waiting/Active) | **Both** | From `mic_trigger.is_running()/is_holding()`. |
-| Merge-candidate auto-detection | **Partial** | Detection + row tint via `merge_finder.find_candidates`; macOS expandable parent/child merge rows + inline tick **not yet ported**. |
-| Transcribed-session badge | **Partial** | Windows shows it in the tray tooltip (PyQt6 has no dock-badge equivalent). |
+| Merge-candidate auto-detection | **Both** | Detection + row tint via `merge_finder`, AND expandable parent/child merge rows (merge writes `merge_groups.json`; ▸/▾ disclosure + indented pieces; click-to-toggle). |
+| Transcribed-session badge | **Partial (by design)** | Windows shows it in the tray tooltip — PyQt6 has no dock-badge equivalent (QtWinExtras removed in Qt6). |
+| Per-device storage bar | **Both** | Computed client-side (capacity constants + summed bytes), exactly like macOS. |
+| Plaud SSO | **Both** | `PyQt6-WebEngine` is now a real requirement (default WebEngine SSO); manual token paste remains a guarded fallback. |
+| H1e idle glyph | **Both** | Idle uses the H1e product photo (no bespoke line-art), distinct from H1. |
+| HiDock cache-paint-before-probe | **Both** | New no-probe `cached-status` extractor command painted on launch before the live probe. |
+| Toolbar (selection-driven verbs) | **Both** | Merge enabled for 2+, Trim for exactly 1, Download Selected shows count (device-card strip already replaced the scattered status/storage rows). |
 
-### Known partial / deferred (Windows)
-- **Merge expandable rows**: only detection + highlight; no parent/child expand UI.
-- **Per-device storage bar**: the Windows-Script extractor doesn't return card
-  capacity/used bytes — the device cards omit the storage line until it does.
-- **Plaud SSO**: uses QtWebEngine when `PyQt6-WebEngine` is installed, else a
-  manual token-paste form; a polished in-card "Sign in required" chip is basic.
-- **HiDock cache-paint-before-probe**: only imported + Plaud paint from cache on
-  launch; HiDock still paints after the first status query.
-- **Toolbar consolidation** (selection-driven verbs, dropped Download New) and a
-  per-SKU **idle** glyph for H1e (recording-state photos already differ) are
-  cosmetic and not ported.
+### Known remaining (by platform constraint, not omission)
+- **Transcribed-session indicator**: surfaced in the tray tooltip rather than a
+  dock/taskbar badge — PyQt6 on Windows has no first-class badge API.
+- All other previously-deferred items are now closed (see the table above);
+  details in `docs/PLAN-windows-parity-final-four-2026-06-18.md`.
 
 Verification on the build machine (macOS) is limited to import + ruff + unit
 tests (53 Windows-App + 127 usb-extractor pass); the PyQt GUI must be exercised
