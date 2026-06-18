@@ -127,6 +127,8 @@ class MainWindow(QMainWindow):
 
         # File menu
         file_menu = menubar.addMenu("File")
+        import_act = file_menu.addAction("Import Audio File...")
+        import_act.triggered.connect(self._import_audio_file)
         rec_folder_act = file_menu.addAction("Recordings Folder...")
         rec_folder_act.triggered.connect(self._choose_recordings_folder)
         trans_folder_act = file_menu.addAction("Transcript Folder...")
@@ -437,6 +439,11 @@ class MainWindow(QMainWindow):
         select_new_btn.clicked.connect(self._select_new_rows)
         row4.addWidget(select_new_btn)
 
+        import_btn = QPushButton("Import")
+        import_btn.setToolTip("Import a local audio/video file into Recordings")
+        import_btn.clicked.connect(self._import_audio_file)
+        row4.addWidget(import_btn)
+
         row4.addStretch()
 
         # Device filter
@@ -603,8 +610,15 @@ class MainWindow(QMainWindow):
         if rec.output_path and os.path.exists(rec.output_path):
             open_loc_act = menu.addAction("Open File Location")
             open_loc_act.triggered.connect(lambda: self._open_file_location(rec.output_path))
-            del_local_act = menu.addAction("Delete Local Copy")
-            del_local_act.triggered.connect(lambda: self._ctx_delete_local_copy(entry))
+            # Imported recordings have no device copy — offer Remove Import
+            # instead of the device-oriented Delete Local Copy.
+            from core.imports import IMPORTED_DEVICE_ID
+            if entry.device_id == IMPORTED_DEVICE_ID:
+                rm_imp_act = menu.addAction("Remove Import")
+                rm_imp_act.triggered.connect(lambda: self._ctx_remove_import(entry))
+            else:
+                del_local_act = menu.addAction("Delete Local Copy")
+                del_local_act.triggered.connect(lambda: self._ctx_delete_local_copy(entry))
 
         if rec.transcript_path and os.path.exists(rec.transcript_path):
             # Check for diarized JSON to open transcript viewer
@@ -691,6 +705,75 @@ class MainWindow(QMainWindow):
         with the macOS 'Check for Firmware Updates...' menu item)."""
         import webbrowser
         webbrowser.open("https://www.hidock.com/pages/firmwares")
+
+    # ── Import audio file (virtual "Imported" device) ────────────────────
+
+    def _import_audio_file(self):
+        from core import imports
+        exts = " ".join(f"*{e}" for e in sorted(imports.ALLOWED_EXTS))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import audio/video file(s)", "",
+            f"Audio/Video ({exts});;All files (*)",
+        )
+        if not paths:
+            return
+        ok, fail = 0, 0
+        for p in paths:
+            try:
+                imports.import_file(Path(p))
+                ok += 1
+            except Exception as e:
+                fail += 1
+                self._log_signal.emit(f"Import failed for {p}: {e}")
+        self.statusBar().showMessage(
+            f"Imported {ok} file(s)" + (f", {fail} failed" if fail else ""), 5000
+        )
+        # Refresh the table so the imported rows appear immediately.
+        self._merge_imported_into_entries()
+        self._refresh_transcription_state()
+        self._update_table()
+
+    def _imported_entries(self) -> list[SyncRecordingEntry]:
+        """Build table entries for the virtual 'Imported' device."""
+        from core import imports
+        out = []
+        for e in imports.list_imported():
+            rec = SyncRecording(
+                name=e["name"],
+                output_name=e.get("output_name", e["name"]),
+                output_path=e.get("output_path", ""),
+                length=e.get("length", 0),
+                create_date=e.get("create_date", ""),
+                create_time=e.get("create_time", ""),
+                downloaded=True,
+                local_exists=Path(e.get("output_path", "")).exists(),
+            )
+            out.append(SyncRecordingEntry(
+                recording=rec,
+                device_id=imports.IMPORTED_DEVICE_ID,
+                device_name=imports.IMPORTED_DEVICE_NAME,
+            ))
+        return out
+
+    def _merge_imported_into_entries(self):
+        """Append imported entries to self._entries, replacing any prior ones."""
+        from core import imports
+        non_imported = [e for e in self._entries if e.device_id != imports.IMPORTED_DEVICE_ID]
+        self._entries = non_imported + self._imported_entries()
+
+    def _ctx_remove_import(self, entry: SyncRecordingEntry):
+        from core import imports
+        resp = QMessageBox.warning(
+            self, "Remove imported recording?",
+            f"Remove {entry.recording.output_name or entry.recording.name} and delete its file?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        imports.remove_import(entry.recording.output_path, delete_file=True)
+        self._merge_imported_into_entries()
+        self._update_table()
 
     def _ctx_transcribe(self, entry: SyncRecordingEntry):
         if entry.recording.output_path:
@@ -1078,6 +1161,7 @@ class MainWindow(QMainWindow):
             ))
 
         self._entries = entries
+        self._merge_imported_into_entries()
         self._refresh_device_filter_combo()
         self._refresh_transcription_state()
         self._update_table()
