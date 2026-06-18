@@ -53,6 +53,7 @@ def transcribe_file(
     on_progress: Callable[[int], None] | None = None,
     diarize: bool = False,
     summarize: bool = False,
+    n_speakers: int | None = None,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict."""
     from shared.transcript_writer import write_transcript, format_diarized_transcript
@@ -116,7 +117,7 @@ def transcribe_file(
                 from shared.voice_library_lite import identify_speakers
                 from shared.audio_utils import load_audio, extract_embedding, segment_audio
 
-                diarized_result = run_diarize(mp3_path, whisper_dicts)
+                diarized_result = run_diarize(mp3_path, whisper_dicts, n_speakers=n_speakers)
 
                 # Try to identify speakers from voice library
                 audio = load_audio(mp3_path, sr=16000)

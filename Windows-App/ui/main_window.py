@@ -585,6 +585,8 @@ class MainWindow(QMainWindow):
         if rec.downloaded and rec.output_path and not rec.transcribed:
             trans_act = menu.addAction("Transcribe")
             trans_act.triggered.connect(lambda: self._ctx_transcribe(entry))
+            trans_n_act = menu.addAction("Transcribe with Speaker Count...")
+            trans_n_act.triggered.connect(lambda: self._ctx_transcribe_with_count(entry))
 
         if rec.transcribed and rec.transcript_path:
             summ_act = menu.addAction("Summarise")
@@ -693,6 +695,18 @@ class MainWindow(QMainWindow):
     def _ctx_transcribe(self, entry: SyncRecordingEntry):
         if entry.recording.output_path:
             self._run_transcription([Path(entry.recording.output_path)])
+
+    def _ctx_transcribe_with_count(self, entry: SyncRecordingEntry):
+        if not entry.recording.output_path:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        n, ok = QInputDialog.getInt(
+            self, "Transcribe with Speaker Count",
+            "Expected number of speakers (hint for diarization):",
+            2, 1, 20, 1,
+        )
+        if ok:
+            self._run_transcription([Path(entry.recording.output_path)], n_speakers=n)
 
     def _open_file_location(self, filepath: str):
         dirpath = os.path.dirname(filepath)
@@ -1461,8 +1475,12 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=_do_trim, daemon=True).start()
 
-    def _run_transcription(self, targets: list[Path]):
-        """Transcribe a list of audio files in a background thread."""
+    def _run_transcription(self, targets: list[Path], n_speakers: int | None = None):
+        """Transcribe a list of audio files in a background thread.
+
+        ``n_speakers`` (from the 'Transcribe with Speaker Count' action) is
+        passed to diarization as a hint, matching the macOS speaker-count UI.
+        """
         if not whisper_model_ready():
             QMessageBox.information(
                 self, "Model Required",
@@ -1524,7 +1542,7 @@ class MainWindow(QMainWindow):
 
                     result = transcribe_file(
                         mp3_path, model=model, on_progress=_progress,
-                        diarize=diarize,
+                        diarize=diarize, n_speakers=n_speakers,
                     )
                     results.append(result)
                     item["status"] = "completed" if result.get("transcribed") else "failed"
