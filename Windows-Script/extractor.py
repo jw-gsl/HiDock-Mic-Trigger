@@ -922,6 +922,27 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     return payload
 
 
+def cached_status_payload(config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH) -> dict:
+    """Report the cached recording catalogue from state.json WITHOUT a USB probe.
+
+    Lets the desktop app paint instantly on launch before the (slower) live
+    `status` probe — mirrors `plaud-cached-status` and the macOS launch
+    cache-paint. Passing an empty live-recordings list makes
+    build_recording_status_items synthesize items purely from stored downloads.
+    """
+    config = load_config(config_path)
+    output_dir = resolved_output_dir(config)
+    state = load_state(state_path)
+    return {
+        "connected": False,
+        "cached": True,
+        "outputDir": str(output_dir),
+        "statePath": str(state_path.resolve()),
+        "configPath": str(config_path.resolve()),
+        "recordings": build_recording_status_items([], state, output_dir),
+    }
+
+
 def download_one(
     filename: str,
     length: int | None = None,
@@ -1531,6 +1552,8 @@ def main() -> int:
     transfer.add_argument("--request-id", type=lambda s: int(s, 0), default=6)
     transfer.add_argument("--timeout-ms", type=int, default=5000)
 
+    sub.add_parser("cached-status", help="Report the cached recording catalogue from state.json WITHOUT a USB probe (instant launch paint)")
+
     # Volume (mass-storage) commands
     sub.add_parser("scan-volumes", help="List mounted volumes with audio files")
 
@@ -1565,6 +1588,10 @@ def main() -> int:
 
     if args.command == "status":
         print(json.dumps(status_payload(timeout_ms=args.timeout_ms), indent=2))
+        return 0
+
+    if args.command == "cached-status":
+        print(json.dumps(cached_status_payload(), indent=2))
         return 0
     if args.command == "set-output":
         config = load_config()

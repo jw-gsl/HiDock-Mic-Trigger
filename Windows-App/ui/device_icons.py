@@ -78,9 +78,13 @@ def device_glyph_pixmap(
         return None
     if recording:
         filename = f"{sku.value}_recording.png"
+    elif sku is HiDockSKU.H1E:
+        # No bespoke H1e line-art glyph exists; the H1 glyph is identical to the
+        # eye, so fall back to the H1e product photo so H1e stays visually
+        # distinct from H1 even when idle (parity with the macOS per-SKU art).
+        filename = "H1e_recording.png"
     else:
-        # H1 and H1e share the same line-art glyph; only the recording shot differs.
-        filename = "H1_glyph.svg" if sku is HiDockSKU.H1E else f"{sku.value}_glyph.svg"
+        filename = f"{sku.value}_glyph.svg"
     return _load_pixmap(filename, size)
 
 

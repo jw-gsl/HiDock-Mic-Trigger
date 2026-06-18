@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         self._notify_download_on_complete = False
         self._downloaded_before = 0
         self._session_transcribed_count = 0  # macOS dock-badge equivalent (shown in tray)
+        self._merge_groups_cache: dict[str, list[str]] = self._load_merge_groups()
 
         self._init_menu_bar()
         self._init_ui()
@@ -131,6 +132,42 @@ class MainWindow(QMainWindow):
         self._merge_imported_into_entries()
         self._update_table()
         self._refresh_plaud(live=False)
+        self._paint_hidock_cached()
+
+    def _paint_hidock_cached(self):
+        """Paint HiDock/volume recordings from the extractor's cached catalogue
+        WITHOUT a USB probe, for an instant launch table. The live status refresh
+        (USB auto-check timer) corrects per-device attribution shortly after.
+        """
+        from core.models import DeviceType, load_paired_devices
+        devices = [d for d in load_paired_devices(self.settings)
+                   if d.device_type in (DeviceType.HIDOCK, DeviceType.VOLUME)]
+        if not devices:
+            return
+        primary = devices[0]
+        ready, _ = extractor_ready()
+        if not ready:
+            return
+
+        def _worker():
+            try:
+                data = run_extractor(["cached-status"], timeout=15)
+            except Exception:
+                return
+            recs = data.get("recordings", []) if data else []
+            if not recs:
+                return
+            for r in recs:
+                r["_device_id"] = primary.device_id
+                r["_device_name"] = primary.display_name
+                r["_device_product_id"] = getattr(primary, "product_id", 0) or 0
+            self._sync_complete_signal.emit(
+                {"_cached": True, "connected": False,
+                 "recordings": recs, "outputDir": data.get("outputDir", "")},
+                None,
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Menu Bar ────────────────────────────────────────────────────────────
 
@@ -515,6 +552,8 @@ class MainWindow(QMainWindow):
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_table_context_menu)
         self.table_view.doubleClicked.connect(self._on_row_double_click)
+        self.table_view.clicked.connect(self._on_table_clicked)
+        self.table_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
         header = self.table_view.horizontalHeader()
         widths = [100, 100, 85, 70, 250, 150, 80, 80, 300]
@@ -1312,8 +1351,10 @@ class MainWindow(QMainWindow):
         self._update_tray_tooltip()
         self.statusBar().showMessage(f"Loaded {len(entries)} recordings", 3000)
 
-        # Merge Plaud cloud recordings (async network query).
-        self._refresh_plaud(live=True)
+        # Merge Plaud cloud recordings (async network query) — not on a cached
+        # paint (launch cache-paint already did a cached Plaud merge).
+        if not data.get("_cached"):
+            self._refresh_plaud(live=True)
 
         # Detect split-recording chains and tint candidate rows (async).
         self._detect_merge_candidates()
@@ -1345,8 +1386,9 @@ class MainWindow(QMainWindow):
             if targets:
                 self._run_transcription(targets)
 
-        # Auto-download if enabled
-        if self.auto_download_check.isChecked():
+        # Auto-download if enabled — but never off a cached-paint (no live probe
+        # ran, so "not downloaded" here is just the cached catalogue).
+        if not data.get("_cached") and self.auto_download_check.isChecked():
             not_downloaded = [e for e in entries if not e.recording.downloaded]
             if not_downloaded:
                 self._download_new()
@@ -1368,6 +1410,9 @@ class MainWindow(QMainWindow):
                 and summarize.summary_type_of(e.recording.summary_path) == type_filter
             ]
         self.table_model.set_entries(visible)
+        # Apply merge groups (parent/child expandable rows) after entries.
+        if self._merge_groups_cache:
+            self.table_model.set_merge_groups(self._merge_groups_cache)
         self._update_summary()
         self._refresh_device_strip()
 
@@ -1395,13 +1440,44 @@ class MainWindow(QMainWindow):
                 }
                 order.append(did)
             agg[did]["recording_count"] += 1
+            agg[did]["_used_bytes"] = agg[did].get("_used_bytes", 0) + max(e.recording.length, 0)
             if e.recording.downloaded:
                 agg[did]["downloaded_count"] += 1
         # Imported + Plaud are "present" by virtue of having rows; HiDock/volume
         # connection is best-effort from the last sync (rows imply reachable).
         for card in agg.values():
             card["connected"] = card["recording_count"] > 0
+            card["storage_text"] = self._storage_text(card["name"], card["kind"], card.pop("_used_bytes", 0))
         self.device_strip.set_devices([agg[d] for d in order])
+
+    # Known card capacities (bytes) by SKU — the device doesn't report capacity,
+    # so we compute used/free client-side exactly like the macOS app.
+    _CAPACITY_BYTES = {
+        "H1": 32 * 1_073_741_824,
+        "H1E": 32 * 1_073_741_824,
+        "P1": 64 * 1_073_741_824,
+        "PLAUD": 64 * 1_073_741_824,
+    }
+
+    def _storage_text(self, name: str, kind: str, used_bytes: int) -> str | None:
+        """"used / cap GB (free)" for known SKUs, else None (no bar)."""
+        n = (name or "").upper().replace(" ", "")
+        cap = None
+        if kind == "plaud":
+            cap = self._CAPACITY_BYTES["PLAUD"]
+        elif "H1E" in n:
+            cap = self._CAPACITY_BYTES["H1E"]
+        elif "H1" in n:
+            cap = self._CAPACITY_BYTES["H1"]
+        elif "P1" in n:
+            cap = self._CAPACITY_BYTES["P1"]
+        if not cap:
+            return None
+        gb = 1_073_741_824
+        used_gb = used_bytes / gb
+        cap_gb = cap / gb
+        free_gb = max(cap_gb - used_gb, 0)
+        return f"{used_gb:.1f} / {cap_gb:.0f} GB ({free_gb:.0f} free)"
 
     def _on_device_reconnect(self, device_id: str):
         # Per-device reconnect: Plaud re-queries the cloud; HiDock/volume
@@ -1464,6 +1540,55 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"{n} possible split-recording pieces detected — select & Merge", 4000
             )
+
+    # ── Merge groups (expandable parent/child rows) ──────────────────────
+
+    def _merge_groups_path(self) -> Path:
+        from core.config import HIDOCK_ROOT
+        return HIDOCK_ROOT / "merge_groups.json"
+
+    def _load_merge_groups(self) -> dict:
+        import json
+        p = self._merge_groups_path()
+        if not p.exists():
+            return {}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _record_merge_group(self, merged_path: str, piece_paths: list):
+        import json
+        groups = self._load_merge_groups()
+        groups[merged_path] = piece_paths
+        p = self._merge_groups_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(groups, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        self._merge_groups_cache = groups
+
+    def _on_table_clicked(self, index):
+        """Click on a merge-parent row toggles its expand/collapse state."""
+        if not index.isValid():
+            return
+        if self.table_model.is_parent(index.row()):
+            path = self.table_model.parent_path_at(index.row())
+            if path:
+                self.table_model.toggle_group(path)
+
+    def _on_selection_changed(self, *_):
+        """Selection-driven toolbar verbs (mirrors macOS's consolidated toolbar):
+        enable Merge for 2+ rows, Trim for exactly 1, and surface the count on
+        Download Selected."""
+        n = len(self.table_view.selectionModel().selectedRows())
+        self.merge_btn.setEnabled(n >= 2)
+        self.trim_btn.setEnabled(n == 1)
+        self.download_selected_btn.setText(
+            f"Download Selected ({n})" if n else "Download Selected"
+        )
 
     def _update_summary(self):
         total = len(self._entries)
@@ -1784,6 +1909,11 @@ class MainWindow(QMainWindow):
                     list_path = f.name
                 subprocess.run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", str(out_path)], check=True, capture_output=True)
                 Path(list_path).unlink(missing_ok=True)
+                # Record the parent→pieces relationship so the table can show
+                # the merged file as an expandable group.
+                self._record_merge_group(
+                    str(out_path), [str(e.recording.output_path) for e in ready]
+                )
                 self.statusBar().showMessage(f"Merged {len(ready)} recordings → {out_path.name}")
                 self._refresh_status()
             except Exception as e:

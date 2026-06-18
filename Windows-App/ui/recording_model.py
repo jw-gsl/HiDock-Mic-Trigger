@@ -35,13 +35,85 @@ _MERGE_TINT = QColor(137, 180, 250, 28)  # faint accent wash on merge-candidate 
 class RecordingTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Full backing set (all known entries, in load order).
+        self._all_entries: list[SyncRecordingEntry] = []
+        # Visible display list — what entries() returns; one real
+        # SyncRecordingEntry per visible row, in display order.
         self._entries: list[SyncRecordingEntry] = []
         self._merge_candidate_paths: set[str] = set()
+        # output_path -> ordered list of constituent piece output_paths.
+        self._merge_groups: dict[str, list[str]] = {}
+        # Parent output_paths currently expanded. Default collapsed.
+        self._expanded: set[str] = set()
 
     def set_entries(self, entries: list[SyncRecordingEntry]):
         self.beginResetModel()
-        self._entries = entries
+        self._all_entries = list(entries)
+        self._rebuild_display()
         self.endResetModel()
+
+    def set_merge_groups(self, groups: dict[str, list[str]]):
+        """Define expandable merge groups.
+
+        ``groups`` maps a merged recording's ``output_path`` (the parent) to the
+        ordered list of its constituent piece ``output_path``s (the children).
+        """
+        self.beginResetModel()
+        self._merge_groups = dict(groups or {})
+        # Drop expand state for groups that no longer exist.
+        self._expanded &= set(self._merge_groups.keys())
+        self._rebuild_display()
+        self.endResetModel()
+
+    def toggle_group(self, parent_output_path: str):
+        """Flip the expand state for a merge parent and rebuild the display."""
+        if parent_output_path not in self._merge_groups:
+            return
+        self.beginResetModel()
+        if parent_output_path in self._expanded:
+            self._expanded.discard(parent_output_path)
+        else:
+            self._expanded.add(parent_output_path)
+        self._rebuild_display()
+        self.endResetModel()
+
+    def _rebuild_display(self):
+        """Compute the visible display list from _all_entries + merge groups.
+
+        Walk _all_entries in order. Parents are emitted in place; their children
+        are emitted (in group piece order) immediately after, only when the
+        parent is expanded. Children are never emitted at top level. Everything
+        else is emitted normally.
+        """
+        groups = self._merge_groups
+        # Set of all child output_paths across every group.
+        child_paths: set[str] = set()
+        for pieces in groups.values():
+            child_paths.update(pieces)
+        # Map output_path -> entry for fast child lookup.
+        by_path: dict[str, SyncRecordingEntry] = {}
+        for e in self._all_entries:
+            p = e.recording.output_path
+            if p:
+                by_path[p] = e
+
+        display: list[SyncRecordingEntry] = []
+        for entry in self._all_entries:
+            path = entry.recording.output_path
+            if path in groups:
+                # Parent row — always shown.
+                display.append(entry)
+                if path in self._expanded:
+                    for piece in groups[path]:
+                        child = by_path.get(piece)
+                        if child is not None:
+                            display.append(child)
+            elif path and path in child_paths:
+                # Child — only shown under its expanded parent (above).
+                continue
+            else:
+                display.append(entry)
+        self._entries = display
 
     def set_merge_candidates(self, paths: set[str]):
         """Paths that belong to a detected split-recording chain — tinted so
@@ -54,6 +126,24 @@ class RecordingTableModel(QAbstractTableModel):
 
     def entries(self) -> list[SyncRecordingEntry]:
         return self._entries
+
+    def is_parent(self, row: int) -> bool:
+        """True if the entry at ``row`` is a merge parent."""
+        if row < 0 or row >= len(self._entries):
+            return False
+        return self._entries[row].recording.output_path in self._merge_groups
+
+    def parent_path_at(self, row: int) -> str | None:
+        """The output_path if the row is a merge parent, else None."""
+        if self.is_parent(row):
+            return self._entries[row].recording.output_path
+        return None
+
+    def _child_paths(self) -> set[str]:
+        paths: set[str] = set()
+        for pieces in self._merge_groups.values():
+            paths.update(pieces)
+        return paths
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._entries)
@@ -73,6 +163,10 @@ class RecordingTableModel(QAbstractTableModel):
         entry = self._entries[index.row()]
         rec = entry.recording
         col_key = COLUMNS[index.column()][0]
+        path = rec.output_path
+
+        is_parent = path in self._merge_groups
+        is_child = bool(path) and not is_parent and path in self._child_paths()
 
         if role == Qt.ItemDataRole.DisplayRole:
             if col_key == "device":
@@ -94,7 +188,14 @@ class RecordingTableModel(QAbstractTableModel):
             elif col_key == "summary":
                 return "\u2713" if rec.summary_path else "\u2014"
             elif col_key == "name":
-                return rec.output_name or rec.name
+                base = rec.output_name or rec.name
+                if is_parent:
+                    glyph = "▾ " if path in self._expanded else "▸ "
+                    n = len(self._merge_groups[path])
+                    return f"{glyph}{base} ({n} pieces)"
+                elif is_child:
+                    return f"    ↳ {base}"
+                return base
             elif col_key == "created":
                 return f"{rec.create_date} {rec.create_time}"
             elif col_key == "duration":
