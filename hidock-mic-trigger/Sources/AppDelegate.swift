@@ -161,6 +161,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // --summarize-engine. Mirrors shared/llm_cli.py's engine ids.
     private let summarizeEngineKey = "summarizeEngine"
     private var summarizeEngine: String { UserDefaults.standard.string(forKey: summarizeEngineKey) ?? "auto" }
+    private let showCLIWhileSummarisingKey = "showCLIWhileSummarising"
+    /// Defaults to true when never set.
+    private var showCLIWhileSummarising: Bool {
+        UserDefaults.standard.object(forKey: showCLIWhileSummarisingKey) == nil
+            ? true : UserDefaults.standard.bool(forKey: showCLIWhileSummarisingKey)
+    }
     private let summarizeEngineOptions: [(id: String, label: String)] = [
         ("auto", "Auto (detect)"),
         ("claude", "Claude"),
@@ -549,6 +555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
         syncAutoSummarise = viewModel.syncAutoSummarise
         viewModel.summarizeEngine = summarizeEngine
+        viewModel.showCLIWhileSummarising = showCLIWhileSummarising
         refreshResolvedAutoEngine()
         // Default diarization to ON — speaker labels are almost always wanted
         if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
@@ -641,6 +648,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
         viewModel.onSetSummarizeEngine = { [weak self] id in self?.setSummarizeEngine(id) }
+        viewModel.onSetShowCLIWhileSummarising = { [weak self] on in
+            UserDefaults.standard.set(on, forKey: self?.showCLIWhileSummarisingKey ?? "showCLIWhileSummarising")
+            self?.viewModel.showCLIWhileSummarising = on
+        }
         viewModel.onShowTemplatesManager = { [weak self] in self?.openTemplatesManager() }
         viewModel.onIterateTemplate = { [weak self] url in self?.iterateTemplate(url) }
         viewModel.onCreateTemplate = { [weak self] in self?.createTemplateWithClaude() }
@@ -3304,7 +3315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// replaces the old summary file, and reopens the viewer on the new one.
     private func reclassifySummary(transcriptPath: String, template: String) {
         guard !transcriptPath.isEmpty else { return }
-        viewModel.cliPaneVisible = true
+        if showCLIWhileSummarising { viewModel.cliPaneVisible = true }
         viewModel.terminalController.appendActivity("")
         viewModel.terminalController.appendActivity("──── Reclassifying as \(template) ────")
         var args = ["summarize", transcriptPath, "--template", template]
@@ -3787,7 +3798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // start marker so the user sees what's happening (both auto- and
         // manual summarise flow through here). The authoritative run is the
         // managed subprocess below; the pane shows event-level activity.
-        viewModel.cliPaneVisible = true
+        if showCLIWhileSummarising { viewModel.cliPaneVisible = true }
         viewModel.terminalController.appendActivity("")
         viewModel.terminalController.appendActivity("──── Summarising \(name) ────")
         syncViewModelState()

@@ -100,6 +100,15 @@ struct ModelManagerView: View {
                 }
                 Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
                     .font(.caption).foregroundColor(.secondary)
+
+                Toggle("Show the CLI pane while summarising", isOn: Binding(
+                    get: { viewModel.showCLIWhileSummarising },
+                    set: { viewModel.onSetShowCLIWhileSummarising($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .padding(.top, 4)
+                Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
+                    .font(.caption).foregroundColor(.secondary)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
