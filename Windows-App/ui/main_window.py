@@ -1404,9 +1404,12 @@ class MainWindow(QMainWindow):
         self.device_strip.set_devices([agg[d] for d in order])
 
     def _on_device_reconnect(self, device_id: str):
-        # Force a fresh status query for all devices (per-device reconnect maps
-        # to a refresh; the extractor re-probes reachable devices).
-        self._refresh_status()
+        # Per-device reconnect: Plaud re-queries the cloud; HiDock/volume
+        # re-probe via the extractor refresh.
+        if device_id.startswith("plaud:"):
+            self._refresh_plaud(live=True)
+        else:
+            self._refresh_status()
 
     def _on_device_card_filter(self, device_id: str):
         """Card click toggles the table device filter (empty string = clear)."""

@@ -3,7 +3,51 @@
 Cross-platform feature tracking for macOS (Swift/AppKit) and Windows (Python/PyQt6).
 **Update this file whenever a feature is added, changed, or removed on either platform.**
 
-Last reviewed: 2026-04-22
+Last reviewed: 2026-06-18
+
+---
+
+## 2026-06-18 — Windows parity pass (branch `windows-parity`)
+
+A full audit (see `docs/PLAN-windows-parity-2026-06.md`) found Windows had
+stalled ~April while macOS gained the entire June feature wave. This pass
+ported that work. Status of the previously macOS-only subsystems:
+
+| Subsystem | Windows status now | Notes |
+|-----------|--------------------|-------|
+| Summarisation suite | **Both** | Summarise/All, auto-summarise, Summary column, in-app viewer, classify + reclassify, type filter, Templates manager, Provider menu, engine gating. Cowork removed (matches macOS). Shared `typed_summarize`/`llm_cli` backend. |
+| Plaud cloud sync | **Both** | Extractor backend ported to Windows-Script; account/token store (`core/plaud.py`), Pair Plaud, async merge + download routing + token refresh. SSO via QtWebEngine **or** manual token paste (WebEngine optional). |
+| Embedded CLI / terminal | **Both** | `ui/terminal_pane.py` (pywinpty PTY + QProcess fallback), CLI toggle, Terminal menu, Ask Claude Code, summarise activity feed. |
+| Model Manager rethink | **Both** | Two-tier Pipeline Stages / Supporting + per-stage backend picker → `pipeline_backends.json`. |
+| Voice Training window | **Both** | `ui/voice_training_dialog.py` — cluster review, sample playback/reassign, confirm-enrollment. |
+| Word-range split + recluster | **Both** | In `transcript_viewer.py` (+ speaker-stats header, Copy All). |
+| Transcription queue window | **Both** | Previously orphaned dialog now wired (live status, pause/resume/cancel/remove). |
+| Device card strip | **Both** | `ui/device_strip.py` — per-device card grid, state chip, counts, reconnect, click-to-filter. Storage bar omitted (Windows extractor doesn't report capacity — see Partial below). |
+| Skip/Unskip + opt-out | **Both** | Rename + transcription opt-out. |
+| Firmware menu, Delete Local Copy, unmark-downloaded | **Both** | |
+| Import Audio File + Imported device | **Both** | `core/imports.py` + virtual device. |
+| Speaker-count on initial transcribe | **Both** | `n_speakers` hint through `transcribe_file`. |
+| Download-complete toast | **Both** | Was status-bar only. |
+| Cache-paint on launch | **Both** (imported + Plaud) | HiDock cached-paint-before-probe not yet (see Partial). |
+| Trigger health (Stopped/Waiting/Active) | **Both** | From `mic_trigger.is_running()/is_holding()`. |
+| Merge-candidate auto-detection | **Partial** | Detection + row tint via `merge_finder.find_candidates`; macOS expandable parent/child merge rows + inline tick **not yet ported**. |
+| Transcribed-session badge | **Partial** | Windows shows it in the tray tooltip (PyQt6 has no dock-badge equivalent). |
+
+### Known partial / deferred (Windows)
+- **Merge expandable rows**: only detection + highlight; no parent/child expand UI.
+- **Per-device storage bar**: the Windows-Script extractor doesn't return card
+  capacity/used bytes — the device cards omit the storage line until it does.
+- **Plaud SSO**: uses QtWebEngine when `PyQt6-WebEngine` is installed, else a
+  manual token-paste form; a polished in-card "Sign in required" chip is basic.
+- **HiDock cache-paint-before-probe**: only imported + Plaud paint from cache on
+  launch; HiDock still paints after the first status query.
+- **Toolbar consolidation** (selection-driven verbs, dropped Download New) and a
+  per-SKU **idle** glyph for H1e (recording-state photos already differ) are
+  cosmetic and not ported.
+
+Verification on the build machine (macOS) is limited to import + ruff + unit
+tests (53 Windows-App + 127 usb-extractor pass); the PyQt GUI must be exercised
+on a real Windows build/CI run.
 
 ## How to use this file
 
@@ -81,9 +125,9 @@ Last reviewed: 2026-04-22
 | Stop download button | In progress bar | In progress bar | Both | |
 | Auto-download on refresh | Configurable | Configurable | Both | |
 | Volume device downloads (volume-import) | `AppDelegate.swift` | `main_window.py` | Both | |
-| Download complete notification | User notification | Status bar message only | Partial | Windows missing tray notification |
-| Plaud cloud sync (account login + cloud recordings) | `PlaudAuth.swift` + `plaud_client.py` | — | macOS only | Windows has no Plaud support |
-| Plaud cloud token auto-refresh | `plaud_client.py` refreshes the short-lived `pld_ut`; rotated tokens persisted to Keychain via `PlaudSession.applyingRefreshedTokens` | — | macOS only | 2026-06-11 — without it an expired token returns an empty cloud list ("connected, 0 recordings"); mirrors the plaud-sync app |
+| Download complete notification | User notification | Tray notification | Both | 2026-06-18 — Windows now posts a download-complete tray toast |
+| Plaud cloud sync (account login + cloud recordings) | `PlaudAuth.swift` + `plaud_client.py` | `core/plaud.py` + `ui/plaud_signin_dialog.py` + `Windows-Script/plaud_client.py` | Both | 2026-06-18 — Windows ported: sign-in (QtWebEngine or manual token paste), Pair Plaud, async cloud merge + download routing |
+| Plaud cloud token auto-refresh | `plaud_client.py` refreshes the short-lived `pld_ut`; rotated tokens persisted to Keychain via `PlaudSession.applyingRefreshedTokens` | `core/plaud.apply_refreshed_tokens` (QSettings) | Both | Windows persists rotated tokens from the extractor's `refreshedTokens` payload |
 
 ## Transcription
 
@@ -97,8 +141,8 @@ Last reviewed: 2026-04-22
 | Transcript viewer dialog | Speaker view + colors | Speaker view + colors | Both | |
 | Rename speakers in transcript | Click to edit | Click to rename | Both | |
 | Speaker enrollment on rename | Automatic | Subprocess call | Both | |
-| Mid-segment word-range split | `WordTokensView` drag-select + inline speaker bar (`TranscriptViewerView.swift`) | — | macOS only | 2026-04-28 — drag a range of words inside a segment, click a speaker pill in the inline bar below to assign that range as a new sub-segment (Layer 1 v2). Replaces the earlier sheet-based UX. Windows port pending. |
-| Re-cluster transcript using user labels | "Re-cluster from my labels" toolbar button → `transcribe.py recluster-with-anchors` | — | macOS only | 2026-04-27 — Layer 2 of voice-training plan. Treats every renamed speaker as an anchor centroid and reassigns every other segment to its nearest anchor by cosine similarity. Windows port pending. |
+| Mid-segment word-range split | `WordTokensView` drag-select + inline speaker bar (`TranscriptViewerView.swift`) | `transcript_viewer.py` (select words → assign speaker) | Both | 2026-06-18 — Windows ported; sub-segment timing approximated by word-count interpolation (no per-word timestamps in the diarized JSON) |
+| Re-cluster transcript using user labels | "Re-cluster from my labels" toolbar button → `transcribe.py recluster-with-anchors` | `transcript_viewer.py` "Re-cluster from my labels" | Both | 2026-06-18 — Windows ported; runs `recluster-with-anchors` on the diarized JSON |
 | Transcription complete notification | User notification with actions | Tray notification | Both | macOS has "Open Transcript" / "Show in Finder" actions |
 | Auto-emit `.srt` beside `.md` on transcription | `transcribe.py` (shared pipeline) | `transcribe.py` (shared pipeline) | Both | Shared `shared/srt_writer.py`. Speaker labels included when diarized. |
 | Export as SRT (context menu) | `onExportSRT` → `NSSavePanel` → copy/regenerate | `_ctx_export_srt` → `QFileDialog` → copy/regenerate | Both | Regenerates from `_diarized.json` / `_whisper.json` for legacy transcripts that predate auto-emit. |
