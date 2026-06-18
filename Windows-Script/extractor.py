@@ -1465,6 +1465,10 @@ def main() -> int:
     mark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to mark")
     mark_dl.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
 
+    unmark_dl = sub.add_parser("unmark-downloaded", help="Unmark recordings so they show as on-device / can be re-downloaded")
+    unmark_dl.add_argument("filenames", nargs="+", help="Device-side filenames to unmark")
+    unmark_dl.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
+
     pull = sub.add_parser("pull", help="Pull one known device-side .hda file")
     pull.add_argument("filename", help="Device-side filename, e.g. 2026Feb26-160117-Rec35.hda")
     pull.add_argument("--out", default="out", help="Output directory")
@@ -1564,6 +1568,24 @@ def main() -> int:
             marked.append(filename)
         save_state(state)
         print(json.dumps({"marked": marked}, indent=2))
+        return 0
+
+    if args.command == "unmark-downloaded":
+        state = load_state()
+        downloads = state["downloads"]
+        unmarked = []
+        vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
+        for filename in args.filenames:
+            state_key = f"{vol_prefix}{filename}"
+            record = downloads.get(state_key)
+            if record is not None:
+                record["downloaded"] = False
+                record["downloaded_at"] = None
+                record["updated_at"] = utc_now_iso()
+                downloads[state_key] = record
+            unmarked.append(filename)
+        save_state(state)
+        print(json.dumps({"unmarked": unmarked}, indent=2))
         return 0
 
     if args.command == "pull":

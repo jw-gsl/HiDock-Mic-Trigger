@@ -68,7 +68,7 @@ class RecordingTableModel(QAbstractTableModel):
                 if rec.downloaded and rec.local_exists:
                     return "\u2713 Downloaded"
                 elif rec.downloaded:
-                    return "\u2713 Marked"
+                    return "\u2713 Skipped"
                 elif rec.last_error:
                     return "\u2717 Failed"
                 return "\u25cf On device"
@@ -121,7 +121,7 @@ class RecordingTableModel(QAbstractTableModel):
                 if rec.downloaded and rec.local_exists:
                     return f"Downloaded to: {rec.output_path}"
                 if rec.downloaded:
-                    return "Marked as downloaded (file may not exist locally)"
+                    return "Skipped — marked as downloaded; won't re-download or auto-transcribe"
                 return "Recording is on the HiDock device"
             elif col_key == "name":
                 parts = [rec.output_name or rec.name]

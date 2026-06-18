@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
     _model_download_signal = pyqtSignal(int, int)       # bytes_downloaded, total_bytes
     _model_download_done_signal = pyqtSignal()
     _model_download_error_signal = pyqtSignal(str)
+    _txq_update_signal = pyqtSignal()                   # transcription queue changed
 
     def __init__(self, tray_icon: QSystemTrayIcon | None = None):
         super().__init__()
@@ -77,6 +78,12 @@ class MainWindow(QMainWindow):
         self._trigger_start_time: float | None = None
         self._last_transcript_path: str | None = None
         self._paired_devices: list = []  # list[PairedDevice] loaded lazily
+        # Transcription queue model (drives the pop-out queue dialog)
+        self._transcription_cancelled = False
+        self._txq_items: list[dict] = []   # [{filename, path, status, progress}]
+        self._txq_paused = False
+        self._txq_remove: set[str] = set()  # paths the user removed while queued
+        self._txq_dialog = None
 
         self._init_menu_bar()
         self._init_ui()
@@ -136,8 +143,12 @@ class MainWindow(QMainWindow):
         dl_new_act.triggered.connect(self._download_new)
         trans_all_act = actions_menu.addAction("Transcribe All")
         trans_all_act.triggered.connect(self._transcribe_all)
+        queue_act = actions_menu.addAction("Transcription Queue...")
+        queue_act.triggered.connect(self._show_transcription_queue)
         dl_model_act = actions_menu.addAction("Download Model")
         dl_model_act.triggered.connect(self._download_model)
+        firmware_act = actions_menu.addAction("Check for Firmware Updates...")
+        firmware_act.triggered.connect(self._open_firmware_page)
         actions_menu.addSeparator()
         voice_lib_act = actions_menu.addAction("Voice Library...")
         voice_lib_act.triggered.connect(self._show_voice_library)
@@ -329,9 +340,10 @@ class MainWindow(QMainWindow):
         self.download_new_btn = QPushButton("Download New")
         self.download_new_btn.clicked.connect(self._download_new)
         row2.addWidget(self.download_new_btn)
-        mark_btn = QPushButton("Mark Done")
-        mark_btn.clicked.connect(self._mark_downloaded)
-        row2.addWidget(mark_btn)
+        skip_btn = QPushButton("Skip")
+        skip_btn.setToolTip("Mark selected as downloaded and skip them — they won't re-download or auto-transcribe")
+        skip_btn.clicked.connect(self._mark_downloaded)
+        row2.addWidget(skip_btn)
 
         root.addLayout(row2)
 
@@ -567,6 +579,8 @@ class MainWindow(QMainWindow):
         if rec.output_path and os.path.exists(rec.output_path):
             open_loc_act = menu.addAction("Open File Location")
             open_loc_act.triggered.connect(lambda: self._open_file_location(rec.output_path))
+            del_local_act = menu.addAction("Delete Local Copy")
+            del_local_act.triggered.connect(lambda: self._ctx_delete_local_copy(entry))
 
         if rec.transcript_path and os.path.exists(rec.transcript_path):
             # Check for diarized JSON to open transcript viewer
@@ -593,6 +607,66 @@ class MainWindow(QMainWindow):
             self._refresh_status()
         except Exception as e:
             self.statusBar().showMessage(f"Error: {e}", 5000)
+
+    def _ctx_delete_local_copy(self, entry: SyncRecordingEntry):
+        """Delete the local MP3 and unmark it so it shows as on-device again.
+
+        Mirrors the macOS deleteLocalCopy: the device copy survives and can be
+        re-downloaded. Destructive on disk, so it confirms first.
+        """
+        rec = entry.recording
+        path = rec.output_path
+        if not path or not os.path.exists(path):
+            self.statusBar().showMessage("Local copy already absent", 3000)
+            return
+        resp = QMessageBox.warning(
+            self,
+            f"Delete local copy of {rec.output_name or rec.name}?",
+            f"The file will be removed from:\n{path}\n\n"
+            "The recording stays on the HiDock and can be re-downloaded any time.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            os.remove(path)
+        except OSError as e:
+            self.statusBar().showMessage(f"Failed to delete: {e}", 5000)
+            return
+        # Reset extractor state so the catalogue reports it as not-downloaded.
+        try:
+            device = self._device_for_entry(entry)
+            args = ["unmark-downloaded"]
+            pid = None
+            if entry.device_id.startswith("volume:"):
+                vol = device.volume_name if device else entry.device_id.split(":", 1)[1]
+                args += ["--volume-name", vol or ""]
+            elif device is not None:
+                pid = getattr(device, "product_id", None)
+            args.append(rec.name)
+            run_extractor(args, product_id=pid)
+        except Exception:
+            pass  # file is gone regardless; refresh will reflect localExists=False
+        self.statusBar().showMessage(f"Deleted local copy of {rec.output_name or rec.name}", 4000)
+        self._refresh_status()
+
+    def _device_for_entry(self, entry: SyncRecordingEntry):
+        """Best-effort lookup of the paired device backing an entry."""
+        try:
+            for d in getattr(self, "_paired_devices", []) or []:
+                if getattr(d, "device_id", None) == entry.device_id:
+                    return d
+        except Exception:
+            pass
+        return None
+
+    def _open_firmware_page(self):
+        """HiDock firmware ships via the vendor's HiNotes app / firmwares page;
+        there's no device-side OTA command, so we open the vendor page (parity
+        with the macOS 'Check for Firmware Updates...' menu item)."""
+        import webbrowser
+        webbrowser.open("https://www.hidock.com/pages/firmwares")
 
     def _ctx_transcribe(self, entry: SyncRecordingEntry):
         if entry.recording.output_path:
@@ -722,6 +796,7 @@ class MainWindow(QMainWindow):
         self._sync_complete_signal.connect(self._on_sync_complete)
         self._transcription_status_signal.connect(self._on_transcription_status)
         self._progress_signal.connect(self._on_progress)
+        self._txq_update_signal.connect(self._on_txq_update)
 
     # ── Settings ────────────────────────────────────────────────────────
 
@@ -979,7 +1054,8 @@ class MainWindow(QMainWindow):
             targets = [
                 Path(e.recording.output_path)
                 for e in entries
-                if e.recording.downloaded and e.recording.output_path and not e.recording.transcribed
+                if e.recording.downloaded and e.recording.local_exists
+                and e.recording.output_path and not e.recording.transcribed
             ]
             if targets:
                 self._run_transcription(targets)
@@ -1208,7 +1284,10 @@ class MainWindow(QMainWindow):
     def _transcribe_all(self):
         targets = []
         for entry in self._entries:
+            # Skipped recordings (marked downloaded but no local file) are
+            # opted out of transcription — matches the macOS Skip semantics.
             if (entry.recording.downloaded
+                    and entry.recording.local_exists
                     and not entry.recording.transcribed
                     and entry.recording.output_path):
                 targets.append(Path(entry.recording.output_path))
@@ -1353,6 +1432,8 @@ class MainWindow(QMainWindow):
         from core.transcription import transcribe_file
 
         self._transcription_cancelled = False
+        self._txq_paused = False
+        self._txq_remove = set()
         self.transcribe_selected_btn.setEnabled(False)
         self.transcribe_all_btn.setEnabled(False)
         self.cancel_transcription_btn.setVisible(True)
@@ -1360,27 +1441,56 @@ class MainWindow(QMainWindow):
 
         diarize = self.diarize_check.isChecked()
 
+        # Build the queue model that drives the pop-out queue dialog.
+        self._txq_items = [
+            {"filename": p.name, "path": str(p), "status": "queued", "progress": 0}
+            for p in targets
+        ]
+        self._txq_update_signal.emit()
+
+        import time
+
         def _worker():
             model = None
             results = []
+            total = len(targets)
             for i, mp3_path in enumerate(targets):
                 if self._transcription_cancelled:
                     break
+                item = self._txq_items[i]
+                # Honour a removed-while-queued request.
+                if item["path"] in self._txq_remove:
+                    item["status"] = "cancelled"
+                    self._txq_update_signal.emit()
+                    continue
+                # Honour pause between items.
+                while self._txq_paused and not self._transcription_cancelled:
+                    time.sleep(0.2)
+                if self._transcription_cancelled:
+                    break
+
+                item["status"] = "transcribing"
+                self._txq_update_signal.emit()
                 try:
                     def _progress(pct, _i=i):
-                        total_pct = int((_i * 100 + pct) / len(targets))
+                        total_pct = int((_i * 100 + pct) / total)
+                        self._txq_items[_i]["progress"] = pct
                         self._progress_signal.emit(
                             total_pct, 100,
-                            f"Transcribing {_i+1}/{len(targets)} — {total_pct}%"
+                            f"Transcribing {_i+1}/{total} — {total_pct}%"
                         )
+                        self._txq_update_signal.emit()
 
                     result = transcribe_file(
                         mp3_path, model=model, on_progress=_progress,
                         diarize=diarize,
                     )
                     results.append(result)
+                    item["status"] = "completed" if result.get("transcribed") else "failed"
                 except Exception as e:
+                    item["status"] = "failed"
                     self._log_signal.emit(f"Error transcribing {mp3_path.name}: {e}")
+                self._txq_update_signal.emit()
 
             succeeded = sum(1 for r in results if r.get("transcribed"))
             transcript_paths = [r["transcript_path"] for r in results if r.get("transcribed") and r.get("transcript_path")]
@@ -1399,9 +1509,49 @@ class MainWindow(QMainWindow):
     def _cancel_transcription(self):
         """Cancel the current transcription batch."""
         self._transcription_cancelled = True
+        self._txq_paused = False
         self.cancel_transcription_btn.setVisible(False)
         self.statusBar().showMessage("Transcription cancelled", 5000)
         self._hide_progress()
+        for item in self._txq_items:
+            if item["status"] in ("queued", "transcribing"):
+                item["status"] = "cancelled"
+        self._txq_update_signal.emit()
+
+    # ── Transcription queue dialog ───────────────────────────────────────
+
+    def _show_transcription_queue(self):
+        from ui.transcription_queue_dialog import TranscriptionQueueDialog
+        if self._txq_dialog is None:
+            dlg = TranscriptionQueueDialog(self)
+            dlg.pause_clicked.connect(self._txq_pause)
+            dlg.resume_clicked.connect(self._txq_resume)
+            dlg.cancel_clicked.connect(self._cancel_transcription)
+            dlg.remove_clicked.connect(self._txq_remove_index)
+            dlg.finished.connect(lambda _r: setattr(self, "_txq_dialog", None))
+            self._txq_dialog = dlg
+        self._txq_dialog.update_queue(self._txq_items, self._txq_paused)
+        self._txq_dialog.show()
+        self._txq_dialog.raise_()
+
+    @pyqtSlot()
+    def _on_txq_update(self):
+        if self._txq_dialog is not None:
+            self._txq_dialog.update_queue(self._txq_items, self._txq_paused)
+
+    def _txq_pause(self):
+        self._txq_paused = True
+
+    def _txq_resume(self):
+        self._txq_paused = False
+
+    def _txq_remove_index(self, index: int):
+        if 0 <= index < len(self._txq_items):
+            item = self._txq_items[index]
+            if item["status"] == "queued":
+                self._txq_remove.add(item["path"])
+                item["status"] = "cancelled"
+                self._on_txq_update()
 
     @pyqtSlot(object, object)
     def _on_transcription_done(self, data, error):
