@@ -121,6 +121,15 @@ class MainWindow(QMainWindow):
         # Check for updates after 5 seconds
         QTimer.singleShot(5000, self._check_for_updates_auto)
 
+        # Paint imported + cached Plaud recordings instantly on launch, before
+        # any USB probe or live cloud query (macOS cache-paint parity).
+        QTimer.singleShot(0, self._paint_cached_on_launch)
+
+    def _paint_cached_on_launch(self):
+        self._merge_imported_into_entries()
+        self._update_table()
+        self._refresh_plaud(live=False)
+
     # ── Menu Bar ────────────────────────────────────────────────────────────
 
     def _init_menu_bar(self):
