@@ -1400,7 +1400,16 @@ class MainWindow(QMainWindow):
         if filter_device_id is not None:
             visible = [e for e in visible if e.device_id == filter_device_id]
         if self.hide_downloaded_check.isChecked():
-            visible = [e for e in visible if not e.recording.downloaded]
+            # Keep merge-group members visible even though merged files are
+            # always downloaded — otherwise Hide Downloaded would drop whole
+            # merge groups (parent + children).
+            keep = set(self._merge_groups_cache.keys())
+            for pieces in self._merge_groups_cache.values():
+                keep.update(pieces)
+            visible = [
+                e for e in visible
+                if not e.recording.downloaded or e.recording.output_path in keep
+            ]
         type_filter = self.summary_type_combo.currentData()
         if type_filter is not None:
             from core import summarize

@@ -76,7 +76,12 @@ def _account_id_from(email: str | None, access_token: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", email.lower()).strip("-")
         if slug:
             return slug
-    return str(abs(hash(access_token)))
+    # Deterministic md5-based hash (NOT builtin hash(), which is salted per
+    # process) so a no-email account keeps the same id across restarts —
+    # otherwise its stored tokens, plaud:<id> device_id, and state.json
+    # download keys would orphan on the next launch.
+    from core.models import _stable_hash
+    return str(_stable_hash(access_token))
 
 
 def account_from_tokens(
