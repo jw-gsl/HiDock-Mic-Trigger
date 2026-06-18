@@ -10,6 +10,13 @@ a = Analysis(
     binaries=[],
     datas=[
         ('resources', 'resources'),
+        # Bundle the cross-platform packages the app imports lazily at runtime.
+        # Without these the frozen exe launches but every `shared.*` feature
+        # (Models/get_model_status, Summarise, etc.) fails with an import error.
+        # The runtime hook (pyi_rth_hidock.py) puts sys._MEIPASS on sys.path so
+        # `import shared.*` resolves inside the frozen exe as it does from source.
+        ('../shared', 'shared'),
+        ('../transcription-pipeline', 'transcription-pipeline'),
     ],
     hiddenimports=[
         'PyQt6.sip',
@@ -28,17 +35,27 @@ a = Analysis(
         'core.transcription',
         'core.model_download',
         'core.update_checker',
+        'core.summarize',
+        'core.plaud',
+        'core.imports',
         'ui.main_window',
         'ui.recording_model',
         'ui.model_manager_dialog',
         'ui.device_manager_dialog',
         'ui.voice_library_dialog',
+        'ui.voice_training_dialog',
         'ui.onboarding_dialog',
         'ui.transcript_viewer',
+        'ui.transcription_queue_dialog',
+        'ui.summary_viewer',
+        'ui.templates_manager_dialog',
+        'ui.terminal_pane',
+        'ui.device_strip',
+        'ui.plaud_signin_dialog',
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['pyi_rth_hidock.py'],
     excludes=[],
     noarchive=False,
 )
