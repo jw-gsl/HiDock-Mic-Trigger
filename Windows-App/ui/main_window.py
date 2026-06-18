@@ -84,6 +84,8 @@ class MainWindow(QMainWindow):
         self._txq_paused = False
         self._txq_remove: set[str] = set()  # paths the user removed while queued
         self._txq_dialog = None
+        self._notify_download_on_complete = False
+        self._downloaded_before = 0
 
         self._init_menu_bar()
         self._init_ui()
@@ -152,8 +154,12 @@ class MainWindow(QMainWindow):
         actions_menu.addSeparator()
         voice_lib_act = actions_menu.addAction("Voice Library...")
         voice_lib_act.triggered.connect(self._show_voice_library)
+        voice_train_act = actions_menu.addAction("Voice Training...")
+        voice_train_act.triggered.connect(self._show_voice_training)
         model_mgr_act = actions_menu.addAction("Models...")
         model_mgr_act.triggered.connect(self._show_model_manager)
+        terminal_act = actions_menu.addAction("Terminal...")
+        terminal_act.triggered.connect(self._show_terminal)
         device_mgr_act = actions_menu.addAction("Devices...")
         device_mgr_act.triggered.connect(self._show_device_manager)
         actions_menu.addSeparator()
@@ -492,6 +498,13 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self.table_view, stretch=1)
 
+        # ── Embedded CLI / terminal pane (hidden until toggled) ─────────
+        from ui.terminal_pane import TerminalPane
+        self.terminal_pane = TerminalPane(self)
+        self.terminal_pane.setVisible(False)
+        self.terminal_pane.setMinimumHeight(180)
+        root.addWidget(self.terminal_pane)
+
         # ── Progress bar ────────────────────────────────────────────────
         progress_row = QHBoxLayout()
         progress_row.setSpacing(8)
@@ -520,6 +533,11 @@ class MainWindow(QMainWindow):
 
         footer_row.addStretch()
 
+        self.cli_toggle_btn = QPushButton("CLI")
+        self.cli_toggle_btn.setCheckable(True)
+        self.cli_toggle_btn.setToolTip("Show/hide the embedded CLI pane")
+        self.cli_toggle_btn.clicked.connect(self._toggle_cli_pane)
+        footer_row.addWidget(self.cli_toggle_btn)
         models_btn = QPushButton("Models")
         models_btn.clicked.connect(self._show_model_manager)
         footer_row.addWidget(models_btn)
@@ -575,6 +593,10 @@ class MainWindow(QMainWindow):
         if rec.summary_path and os.path.exists(rec.summary_path):
             view_summ_act = menu.addAction("View Summary")
             view_summ_act.triggered.connect(lambda: self._ctx_view_summary(entry))
+
+        if rec.transcript_path and os.path.exists(rec.transcript_path):
+            ask_act = menu.addAction("Ask Claude Code")
+            ask_act.triggered.connect(lambda: self._ctx_ask_claude(entry))
 
         if rec.output_path and os.path.exists(rec.output_path):
             open_loc_act = menu.addAction("Open File Location")
@@ -1048,6 +1070,21 @@ class MainWindow(QMainWindow):
         self._update_tray_tooltip()
         self.statusBar().showMessage(f"Loaded {len(entries)} recordings", 3000)
 
+        # Download-complete toast (armed by _run_download_commands). Mirrors the
+        # macOS download-complete notification, which the Windows app lacked.
+        if self._notify_download_on_complete:
+            self._notify_download_on_complete = False
+            now_downloaded = sum(1 for e in entries if e.recording.downloaded)
+            new_count = max(0, now_downloaded - self._downloaded_before)
+            if (self._tray_icon and new_count > 0
+                    and self.settings.value("notifyDownload", True, type=bool)):
+                self._tray_icon.showMessage(
+                    "Download Complete",
+                    f"Downloaded {new_count} recording(s)",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+
         # Auto-transcribe after download-for-transcription
         if self._transcribe_after_download:
             self._transcribe_after_download = False
@@ -1205,6 +1242,10 @@ class MainWindow(QMainWindow):
         """Run multiple extractor download commands sequentially in a background thread."""
         self.sync_status_label.setText("Downloading...")
         self._show_progress(0, 0, "Downloading...")
+        # Arm a download-complete toast for the next successful sync-complete
+        # (mirrors the macOS download-complete notification).
+        self._notify_download_on_complete = True
+        self._downloaded_before = sum(1 for e in self._entries if e.recording.downloaded)
 
         def _run():
             last_data = None
@@ -1888,6 +1929,8 @@ class MainWindow(QMainWindow):
         self._save_geometry()
         if self._force_quit or self._tray_icon is None:
             self.mic_trigger.stop()
+            if hasattr(self, "terminal_pane"):
+                self.terminal_pane.shutdown()
             event.accept()
             super().closeEvent(event)
         else:
@@ -2329,6 +2372,31 @@ class MainWindow(QMainWindow):
         from ui.templates_manager_dialog import TemplatesManagerDialog
         TemplatesManagerDialog(self).exec()
 
+    # ── Embedded CLI / terminal pane ─────────────────────────────────────
+
+    def _toggle_cli_pane(self):
+        visible = not self.terminal_pane.isVisible()
+        self.terminal_pane.setVisible(visible)
+        self.cli_toggle_btn.setChecked(visible)
+
+    def _show_terminal(self):
+        """Reveal the CLI pane (parity with the macOS Terminal... menu)."""
+        if not self.terminal_pane.isVisible():
+            self.terminal_pane.setVisible(True)
+            self.cli_toggle_btn.setChecked(True)
+
+    def _ctx_ask_claude(self, entry: SyncRecordingEntry):
+        """Open the CLI pane and run `claude <transcript>` on the recording."""
+        tp = entry.recording.transcript_path
+        if not tp:
+            return
+        self._show_terminal()
+        self.terminal_pane.ask_claude(tp)
+
+    def _show_voice_training(self):
+        from ui.voice_training_dialog import VoiceTrainingDialog
+        VoiceTrainingDialog(self).exec()
+
     def _selected_transcribed_entries(self) -> list:
         """Selected rows that have a transcript (eligible for summarising)."""
         rows = {i.row() for i in self.table_view.selectionModel().selectedRows()}
@@ -2392,6 +2460,12 @@ class MainWindow(QMainWindow):
             return
         self.summarise_btn.setEnabled(False)
         self.statusBar().showMessage(f"Summarising {len(targets)} transcript(s)...")
+        # Surface activity in the CLI pane (display-only feed), mirroring the
+        # macOS in-app summarise activity.
+        if hasattr(self, "terminal_pane"):
+            self.terminal_pane.append_activity(
+                f"Summarising {len(targets)} transcript(s) with {summarize.resolved_engine()}…"
+            )
 
         def _worker():
             results = []
@@ -2432,8 +2506,12 @@ class MainWindow(QMainWindow):
         )
         if succeeded == 0 and first_err:
             self.statusBar().showMessage(f"Summarise failed: {first_err}", 6000)
+            if hasattr(self, "terminal_pane"):
+                self.terminal_pane.append_activity(f"Summarise failed: {first_err}")
         else:
             self.statusBar().showMessage(f"Summarised {succeeded}/{total}", 5000)
+            if hasattr(self, "terminal_pane"):
+                self.terminal_pane.append_activity(f"Summarised {succeeded}/{total}.")
 
     def _on_summary_type_filter_changed(self, index):
         self._update_table()

@@ -14,5 +14,8 @@ mutagen>=1.47
 pycaw>=20240210
 comtypes>=1.4
 
+# Embedded CLI pane (PTY backend, ConPTY on Windows)
+pywinpty; sys_platform == "win32"
+
 # Build
 pyinstaller>=6.0
