@@ -145,6 +145,15 @@ class MainWindow(QMainWindow):
         model_mgr_act.triggered.connect(self._show_model_manager)
         device_mgr_act = actions_menu.addAction("Devices...")
         device_mgr_act.triggered.connect(self._show_device_manager)
+        actions_menu.addSeparator()
+        summarise_all_act = actions_menu.addAction("Summarise All")
+        summarise_all_act.triggered.connect(self._summarise_all)
+        templates_act = actions_menu.addAction("Summary Templates...")
+        templates_act.triggered.connect(self._show_templates_manager)
+        # Summarisation Provider submenu (engine choice) — mirrors the macOS
+        # "Summarisation Provider" menu. Built dynamically from installed CLIs.
+        self._provider_menu = actions_menu.addMenu("Summarisation Provider")
+        self._rebuild_provider_menu()
 
         # Trigger menu
         trigger_menu = menubar.addMenu("Trigger")
@@ -360,6 +369,11 @@ class MainWindow(QMainWindow):
         self.transcribe_all_btn.clicked.connect(self._transcribe_all)
         row3.addWidget(self.transcribe_all_btn)
 
+        self.summarise_btn = QPushButton("Summarise")
+        self.summarise_btn.setToolTip("Summarise selected transcribed recordings with the AI engine")
+        self.summarise_btn.clicked.connect(self._summarise_selected)
+        row3.addWidget(self.summarise_btn)
+
         self.merge_btn = QPushButton("Merge")
         self.merge_btn.setToolTip("Merge selected recordings into one file")
         self.merge_btn.clicked.connect(self._merge_selected)
@@ -417,15 +431,32 @@ class MainWindow(QMainWindow):
         self.device_filter_combo.currentIndexChanged.connect(self._on_device_filter_changed)
         row4.addWidget(self.device_filter_combo)
 
+        # Summary-type filter (hidden until summaries exist) — mirrors the
+        # macOS summaryTypeFilter dropdown.
+        self.summary_type_label = QLabel("Type:")
+        self.summary_type_label.setStyleSheet("font-size: 11px; font-weight: 600;")
+        self.summary_type_label.setVisible(False)
+        row4.addWidget(self.summary_type_label)
+        self.summary_type_combo = QComboBox()
+        self.summary_type_combo.setMinimumWidth(120)
+        self.summary_type_combo.addItem("All", userData=None)
+        self.summary_type_combo.currentIndexChanged.connect(self._on_summary_type_filter_changed)
+        self.summary_type_combo.setVisible(False)
+        row4.addWidget(self.summary_type_combo)
+
         row4.addStretch()
 
-        # Right: hide downloaded + auto-download
+        # Right: hide downloaded + auto-download + auto-summarise
         self.hide_downloaded_check = QCheckBox("Hide Downloaded")
         self.hide_downloaded_check.stateChanged.connect(self._on_hide_downloaded_changed)
         row4.addWidget(self.hide_downloaded_check)
         self.auto_download_check = QCheckBox("Auto-download")
         self.auto_download_check.stateChanged.connect(self._on_auto_download_changed)
         row4.addWidget(self.auto_download_check)
+        self.auto_summarise_check = QCheckBox("Auto-summarise")
+        self.auto_summarise_check.setToolTip("Automatically summarise newly transcribed recordings")
+        self.auto_summarise_check.stateChanged.connect(self._on_auto_summarise_changed)
+        row4.addWidget(self.auto_summarise_check)
 
         root.addLayout(row4)
 
@@ -442,7 +473,7 @@ class MainWindow(QMainWindow):
         self.table_view.doubleClicked.connect(self._on_row_double_click)
 
         header = self.table_view.horizontalHeader()
-        widths = [100, 100, 85, 250, 150, 80, 80, 300]
+        widths = [100, 100, 85, 70, 250, 150, 80, 80, 300]
         for i, w in enumerate(widths):
             if i < self.table_model.columnCount():
                 header.resizeSection(i, w)
@@ -477,9 +508,6 @@ class MainWindow(QMainWindow):
 
         footer_row.addStretch()
 
-        cowork_btn = QPushButton("\u2728 Cowork")
-        cowork_btn.clicked.connect(self._show_cowork_prompt)
-        footer_row.addWidget(cowork_btn)
         models_btn = QPushButton("Models")
         models_btn.clicked.connect(self._show_model_manager)
         footer_row.addWidget(models_btn)
@@ -527,6 +555,14 @@ class MainWindow(QMainWindow):
         if rec.downloaded and rec.output_path and not rec.transcribed:
             trans_act = menu.addAction("Transcribe")
             trans_act.triggered.connect(lambda: self._ctx_transcribe(entry))
+
+        if rec.transcribed and rec.transcript_path:
+            summ_act = menu.addAction("Summarise")
+            summ_act.triggered.connect(lambda: self._ctx_summarise(entry))
+
+        if rec.summary_path and os.path.exists(rec.summary_path):
+            view_summ_act = menu.addAction("View Summary")
+            view_summ_act.triggered.connect(lambda: self._ctx_view_summary(entry))
 
         if rec.output_path and os.path.exists(rec.output_path):
             open_loc_act = menu.addAction("Open File Location")
@@ -710,6 +746,13 @@ class MainWindow(QMainWindow):
         self.diarize_check.setChecked(
             self.settings.value("diarizeEnabled", True, type=bool)
         )
+        # Auto-summarise + engine state come from the shared [summarization]
+        # config (same store the Mac app and pipeline use), not QSettings.
+        from core import summarize
+        self.auto_summarise_check.blockSignals(True)
+        self.auto_summarise_check.setChecked(summarize.auto_summarize_enabled())
+        self.auto_summarise_check.blockSignals(False)
+        self._update_summarise_button_state()
 
         if auto_start:
             QTimer.singleShot(500, self._start_trigger)
@@ -884,6 +927,9 @@ class MainWindow(QMainWindow):
         if data and isinstance(data, dict) and data.get("_transcription_done"):
             self._on_transcription_done(data, error)
             return
+        if data and isinstance(data, dict) and data.get("_summarization_done"):
+            self._on_summarization_done(data, error)
+            return
         if error:
             self.sync_status_label.setText(str(error))
             self.sync_status_dot.setObjectName("statusDotDisconnected")
@@ -945,12 +991,21 @@ class MainWindow(QMainWindow):
                 self._download_new()
 
     def _update_table(self):
+        self._rebuild_summary_type_filter()
         visible = self._entries
         filter_device_id = self.device_filter_combo.currentData()
         if filter_device_id is not None:
             visible = [e for e in visible if e.device_id == filter_device_id]
         if self.hide_downloaded_check.isChecked():
             visible = [e for e in visible if not e.recording.downloaded]
+        type_filter = self.summary_type_combo.currentData()
+        if type_filter is not None:
+            from core import summarize
+            visible = [
+                e for e in visible
+                if e.recording.summary_path
+                and summarize.summary_type_of(e.recording.summary_path) == type_filter
+            ]
         self.table_model.set_entries(visible)
         self._update_summary()
 
@@ -958,11 +1013,14 @@ class MainWindow(QMainWindow):
         total = len(self._entries)
         downloaded = sum(1 for e in self._entries if e.recording.downloaded)
         transcribed = sum(1 for e in self._entries if e.recording.transcribed)
+        summarised = sum(1 for e in self._entries if e.recording.summary_path)
         parts = [f"{total} rec"]
         if downloaded:
             parts.append(f"{downloaded} dl")
         if transcribed:
             parts.append(f"{transcribed} tx")
+        if summarised:
+            parts.append(f"{summarised} sum")
         self.summary_label.setText(" \u00b7 ".join(parts))
 
     def _refresh_transcription_state(self):
@@ -973,6 +1031,8 @@ class MainWindow(QMainWindow):
                 if key in status:
                     entry.recording.transcribed = status[key].get("transcribed", False)
                     entry.recording.transcript_path = status[key].get("transcript_path")
+                    entry.recording.speakers_tagged = status[key].get("speakers_tagged", False)
+                    entry.recording.summary_path = status[key].get("summary_path")
         except Exception:
             pass
 
@@ -1356,6 +1416,19 @@ class MainWindow(QMainWindow):
         self._hide_progress()
         self._refresh_transcription_state()
         self._update_table()
+
+        # Auto-summarise newly transcribed recordings when enabled and an
+        # engine is available (mirrors the macOS syncAutoSummarise toggle).
+        from core import summarize
+        if (transcript_paths and summarize.auto_summarize_enabled()
+                and summarize.resolved_engine() is not None):
+            sdir = summarize.summaries_dir()
+            unsummarised = [
+                tp for tp in transcript_paths
+                if not list(sdir.glob(f"{Path(tp).stem} - *.md"))
+            ]
+            if unsummarised:
+                self._run_summarization(unsummarised)
 
         # Store last transcript path for click-to-open from tray notification
         if transcript_paths:
@@ -2044,10 +2117,205 @@ class MainWindow(QMainWindow):
 
     # ── Voice Library ──────────────────────────────────────────────────
 
-    def _show_cowork_prompt(self):
-        from ui.cowork_dialog import CoworkDialog
-        dlg = CoworkDialog(self)
-        dlg.exec()
+    # ── Summarisation ──────────────────────────────────────────────────
+
+    def _rebuild_provider_menu(self):
+        """Rebuild the Summarisation Provider submenu from installed CLIs.
+
+        Mirrors the macOS rebuildSummarizeSubmenu: a radio group of
+        Auto / Claude / Codex / Gemini / Ollama / None, with the resolved
+        engine surfaced in the 'Auto' label.
+        """
+        from core import summarize
+        menu = self._provider_menu
+        menu.clear()
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        current = summarize.configured_engine()
+        installed = set(summarize.available_engines())
+        resolved = summarize.resolved_engine()
+        for name in summarize.ENGINE_CHOICES:
+            if name == "auto":
+                label = f"Auto ({resolved or 'none available'})"
+            elif name == "none":
+                label = "None (disable)"
+            else:
+                label = name.capitalize()
+                if name not in installed:
+                    label += " — not installed"
+            act = QAction(label, self, checkable=True)
+            act.setChecked(name == current)
+            if name not in ("auto", "none") and name not in installed:
+                act.setEnabled(False)
+            act.triggered.connect(lambda _checked, n=name: self._set_summarise_engine(n))
+            group.addAction(act)
+            menu.addAction(act)
+        self._update_summarise_button_state()
+
+    def _set_summarise_engine(self, name: str):
+        from core import summarize
+        summarize.set_configured_engine(name)
+        self._rebuild_provider_menu()
+        self.statusBar().showMessage(f"Summarisation engine: {name}", 3000)
+
+    def _update_summarise_button_state(self):
+        """Enable Summarise only when an engine resolves (a CLI is installed)."""
+        from core import summarize
+        ok = summarize.resolved_engine() is not None
+        if hasattr(self, "summarise_btn"):
+            self.summarise_btn.setEnabled(ok)
+            self.summarise_btn.setToolTip(
+                "Summarise selected transcribed recordings"
+                if ok else
+                "No AI CLI found. Install claude / codex / gemini / ollama to enable."
+            )
+
+    def _on_auto_summarise_changed(self, state):
+        from core import summarize
+        enabled = state == Qt.CheckState.Checked.value
+        summarize.set_auto_summarize(enabled)
+
+    def _show_templates_manager(self):
+        from ui.templates_manager_dialog import TemplatesManagerDialog
+        TemplatesManagerDialog(self).exec()
+
+    def _selected_transcribed_entries(self) -> list:
+        """Selected rows that have a transcript (eligible for summarising)."""
+        rows = {i.row() for i in self.table_view.selectionModel().selectedRows()}
+        entries = self.table_model.entries()
+        out = []
+        for r in sorted(rows):
+            if r < len(entries):
+                e = entries[r]
+                if e.recording.transcribed and e.recording.transcript_path:
+                    out.append(e)
+        return out
+
+    def _summarise_selected(self):
+        entries = self._selected_transcribed_entries()
+        if not entries:
+            self.statusBar().showMessage(
+                "Select one or more transcribed recordings to summarise", 3000
+            )
+            return
+        paths = [e.recording.transcript_path for e in entries]
+        self._run_summarization(paths)
+
+    def _summarise_all(self):
+        entries = [
+            e for e in self._entries
+            if e.recording.transcribed and e.recording.transcript_path
+            and not e.recording.summary_path
+        ]
+        if not entries:
+            self.statusBar().showMessage("No un-summarised transcripts to process", 3000)
+            return
+        self._run_summarization([e.recording.transcript_path for e in entries])
+
+    def _ctx_summarise(self, entry: SyncRecordingEntry):
+        if entry.recording.transcript_path:
+            self._run_summarization([entry.recording.transcript_path])
+
+    def _ctx_view_summary(self, entry: SyncRecordingEntry):
+        if entry.recording.summary_path and os.path.exists(entry.recording.summary_path):
+            self._open_summary_viewer(entry.recording.summary_path, entry.recording.transcript_path)
+
+    def _open_summary_viewer(self, summary_path: str, transcript_path: str | None):
+        from ui.summary_viewer import SummaryViewer
+        viewer = SummaryViewer(summary_path, transcript_path, self)
+        viewer.resummarized.connect(lambda _p: (self._refresh_transcription_state(), self._update_table()))
+        viewer.exec()
+
+    def _run_summarization(self, transcript_paths: list):
+        """Summarise transcripts in a background thread (mirrors _run_transcription)."""
+        from core import summarize
+        if summarize.resolved_engine() is None:
+            QMessageBox.information(
+                self, "No AI engine",
+                "No AI CLI was found on PATH.\n\n"
+                "Install one of: claude, codex, gemini, or ollama, then pick it "
+                "under Actions → Summarisation Provider."
+            )
+            return
+        targets = [Path(p) for p in transcript_paths if p]
+        if not targets:
+            return
+        self.summarise_btn.setEnabled(False)
+        self.statusBar().showMessage(f"Summarising {len(targets)} transcript(s)...")
+
+        def _worker():
+            results = []
+            for i, tpath in enumerate(targets):
+                self._progress_signal.emit(
+                    int(i * 100 / len(targets)), 100,
+                    f"Summarising {i+1}/{len(targets)}..."
+                )
+                try:
+                    res = summarize.summarize_transcript(tpath)
+                    results.append(res)
+                except Exception as e:  # never crash the worker
+                    results.append({"summarized": False, "error": str(e)})
+            succeeded = sum(1 for r in results if r.get("summarized"))
+            self._sync_complete_signal.emit(
+                {
+                    "_summarization_done": True,
+                    "succeeded": succeeded,
+                    "total": len(targets),
+                    "results": results,
+                },
+                None,
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_summarization_done(self, data, error):
+        self._update_summarise_button_state()
+        succeeded = data.get("succeeded", 0)
+        total = data.get("total", 0)
+        self._hide_progress()
+        self._refresh_transcription_state()
+        self._update_table()
+        # Surface the first error, if any, so failures aren't silent.
+        first_err = next(
+            (r.get("error") for r in data.get("results", []) if not r.get("summarized")),
+            None,
+        )
+        if succeeded == 0 and first_err:
+            self.statusBar().showMessage(f"Summarise failed: {first_err}", 6000)
+        else:
+            self.statusBar().showMessage(f"Summarised {succeeded}/{total}", 5000)
+
+    def _on_summary_type_filter_changed(self, index):
+        self._update_table()
+
+    def _rebuild_summary_type_filter(self):
+        """Populate the summary-type filter from current summaries; hide if none.
+
+        Mirrors macOS summaryTypeOptions / auto-hide behaviour.
+        """
+        from core import summarize
+        combo = self.summary_type_combo
+        types = set()
+        for e in self._entries:
+            sp = e.recording.summary_path
+            if sp:
+                t = summarize.summary_type_of(sp)
+                if t:
+                    types.add(t)
+        has_any = bool(types)
+        self.summary_type_label.setVisible(has_any)
+        combo.setVisible(has_any)
+        prev = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("All", userData=None)
+        for t in sorted(types):
+            combo.addItem(t, userData=t)
+        for i in range(combo.count()):
+            if combo.itemData(i) == prev:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
 
     def _show_voice_library(self):
         from ui.voice_library_dialog import VoiceLibraryDialog

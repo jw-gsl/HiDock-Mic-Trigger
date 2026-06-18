@@ -10,6 +10,7 @@ COLUMNS = [
     ("device", "Device"),
     ("status", "Status"),
     ("transcribed", "Transcribed"),
+    ("summary", "Summary"),
     ("name", "Recording"),
     ("created", "Created"),
     ("duration", "Length"),
@@ -77,6 +78,8 @@ class RecordingTableModel(QAbstractTableModel):
                 elif rec.transcribed:
                     return "\U0001f3f7"  # tag emoji
                 return "\u2014"
+            elif col_key == "summary":
+                return "\u2713" if rec.summary_path else "\u2014"
             elif col_key == "name":
                 return rec.output_name or rec.name
             elif col_key == "created":
@@ -106,6 +109,8 @@ class RecordingTableModel(QAbstractTableModel):
                 elif rec.transcribed:
                     return _ORANGE
                 return _GRAY
+            elif col_key == "summary":
+                return _PURPLE if rec.summary_path else _GRAY
             elif col_key == "path":
                 return _SECONDARY
 
@@ -133,6 +138,10 @@ class RecordingTableModel(QAbstractTableModel):
                 elif rec.transcribed:
                     return "Speakers need tagging — click to open transcript"
                 return "Not transcribed"
+            elif col_key == "summary":
+                if rec.summary_path:
+                    return f"Summarised — click to view: {rec.summary_path}"
+                return "Not summarised"
             elif col_key == "path":
                 return rec.output_path or "Not downloaded"
 
