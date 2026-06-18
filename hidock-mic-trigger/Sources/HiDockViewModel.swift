@@ -545,6 +545,11 @@ final class HiDockViewModel: ObservableObject {
         ("ollama", "Ollama (local)"),
     ]
     var onSetSummarizeEngine: (String) -> Void = { _ in }
+    /// When true (default), summarising auto-opens the CLI pane so the user
+    /// sees progress. Off = summaries run silently (still works — the headless
+    /// `claude --print` uses the one-time global login, no pane needed).
+    @Published var showCLIWhileSummarising: Bool = true
+    var onSetShowCLIWhileSummarising: (Bool) -> Void = { _ in }
 
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
