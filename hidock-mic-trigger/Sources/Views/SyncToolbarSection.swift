@@ -200,13 +200,17 @@ struct SyncToolbarSection: View {
                     let count = HiDockViewModel.hideableStatuses
                         .filter { viewModel.hiddenStatuses.contains($0) }.count
                     Label {
-                        // Reserve the width of the widest state ("Hidden (2)")
-                        // with a hidden placeholder so the toolbar row doesn't
-                        // shift as the label flips between "Hide" and "Hidden (N)".
-                        ZStack(alignment: .leading) {
-                            Text("Hidden (\(HiDockViewModel.hideableStatuses.count))").hidden()
-                            Text(count == 0 ? "Hide" : "Hidden (\(count))")
-                        }
+                        // The layout-participating view is ALWAYS the widest
+                        // state ("Hidden (2)") so the menu measures a constant
+                        // width and the dropdown arrow / toolbar row never
+                        // shifts. The actual label is drawn as a leading
+                        // overlay on top (overlays don't affect layout).
+                        Text("Hidden (\(HiDockViewModel.hideableStatuses.count))")
+                            .hidden()
+                            .overlay(alignment: .leading) {
+                                Text(count == 0 ? "Hide" : "Hidden (\(count))")
+                                    .fixedSize()
+                            }
                     } icon: {
                         Image(systemName: "eye.slash")
                     }
