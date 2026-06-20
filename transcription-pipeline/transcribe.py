@@ -579,6 +579,45 @@ def cmd_transcribe_batch(args):
     }))
 
 
+def cmd_notes(args):
+    """List/search/get/stats over typed meeting summaries (~/HiDock/Summaries).
+    The terminal-facing twin of the MCP server's summary tools."""
+    import json as _json
+    from shared import summaries_index as si
+    action = args.action
+    if action == "list":
+        rows = si.list_summaries(type=args.type, area=args.area, since=args.since, limit=args.limit)
+        if args.json:
+            print(_json.dumps(rows, indent=2))
+        elif not rows:
+            print("No summaries found for that filter.")
+        else:
+            for s in rows:
+                print(f"- {s['title']}  [{s['type']} / {s['area']}]  ({s['recorded']})  — {s['filename']}")
+    elif action == "search":
+        rows = si.search_summaries(args.query, limit=args.limit)
+        if args.json:
+            print(_json.dumps(rows, indent=2))
+        elif not rows:
+            print("No matches.")
+        else:
+            for s in rows:
+                print(f"- {s['title']}  [{s['type']} / {s['area']}]  ({s['recorded']})")
+                print(f"    {s['snippet']}")
+                print(f"    {s['filename']}")
+    elif action == "get":
+        s = si.get_summary(args.id or args.query)
+        if not s:
+            print("No summary matched.")
+        elif args.json:
+            print(_json.dumps(s, indent=2))
+        else:
+            print(f"# {s['title']}\nType: {s['type']} | Area: {s['area']} | Recorded: {s['recorded']}\n")
+            print(s["body"])
+    elif action == "stats":
+        print(_json.dumps(si.summary_stats(), indent=2))
+
+
 def cmd_detect_engine(_args):
     """Report which AI CLI 'auto' resolves to (PATH detection, priority order
     claude > codex > gemini > ollama). Used by the desktop app so its
@@ -1020,6 +1059,17 @@ def main():
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
     p_detect.set_defaults(func=cmd_detect_engine)
+
+    p_notes = sub.add_parser("notes", help="List/search/get your typed meeting summaries (~/HiDock/Summaries)")
+    p_notes.add_argument("action", choices=["list", "search", "get", "stats"])
+    p_notes.add_argument("--query", "-q", default="", help="search text (search) or identifier (get)")
+    p_notes.add_argument("--id", default="", help="recording/title/filename substring (get)")
+    p_notes.add_argument("--type", default=None, help="filter by classification type, e.g. 'Brainstorming'")
+    p_notes.add_argument("--area", default=None, help="filter by area substring")
+    p_notes.add_argument("--since", default=None, help="ISO date lower bound, e.g. 2026-06-01")
+    p_notes.add_argument("--limit", type=int, default=50)
+    p_notes.add_argument("--json", action="store_true")
+    p_notes.set_defaults(func=cmd_notes)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):
