@@ -197,12 +197,19 @@ struct SyncToolbarSection: View {
                         }
                     }
                 } label: {
-                    let active = HiDockViewModel.hideableStatuses
-                        .filter { viewModel.hiddenStatuses.contains($0) }
-                    Label(
-                        active.isEmpty ? "Hide" : "Hide: \(active.joined(separator: ", "))",
-                        systemImage: "eye.slash"
-                    )
+                    let anyHidden = HiDockViewModel.hideableStatuses
+                        .contains { viewModel.hiddenStatuses.contains($0) }
+                    Label {
+                        // Reserve the width of the wider word ("Hidden") with a
+                        // hidden placeholder so the toolbar row doesn't shift
+                        // when the label flips between "Hide" and "Hidden".
+                        ZStack(alignment: .leading) {
+                            Text("Hidden").hidden()
+                            Text(anyHidden ? "Hidden" : "Hide")
+                        }
+                    } icon: {
+                        Image(systemName: "eye.slash")
+                    }
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
