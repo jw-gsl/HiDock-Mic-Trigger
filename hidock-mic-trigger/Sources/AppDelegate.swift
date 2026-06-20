@@ -5164,9 +5164,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // transition. Treat "never seen" (nil) as not-connected so the
         // very first live probe after launch counts as a fresh connect.
         let wasConnected = syncDeviceConnected[device.deviceId] ?? false
+        // A cached response (cached-status, or a live probe that timed out and
+        // fell back to cache) carries connected:false because we didn't get an
+        // authoritative live read — NOT because the device is gone. Treat it as
+        // a catalog-only paint: update recordings/storage below, but leave the
+        // connection baseline untouched so it can't clobber a real Connected
+        // state and make the next live probe look "freshly connected" (which
+        // spuriously re-fired the download-new catch-all — the flapping bug).
+        let isCached = status.cached == true
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
-        syncDeviceConnected[device.deviceId] = status.connected
+        if !isCached {
+            syncDeviceConnected[device.deviceId] = status.connected
+        }
         if status.connected {
             syncDeviceLastOK[device.deviceId] = Date()
             syncDeviceLastError.removeValue(forKey: device.deviceId)
@@ -5301,7 +5311,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 viewModel.syncStatus = "Not connected"
                 viewModel.syncStatusLevel = .secondary
             }
-            updateMenuSyncStatus(connected: status.connected)
+            // Use the preserved per-device state (anyConnected), not
+            // status.connected — a cached response reports connected:false but
+            // must not flip the menu to disconnected.
+            updateMenuSyncStatus(connected: anyConnected)
         }
         syncViewModelState()
     }

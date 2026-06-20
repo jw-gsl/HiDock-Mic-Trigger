@@ -42,10 +42,29 @@ Two layers:
   show when `totalDownloaded > 0`; otherwise the status line stays quiet
   (`refreshSyncStatus` restores connected/blank).
 
+## Proper fix — cached/live flag (done 2026-06-20)
+Added a `cached: Bool?` field to `HiDockSyncStatusResponse` so the client can
+tell a non-authoritative cached read from a real disconnect:
+- **Python** (`usb-extractor/extractor.py`): `status_payload` now sets
+  `cached: true` on its two fallback paths where the device was present but the
+  live read didn't complete — USBError on `prepare_device` (busy / held) and the
+  general `except` (timeout kill, protocol error). `cached_status_payload`
+  already set it. `FileNotFoundError` is left unflagged — that's an
+  authoritative "device not enumerated" disconnect, which *should* update the
+  baseline. Plaud (`plaud_client.py`) already emits `cached`; Volume's
+  `connected` is an authoritative `mount.is_dir()` check (no cached path).
+- **Swift** (`renderSyncStatus`): when `cached == true`, treat the response as a
+  catalog-only paint — update recordings/storage but DO NOT write
+  `syncDeviceConnected` (preserve the baseline) and use the preserved state for
+  the menu indicator. So a timed-out probe can no longer clobber Connected and
+  make the next live probe look "freshly connected."
+
+This eliminates the dominant (HiDock) flap source at its root. The idempotency
+guard (above) remains as defence-in-depth and also covers flap sources that
+arrive as a transport `.failure` (no payload), e.g. a volume probe that errors —
+those can't carry the flag.
+
 ## Not done / future
-- The deeper flapping itself (cached probe clobbering the connected flag) is
-  only *mitigated*, not eliminated. A proper fix would add a `cached`/`live`
-  field to `HiDockSyncStatusResponse` (or a separate "last live connection"
-  tracker) so cached probes don't reset the connection baseline. Left out to
-  keep this change contained; the idempotency guard removes the user-visible
-  symptom. Revisit if the flapping causes other issues.
+- Windows parity: `Windows-Script/extractor.py` + the PyQt6 app's connection
+  logic don't yet have the cached/live distinction. The macOS extractor and app
+  are separate from the Windows ones, so this fix is macOS-only for now.
