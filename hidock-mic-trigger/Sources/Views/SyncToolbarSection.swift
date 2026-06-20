@@ -71,10 +71,6 @@ struct SyncToolbarSection: View {
                 .help("Remove imported files entirely, delete local copies of downloaded HiDock recordings. Device copies are preserved.")
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || !viewModel.hasSelection)
 
-                Toggle("Hide removed", isOn: $viewModel.hideRemoved)
-                    .toggleStyle(.checkbox)
-                    .help("Hide rows whose local copy has been removed. They're still on the device — untick to see them again, or pick the 'Removed' filter to inspect them.")
-
                 Spacer()
 
                 if !viewModel.transcriptionQueue.isEmpty {
@@ -183,6 +179,34 @@ struct SyncToolbarSection: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
+
+                // "Hide" — multiselect menu (sibling of Filter). Hides the
+                // user-actioned terminal states (Skipped / Removed) so they
+                // stop cluttering the table. Picking one in Filter overrides
+                // its hide.
+                Menu {
+                    ForEach(HiDockViewModel.hideableStatuses, id: \.self) { s in
+                        Button {
+                            viewModel.toggleHidden(s)
+                        } label: {
+                            HStack {
+                                Image(systemName: viewModel.hiddenStatuses.contains(s)
+                                      ? "checkmark.square.fill" : "square")
+                                Text(s)
+                            }
+                        }
+                    }
+                } label: {
+                    let active = HiDockViewModel.hideableStatuses
+                        .filter { viewModel.hiddenStatuses.contains($0) }
+                    Label(
+                        active.isEmpty ? "Hide" : "Hide: \(active.joined(separator: ", "))",
+                        systemImage: "eye.slash"
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Hide rows you've already actioned — Skipped (won't download) and Removed (local copy deleted). Multiselect; picking a status in Filter overrides hiding it.")
 
                 // Summary-type filter — only shown once something has been
                 // summarised. Lets the user narrow to one classification

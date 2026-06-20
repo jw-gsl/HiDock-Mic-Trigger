@@ -76,12 +76,27 @@ final class HiDockViewModel: ObservableObject {
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
     @Published var summaryTypeFilter: String? = nil
-    /// When on, rows whose local copy has been removed ("Removed" status) are
-    /// hidden from the table. Sticky across launches. Ignored when the user
-    /// has explicitly picked the "Removed" status filter (they clearly want to
-    /// see them). Toggle lives next to the Remove button.
-    @Published var hideRemoved: Bool = UserDefaults.standard.bool(forKey: "hidockHideRemoved") {
-        didSet { UserDefaults.standard.set(hideRemoved, forKey: "hidockHideRemoved") }
+    /// Statuses the user has chosen to hide via the multiselect "Hide" menu.
+    /// Values are statusText strings (see `hideableStatuses`). Sticky across
+    /// launches. A hidden status is still shown if the user explicitly picks it
+    /// in the Filter dropdown (they clearly want to see it then).
+    @Published var hiddenStatuses: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "hidockHiddenStatuses") ?? []) {
+        didSet { UserDefaults.standard.set(Array(hiddenStatuses), forKey: "hidockHiddenStatuses") }
+    }
+
+    /// The statuses the "Hide" menu offers — the user-driven "already actioned"
+    /// terminal states. Deliberately excludes Failed (you want failures visible)
+    /// and pipeline stages (that's the Filter dropdown's job).
+    static let hideableStatuses = ["Skipped", "Removed"]
+
+    /// Toggle a status in/out of the hidden set (drives the Hide menu).
+    func toggleHidden(_ status: String) {
+        if hiddenStatuses.contains(status) {
+            hiddenStatuses.remove(status)
+        } else {
+            hiddenStatuses.insert(status)
+        }
     }
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
@@ -286,11 +301,14 @@ final class HiDockViewModel: ObservableObject {
         if let type = summaryTypeFilter {
             entries = entries.filter { $0.summaryType == type }
         }
-        // "Hide removed" tick box (next to the Remove button). Drops rows whose
-        // local copy has been removed — unless the user explicitly picked the
-        // "Removed" status filter, in which case they want to inspect them.
-        if hideRemoved && syncStatusFilter != .removed {
-            entries = entries.filter { $0.statusText != "Removed" }
+        // "Hide" menu (multiselect). Drop rows whose status the user chose to
+        // hide — but never hide the status they've explicitly selected in the
+        // Filter dropdown (they clearly want to see it then).
+        if !hiddenStatuses.isEmpty {
+            entries = entries.filter { e in
+                if e.statusText == syncStatusFilter.label { return true }
+                return !hiddenStatuses.contains(e.statusText)
+            }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording
