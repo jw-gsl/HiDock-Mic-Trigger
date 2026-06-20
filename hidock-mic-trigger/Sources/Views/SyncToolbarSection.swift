@@ -71,6 +71,10 @@ struct SyncToolbarSection: View {
                 .help("Remove imported files entirely, delete local copies of downloaded HiDock recordings. Device copies are preserved.")
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || !viewModel.hasSelection)
 
+                Toggle("Hide removed", isOn: $viewModel.hideRemoved)
+                    .toggleStyle(.checkbox)
+                    .help("Hide rows whose local copy has been removed. They're still on the device — untick to see them again, or pick the 'Removed' filter to inspect them.")
+
                 Spacer()
 
                 if !viewModel.transcriptionQueue.isEmpty {

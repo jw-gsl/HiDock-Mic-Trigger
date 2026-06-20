@@ -76,6 +76,13 @@ final class HiDockViewModel: ObservableObject {
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
     @Published var summaryTypeFilter: String? = nil
+    /// When on, rows whose local copy has been removed ("Removed" status) are
+    /// hidden from the table. Sticky across launches. Ignored when the user
+    /// has explicitly picked the "Removed" status filter (they clearly want to
+    /// see them). Toggle lives next to the Remove button.
+    @Published var hideRemoved: Bool = UserDefaults.standard.bool(forKey: "hidockHideRemoved") {
+        didSet { UserDefaults.standard.set(hideRemoved, forKey: "hidockHideRemoved") }
+    }
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
     @Published var syncPaired = false
@@ -278,6 +285,12 @@ final class HiDockViewModel: ObservableObject {
         // carry a type, so a non-nil filter implicitly hides un-summarised rows.
         if let type = summaryTypeFilter {
             entries = entries.filter { $0.summaryType == type }
+        }
+        // "Hide removed" tick box (next to the Remove button). Drops rows whose
+        // local copy has been removed — unless the user explicitly picked the
+        // "Removed" status filter, in which case they want to inspect them.
+        if hideRemoved && syncStatusFilter != .removed {
+            entries = entries.filter { $0.statusText != "Removed" }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording
