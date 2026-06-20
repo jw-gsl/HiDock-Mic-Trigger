@@ -261,6 +261,10 @@ final class HiDockViewModel: ObservableObject {
             }
         case .transcribed:
             entries = entries.filter { $0.transcribed }
+        case .summarised:
+            // Transcript that also has a typed summary (statusText cascades to
+            // "Summarised" when summaryPath != nil — see Models.swift).
+            entries = entries.filter { $0.statusText == "Summarised" }
         case .skipped:
             entries = entries.filter { $0.statusText == "Skipped" }
         case .removed:

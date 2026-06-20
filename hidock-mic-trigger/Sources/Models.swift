@@ -341,6 +341,7 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
     case downloaded
     case untranscribed
     case transcribed
+    case summarised
     case skipped
     case removed
     case failed
@@ -355,6 +356,7 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
         case .downloaded: return "Downloaded"
         case .untranscribed: return "Untranscribed"
         case .transcribed: return "Transcribed"
+        case .summarised: return "Summarised"
         case .skipped: return "Skipped"
         case .removed: return "Removed"
         case .failed: return "Failed"
