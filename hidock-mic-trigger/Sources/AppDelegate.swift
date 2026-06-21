@@ -1865,6 +1865,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // the early-launch window — from here on, probes are safe
         // because we own the initial state.
         didInitialAutoConnect = true
+
+        // Decouple mic-trigger startup from the (potentially slow, ~25s)
+        // catalog probe. The trigger is the app's core job and only needs the
+        // device present, not the full file list — waiting for the probe meant
+        // the mic wasn't armed for ~25s after launch (and recordings started in
+        // that window could be missed). Arm it now; the probe still runs below
+        // and paintFromCache has already populated the table, so the recordings
+        // UI isn't blocked either. The completion block keeps its own
+        // `process == nil`-guarded start as a fallback (no-op once armed here).
+        if startTriggerOnCompletion && autoStartOnLaunch && process == nil {
+            log("Auto-connect: arming mic trigger immediately (catalog probe continues in background)")
+            startTrigger()
+        }
+
         log("autoConnectSyncIfPaired: running list-devices")
 
         runExtractor(arguments: ["list-devices"]) { [weak self] result in
