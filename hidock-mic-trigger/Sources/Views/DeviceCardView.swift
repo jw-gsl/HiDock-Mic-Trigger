@@ -183,7 +183,10 @@ struct DeviceCardView: View {
     /// "Not connected" so a physically-plugged-in HiDock doesn't
     /// briefly look absent during launch.
     private var connecting: Bool {
-        guard device.deviceType == .hidock else { return false }
+        // HiDock (USB) and Plaud (cloud) both have a slow async probe where the
+        // "Connecting…" chip is worth showing on launch. Volume is a fast local
+        // mount check, so it resolves before a chip would register.
+        guard device.deviceType == .hidock || device.deviceType == .plaud else { return false }
         let hadSuccess = viewModel.syncDeviceLastOK[device.deviceId] != nil
         let hadFailure = viewModel.syncDeviceLastError[device.deviceId] != nil
         return !hadSuccess && !hadFailure && viewModel.syncBusy

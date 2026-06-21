@@ -580,7 +580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onStopTrigger = { [weak self] in self?.stopTrigger() }
         viewModel.onToggleAutoStart = { [weak self] in self?.toggleAutoStart() }
         viewModel.onSelectMic = { [weak self] mic in self?.selectMic(mic) }
-        viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus() }
+        viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus(manual: true) }
         viewModel.onImportAudioFile = { [weak self] in self?.importAudioFile() }
         viewModel.onRemoveImport = { [weak self] name in self?.removeImportedRecording(name: name) }
         viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
@@ -5440,7 +5440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func refreshSyncStatus() {
+    private func refreshSyncStatus(manual: Bool = false) {
         guard !syncBusy else {
             log("refreshSyncStatus: skipping, already busy")
             return
@@ -5475,14 +5475,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // Leave status/busy state untouched; nothing to do.
             return
         }
-        performRefreshProbes(devices: probeDevices, restartTriggerAfter: false)
+        // Only the explicit ↻ (manual) shows the global "Refreshing…" status
+        // line. Auto/initial refreshes stay silent — the per-device cards
+        // already show "Connecting…" chips, so a ticking global banner on load
+        // was redundant and read as "stuck".
+        performRefreshProbes(devices: probeDevices, restartTriggerAfter: false, showStatus: manual)
     }
 
-    private func performRefreshProbes(devices: [HiDockPairedDevice], restartTriggerAfter: Bool) {
+    private func performRefreshProbes(devices: [HiDockPairedDevice], restartTriggerAfter: Bool, showStatus: Bool = true) {
         syncBusy = true
-        viewModel.syncStatus = "Refreshing..."
-        viewModel.syncStatusLevel = .secondary
-        startSyncRefreshTimer()
+        if showStatus {
+            viewModel.syncStatus = "Refreshing..."
+            viewModel.syncStatusLevel = .secondary
+            startSyncRefreshTimer()
+        }
         syncViewModelState()
 
         let group = DispatchGroup()
