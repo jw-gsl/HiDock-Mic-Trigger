@@ -403,7 +403,13 @@ final class HiDockViewModel: ObservableObject {
 
     var syncSummary: String {
         let visible = visibleEntries
-        let downloadedCount = syncEntries.filter(\.recording.downloaded).count
+        // Count files actually present on disk (localExists), NOT the
+        // `downloaded` flag. The flag is set for Skipped recordings too (Skip =
+        // downloaded-flag + no local file) and stays set on Removed ones, so a
+        // flag-based count was misleading — "downloaded" now means "I have the
+        // file", which is what the user expects. Imported files count (they're
+        // on disk); Skipped/Removed/On-device don't.
+        let downloadedCount = syncEntries.filter(\.recording.localExists).count
         let selectedCount = syncCheckedRecordings.count
         var parts = ["\(visible.count) shown", "\(syncEntries.count) total", "\(downloadedCount) downloaded"]
         if selectedCount > 0 {
