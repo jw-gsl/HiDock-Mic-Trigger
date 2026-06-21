@@ -580,7 +580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onStopTrigger = { [weak self] in self?.stopTrigger() }
         viewModel.onToggleAutoStart = { [weak self] in self?.toggleAutoStart() }
         viewModel.onSelectMic = { [weak self] mic in self?.selectMic(mic) }
-        viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus() }
+        viewModel.onRefreshSync = { [weak self] in self?.refreshSyncStatus(manual: true) }
         viewModel.onImportAudioFile = { [weak self] in self?.importAudioFile() }
         viewModel.onRemoveImport = { [weak self] name in self?.removeImportedRecording(name: name) }
         viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
@@ -3193,6 +3193,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// recording directly meant the file just sat there).
     private var syncDeviceLastSeenCount: [String: Int] = [:]
 
+    /// Catalog size for which the fresh-connect "catch-all" download-new sweep
+    /// (auto-download trigger #3) was last run, per deviceId. The connection
+    /// state flaps (a cached probe reports connected:false, clobbering the
+    /// stored flag, so the next live probe looks "freshly connected"), which
+    /// would otherwise re-fire the catch-all every probe. Skipping when the
+    /// count is unchanged makes the catch-all idempotent per catalog — a
+    /// genuine new recording (count change) re-enables it. Recorded when the
+    /// sweep actually runs (not at schedule time) so a skipped timer can't
+    /// permanently consume it.
+    private var syncDeviceCatchAllSweptCount: [String: Int] = [:]
+
     // MARK: - Transcript Viewer
 
     private func openTranscriptViewer(transcriptMdPath: String) {
@@ -5153,9 +5164,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // transition. Treat "never seen" (nil) as not-connected so the
         // very first live probe after launch counts as a fresh connect.
         let wasConnected = syncDeviceConnected[device.deviceId] ?? false
+        // A cached response (cached-status, or a live probe that timed out and
+        // fell back to cache) carries connected:false because we didn't get an
+        // authoritative live read — NOT because the device is gone. Treat it as
+        // a catalog-only paint: update recordings/storage below, but leave the
+        // connection baseline untouched so it can't clobber a real Connected
+        // state and make the next live probe look "freshly connected" (which
+        // spuriously re-fired the download-new catch-all — the flapping bug).
+        let isCached = status.cached == true
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
-        syncDeviceConnected[device.deviceId] = status.connected
+        if !isCached {
+            syncDeviceConnected[device.deviceId] = status.connected
+        }
         if status.connected {
             syncDeviceLastOK[device.deviceId] = Date()
             syncDeviceLastError.removeValue(forKey: device.deviceId)
@@ -5262,8 +5283,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // a no-op when everything's already downloaded, so the worst
         // case is one extra extractor call per fresh connect.
         if status.connected, !wasConnected, currentCount > 0,
-           syncAutoDownload, !syncDownloading {
+           syncAutoDownload, !syncDownloading,
+           syncDeviceCatchAllSweptCount[device.deviceId] != currentCount {
             // !syncBusy intentionally not gated — see comment on trigger #2.
+            // Idempotency guard (syncDeviceCatchAllSweptCount) suppresses the
+            // re-fire caused by connection flapping on an unchanged catalog.
             log("Auto-download: \(device.shortName) freshly connected with \(currentCount) recording(s) on device, triggering download-new")
             scheduleAutoDownloadNewRecordings()
         }
@@ -5287,7 +5311,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 viewModel.syncStatus = "Not connected"
                 viewModel.syncStatusLevel = .secondary
             }
-            updateMenuSyncStatus(connected: status.connected)
+            // Use the preserved per-device state (anyConnected), not
+            // status.connected — a cached response reports connected:false but
+            // must not flip the menu to disconnected.
+            updateMenuSyncStatus(connected: anyConnected)
         }
         syncViewModelState()
     }
@@ -5413,7 +5440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func refreshSyncStatus() {
+    private func refreshSyncStatus(manual: Bool = false) {
         guard !syncBusy else {
             log("refreshSyncStatus: skipping, already busy")
             return
@@ -5448,14 +5475,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // Leave status/busy state untouched; nothing to do.
             return
         }
-        performRefreshProbes(devices: probeDevices, restartTriggerAfter: false)
+        // Only the explicit ↻ (manual) shows the global "Refreshing…" status
+        // line. Auto/initial refreshes stay silent — the per-device cards
+        // already show "Connecting…" chips, so a ticking global banner on load
+        // was redundant and read as "stuck".
+        performRefreshProbes(devices: probeDevices, restartTriggerAfter: false, showStatus: manual)
     }
 
-    private func performRefreshProbes(devices: [HiDockPairedDevice], restartTriggerAfter: Bool) {
+    private func performRefreshProbes(devices: [HiDockPairedDevice], restartTriggerAfter: Bool, showStatus: Bool = true) {
         syncBusy = true
-        viewModel.syncStatus = "Refreshing..."
-        viewModel.syncStatusLevel = .secondary
-        startSyncRefreshTimer()
+        if showStatus {
+            viewModel.syncStatus = "Refreshing..."
+            viewModel.syncStatusLevel = .secondary
+            startSyncRefreshTimer()
+        }
         syncViewModelState()
 
         let group = DispatchGroup()
@@ -6119,13 +6152,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard !devices.isEmpty else { return }
 
         syncBusy = true
+        // Stay visually quiet up front. Most auto-sweeps are no-ops (the
+        // fresh-connect catch-all with nothing new), and flashing a
+        // "Downloading new recordings…" banner + progress bar for those was
+        // misleading. The download UI is revealed lazily — only once a file
+        // actually starts downloading (beginDownloadProgressIfNeeded, called
+        // from the per-file/progress callbacks). A genuine download still
+        // shows full progress; a no-op sweep stays silent.
+        //
+        // Record the catalog size we're about to sweep per device so a
+        // flapping connection can't re-trigger the catch-all for an unchanged
+        // catalog. Done here (sweep actually running) rather than at schedule
+        // time so a timer skipped on `syncBusy` can't permanently consume it.
+        for d in devices {
+            if let c = syncDeviceLastSeenCount[d.deviceId] {
+                syncDeviceCatchAllSweptCount[d.deviceId] = c
+            }
+        }
+        syncViewModelState()
+
+        downloadNewFromDevices(devices, totalDownloaded: 0, freshDownloads: [])
+    }
+
+    /// Reveal the download progress UI (progress bar + banner + elapsed timer)
+    /// the first time a file actually starts downloading during a download-new
+    /// sweep. No-op if already shown. Keeps no-op sweeps silent (see
+    /// downloadNewSyncRecordings).
+    private func beginDownloadProgressIfNeeded() {
+        guard !syncDownloading else { return }
         syncDownloading = true
         startDownloadTimer()
         viewModel.syncStatus = "Downloading new recordings..."
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
-
-        downloadNewFromDevices(devices, totalDownloaded: 0, freshDownloads: [])
     }
 
     private func downloadNewFromDevices(_ remaining: [HiDockPairedDevice], totalDownloaded: Int, freshDownloads: [HiDockSyncDownloadResult]) {
@@ -6139,9 +6198,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ? "1 new recording was saved successfully."
                     : "\(totalDownloaded) new recordings were saved successfully."
                 postSyncDownloadNotification(title: "✅ Downloads Complete", body: body)
+                viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
+                viewModel.syncStatusLevel = .success
             }
-            viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
-            viewModel.syncStatusLevel = .success
+            // When nothing was downloaded (the common no-op auto-sweep), leave
+            // the status line quiet — refreshSyncStatus restores the normal
+            // connected/blank state rather than a misleading "Downloaded 0".
             refreshSyncStatus()
             // Auto-transcribe combines two sources so nothing is missed:
             //
@@ -6200,12 +6262,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         runExtractorWithProgress(arguments: args, productId: pid, environment: environment, onProgress: { [weak self] received, total, pct in
             guard let self = self else { return }
+            self.beginDownloadProgressIfNeeded()
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
             self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
             self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
         }, onFile: { [weak self] name, started in
             guard let self = self else { return }
+            if started { self.beginDownloadProgressIfNeeded() }
             self.currentlyDownloadingName = started ? name : nil
             self.log(started ? "FILE_START: \(name)" : "FILE_DONE: \(name)")
             self.syncViewModelState()

@@ -76,6 +76,35 @@ final class HiDockViewModel: ObservableObject {
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
     @Published var summaryTypeFilter: String? = nil
+    /// Statuses the user has chosen to hide via the multiselect "Hide" menu.
+    /// Values are statusText strings (see `hideableStatuses`). Sticky across
+    /// launches. A hidden status is still shown if the user explicitly picks it
+    /// in the Filter dropdown (they clearly want to see it then).
+    @Published var hiddenStatuses: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "hidockHiddenStatuses") ?? []) {
+        didSet { UserDefaults.standard.set(Array(hiddenStatuses), forKey: "hidockHiddenStatuses") }
+    }
+
+    /// The statuses the "Hide" menu offers — the user-driven "already actioned"
+    /// terminal states. Deliberately excludes Failed (you want failures visible)
+    /// and pipeline stages (that's the Filter dropdown's job).
+    static let hideableStatuses = ["Skipped", "Removed"]
+
+    /// How many recordings are currently at a given status, across ALL entries
+    /// (ignores the Hide filter so a hidden status still reports its true
+    /// count). Drives the "Skipped (N)" / "Removed (N)" counts in the Hide menu.
+    func statusCount(_ status: String) -> Int {
+        syncEntries.filter { $0.statusText == status }.count
+    }
+
+    /// Toggle a status in/out of the hidden set (drives the Hide menu).
+    func toggleHidden(_ status: String) {
+        if hiddenStatuses.contains(status) {
+            hiddenStatuses.remove(status)
+        } else {
+            hiddenStatuses.insert(status)
+        }
+    }
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
     @Published var syncPaired = false
@@ -261,6 +290,10 @@ final class HiDockViewModel: ObservableObject {
             }
         case .transcribed:
             entries = entries.filter { $0.transcribed }
+        case .summarised:
+            // Transcript that also has a typed summary (statusText cascades to
+            // "Summarised" when summaryPath != nil — see Models.swift).
+            entries = entries.filter { $0.statusText == "Summarised" }
         case .skipped:
             entries = entries.filter { $0.statusText == "Skipped" }
         case .removed:
@@ -274,6 +307,15 @@ final class HiDockViewModel: ObservableObject {
         // carry a type, so a non-nil filter implicitly hides un-summarised rows.
         if let type = summaryTypeFilter {
             entries = entries.filter { $0.summaryType == type }
+        }
+        // "Hide" menu (multiselect). Drop rows whose status the user chose to
+        // hide — but never hide the status they've explicitly selected in the
+        // Filter dropdown (they clearly want to see it then).
+        if !hiddenStatuses.isEmpty {
+            entries = entries.filter { e in
+                if e.statusText == syncStatusFilter.label { return true }
+                return !hiddenStatuses.contains(e.statusText)
+            }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording
@@ -361,7 +403,13 @@ final class HiDockViewModel: ObservableObject {
 
     var syncSummary: String {
         let visible = visibleEntries
-        let downloadedCount = syncEntries.filter(\.recording.downloaded).count
+        // Count files actually present on disk (localExists), NOT the
+        // `downloaded` flag. The flag is set for Skipped recordings too (Skip =
+        // downloaded-flag + no local file) and stays set on Removed ones, so a
+        // flag-based count was misleading — "downloaded" now means "I have the
+        // file", which is what the user expects. Imported files count (they're
+        // on disk); Skipped/Removed/On-device don't.
+        let downloadedCount = syncEntries.filter(\.recording.localExists).count
         let selectedCount = syncCheckedRecordings.count
         var parts = ["\(visible.count) shown", "\(syncEntries.count) total", "\(downloadedCount) downloaded"]
         if selectedCount > 0 {

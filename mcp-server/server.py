@@ -64,6 +64,47 @@ def _get_intel() -> MeetingIntelligence:
 
 TOOLS = [
     {
+        "name": "search_summaries",
+        "description": "Full-text search across your TYPED meeting summaries (the curated ~/HiDock/Summaries, each classified by type/area). Returns matches with snippets.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "description": "Max results", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_summaries",
+        "description": "List typed meeting summaries newest-first, optionally filtered by classification type (e.g. 'Job Interview', 'Brainstorming'), area, or a since-date.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "description": "Classification type, e.g. 'Brainstorming'"},
+                "area": {"type": "string", "description": "Area substring, e.g. 'Recruitment'"},
+                "since": {"type": "string", "description": "ISO date/time lower bound, e.g. '2026-06-01'"},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    },
+    {
+        "name": "get_summary",
+        "description": "Fetch one full typed summary by recording name, title, or filename substring.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "identifier": {"type": "string", "description": "Recording stem, title, or filename substring"},
+            },
+            "required": ["identifier"],
+        },
+    },
+    {
+        "name": "summary_stats",
+        "description": "Counts of your typed summaries by type and area, plus the latest.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "search_meetings",
         "description": "Full-text search across all meeting transcripts. Returns matching meetings with snippets.",
         "inputSchema": {
@@ -289,6 +330,45 @@ RESOURCES = [
 ]
 
 # ── Tool Handlers ───────────────────────────────────────────────────────────
+
+
+def handle_search_summaries(args: dict) -> str:
+    from shared.summaries_index import search_summaries
+    res = search_summaries(args["query"], limit=args.get("limit", 10))
+    if not res:
+        return "No summaries match that query."
+    out = []
+    for s in res:
+        out.append(f"**{s['title']}**  [{s['type']} / {s['area']}]  ({s['recorded']})")
+        out.append(f"  {s['snippet']}")
+        out.append(f"  File: {s['filename']}")
+        out.append("")
+    return "\n".join(out)
+
+
+def handle_list_summaries(args: dict) -> str:
+    from shared.summaries_index import list_summaries
+    res = list_summaries(type=args.get("type"), area=args.get("area"),
+                         since=args.get("since"), limit=args.get("limit", 50))
+    if not res:
+        return "No summaries found for that filter."
+    return "\n".join(
+        f"- {s['title']}  [{s['type']} / {s['area']}]  ({s['recorded']})  — {s['filename']}"
+        for s in res)
+
+
+def handle_get_summary(args: dict) -> str:
+    from shared.summaries_index import get_summary
+    s = get_summary(args["identifier"])
+    if not s:
+        return "No summary matched that identifier."
+    return (f"# {s['title']}\nType: {s['type']} | Area: {s['area']} | "
+            f"Recorded: {s['recorded']}\nSource: {s['source']}\n\n{s['body']}")
+
+
+def handle_summary_stats(args: dict) -> str:
+    from shared.summaries_index import summary_stats
+    return json.dumps(summary_stats(), indent=2)
 
 
 def handle_search_meetings(args: dict) -> str:
@@ -600,6 +680,10 @@ def handle_topic_trends(args: dict) -> str:
 
 
 _TOOL_HANDLERS = {
+    "search_summaries": handle_search_summaries,
+    "list_summaries": handle_list_summaries,
+    "get_summary": handle_get_summary,
+    "summary_stats": handle_summary_stats,
     "search_meetings": handle_search_meetings,
     "get_meeting": handle_get_meeting,
     "get_recent_meetings": handle_get_recent_meetings,

@@ -55,6 +55,15 @@ struct HiDockSyncStatusResponse: Codable {
     let recordings: [HiDockSyncRecording]
     let error: String?
     let storage: HiDockStorageStats?
+    /// True when `connected`/`recordings` came from the cached catalog — a
+    /// `*-cached-status` command, or a live probe that timed out / couldn't
+    /// open the device and fell back to cache — rather than an authoritative
+    /// live read. The UI must NOT treat `connected:false` from a cached
+    /// response as a real disconnect (it would otherwise clobber the
+    /// connection baseline and make the next live probe look "freshly
+    /// connected", spuriously re-firing auto-download). See renderSyncStatus.
+    /// Optional: absent in older/live payloads → decodes as nil (= live).
+    let cached: Bool?
 }
 
 struct HiDockSyncDownloadResult: Codable {
@@ -341,6 +350,7 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
     case downloaded
     case untranscribed
     case transcribed
+    case summarised
     case skipped
     case removed
     case failed
@@ -355,6 +365,7 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
         case .downloaded: return "Downloaded"
         case .untranscribed: return "Untranscribed"
         case .transcribed: return "Transcribed"
+        case .summarised: return "Summarised"
         case .skipped: return "Skipped"
         case .removed: return "Removed"
         case .failed: return "Failed"

@@ -1286,6 +1286,10 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         cache_key = str(product_id) if product_id else "default"
         cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
         payload["recordings"] = build_recording_status_items(cached_recs, state, output_dir, product_id=product_id)
+        # The device was found but couldn't be opened (busy / held by another
+        # process) — connected:false here is NOT an authoritative disconnect, so
+        # flag it cached so the client doesn't reset its Connected baseline.
+        payload["cached"] = True
         return payload
 
     try:
@@ -1337,6 +1341,13 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         # succeeded, JSON decode failures, etc. The two earlier error
         # paths (FileNotFoundError, USBError on prepare_device) already
         # did this; this closes the gap for everything in between.
+        #
+        # The device was present (find_device + prepare_device succeeded) — the
+        # live read just didn't complete (e.g. timeout). connected:false here is
+        # NOT an authoritative disconnect, so flag it cached so the client keeps
+        # its Connected baseline instead of treating the next live probe as a
+        # fresh connect (the flapping that re-fired auto-download).
+        payload["cached"] = True
         cache_key = str(product_id) if product_id else "default"
         cached_recs = state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])
         if cached_recs:

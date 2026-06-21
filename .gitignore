@@ -46,3 +46,6 @@ hidock-mic-trigger/Sources/*.bak
 feedback_token.txt
 Windows-App/core/feedback_token.py
 .claude/worktrees/
+
+# SourceKit-LSP build context (machine-specific, absolute paths)
+buildServer.json

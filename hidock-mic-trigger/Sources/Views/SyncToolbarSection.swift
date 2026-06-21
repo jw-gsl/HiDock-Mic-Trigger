@@ -180,6 +180,47 @@ struct SyncToolbarSection: View {
                 .fixedSize()
                 .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
 
+                // "Hide" — multiselect menu (sibling of Filter). Hides the
+                // user-actioned terminal states (Skipped / Removed) so they
+                // stop cluttering the table. Picking one in Filter overrides
+                // its hide.
+                Menu {
+                    ForEach(HiDockViewModel.hideableStatuses, id: \.self) { s in
+                        Button {
+                            viewModel.toggleHidden(s)
+                        } label: {
+                            HStack {
+                                Image(systemName: viewModel.hiddenStatuses.contains(s)
+                                      ? "checkmark.square.fill" : "square")
+                                // Show how many recordings carry this status so
+                                // the user can see what hiding it removes.
+                                Text("\(s) (\(viewModel.statusCount(s)))")
+                            }
+                        }
+                    }
+                } label: {
+                    let count = HiDockViewModel.hideableStatuses
+                        .filter { viewModel.hiddenStatuses.contains($0) }.count
+                    Label {
+                        // The layout-participating view is ALWAYS the widest
+                        // state ("Hidden (2)") so the menu measures a constant
+                        // width and the dropdown arrow / toolbar row never
+                        // shifts. The actual label is drawn as a leading
+                        // overlay on top (overlays don't affect layout).
+                        Text("Hidden (\(HiDockViewModel.hideableStatuses.count))")
+                            .hidden()
+                            .overlay(alignment: .leading) {
+                                Text(count == 0 ? "Hide" : "Hidden (\(count))")
+                                    .fixedSize()
+                            }
+                    } icon: {
+                        Image(systemName: "eye.slash")
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Hide rows you've already actioned — Skipped (won't download) and Removed (local copy deleted). Multiselect; picking a status in Filter overrides hiding it.")
+
                 // Summary-type filter — only shown once something has been
                 // summarised. Lets the user narrow to one classification
                 // (e.g. just "Brainstorming"). AND-ed with the Filter above.
