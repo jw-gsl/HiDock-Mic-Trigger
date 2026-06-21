@@ -192,7 +192,9 @@ struct SyncToolbarSection: View {
                             HStack {
                                 Image(systemName: viewModel.hiddenStatuses.contains(s)
                                       ? "checkmark.square.fill" : "square")
-                                Text(s)
+                                // Show how many recordings carry this status so
+                                // the user can see what hiding it removes.
+                                Text("\(s) (\(viewModel.statusCount(s)))")
                             }
                         }
                     }

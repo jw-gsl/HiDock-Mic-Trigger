@@ -90,6 +90,13 @@ final class HiDockViewModel: ObservableObject {
     /// and pipeline stages (that's the Filter dropdown's job).
     static let hideableStatuses = ["Skipped", "Removed"]
 
+    /// How many recordings are currently at a given status, across ALL entries
+    /// (ignores the Hide filter so a hidden status still reports its true
+    /// count). Drives the "Skipped (N)" / "Removed (N)" counts in the Hide menu.
+    func statusCount(_ status: String) -> Int {
+        syncEntries.filter { $0.statusText == status }.count
+    }
+
     /// Toggle a status in/out of the hidden set (drives the Hide menu).
     func toggleHidden(_ status: String) {
         if hiddenStatuses.contains(status) {
