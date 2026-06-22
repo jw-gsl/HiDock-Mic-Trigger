@@ -196,6 +196,19 @@ struct MeetingHeatmapView: View {
             .help("Recorded = when meetings happened. Transcribed = when they were transcribed.")
             legend
             Spacer()
+            // Refreshing / downloading status lives here now (shows/hides as
+            // needed) instead of on its own row — less is more.
+            if !viewModel.syncStatus.isEmpty {
+                HStack(spacing: 5) {
+                    if viewModel.syncBusy || viewModel.syncDownloading {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text(viewModel.syncStatus)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
         }
     }
 
