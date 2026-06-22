@@ -270,6 +270,9 @@ struct HiDockSyncRecordingEntry: Identifiable {
     let deviceName: String
     var transcribed: Bool = false
     var transcriptPath: String? = nil
+    /// When the transcription happened — the transcript file's modification
+    /// time (set during the transcript disk-scan). nil until transcribed.
+    var transcribedDate: Date? = nil
     var speakersTagged: Bool = false
     var summaryPath: String? = nil
     /// User explicitly opted out of transcribing this recording. The file
@@ -278,7 +281,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
     /// UI shows "Skipped" and auto-transcribe filters it out.
     var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -286,6 +289,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.deviceName = deviceName
         self.transcribed = transcribed
         self.transcriptPath = transcriptPath
+        self.transcribedDate = transcribedDate
         self.speakersTagged = speakersTagged
         self.summaryPath = summaryPath
         self.transcriptionSkipped = transcriptionSkipped

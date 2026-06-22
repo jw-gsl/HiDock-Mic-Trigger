@@ -2832,6 +2832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             deviceName: existing.deviceName,
             transcribed: existing.transcribed,
             transcriptPath: existing.transcriptPath,
+            transcribedDate: existing.transcribedDate,
             speakersTagged: existing.speakersTagged,
             summaryPath: existing.summaryPath,
             transcriptionSkipped: existing.transcriptionSkipped
@@ -5236,6 +5237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     deviceName: device.cleanName,
                     transcribed: prev?.transcribed ?? false,
                     transcriptPath: prev?.transcriptPath,
+                    transcribedDate: prev?.transcribedDate,
                     speakersTagged: prev?.speakersTagged ?? false,
                     summaryPath: prev?.summaryPath,
                     transcriptionSkipped: prev?.transcriptionSkipped ?? false
@@ -7151,6 +7153,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// cascade already prefers Transcribed over Downloaded). The
     /// async refresh still runs afterwards to fill in `speakersTagged`
     /// / `summaryPath` / canonical `transcriptPath`.
+    /// The transcript file's modification time — used as the "transcribed on"
+    /// date for the table column (transcripts are written once at transcription
+    /// time, so mtime ≈ when it was transcribed). nil if no path / not on disk.
+    private func transcriptModificationDate(_ path: String?) -> Date? {
+        guard let path = path, !path.isEmpty,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+        return attrs[.modificationDate] as? Date
+    }
+
     private func applyTranscribedFromDiskScan() {
         let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
         guard let contents = try? FileManager.default.contentsOfDirectory(atPath: transcriptDir) else { return }
@@ -7168,6 +7179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if syncEntries[i].transcriptPath == nil {
                     syncEntries[i].transcriptPath = (transcriptDir as NSString).appendingPathComponent(base + ".md")
                 }
+                syncEntries[i].transcribedDate = transcriptModificationDate(syncEntries[i].transcriptPath)
                 flipped += 1
             }
         }
@@ -7263,6 +7275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if let info = lookup[mp3Name] {
                         self.syncEntries[i].transcribed = info["transcribed"] as? Bool ?? false
                         self.syncEntries[i].transcriptPath = info["transcript_path"] as? String
+                        self.syncEntries[i].transcribedDate = self.transcriptModificationDate(info["transcript_path"] as? String)
                         // Check speaker tagging state from diarized JSON
                         self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
                         // Check if summary exists
@@ -7271,6 +7284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     } else {
                         self.syncEntries[i].transcribed = false
                         self.syncEntries[i].transcriptPath = nil
+                        self.syncEntries[i].transcribedDate = nil
                         self.syncEntries[i].speakersTagged = false
                         self.syncEntries[i].summaryPath = nil
                     }

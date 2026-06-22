@@ -343,6 +343,10 @@ final class HiDockViewModel: ObservableObject {
                 let aKey = "\(ar.createDate) \(ar.createTime)"
                 let bKey = "\(br.createDate) \(br.createTime)"
                 result = aKey < bKey
+            case "transcribed":
+                // Untranscribed (nil) sort to the bottom in the default
+                // (descending) order via distantPast.
+                result = (a.transcribedDate ?? .distantPast) < (b.transcribedDate ?? .distantPast)
             case "duration":
                 result = ar.duration < br.duration
             case "size":
@@ -490,9 +494,37 @@ final class HiDockViewModel: ObservableObject {
         heatmapSelectedDay = (heatmapSelectedDay == day) ? nil : day
     }
 
+    /// Day a merge group counts as (its earliest child's recording day), using
+    /// all children from syncEntries so it's stable regardless of filters.
+    private func mergeGroupDay(_ group: MergeGroup) -> Date? {
+        group.childNames.compactMap { name in
+            syncEntries.first { $0.recording.name == name }
+                .flatMap { recordingDay($0.recording) }
+        }.min()
+    }
+
     var meetingActivityByDay: [Date: DayActivity] {
+        let childNames = Set(mergeGroups.flatMap(\.childNames))
         var out: [Date: DayActivity] = [:]
+        var countedGroups = Set<String>()
         for entry in filteredEntriesNoDay {
+            // A merged recording is ONE meeting: collapse its children into a
+            // single count on the group's (earliest-child) day with the merged
+            // total duration, rather than counting each piece separately.
+            if childNames.contains(entry.recording.name),
+               let group = mergeGroups.first(where: { $0.childNames.contains(entry.recording.name) }) {
+                if countedGroups.contains(group.id) { continue }
+                countedGroups.insert(group.id)
+                guard let day = mergeGroupDay(group) else { continue }
+                var a = out[day] ?? DayActivity()
+                a.count += 1
+                a.totalDuration += group.totalDuration
+                a.byDevice[deviceShortLabel(for: entry), default: 0] += 1
+                let mp3 = (group.outputPath as NSString).lastPathComponent
+                if mergedFileTranscribed.contains(mp3) { a.transcribed += 1 }
+                out[day] = a
+                continue
+            }
             guard let day = recordingDay(entry.recording) else { continue }
             var a = out[day] ?? DayActivity()
             a.count += 1
