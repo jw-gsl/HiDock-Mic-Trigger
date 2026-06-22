@@ -179,7 +179,7 @@ struct RecordingsTableView: View {
             .frame(width: 120, alignment: .leading)
 
             // Status
-            StatusBadge(text: "Merged", level: .info)
+            StatusBadge(text: "Merged", level: .merged)
                 .frame(width: 110, alignment: .leading)
 
             // Transcription state for merged file

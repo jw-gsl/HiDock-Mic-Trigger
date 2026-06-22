@@ -4,17 +4,19 @@ struct SyncHeaderSection: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     private var statusColor: Color {
+        // Mirrors StatusBadge.color — keep the two in sync.
         switch viewModel.syncStatusLevel {
         case .success: return .green
-        case .transcribed: return .purple
+        case .transcribed: return .teal
         case .summarised: return .indigo
+        case .info: return .blue
+        case .merged: return .purple
+        case .skipped: return .brown
+        case .removed: return .pink
         case .warning: return .orange
         case .error: return .red
-        case .info: return .blue
         case .secondary: return .secondary
         case .normal: return .primary
-        case .skipped: return Color.teal.opacity(0.6)
-        case .removed: return Color.red.opacity(0.6)
         }
     }
 

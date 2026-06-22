@@ -416,20 +416,19 @@ enum DisplayRow: Identifiable {
 
 enum StatusLevel {
     case normal, success, warning, error, info, secondary
-    /// Used for the "Transcribed" status — distinct from `.success`
-    /// (which remains green for "Downloaded") so Downloaded and
-    /// Transcribed rows are visually distinguishable at a glance.
+    /// "Transcribed" — teal, one step past Downloaded's green in the cool
+    /// progression ramp (green → teal → indigo).
     case transcribed
-    /// "Summarised" — a transcript that also has a typed summary. Indigo,
-    /// distinct from transcribed purple, reads as "one step further processed".
+    /// "Summarised" — indigo, the deepest pipeline state (AI-distilled).
     case summarised
-    /// User-driven opt-out: "I told you to skip this." Cyan reads as a
-    /// deliberate choice — distinct from grey ("not yet acted on")
-    /// and from blue (informational).
+    /// "Merged" — purple, a structural combination; distinct from Imported's
+    /// blue so the two source/structure markers don't share a hue.
+    case merged
+    /// User-driven opt-out ("Skip"): brown — parked / set aside on purpose,
+    /// an earthy low-key tone clearly outside the pipeline colours.
     case skipped
-    /// User-driven destructive action: "I deleted the local copy."
-    /// Renders as muted red — reminds the user a destructive action
-    /// was taken without screaming "error" the way full red would.
+    /// User-driven destructive action ("Removed"): pink — deliberate, but a
+    /// distinct hue from the error red so it never reads as a failure.
     case removed
 }
 
