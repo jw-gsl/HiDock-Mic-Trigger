@@ -7202,12 +7202,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Fetch per-transcript speaker / action-item counts (heatmap Tier-2
+    /// tooltip) via `transcribe.py activity-stats`. Small JSON; refreshed
+    /// alongside transcription state.
+    private func refreshMeetingExtraStats() {
+        guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
+              FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else { return }
+        transcriptionDispatchQueue.async {
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
+            process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)
+            process.arguments = [self.transcriptionScriptPath, "activity-stats"]
+            var env = ProcessInfo.processInfo.environment
+            env["HOME"] = NSHomeDirectory()
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:" + existing
+            }
+            process.environment = env
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do { try process.run() } catch {
+                self.log("activity-stats: launch failed: \(error.localizedDescription)")
+                return
+            }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Int]] else { return }
+            var map: [String: (speakers: Int, actionItems: Int)] = [:]
+            for (name, counts) in obj {
+                map[name] = (speakers: counts["speakers"] ?? 0, actionItems: counts["action_items"] ?? 0)
+            }
+            DispatchQueue.main.async {
+                self.viewModel.meetingExtraStats = map
+                self.log("activity-stats: loaded speaker/action counts for \(map.count) transcript(s)")
+            }
+        }
+    }
+
     private func refreshTranscriptionState() {
         guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
               FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else {
             log("refreshTranscriptionState: skipping — script=\(FileManager.default.fileExists(atPath: transcriptionScriptPath)), python=\(FileManager.default.isExecutableFile(atPath: transcriptionPythonPath)) at \(transcriptionScriptPath)")
             return
         }
+        // Refresh the heatmap Tier-2 stats alongside (own async, small payload).
+        refreshMeetingExtraStats()
 
         transcriptionDispatchQueue.async {
             let process = Process()

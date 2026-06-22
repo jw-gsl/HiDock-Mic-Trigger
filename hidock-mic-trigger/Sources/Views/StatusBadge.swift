@@ -6,13 +6,13 @@ struct StatusBadge: View {
 
     private var color: Color {
         switch level {
-        // Pipeline progression ramp (cool, deepening): green → teal → indigo.
-        case .success: return .green        // Downloaded — "I have the file"
-        case .transcribed: return .teal      // text ready
-        case .summarised: return .indigo     // AI-distilled — deepest
+        // Pipeline progression ramp (cool → rich): teal → green → purple.
+        case .success: return .teal          // Downloaded — "I have the file"
+        case .transcribed: return .green     // text ready
+        case .summarised: return .purple     // AI-distilled — the rich "completed" state
         // Source / structural markers, set apart from the ramp.
         case .info: return .blue             // Imported — external source
-        case .merged: return .purple         // Merged — structural combination
+        case .merged: return .indigo         // Merged — structural combination
         // User-action / attention states, warm & earthy; red is failure-only.
         case .skipped: return .brown         // parked on purpose
         case .removed: return .pink          // deliberate destructive (≠ error red)

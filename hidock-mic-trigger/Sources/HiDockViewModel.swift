@@ -253,6 +253,10 @@ final class HiDockViewModel: ObservableObject {
     /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
     /// on the date its merged transcript was produced.
     @Published var mergedFileTranscribedDates: [String: Date] = [:]
+    /// Per-recording speaker / action-item counts (mp3 name → counts) parsed
+    /// from transcript frontmatter via `transcribe.py activity-stats`, fetched
+    /// once on load. Feeds the heatmap Tier-2 tooltip (shown when present).
+    @Published var meetingExtraStats: [String: (speakers: Int, actionItems: Int)] = [:]
 
     // MARK: - Computed
 
@@ -558,6 +562,10 @@ final class HiDockViewModel: ObservableObject {
                 a.byDevice[deviceShortLabel(for: entry), default: 0] += 1
                 let mp3 = (group.outputPath as NSString).lastPathComponent
                 if mergedFileTranscribed.contains(mp3) { a.transcribed += 1 }
+                if let ex = meetingExtraStats[group.outputName] {
+                    a.speakers = (a.speakers ?? 0) + ex.speakers
+                    a.actionItems = (a.actionItems ?? 0) + ex.actionItems
+                }
                 out[day] = a
                 continue
             }
@@ -568,6 +576,10 @@ final class HiDockViewModel: ObservableObject {
             a.byDevice[deviceShortLabel(for: entry), default: 0] += 1
             if entry.transcribed { a.transcribed += 1 }
             if entry.summaryPath != nil { a.summarised += 1 }
+            if let ex = meetingExtraStats[entry.recording.outputName] {
+                a.speakers = (a.speakers ?? 0) + ex.speakers
+                a.actionItems = (a.actionItems ?? 0) + ex.actionItems
+            }
             out[day] = a
         }
         return out

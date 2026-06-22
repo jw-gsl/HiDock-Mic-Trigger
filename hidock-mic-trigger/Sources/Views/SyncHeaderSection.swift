@@ -6,11 +6,11 @@ struct SyncHeaderSection: View {
     private var statusColor: Color {
         // Mirrors StatusBadge.color — keep the two in sync.
         switch viewModel.syncStatusLevel {
-        case .success: return .green
-        case .transcribed: return .teal
-        case .summarised: return .indigo
+        case .success: return .teal
+        case .transcribed: return .green
+        case .summarised: return .purple
         case .info: return .blue
-        case .merged: return .purple
+        case .merged: return .indigo
         case .skipped: return .brown
         case .removed: return .pink
         case .warning: return .orange

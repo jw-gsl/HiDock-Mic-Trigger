@@ -579,6 +579,14 @@ def cmd_transcribe_batch(args):
     }))
 
 
+def cmd_activity_stats(_args):
+    """Per-transcript speaker / action-item counts for the meeting heatmap's
+    Tier-2 tooltip. Prints {"<source_mp3_name>": {"speakers": N,
+    "action_items": M}, ...} from ~/HiDock/Raw Transcripts frontmatter."""
+    from shared.transcript_stats import transcript_stats
+    print(json.dumps(transcript_stats()))
+
+
 def cmd_notes(args):
     """List/search/get/stats over typed meeting summaries (~/HiDock/Summaries).
     The terminal-facing twin of the MCP server's summary tools."""
@@ -1059,6 +1067,9 @@ def main():
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
     p_detect.set_defaults(func=cmd_detect_engine)
+
+    p_activity = sub.add_parser("activity-stats", help="Per-transcript speaker/action-item counts -> JSON (heatmap Tier-2 tooltip)")
+    p_activity.set_defaults(func=cmd_activity_stats)
 
     p_notes = sub.add_parser("notes", help="List/search/get your typed meeting summaries (~/HiDock/Summaries)")
     p_notes.add_argument("action", choices=["list", "search", "get", "stats"])
