@@ -8,9 +8,9 @@ struct SyncHeaderSection: View {
         switch viewModel.syncStatusLevel {
         case .success: return .teal
         case .transcribed: return .green
-        case .summarised: return .purple
+        case .summarised: return .indigo
         case .info: return .blue
-        case .merged: return .indigo
+        case .merged: return .purple
         case .skipped: return .brown
         case .removed: return .pink
         case .warning: return .orange
