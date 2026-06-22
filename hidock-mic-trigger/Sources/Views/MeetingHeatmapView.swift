@@ -9,6 +9,11 @@ import SwiftUI
 struct MeetingHeatmapView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
+    /// Day the pointer is currently over — drives the always-visible detail
+    /// line (more reliable + immediate than the native `.help()` tooltip on
+    /// 11px cells, which it supplements).
+    @State private var hoveredDate: Date? = nil
+
     private let cell: CGFloat = 11
     private let gap: CGFloat = 3
     private let weeksBack = 52        // 52 columns back + current week = 53 columns
@@ -70,20 +75,28 @@ struct MeetingHeatmapView: View {
 
     // MARK: Tooltip
 
+    /// "2 on H1 · 1 on Plaud" — extracted with an explicit closure signature so
+    /// Swift's type-checker resolves it fast (inline sort+map+join chains with a
+    /// ternary were tripping the "unable to type-check in reasonable time" path).
+    private func deviceSummary(_ byDevice: [String: Int]) -> String {
+        let sorted = byDevice.sorted { (lhs, rhs) -> Bool in
+            if lhs.value != rhs.value { return lhs.value > rhs.value }
+            return lhs.key < rhs.key
+        }
+        return sorted.map { "\($0.value) on \($0.key)" }.joined(separator: " · ")
+    }
+
     private func tooltip(day: Date, activity: DayActivity?) -> String {
         let dateStr = Self.tooltipDateFormatter.string(from: day)
         guard let a = activity, a.count > 0 else { return "\(dateStr)\nNo meetings" }
-        var lines = [dateStr]
-        let mtg = "\(a.count) meeting\(a.count == 1 ? "" : "s")"
-        lines.append("\(mtg) · \(Self.formatDuration(a.totalDuration))")
-        let dev = a.byDevice.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-            .map { "\($0.value) on \($0.key)" }
-            .joined(separator: " · ")
+        var lines: [String] = [dateStr]
+        let mtg: String = "\(a.count) meeting\(a.count == 1 ? "" : "s")"
+        lines.append(mtg + " · " + Self.formatDuration(a.totalDuration))
+        let dev: String = deviceSummary(a.byDevice)
         if !dev.isEmpty { lines.append(dev) }
         if a.transcribed > 0 || a.summarised > 0 {
             lines.append("\(a.transcribed) transcribed · \(a.summarised) summarised")
         }
-        // Tier 2 — only when populated.
         if let sp = a.speakers, let ai = a.actionItems {
             lines.append("—")
             lines.append("\(sp) speaker\(sp == 1 ? "" : "s") · \(ai) action item\(ai == 1 ? "" : "s")")
@@ -148,6 +161,7 @@ struct MeetingHeatmapView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             header
+            detailLine(activity: activity)
             ScrollView(.horizontal, showsIndicators: false) {
                 ScrollViewReader { proxy in
                     VStack(alignment: .leading, spacing: gap) {
@@ -161,29 +175,72 @@ struct MeetingHeatmapView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "calendar")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-            Text("Meeting activity")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.secondary)
-            Spacer()
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "calendar")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text("Meeting activity")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
             legend
+            Spacer()
         }
     }
 
+    /// Always-visible readout that updates as the pointer moves over the grid.
+    /// Shows the exact date for every day, including zero-meeting days.
+    private func detailLine(activity: [Date: DayActivity]) -> some View {
+        let text: String
+        if let d = hoveredDate {
+            text = detailText(day: d, activity: activity[d])
+        } else {
+            text = "Hover a day for details"
+        }
+        return Text(text)
+            .font(.caption)
+            .foregroundColor(hoveredDate == nil ? .secondary : .primary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Single-line version of the tooltip for the detail readout.
+    private func detailText(day: Date, activity a: DayActivity?) -> String {
+        let dateStr = Self.tooltipDateFormatter.string(from: day)
+        guard let a = a, a.count > 0 else { return "\(dateStr) — no meetings" }
+        var parts: [String] = ["\(a.count) meeting\(a.count == 1 ? "" : "s")", Self.formatDuration(a.totalDuration)]
+        let dev: String = deviceSummary(a.byDevice)
+        if !dev.isEmpty { parts.append(dev) }
+        if a.transcribed > 0 || a.summarised > 0 {
+            parts.append("\(a.transcribed) transcribed · \(a.summarised) summarised")
+        }
+        if let sp = a.speakers, let ai = a.actionItems {
+            parts.append("\(sp) speaker\(sp == 1 ? "" : "s") · \(ai) action item\(ai == 1 ? "" : "s")")
+        }
+        return "\(dateStr) — " + parts.joined(separator: " · ")
+    }
+
     private func monthLabelRow(_ labels: [String?]) -> some View {
-        HStack(spacing: gap) {
-            Spacer().frame(width: 30)   // weekday-label gutter
-            ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
-                Text(label ?? "")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .frame(width: cell, alignment: .leading)
-                    .fixedSize()
+        // Position each month label by absolute x-offset (column pitch) rather
+        // than constraining it to one cell's width — otherwise "Aug" wraps
+        // vertically inside an 11px cell. Labels take their natural width and
+        // sit over the (empty) columns following the month's first week.
+        let pitch = cell + gap
+        return ZStack(alignment: .topLeading) {
+            Color.clear.frame(width: CGFloat(labels.count) * pitch, height: 11)
+            ForEach(Array(labels.enumerated()), id: \.offset) { idx, label in
+                if let label = label {
+                    Text(label)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .fixedSize()
+                        .offset(x: CGFloat(idx) * pitch)
+                }
             }
         }
+        .padding(.leading, 30 + gap)   // align with the grid's weekday gutter
     }
 
     private func gridRow(columns: [[Date?]], activity: [Date: DayActivity]) -> some View {
@@ -220,8 +277,16 @@ struct MeetingHeatmapView: View {
             let a = activity[date]
             RoundedRectangle(cornerRadius: 2)
                 .fill(fill(level(a?.count ?? 0)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.primary, lineWidth: hoveredDate == date ? 1 : 0)
+                )
                 .frame(width: cell, height: cell)
                 .help(tooltip(day: date, activity: a))
+                .onHover { inside in
+                    if inside { hoveredDate = date }
+                    else if hoveredDate == date { hoveredDate = nil }
+                }
         } else {
             Color.clear.frame(width: cell, height: cell)
         }

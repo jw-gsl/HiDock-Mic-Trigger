@@ -124,6 +124,26 @@ Fri, 12 Jun 2026
 5 speakers · 4 action items     (only if the day has summary/transcript data)
 ```
 
+## Follow-ups raised during build (2026-06-21)
+- **Mirror table filters** ✅ — heatmap now built from `visibleEntries`, so the
+  active device/status/Hide/summary-type filters apply to the grid too.
+- **Month labels** ✅ — were wrapping vertically (each constrained to an 11px
+  cell); now positioned by absolute x-offset, natural width, no wrap.
+- **Reliable rollovers** ✅ — native `.help()` is laggy/unreliable on 11px
+  cells. Added `.onHover` → an always-visible detail line that updates instantly
+  for every day (incl. zero-meeting days, which still show their exact date) +
+  a hover outline on the cell. `.help()` kept as a fallback.
+- **Transcribed date** (James clarified): the real want is knowing *when* a
+  recording was transcribed (a "transcribed" notification popped up with no
+  timestamp). Two parts:
+  1. **A "Transcribed" date column in the recordings table** — primary. Source:
+     the transcript file's frontmatter `date:` (authoritative generation time,
+     e.g. `2026-06-22T03:33:10Z`) or its mtime (cheap proxy). Needs plumbing the
+     date into `HiDockSyncRecordingEntry` during the transcript disk-scan.
+  2. **A date-mode switch on the heatmap** (Recorded ↔ Transcribed) — secondary.
+     Default stays **Recorded** ("when the meeting happened" is the common case).
+     Transcribed-date mode reuses the same per-transcript date.
+
 ## Build order (revised)
 1. **Tier 1 heatmap** — `DayActivity{count,duration,byDevice,transcribed,summarised}`
    + `meetingActivityByDay` on the view model (all in-memory), date parse incl.

@@ -463,11 +463,13 @@ final class HiDockViewModel: ObservableObject {
         return name.isEmpty ? entry.deviceName : name
     }
 
-    /// Per-day aggregated activity across all recordings (Tier-1 fields only;
-    /// computed in memory from `syncEntries`, no file IO).
+    /// Per-day aggregated activity (Tier-1 fields only; computed in memory, no
+    /// file IO). Mirrors the recordings table: built from `visibleEntries`, so
+    /// the heatmap reflects the active device / status / Hide / summary-type
+    /// filters.
     var meetingActivityByDay: [Date: DayActivity] {
         var out: [Date: DayActivity] = [:]
-        for entry in syncEntries {
+        for entry in visibleEntries {
             guard let day = recordingDay(entry.recording) else { continue }
             var a = out[day] ?? DayActivity()
             a.count += 1
