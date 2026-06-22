@@ -260,7 +260,11 @@ final class HiDockViewModel: ObservableObject {
         Array(Set(syncEntries.compactMap { $0.summaryType })).sorted()
     }
 
-    var visibleEntries: [HiDockSyncRecordingEntry] {
+    /// Entries after the device / status / summary-type / Hide filters, but
+    /// BEFORE the heatmap day-filter and sort. The heatmap is built from this
+    /// (so selecting a day doesn't collapse the grid to that one day), while
+    /// `visibleEntries` additionally applies the selected-day filter.
+    private var filteredEntriesNoDay: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
             entries = entries.filter {
@@ -316,6 +320,16 @@ final class HiDockViewModel: ObservableObject {
                 if e.statusText == syncStatusFilter.label { return true }
                 return !hiddenStatuses.contains(e.statusText)
             }
+        }
+        return entries
+    }
+
+    var visibleEntries: [HiDockSyncRecordingEntry] {
+        var entries = filteredEntriesNoDay
+        // Heatmap day-filter: when a day square is locked, the table narrows to
+        // that day (the heatmap grid itself keeps using filteredEntriesNoDay).
+        if let day = heatmapSelectedDay {
+            entries = entries.filter { recordingDay($0.recording) == day }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording
@@ -467,9 +481,18 @@ final class HiDockViewModel: ObservableObject {
     /// file IO). Mirrors the recordings table: built from `visibleEntries`, so
     /// the heatmap reflects the active device / status / Hide / summary-type
     /// filters.
+    /// Day locked by clicking a heatmap square — filters the recordings table
+    /// to that day (and locks the heatmap detail readout). nil = no day filter.
+    @Published var heatmapSelectedDay: Date? = nil
+
+    /// Click handler for a heatmap square: toggle the day filter on/off.
+    func toggleHeatmapDay(_ day: Date) {
+        heatmapSelectedDay = (heatmapSelectedDay == day) ? nil : day
+    }
+
     var meetingActivityByDay: [Date: DayActivity] {
         var out: [Date: DayActivity] = [:]
-        for entry in visibleEntries {
+        for entry in filteredEntriesNoDay {
             guard let day = recordingDay(entry.recording) else { continue }
             var a = out[day] ?? DayActivity()
             a.count += 1

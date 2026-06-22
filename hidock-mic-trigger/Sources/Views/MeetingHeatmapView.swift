@@ -151,7 +151,7 @@ struct MeetingHeatmapView: View {
 
     // MARK: View
 
-    private let weekdayCol = ["Mon", "", "Wed", "", "Fri", "", ""]
+    private let weekdayCol = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     var body: some View {
         let today = calendar.startOfDay(for: Date())
@@ -192,18 +192,35 @@ struct MeetingHeatmapView: View {
     /// Always-visible readout that updates as the pointer moves over the grid.
     /// Shows the exact date for every day, including zero-meeting days.
     private func detailLine(activity: [Date: DayActivity]) -> some View {
-        let text: String
-        if let d = hoveredDate {
-            text = detailText(day: d, activity: activity[d])
-        } else {
-            text = "Hover a day for details"
+        // Hover gives a transient preview; a clicked day stays locked. Show the
+        // hovered day if hovering, else the locked day, else a hint.
+        let activeDay = hoveredDate ?? viewModel.heatmapSelectedDay
+        let locked = viewModel.heatmapSelectedDay
+        return HStack(spacing: 8) {
+            if let d = activeDay {
+                Text(detailText(day: d, activity: activity[d]))
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                Text("Hover a day for details · click to filter the list")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            if locked != nil {
+                Button {
+                    viewModel.heatmapSelectedDay = nil
+                } label: {
+                    Label("Clear filter", systemImage: "xmark.circle.fill")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Stop filtering the list to this day")
+            }
+            Spacer()
         }
-        return Text(text)
-            .font(.caption)
-            .foregroundColor(hoveredDate == nil ? .secondary : .primary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Single-line version of the tooltip for the detail readout.
@@ -275,18 +292,23 @@ struct MeetingHeatmapView: View {
     private func cellView(date: Date?, activity: [Date: DayActivity]) -> some View {
         if let date = date {
             let a = activity[date]
+            let selected = viewModel.heatmapSelectedDay == date
+            let strokeColor: Color = selected ? .accentColor : (hoveredDate == date ? .primary : .clear)
+            let strokeWidth: CGFloat = selected ? 1.5 : (hoveredDate == date ? 1 : 0)
             RoundedRectangle(cornerRadius: 2)
                 .fill(fill(level(a?.count ?? 0)))
                 .overlay(
                     RoundedRectangle(cornerRadius: 2)
-                        .stroke(Color.primary, lineWidth: hoveredDate == date ? 1 : 0)
+                        .stroke(strokeColor, lineWidth: strokeWidth)
                 )
                 .frame(width: cell, height: cell)
+                .contentShape(Rectangle())
                 .help(tooltip(day: date, activity: a))
                 .onHover { inside in
                     if inside { hoveredDate = date }
                     else if hoveredDate == date { hoveredDate = nil }
                 }
+                .onTapGesture { viewModel.toggleHeatmapDay(date) }
         } else {
             Color.clear.frame(width: cell, height: cell)
         }
