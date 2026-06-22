@@ -31,6 +31,14 @@ struct SyncHeaderSection: View {
             // status / storage / filter rows any more.
             DeviceStripView(viewModel: viewModel)
 
+            // GitHub-style meeting-activity heatmap — one square per day over
+            // the last year, intensity = meetings recorded that day, hover for
+            // the day's stats. Shown once there are recordings to plot.
+            if !viewModel.syncEntries.isEmpty {
+                MeetingHeatmapView(viewModel: viewModel)
+                    .padding(.top, 2)
+            }
+
             // Generic pipeline-status line: transcription progress, skip
             // confirmations, auto-flow messages. Per-device connection
             // state lives on the cards above, so this row is hidden when

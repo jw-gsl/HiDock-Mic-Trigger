@@ -47,6 +47,20 @@ struct HiDockStorageStats: Codable {
     let truncated: Bool
 }
 
+/// One day's aggregated meeting activity, for the GitHub-style contribution
+/// heatmap. Tier-1 fields (count/duration/byDevice/transcribed/summarised) come
+/// for free from `syncEntries`; Tier-2 fields (speakers/actionItems) are filled
+/// later from a knowledge-graph–backed per-day index and stay nil until then.
+struct DayActivity {
+    var count: Int = 0
+    var totalDuration: Double = 0          // seconds
+    var byDevice: [String: Int] = [:]      // short label ("H1"/"Plaud") → count
+    var transcribed: Int = 0
+    var summarised: Int = 0
+    var speakers: Int? = nil               // Tier 2
+    var actionItems: Int? = nil            // Tier 2
+}
+
 struct HiDockSyncStatusResponse: Codable {
     let connected: Bool
     let outputDir: String

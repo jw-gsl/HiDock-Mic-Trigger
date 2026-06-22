@@ -418,6 +418,68 @@ final class HiDockViewModel: ObservableObject {
         return parts.joined(separator: " · ")
     }
 
+    // MARK: - Meeting activity heatmap
+
+    /// Parser for the extractor's `createDate` ("yyyy/MM/dd", emitted for every
+    /// device type — HiDock, Plaud, volume — in the resolved status item).
+    private static let recordingDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy/MM/dd"
+        return f
+    }()
+
+    /// Fallback parser for a leading "yyyy-MM-dd" in name/outputName.
+    private static let recordingISODayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// The calendar day a recording belongs to (start-of-day, local), or nil if
+    /// no date can be recovered. Prefers `createDate`; falls back to a leading
+    /// ISO date in outputName/name.
+    func recordingDay(_ rec: HiDockSyncRecording) -> Date? {
+        let cd = rec.createDate.trimmingCharacters(in: .whitespaces)
+        if !cd.isEmpty, let d = Self.recordingDayFormatter.date(from: cd) {
+            return Calendar.current.startOfDay(for: d)
+        }
+        let candidate = rec.outputName.isEmpty ? rec.name : rec.outputName
+        if candidate.count >= 10,
+           let d = Self.recordingISODayFormatter.date(from: String(candidate.prefix(10))) {
+            return Calendar.current.startOfDay(for: d)
+        }
+        return nil
+    }
+
+    /// Short device label for the heatmap tooltip ("H1", "P1", "Plaud",
+    /// "Imported", or a cleaned volume name).
+    func deviceShortLabel(for entry: HiDockSyncRecordingEntry) -> String {
+        if entry.deviceId.hasPrefix("plaud:") { return "Plaud" }
+        if entry.deviceId == "imported:local" { return "Imported" }
+        var name = entry.deviceName
+        if name.hasPrefix("HiDock ") { name = String(name.dropFirst("HiDock ".count)) }
+        return name.isEmpty ? entry.deviceName : name
+    }
+
+    /// Per-day aggregated activity across all recordings (Tier-1 fields only;
+    /// computed in memory from `syncEntries`, no file IO).
+    var meetingActivityByDay: [Date: DayActivity] {
+        var out: [Date: DayActivity] = [:]
+        for entry in syncEntries {
+            guard let day = recordingDay(entry.recording) else { continue }
+            var a = out[day] ?? DayActivity()
+            a.count += 1
+            a.totalDuration += entry.recording.duration
+            a.byDevice[deviceShortLabel(for: entry), default: 0] += 1
+            if entry.transcribed { a.transcribed += 1 }
+            if entry.summaryPath != nil { a.summarised += 1 }
+            out[day] = a
+        }
+        return out
+    }
+
     // MARK: - Action Closures (set by AppDelegate)
     var onStartTrigger: () -> Void = {}
     var onStopTrigger: () -> Void = {}
