@@ -154,31 +154,40 @@ struct SyncToolbarSection: View {
                 .fixedSize()
 
                 Menu {
-                    ForEach(SyncStatusFilter.allCases) { f in
+                    // "All" clears the multi-select set (no filter).
+                    Button {
+                        viewModel.statusFilters = []
+                    } label: {
+                        HStack {
+                            Image(systemName: viewModel.statusFilters.isEmpty
+                                  ? "checkmark.circle.fill" : "circle")
+                            Text("All")
+                        }
+                    }
+                    Divider()
+                    // Multi-select statuses — tick to stack (OR). Checkmark
+                    // shows what's active without closing the menu.
+                    ForEach(SyncStatusFilter.selectable) { f in
                         Button {
-                            viewModel.syncStatusFilter = f
+                            viewModel.toggleStatusFilter(f)
                         } label: {
-                            // Tick the currently-active filter so the
-                            // user can see what's selected without
-                            // closing the menu first.
                             HStack {
-                                Image(systemName: viewModel.syncStatusFilter == f
-                                      ? "checkmark.circle.fill" : "circle")
+                                Image(systemName: viewModel.statusFilters.contains(f)
+                                      ? "checkmark.square.fill" : "square")
                                 Text(f.label)
                             }
                         }
                     }
                 } label: {
+                    let n = viewModel.statusFilters.subtracting([.all]).count
                     Label(
-                        viewModel.syncStatusFilter == .all
-                            ? "Filter"
-                            : "Filter: \(viewModel.syncStatusFilter.label)",
+                        n == 0 ? "Filter" : "Filter (\(n))",
                         systemImage: "line.3.horizontal.decrease.circle"
                     )
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .help("Show only recordings at this pipeline stage. Combines with the device filter on the cards above.")
+                .help("Show recordings matching any of the selected stages (stackable). 'All' clears the filter. Combines with the device filter on the cards above.")
 
                 // "Hide" — multiselect menu (sibling of Filter). Hides the
                 // user-actioned terminal states (Skipped / Removed) so they

@@ -81,7 +81,9 @@ struct MicTriggerSection: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                if viewModel.triggerRunning, !viewModel.triggerUptime.isEmpty {
+                // Connected time — shown only when actually connected
+                // (healthy), not while waiting for a device.
+                if viewModel.triggerRunning, viewModel.triggerHealthy, !viewModel.triggerUptime.isEmpty {
                     Text(viewModel.triggerUptime)
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.secondary)

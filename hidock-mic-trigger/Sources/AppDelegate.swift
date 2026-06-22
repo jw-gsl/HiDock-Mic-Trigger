@@ -120,6 +120,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// `viewModel.triggerHealthy` and drives the green/amber dot in
     /// MicTriggerSection.
     private var triggerHealthy = false
+    /// When the trigger last became healthy (HiDock connected). Drives the
+    /// uptime readout as "time connected" — reset on each (re)connect, cleared
+    /// while waiting so the timer doesn't count up before a device is present.
+    private var triggerConnectedSince: Date?
     /// Human-readable wait status from the CLI's waitForDevice loop.
     /// Cleared when the trigger goes healthy or when the process exits.
     private var triggerWaitMessage: String?
@@ -820,6 +824,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard self.process != nil else { return }
             let micName = self.selectedMicName ?? ""
             self.triggerHealthy = true
+            if self.triggerConnectedSince == nil { self.triggerConnectedSince = Date() }
             self.triggerLastStartedAt = self.processStartDate
             self.syncViewModelState()
             let preferredOK = self.preferredMicName == nil
@@ -872,12 +877,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 log("Trigger: \(msg)")
                 DispatchQueue.main.async {
                     self.triggerWaitMessage = msg
+                    // Waiting again (device gone) — stop the connected timer.
+                    self.triggerConnectedSince = nil
                     self.syncViewModelState()
                 }
             } else if line.contains(" appeared after ") {
                 log("Trigger: \(line)")
                 DispatchQueue.main.async {
                     self.triggerWaitMessage = nil
+                    // Reconnected — restart the connected timer from now.
+                    self.triggerConnectedSince = Date()
                     self.syncViewModelState()
                 }
             }
@@ -1505,7 +1514,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func formatUptime() -> String? {
-        guard let start = processStartDate else { return nil }
+        // Time CONNECTED, not time since the process started — nil while
+        // waiting for a device (so the readout disappears rather than ticking
+        // up before anything's connected).
+        guard let start = triggerConnectedSince else { return nil }
         let elapsed = Int(Date().timeIntervalSince(start))
         if elapsed < 60 {
             return "\(elapsed)s"
@@ -1628,6 +1640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Fresh launch — clear any stale healthy/wait state from a
         // previous run before the CLI even starts emitting output.
         triggerHealthy = false
+        triggerConnectedSince = nil
         triggerWaitMessage = nil
         pendingHealthyTimer?.invalidate()
         pendingHealthyTimer = nil
@@ -1664,6 +1677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.process = nil
                 self.processStartDate = nil
                 self.triggerHealthy = false
+                self.triggerConnectedSince = nil
                 self.triggerWaitMessage = nil
                 self.pendingHealthyTimer?.invalidate()
                 self.pendingHealthyTimer = nil
@@ -6303,7 +6317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     devicePayloads = payload.downloaded
                     if device.deviceType == .plaud && deviceDownloaded > 0 {
                         self.syncFilterDeviceId = device.deviceId
-                        self.viewModel.syncStatusFilter = .all
+                        self.viewModel.statusFilters = []
                         self.log("Plaud fresh downloads: showing \(device.cleanName) rows and clearing status filter")
                     }
                 }

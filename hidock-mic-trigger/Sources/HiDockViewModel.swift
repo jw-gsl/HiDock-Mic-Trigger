@@ -72,7 +72,34 @@ final class HiDockViewModel: ObservableObject {
     /// Pipeline-stage filter for the recordings table. Defaults to
     /// `.all`. Combined with `syncFilterDeviceId` (AND) and the
     /// user's sort key inside `visibleEntries`.
-    @Published var syncStatusFilter: SyncStatusFilter = .all
+    /// Multi-select status filter (stackable, like the Hide menu). Empty = show
+    /// all. Entries matching ANY selected status pass (OR semantics).
+    @Published var statusFilters: Set<SyncStatusFilter> = []
+
+    /// Whether an entry matches a given status filter.
+    func matchesStatusFilter(_ e: HiDockSyncRecordingEntry, _ f: SyncStatusFilter) -> Bool {
+        switch f {
+        case .all: return true
+        case .onDevice: return e.statusText == "On device"
+        case .downloaded: return e.statusText == "Downloaded"
+        case .untranscribed:
+            return e.recording.localExists && !e.transcribed && !e.transcriptionSkipped
+        case .transcribed: return e.transcribed
+        case .summarised: return e.statusText == "Summarised"
+        case .skipped: return e.statusText == "Skipped"
+        case .removed: return e.statusText == "Removed"
+        case .failed: return e.statusText == "Failed"
+        case .imported: return e.deviceId == "imported:local"
+        case .merged:
+            return mergeGroups.contains { $0.childNames.contains(e.recording.name) }
+        }
+    }
+
+    /// Toggle a status in/out of the multi-select Filter set.
+    func toggleStatusFilter(_ f: SyncStatusFilter) {
+        if statusFilters.contains(f) { statusFilters.remove(f) }
+        else { statusFilters.insert(f) }
+    }
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
     @Published var summaryTypeFilter: String? = nil
@@ -275,37 +302,14 @@ final class HiDockViewModel: ObservableObject {
         // it was a strict subset of the Filter dropdown's "On device"
         // / "Untranscribed" options, so keeping both was redundant.)
         //
-        // Pipeline-stage filter, evaluated on the same statusText
-        // cascade the table renders, so what the user picks always
-        // matches what the rows display.
-        switch syncStatusFilter {
-        case .all:
-            break
-        case .onDevice:
-            entries = entries.filter { $0.statusText == "On device" }
-        case .downloaded:
-            entries = entries.filter { $0.statusText == "Downloaded" }
-        case .untranscribed:
-            // Downloaded locally but no transcript yet, regardless of
-            // device. Excludes Skipped (user opted out) and Imported
-            // that's already been transcribed.
-            entries = entries.filter {
-                $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped
+        // Multi-select status filter (stackable). An entry passes if it matches
+        // ANY selected status (OR). Empty set = no filtering. Evaluated on the
+        // same statusText cascade the table renders.
+        let activeStatusFilters = statusFilters.subtracting([.all])
+        if !activeStatusFilters.isEmpty {
+            entries = entries.filter { e in
+                activeStatusFilters.contains { matchesStatusFilter(e, $0) }
             }
-        case .transcribed:
-            entries = entries.filter { $0.transcribed }
-        case .summarised:
-            // Transcript that also has a typed summary (statusText cascades to
-            // "Summarised" when summaryPath != nil — see Models.swift).
-            entries = entries.filter { $0.statusText == "Summarised" }
-        case .skipped:
-            entries = entries.filter { $0.statusText == "Skipped" }
-        case .removed:
-            entries = entries.filter { $0.statusText == "Removed" }
-        case .failed:
-            entries = entries.filter { $0.statusText == "Failed" }
-        case .imported:
-            entries = entries.filter { $0.deviceId == "imported:local" }
         }
         // Summary-type filter (AND-ed with the above). Only summarised rows
         // carry a type, so a non-nil filter implicitly hides un-summarised rows.
@@ -313,11 +317,12 @@ final class HiDockViewModel: ObservableObject {
             entries = entries.filter { $0.summaryType == type }
         }
         // "Hide" menu (multiselect). Drop rows whose status the user chose to
-        // hide — but never hide the status they've explicitly selected in the
-        // Filter dropdown (they clearly want to see it then).
+        // hide — but never hide a status they've explicitly selected in the
+        // Filter menu (they clearly want to see it then).
         if !hiddenStatuses.isEmpty {
+            let explicitlyFiltered = Set(activeStatusFilters.map { $0.label })
             entries = entries.filter { e in
-                if e.statusText == syncStatusFilter.label { return true }
+                if explicitlyFiltered.contains(e.statusText) { return true }
                 return !hiddenStatuses.contains(e.statusText)
             }
         }

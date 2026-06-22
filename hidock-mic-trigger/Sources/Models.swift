@@ -373,8 +373,15 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
     case removed
     case failed
     case imported
+    case merged
 
     var id: String { rawValue }
+
+    /// Cases offered in the multi-select Filter menu (everything except `.all`,
+    /// which is the implicit "no filter" / reset).
+    static var selectable: [SyncStatusFilter] {
+        allCases.filter { $0 != .all }
+    }
 
     var label: String {
         switch self {
@@ -388,6 +395,7 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
         case .removed: return "Removed"
         case .failed: return "Failed"
         case .imported: return "Imported"
+        case .merged: return "Merged"
         }
     }
 }
