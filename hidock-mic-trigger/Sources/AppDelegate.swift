@@ -7319,6 +7319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 var mergedTranscribed: Set<String> = []
                 var mergedTagged: Set<String> = []
                 var mergedPaths: [String: String] = [:]
+                var mergedDates: [String: Date] = [:]
                 for group in self.mergeGroups {
                     let mergedMp3Name = (group.outputPath as NSString).lastPathComponent
                     guard let info = lookup[mergedMp3Name],
@@ -7326,6 +7327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     mergedTranscribed.insert(mergedMp3Name)
                     let path = info["transcript_path"] as? String
                     if let path = path { mergedPaths[mergedMp3Name] = path }
+                    if let d = self.transcriptModificationDate(path) { mergedDates[mergedMp3Name] = d }
                     if self.checkSpeakersTagged(transcriptPath: path) {
                         mergedTagged.insert(mergedMp3Name)
                     }
@@ -7333,6 +7335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.mergedFileTranscribed = mergedTranscribed
                 self.viewModel.mergedFileTagged = mergedTagged
                 self.viewModel.mergedFileTranscriptPaths = mergedPaths
+                self.viewModel.mergedFileTranscribedDates = mergedDates
                 if !mergedTranscribed.isEmpty {
                     self.log("refreshTranscriptionState: \(mergedTranscribed.count) merged file(s) transcribed, \(mergedTranscribed.count - mergedTagged.count) need tagging")
                 }

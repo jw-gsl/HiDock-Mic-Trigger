@@ -184,6 +184,16 @@ struct MeetingHeatmapView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.secondary)
             }
+            // Date-mode switch — Recorded (default) vs Transcribed.
+            Picker("", selection: $viewModel.heatmapDateMode) {
+                ForEach(HiDockViewModel.HeatmapDateMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Recorded = when meetings happened. Transcribed = when they were transcribed.")
             legend
             Spacer()
         }

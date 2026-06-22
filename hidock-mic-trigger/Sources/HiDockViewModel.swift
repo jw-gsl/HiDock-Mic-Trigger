@@ -249,6 +249,10 @@ final class HiDockViewModel: ObservableObject {
     @Published var mergedFileTranscribed: Set<String> = []
     @Published var mergedFileTagged: Set<String> = []
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
+    /// Merged file mp3 name → its transcript mtime (when it was transcribed).
+    /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
+    /// on the date its merged transcript was produced.
+    @Published var mergedFileTranscribedDates: [String: Date] = [:]
 
     // MARK: - Computed
 
@@ -494,18 +498,45 @@ final class HiDockViewModel: ObservableObject {
     /// to that day (and locks the heatmap detail readout). nil = no day filter.
     @Published var heatmapSelectedDay: Date? = nil
 
+    /// Which date the heatmap buckets by. Default Recorded ("when the meeting
+    /// happened" — the common case); Transcribed = "when I processed it".
+    enum HeatmapDateMode: String, CaseIterable, Identifiable {
+        case recorded, transcribed
+        var id: String { rawValue }
+        var label: String { self == .recorded ? "Recorded" : "Transcribed" }
+    }
+    @Published var heatmapDateMode: HeatmapDateMode = .recorded
+
     /// Click handler for a heatmap square: toggle the day filter on/off.
     func toggleHeatmapDay(_ day: Date) {
         heatmapSelectedDay = (heatmapSelectedDay == day) ? nil : day
     }
 
-    /// Day a merge group counts as (its earliest child's recording day), using
-    /// all children from syncEntries so it's stable regardless of filters.
+    /// The day an entry buckets to under the current date-mode (start-of-day,
+    /// local). Transcribed mode returns nil for untranscribed entries (they
+    /// simply don't appear on the transcribed grid).
+    private func activityDay(for entry: HiDockSyncRecordingEntry) -> Date? {
+        switch heatmapDateMode {
+        case .recorded: return recordingDay(entry.recording)
+        case .transcribed:
+            return entry.transcribedDate.map { Calendar.current.startOfDay(for: $0) }
+        }
+    }
+
+    /// The day a merge group buckets to under the current date-mode. Recorded =
+    /// earliest child's recording day; Transcribed = the merged file's
+    /// transcript date (nil if the merged file isn't transcribed yet).
     private func mergeGroupDay(_ group: MergeGroup) -> Date? {
-        group.childNames.compactMap { name in
-            syncEntries.first { $0.recording.name == name }
-                .flatMap { recordingDay($0.recording) }
-        }.min()
+        switch heatmapDateMode {
+        case .recorded:
+            return group.childNames.compactMap { name in
+                syncEntries.first { $0.recording.name == name }
+                    .flatMap { recordingDay($0.recording) }
+            }.min()
+        case .transcribed:
+            let mp3 = (group.outputPath as NSString).lastPathComponent
+            return mergedFileTranscribedDates[mp3].map { Calendar.current.startOfDay(for: $0) }
+        }
     }
 
     var meetingActivityByDay: [Date: DayActivity] {
@@ -514,7 +545,7 @@ final class HiDockViewModel: ObservableObject {
         var countedGroups = Set<String>()
         for entry in filteredEntriesNoDay {
             // A merged recording is ONE meeting: collapse its children into a
-            // single count on the group's (earliest-child) day with the merged
+            // single count on the group's day (per date-mode) with the merged
             // total duration, rather than counting each piece separately.
             if childNames.contains(entry.recording.name),
                let group = mergeGroups.first(where: { $0.childNames.contains(entry.recording.name) }) {
@@ -530,7 +561,7 @@ final class HiDockViewModel: ObservableObject {
                 out[day] = a
                 continue
             }
-            guard let day = recordingDay(entry.recording) else { continue }
+            guard let day = activityDay(for: entry) else { continue }
             var a = out[day] ?? DayActivity()
             a.count += 1
             a.totalDuration += entry.recording.duration
