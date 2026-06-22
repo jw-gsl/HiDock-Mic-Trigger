@@ -97,9 +97,14 @@ struct MeetingHeatmapView: View {
         if a.transcribed > 0 || a.summarised > 0 {
             lines.append("\(a.transcribed) transcribed · \(a.summarised) summarised")
         }
-        if let sp = a.speakers, let ai = a.actionItems {
+        // Speakers (from transcripts) and action items (from summaries) shown
+        // independently — action items are sparse (one per summarised meeting).
+        var extra: [String] = []
+        if let sp = a.speakers, sp > 0 { extra.append("\(sp) speaker\(sp == 1 ? "" : "s")") }
+        if let ai = a.actionItems, ai > 0 { extra.append("\(ai) action item\(ai == 1 ? "" : "s")") }
+        if !extra.isEmpty {
             lines.append("—")
-            lines.append("\(sp) speaker\(sp == 1 ? "" : "s") · \(ai) action item\(ai == 1 ? "" : "s")")
+            lines.append(extra.joined(separator: " · "))
         }
         return lines.joined(separator: "\n")
     }
@@ -258,9 +263,8 @@ struct MeetingHeatmapView: View {
         if a.transcribed > 0 || a.summarised > 0 {
             parts.append("\(a.transcribed) transcribed · \(a.summarised) summarised")
         }
-        if let sp = a.speakers, let ai = a.actionItems {
-            parts.append("\(sp) speaker\(sp == 1 ? "" : "s") · \(ai) action item\(ai == 1 ? "" : "s")")
-        }
+        if let sp = a.speakers, sp > 0 { parts.append("\(sp) speaker\(sp == 1 ? "" : "s")") }
+        if let ai = a.actionItems, ai > 0 { parts.append("\(ai) action item\(ai == 1 ? "" : "s")") }
         return "\(dateStr) — " + parts.joined(separator: " · ")
     }
 
@@ -317,6 +321,7 @@ struct MeetingHeatmapView: View {
     private func cellView(date: Date?, activity: [Date: DayActivity]) -> some View {
         if let date = date {
             let a = activity[date]
+            let hasMeetings = (a?.count ?? 0) > 0
             let selected = viewModel.heatmapSelectedDay == date
             let strokeColor: Color = selected ? .accentColor : (hoveredDate == date ? .primary : .clear)
             let strokeWidth: CGFloat = selected ? 1.5 : (hoveredDate == date ? 1 : 0)
@@ -333,7 +338,9 @@ struct MeetingHeatmapView: View {
                     if inside { hoveredDate = date }
                     else if hoveredDate == date { hoveredDate = nil }
                 }
-                .onTapGesture { viewModel.toggleHeatmapDay(date) }
+                // Only days with meetings are selectable — clicking an empty
+                // day would just clear the filter, which feels pointless.
+                .onTapGesture { if hasMeetings { viewModel.toggleHeatmapDay(date) } }
         } else {
             Color.clear.frame(width: cell, height: cell)
         }
