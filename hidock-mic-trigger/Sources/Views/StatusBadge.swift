@@ -6,22 +6,20 @@ struct StatusBadge: View {
 
     private var color: Color {
         switch level {
-        case .success: return .green
-        case .transcribed: return .purple   // distinct from Downloaded's green
-        case .summarised: return .indigo    // one step beyond transcribed
-        case .warning: return .orange
-        case .error: return .red
-        case .info: return .blue
-        case .secondary: return .secondary
+        // Pipeline progression ramp (cool → rich): teal → green → indigo.
+        case .success: return .teal          // Downloaded — "I have the file"
+        case .transcribed: return .green     // text ready
+        case .summarised: return .indigo     // AI-distilled — the "completed" state (reads better in dark mode than purple)
+        // Source / structural markers, set apart from the ramp.
+        case .info: return .blue             // Imported — external source
+        case .merged: return .purple         // Merged — structural combination
+        // User-action / attention states, warm & earthy; red is failure-only.
+        case .skipped: return .brown         // parked on purpose
+        case .removed: return .pink          // deliberate destructive (≠ error red)
+        case .warning: return .orange        // needs attention
+        case .error: return .red             // errors only
+        case .secondary: return .secondary   // inert / on device
         case .normal: return .primary
-        case .skipped: return Color.teal.opacity(0.6)  // dimmed teal — matches Removed's
-                                                       // muted treatment so both
-                                                       // user-driven exclusion states
-                                                       // read at the same visual weight
-                                                       // (just hue distinguishes them)
-        case .removed: return Color.red.opacity(0.6)  // muted red — reminds the user
-                                                      // they took a destructive action
-                                                      // without flagging it as an error
         }
     }
 

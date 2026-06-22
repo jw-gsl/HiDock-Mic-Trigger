@@ -72,7 +72,34 @@ final class HiDockViewModel: ObservableObject {
     /// Pipeline-stage filter for the recordings table. Defaults to
     /// `.all`. Combined with `syncFilterDeviceId` (AND) and the
     /// user's sort key inside `visibleEntries`.
-    @Published var syncStatusFilter: SyncStatusFilter = .all
+    /// Multi-select status filter (stackable, like the Hide menu). Empty = show
+    /// all. Entries matching ANY selected status pass (OR semantics).
+    @Published var statusFilters: Set<SyncStatusFilter> = []
+
+    /// Whether an entry matches a given status filter.
+    func matchesStatusFilter(_ e: HiDockSyncRecordingEntry, _ f: SyncStatusFilter) -> Bool {
+        switch f {
+        case .all: return true
+        case .onDevice: return e.statusText == "On device"
+        case .downloaded: return e.statusText == "Downloaded"
+        case .untranscribed:
+            return e.recording.localExists && !e.transcribed && !e.transcriptionSkipped
+        case .transcribed: return e.transcribed
+        case .summarised: return e.statusText == "Summarised"
+        case .skipped: return e.statusText == "Skipped"
+        case .removed: return e.statusText == "Removed"
+        case .failed: return e.statusText == "Failed"
+        case .imported: return e.deviceId == "imported:local"
+        case .merged:
+            return mergeGroups.contains { $0.childNames.contains(e.recording.name) }
+        }
+    }
+
+    /// Toggle a status in/out of the multi-select Filter set.
+    func toggleStatusFilter(_ f: SyncStatusFilter) {
+        if statusFilters.contains(f) { statusFilters.remove(f) }
+        else { statusFilters.insert(f) }
+    }
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
     @Published var summaryTypeFilter: String? = nil
@@ -222,6 +249,14 @@ final class HiDockViewModel: ObservableObject {
     @Published var mergedFileTranscribed: Set<String> = []
     @Published var mergedFileTagged: Set<String> = []
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
+    /// Merged file mp3 name → its transcript mtime (when it was transcribed).
+    /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
+    /// on the date its merged transcript was produced.
+    @Published var mergedFileTranscribedDates: [String: Date] = [:]
+    /// Per-recording speaker / action-item counts (mp3 name → counts) parsed
+    /// from transcript frontmatter via `transcribe.py activity-stats`, fetched
+    /// once on load. Feeds the heatmap Tier-2 tooltip (shown when present).
+    @Published var meetingExtraStats: [String: (speakers: Int, actionItems: Int)] = [:]
 
     // MARK: - Computed
 
@@ -260,7 +295,11 @@ final class HiDockViewModel: ObservableObject {
         Array(Set(syncEntries.compactMap { $0.summaryType })).sorted()
     }
 
-    var visibleEntries: [HiDockSyncRecordingEntry] {
+    /// Entries after the device / status / summary-type / Hide filters, but
+    /// BEFORE the heatmap day-filter and sort. The heatmap is built from this
+    /// (so selecting a day doesn't collapse the grid to that one day), while
+    /// `visibleEntries` additionally applies the selected-day filter.
+    private var filteredEntriesNoDay: [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
             entries = entries.filter {
@@ -271,37 +310,14 @@ final class HiDockViewModel: ObservableObject {
         // it was a strict subset of the Filter dropdown's "On device"
         // / "Untranscribed" options, so keeping both was redundant.)
         //
-        // Pipeline-stage filter, evaluated on the same statusText
-        // cascade the table renders, so what the user picks always
-        // matches what the rows display.
-        switch syncStatusFilter {
-        case .all:
-            break
-        case .onDevice:
-            entries = entries.filter { $0.statusText == "On device" }
-        case .downloaded:
-            entries = entries.filter { $0.statusText == "Downloaded" }
-        case .untranscribed:
-            // Downloaded locally but no transcript yet, regardless of
-            // device. Excludes Skipped (user opted out) and Imported
-            // that's already been transcribed.
-            entries = entries.filter {
-                $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped
+        // Multi-select status filter (stackable). An entry passes if it matches
+        // ANY selected status (OR). Empty set = no filtering. Evaluated on the
+        // same statusText cascade the table renders.
+        let activeStatusFilters = statusFilters.subtracting([.all])
+        if !activeStatusFilters.isEmpty {
+            entries = entries.filter { e in
+                activeStatusFilters.contains { matchesStatusFilter(e, $0) }
             }
-        case .transcribed:
-            entries = entries.filter { $0.transcribed }
-        case .summarised:
-            // Transcript that also has a typed summary (statusText cascades to
-            // "Summarised" when summaryPath != nil — see Models.swift).
-            entries = entries.filter { $0.statusText == "Summarised" }
-        case .skipped:
-            entries = entries.filter { $0.statusText == "Skipped" }
-        case .removed:
-            entries = entries.filter { $0.statusText == "Removed" }
-        case .failed:
-            entries = entries.filter { $0.statusText == "Failed" }
-        case .imported:
-            entries = entries.filter { $0.deviceId == "imported:local" }
         }
         // Summary-type filter (AND-ed with the above). Only summarised rows
         // carry a type, so a non-nil filter implicitly hides un-summarised rows.
@@ -309,13 +325,24 @@ final class HiDockViewModel: ObservableObject {
             entries = entries.filter { $0.summaryType == type }
         }
         // "Hide" menu (multiselect). Drop rows whose status the user chose to
-        // hide — but never hide the status they've explicitly selected in the
-        // Filter dropdown (they clearly want to see it then).
+        // hide — but never hide a status they've explicitly selected in the
+        // Filter menu (they clearly want to see it then).
         if !hiddenStatuses.isEmpty {
+            let explicitlyFiltered = Set(activeStatusFilters.map { $0.label })
             entries = entries.filter { e in
-                if e.statusText == syncStatusFilter.label { return true }
+                if explicitlyFiltered.contains(e.statusText) { return true }
                 return !hiddenStatuses.contains(e.statusText)
             }
+        }
+        return entries
+    }
+
+    var visibleEntries: [HiDockSyncRecordingEntry] {
+        var entries = filteredEntriesNoDay
+        // Heatmap day-filter: when a day square is locked, the table narrows to
+        // that day (the heatmap grid itself keeps using filteredEntriesNoDay).
+        if let day = heatmapSelectedDay {
+            entries = entries.filter { recordingDay($0.recording) == day }
         }
         entries.sort { a, b in
             let ar = a.recording, br = b.recording
@@ -329,6 +356,10 @@ final class HiDockViewModel: ObservableObject {
                 let aKey = "\(ar.createDate) \(ar.createTime)"
                 let bKey = "\(br.createDate) \(br.createTime)"
                 result = aKey < bKey
+            case "transcribed":
+                // Untranscribed (nil) sort to the bottom in the default
+                // (descending) order via distantPast.
+                result = (a.transcribedDate ?? .distantPast) < (b.transcribedDate ?? .distantPast)
             case "duration":
                 result = ar.duration < br.duration
             case "size":
@@ -416,6 +447,142 @@ final class HiDockViewModel: ObservableObject {
             parts.append("\(selectedCount) selected")
         }
         return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Meeting activity heatmap
+
+    /// Parser for the extractor's `createDate` ("yyyy/MM/dd", emitted for every
+    /// device type — HiDock, Plaud, volume — in the resolved status item).
+    private static let recordingDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy/MM/dd"
+        return f
+    }()
+
+    /// Fallback parser for a leading "yyyy-MM-dd" in name/outputName.
+    private static let recordingISODayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// The calendar day a recording belongs to (start-of-day, local), or nil if
+    /// no date can be recovered. Prefers `createDate`; falls back to a leading
+    /// ISO date in outputName/name.
+    func recordingDay(_ rec: HiDockSyncRecording) -> Date? {
+        let cd = rec.createDate.trimmingCharacters(in: .whitespaces)
+        if !cd.isEmpty, let d = Self.recordingDayFormatter.date(from: cd) {
+            return Calendar.current.startOfDay(for: d)
+        }
+        let candidate = rec.outputName.isEmpty ? rec.name : rec.outputName
+        if candidate.count >= 10,
+           let d = Self.recordingISODayFormatter.date(from: String(candidate.prefix(10))) {
+            return Calendar.current.startOfDay(for: d)
+        }
+        return nil
+    }
+
+    /// Short device label for the heatmap tooltip ("H1", "P1", "Plaud",
+    /// "Imported", or a cleaned volume name).
+    func deviceShortLabel(for entry: HiDockSyncRecordingEntry) -> String {
+        if entry.deviceId.hasPrefix("plaud:") { return "Plaud" }
+        if entry.deviceId == "imported:local" { return "Imported" }
+        var name = entry.deviceName
+        if name.hasPrefix("HiDock ") { name = String(name.dropFirst("HiDock ".count)) }
+        return name.isEmpty ? entry.deviceName : name
+    }
+
+    /// Per-day aggregated activity (Tier-1 fields only; computed in memory, no
+    /// file IO). Mirrors the recordings table: built from `visibleEntries`, so
+    /// the heatmap reflects the active device / status / Hide / summary-type
+    /// filters.
+    /// Day locked by clicking a heatmap square — filters the recordings table
+    /// to that day (and locks the heatmap detail readout). nil = no day filter.
+    @Published var heatmapSelectedDay: Date? = nil
+
+    /// Which date the heatmap buckets by. Default Recorded ("when the meeting
+    /// happened" — the common case); Transcribed = "when I processed it".
+    enum HeatmapDateMode: String, CaseIterable, Identifiable {
+        case recorded, transcribed
+        var id: String { rawValue }
+        var label: String { self == .recorded ? "Recorded" : "Transcribed" }
+    }
+    @Published var heatmapDateMode: HeatmapDateMode = .recorded
+
+    /// Click handler for a heatmap square: toggle the day filter on/off.
+    func toggleHeatmapDay(_ day: Date) {
+        heatmapSelectedDay = (heatmapSelectedDay == day) ? nil : day
+    }
+
+    /// The day an entry buckets to under the current date-mode (start-of-day,
+    /// local). Transcribed mode returns nil for untranscribed entries (they
+    /// simply don't appear on the transcribed grid).
+    private func activityDay(for entry: HiDockSyncRecordingEntry) -> Date? {
+        switch heatmapDateMode {
+        case .recorded: return recordingDay(entry.recording)
+        case .transcribed:
+            return entry.transcribedDate.map { Calendar.current.startOfDay(for: $0) }
+        }
+    }
+
+    /// The day a merge group buckets to under the current date-mode. Recorded =
+    /// earliest child's recording day; Transcribed = the merged file's
+    /// transcript date (nil if the merged file isn't transcribed yet).
+    private func mergeGroupDay(_ group: MergeGroup) -> Date? {
+        switch heatmapDateMode {
+        case .recorded:
+            return group.childNames.compactMap { name in
+                syncEntries.first { $0.recording.name == name }
+                    .flatMap { recordingDay($0.recording) }
+            }.min()
+        case .transcribed:
+            let mp3 = (group.outputPath as NSString).lastPathComponent
+            return mergedFileTranscribedDates[mp3].map { Calendar.current.startOfDay(for: $0) }
+        }
+    }
+
+    var meetingActivityByDay: [Date: DayActivity] {
+        let childNames = Set(mergeGroups.flatMap(\.childNames))
+        var out: [Date: DayActivity] = [:]
+        var countedGroups = Set<String>()
+        for entry in filteredEntriesNoDay {
+            // A merged recording is ONE meeting: collapse its children into a
+            // single count on the group's day (per date-mode) with the merged
+            // total duration, rather than counting each piece separately.
+            if childNames.contains(entry.recording.name),
+               let group = mergeGroups.first(where: { $0.childNames.contains(entry.recording.name) }) {
+                if countedGroups.contains(group.id) { continue }
+                countedGroups.insert(group.id)
+                guard let day = mergeGroupDay(group) else { continue }
+                var a = out[day] ?? DayActivity()
+                a.count += 1
+                a.totalDuration += group.totalDuration
+                a.byDevice[deviceShortLabel(for: entry), default: 0] += 1
+                let mp3 = (group.outputPath as NSString).lastPathComponent
+                if mergedFileTranscribed.contains(mp3) { a.transcribed += 1 }
+                if let ex = meetingExtraStats[group.outputName] {
+                    a.speakers = (a.speakers ?? 0) + ex.speakers
+                    a.actionItems = (a.actionItems ?? 0) + ex.actionItems
+                }
+                out[day] = a
+                continue
+            }
+            guard let day = activityDay(for: entry) else { continue }
+            var a = out[day] ?? DayActivity()
+            a.count += 1
+            a.totalDuration += entry.recording.duration
+            a.byDevice[deviceShortLabel(for: entry), default: 0] += 1
+            if entry.transcribed { a.transcribed += 1 }
+            if entry.summaryPath != nil { a.summarised += 1 }
+            if let ex = meetingExtraStats[entry.recording.outputName] {
+                a.speakers = (a.speakers ?? 0) + ex.speakers
+                a.actionItems = (a.actionItems ?? 0) + ex.actionItems
+            }
+            out[day] = a
+        }
+        return out
     }
 
     // MARK: - Action Closures (set by AppDelegate)

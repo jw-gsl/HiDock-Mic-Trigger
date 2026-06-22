@@ -4,17 +4,19 @@ struct SyncHeaderSection: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     private var statusColor: Color {
+        // Mirrors StatusBadge.color — keep the two in sync.
         switch viewModel.syncStatusLevel {
-        case .success: return .green
-        case .transcribed: return .purple
+        case .success: return .teal
+        case .transcribed: return .green
         case .summarised: return .indigo
+        case .info: return .blue
+        case .merged: return .purple
+        case .skipped: return .brown
+        case .removed: return .pink
         case .warning: return .orange
         case .error: return .red
-        case .info: return .blue
         case .secondary: return .secondary
         case .normal: return .primary
-        case .skipped: return Color.teal.opacity(0.6)
-        case .removed: return Color.red.opacity(0.6)
         }
     }
 
@@ -31,36 +33,28 @@ struct SyncHeaderSection: View {
             // status / storage / filter rows any more.
             DeviceStripView(viewModel: viewModel)
 
-            // Generic pipeline-status line: transcription progress, skip
-            // confirmations, auto-flow messages. Per-device connection
-            // state lives on the cards above, so this row is hidden when
-            // there's no pipeline message to surface — prevents the
-            // redundant "Connected — 🔊 P1" line showing the same thing
-            // as the cards.
-            //
-            // Hidden entirely when the TranscriptionProgressBar (top of
-            // MainWindowView) is already rendering a live
-            // "Transcribing N/M — p% · <stage>" line with its own
-            // progress bar and cancel button. Two places showing the
-            // same transcription status ended up racing each other;
-            // one well-designed indicator wins.
-            if !viewModel.transcriptionBusy && !viewModel.trimBusy
-                && (!viewModel.syncStatus.isEmpty || !viewModel.syncSummary.isEmpty) {
+            // GitHub-style meeting-activity heatmap — one square per day over
+            // the last year, intensity = meetings recorded that day, hover for
+            // the day's stats. Shown once there are recordings to plot. Its
+            // header now also hosts the refreshing/downloading status.
+            if !viewModel.syncEntries.isEmpty {
+                MeetingHeatmapView(viewModel: viewModel)
+                    .padding(.top, 2)
+            }
+
+            // Status fallback ONLY when the heatmap is hidden (no recordings) —
+            // otherwise the heatmap header carries the refreshing/downloading
+            // status. Suppressed while the TranscriptionProgressBar is showing.
+            if viewModel.syncEntries.isEmpty && !viewModel.transcriptionBusy
+                && !viewModel.trimBusy && !viewModel.syncStatus.isEmpty {
                 HStack(spacing: 6) {
-                    if !viewModel.syncStatus.isEmpty {
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 8, height: 8)
-                        Text(viewModel.syncStatus)
-                            .font(.caption)
-                            .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
-                    }
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
+                    Text(viewModel.syncStatus)
+                        .font(.caption)
+                        .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
                     Spacer()
-                    if !viewModel.syncSummary.isEmpty {
-                        Text(viewModel.syncSummary)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
                 }
             }
 
@@ -75,6 +69,9 @@ struct SyncHeaderSection: View {
             // menu (which it also was before).
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        // Tight bottom padding so the toolbar's action row sits directly under
+        // the heatmap (no orphan gap now that the status row is gone).
+        .padding(.bottom, 2)
     }
 }

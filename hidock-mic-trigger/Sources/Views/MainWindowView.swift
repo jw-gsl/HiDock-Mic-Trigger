@@ -179,23 +179,25 @@ struct MainWindowView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button {
-                    viewModel.onShowFeedbackHistory()
+                // Feedback — one button, dropdown for Send / My Feedback.
+                Menu {
+                    Button {
+                        viewModel.onSendFeedback()
+                    } label: {
+                        Label("Send Feedback", systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                    Button {
+                        viewModel.onShowFeedbackHistory()
+                    } label: {
+                        Label("My Feedback", systemImage: "list.bullet.clipboard")
+                    }
                 } label: {
-                    Label("My Feedback", systemImage: "list.bullet.clipboard")
+                    Label("Feedback", systemImage: "bubble.left.and.text.bubble.right")
                         .font(.caption)
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderlessButton)
                 .controlSize(.small)
-
-                Button {
-                    viewModel.onSendFeedback()
-                } label: {
-                    Label("Send Feedback", systemImage: "bubble.left.and.text.bubble.right")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .fixedSize()
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)

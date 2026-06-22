@@ -30,6 +30,7 @@ struct RecordingsTableView: View {
                 headerButton("Summary", key: nil, width: 80)
                 headerButton("Recording", key: "name", width: 220)
                 headerButton("Created", key: "created", width: 155)
+                headerButton("Transcribed", key: "transcribed", width: 140)
                 headerButton("Length", key: "duration", width: 70)
                 headerButton("Size", key: "size", width: 70)
                 Text("").frame(width: 50) // actions
@@ -178,7 +179,7 @@ struct RecordingsTableView: View {
             .frame(width: 120, alignment: .leading)
 
             // Status
-            StatusBadge(text: "Merged", level: .info)
+            StatusBadge(text: "Merged", level: .merged)
                 .frame(width: 110, alignment: .leading)
 
             // Transcription state for merged file
@@ -205,6 +206,13 @@ struct RecordingsTableView: View {
             Text(earliestDate)
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
+
+            // Transcribed — the merged file's transcript mtime.
+            let mergedTranscriptPath = viewModel.mergedFileTranscriptPaths[(group.outputPath as NSString).lastPathComponent]
+            Text(transcribedDateString(forPath: mergedTranscriptPath))
+                .font(.caption.monospacedDigit())
+                .foregroundColor(mergedTranscriptPath == nil ? .secondary.opacity(0.5) : .primary)
+                .frame(width: 140, alignment: .leading)
 
             // Length (total)
             Text(formatRecordingDuration(group.totalDuration))
@@ -292,6 +300,22 @@ struct RecordingsTableView: View {
             Text("—")
                 .foregroundColor(.secondary.opacity(0.5))
         }
+    }
+
+    static let transcribedDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+
+    /// Transcribed-date string for a transcript file path (its mtime), or "—".
+    /// Used by the merge-parent row, which already does per-render FileManager
+    /// lookups, so one more stat here is consistent.
+    private func transcribedDateString(forPath path: String?) -> String {
+        guard let path = path, !path.isEmpty,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let d = attrs[.modificationDate] as? Date else { return "—" }
+        return Self.transcribedDateFormatter.string(from: d)
     }
 
     private func humanSize(_ bytes: Int) -> String {
@@ -427,6 +451,13 @@ struct RecordingsTableView: View {
             Text("\(entry.recording.createDate) \(entry.recording.createTime)")
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
+
+            // Transcribed — when the transcription happened (transcript file
+            // mtime). Dash until transcribed.
+            Text(entry.transcribedDate.map { Self.transcribedDateFormatter.string(from: $0) } ?? "—")
+                .font(.caption.monospacedDigit())
+                .foregroundColor(entry.transcribedDate == nil ? .secondary.opacity(0.5) : .primary)
+                .frame(width: 140, alignment: .leading)
 
             // The extractor pre-download estimate is `file_size / 8000`
             // (assumes 64 kbps), which is correct for H1 (16 kHz/64 kbps)

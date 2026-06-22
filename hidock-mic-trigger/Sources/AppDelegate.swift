@@ -120,6 +120,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// `viewModel.triggerHealthy` and drives the green/amber dot in
     /// MicTriggerSection.
     private var triggerHealthy = false
+    /// When the trigger last became healthy (HiDock connected). Drives the
+    /// uptime readout as "time connected" — reset on each (re)connect, cleared
+    /// while waiting so the timer doesn't count up before a device is present.
+    private var triggerConnectedSince: Date?
     /// Human-readable wait status from the CLI's waitForDevice loop.
     /// Cleared when the trigger goes healthy or when the process exits.
     private var triggerWaitMessage: String?
@@ -820,6 +824,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard self.process != nil else { return }
             let micName = self.selectedMicName ?? ""
             self.triggerHealthy = true
+            if self.triggerConnectedSince == nil { self.triggerConnectedSince = Date() }
             self.triggerLastStartedAt = self.processStartDate
             self.syncViewModelState()
             let preferredOK = self.preferredMicName == nil
@@ -872,12 +877,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 log("Trigger: \(msg)")
                 DispatchQueue.main.async {
                     self.triggerWaitMessage = msg
+                    // Waiting again (device gone) — stop the connected timer.
+                    self.triggerConnectedSince = nil
                     self.syncViewModelState()
                 }
             } else if line.contains(" appeared after ") {
                 log("Trigger: \(line)")
                 DispatchQueue.main.async {
                     self.triggerWaitMessage = nil
+                    // Reconnected — restart the connected timer from now.
+                    self.triggerConnectedSince = Date()
                     self.syncViewModelState()
                 }
             }
@@ -1505,7 +1514,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func formatUptime() -> String? {
-        guard let start = processStartDate else { return nil }
+        // Time CONNECTED, not time since the process started — nil while
+        // waiting for a device (so the readout disappears rather than ticking
+        // up before anything's connected).
+        guard let start = triggerConnectedSince else { return nil }
         let elapsed = Int(Date().timeIntervalSince(start))
         if elapsed < 60 {
             return "\(elapsed)s"
@@ -1628,6 +1640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Fresh launch — clear any stale healthy/wait state from a
         // previous run before the CLI even starts emitting output.
         triggerHealthy = false
+        triggerConnectedSince = nil
         triggerWaitMessage = nil
         pendingHealthyTimer?.invalidate()
         pendingHealthyTimer = nil
@@ -1664,6 +1677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.process = nil
                 self.processStartDate = nil
                 self.triggerHealthy = false
+                self.triggerConnectedSince = nil
                 self.triggerWaitMessage = nil
                 self.pendingHealthyTimer?.invalidate()
                 self.pendingHealthyTimer = nil
@@ -2832,6 +2846,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             deviceName: existing.deviceName,
             transcribed: existing.transcribed,
             transcriptPath: existing.transcriptPath,
+            transcribedDate: existing.transcribedDate,
             speakersTagged: existing.speakersTagged,
             summaryPath: existing.summaryPath,
             transcriptionSkipped: existing.transcriptionSkipped
@@ -5236,6 +5251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     deviceName: device.cleanName,
                     transcribed: prev?.transcribed ?? false,
                     transcriptPath: prev?.transcriptPath,
+                    transcribedDate: prev?.transcribedDate,
                     speakersTagged: prev?.speakersTagged ?? false,
                     summaryPath: prev?.summaryPath,
                     transcriptionSkipped: prev?.transcriptionSkipped ?? false
@@ -6301,7 +6317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     devicePayloads = payload.downloaded
                     if device.deviceType == .plaud && deviceDownloaded > 0 {
                         self.syncFilterDeviceId = device.deviceId
-                        self.viewModel.syncStatusFilter = .all
+                        self.viewModel.statusFilters = []
                         self.log("Plaud fresh downloads: showing \(device.cleanName) rows and clearing status filter")
                     }
                 }
@@ -7151,6 +7167,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// cascade already prefers Transcribed over Downloaded). The
     /// async refresh still runs afterwards to fill in `speakersTagged`
     /// / `summaryPath` / canonical `transcriptPath`.
+    /// The transcript file's modification time — used as the "transcribed on"
+    /// date for the table column (transcripts are written once at transcription
+    /// time, so mtime ≈ when it was transcribed). nil if no path / not on disk.
+    private func transcriptModificationDate(_ path: String?) -> Date? {
+        guard let path = path, !path.isEmpty,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+        return attrs[.modificationDate] as? Date
+    }
+
     private func applyTranscribedFromDiskScan() {
         let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
         guard let contents = try? FileManager.default.contentsOfDirectory(atPath: transcriptDir) else { return }
@@ -7168,11 +7193,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if syncEntries[i].transcriptPath == nil {
                     syncEntries[i].transcriptPath = (transcriptDir as NSString).appendingPathComponent(base + ".md")
                 }
+                syncEntries[i].transcribedDate = transcriptModificationDate(syncEntries[i].transcriptPath)
                 flipped += 1
             }
         }
         if flipped > 0 {
             log("applyTranscribedFromDiskScan: flipped \(flipped) row(s) to Transcribed from disk")
+        }
+    }
+
+    /// Fetch per-transcript speaker / action-item counts (heatmap Tier-2
+    /// tooltip) via `transcribe.py activity-stats`. Small JSON; refreshed
+    /// alongside transcription state.
+    private func refreshMeetingExtraStats() {
+        guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
+              FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else { return }
+        transcriptionDispatchQueue.async {
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
+            process.executableURL = URL(fileURLWithPath: self.transcriptionPythonPath)
+            process.arguments = [self.transcriptionScriptPath, "activity-stats"]
+            var env = ProcessInfo.processInfo.environment
+            env["HOME"] = NSHomeDirectory()
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:" + existing
+            }
+            process.environment = env
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do { try process.run() } catch {
+                self.log("activity-stats: launch failed: \(error.localizedDescription)")
+                return
+            }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Int]] else { return }
+            var map: [String: (speakers: Int, actionItems: Int)] = [:]
+            for (name, counts) in obj {
+                map[name] = (speakers: counts["speakers"] ?? 0, actionItems: counts["action_items"] ?? 0)
+            }
+            DispatchQueue.main.async {
+                self.viewModel.meetingExtraStats = map
+                self.log("activity-stats: loaded speaker/action counts for \(map.count) transcript(s)")
+            }
         }
     }
 
@@ -7182,6 +7248,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log("refreshTranscriptionState: skipping — script=\(FileManager.default.fileExists(atPath: transcriptionScriptPath)), python=\(FileManager.default.isExecutableFile(atPath: transcriptionPythonPath)) at \(transcriptionScriptPath)")
             return
         }
+        // Refresh the heatmap Tier-2 stats alongside (own async, small payload).
+        refreshMeetingExtraStats()
 
         transcriptionDispatchQueue.async {
             let process = Process()
@@ -7263,6 +7331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if let info = lookup[mp3Name] {
                         self.syncEntries[i].transcribed = info["transcribed"] as? Bool ?? false
                         self.syncEntries[i].transcriptPath = info["transcript_path"] as? String
+                        self.syncEntries[i].transcribedDate = self.transcriptModificationDate(info["transcript_path"] as? String)
                         // Check speaker tagging state from diarized JSON
                         self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
                         // Check if summary exists
@@ -7271,6 +7340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     } else {
                         self.syncEntries[i].transcribed = false
                         self.syncEntries[i].transcriptPath = nil
+                        self.syncEntries[i].transcribedDate = nil
                         self.syncEntries[i].speakersTagged = false
                         self.syncEntries[i].summaryPath = nil
                     }
@@ -7291,6 +7361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 var mergedTranscribed: Set<String> = []
                 var mergedTagged: Set<String> = []
                 var mergedPaths: [String: String] = [:]
+                var mergedDates: [String: Date] = [:]
                 for group in self.mergeGroups {
                     let mergedMp3Name = (group.outputPath as NSString).lastPathComponent
                     guard let info = lookup[mergedMp3Name],
@@ -7298,6 +7369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     mergedTranscribed.insert(mergedMp3Name)
                     let path = info["transcript_path"] as? String
                     if let path = path { mergedPaths[mergedMp3Name] = path }
+                    if let d = self.transcriptModificationDate(path) { mergedDates[mergedMp3Name] = d }
                     if self.checkSpeakersTagged(transcriptPath: path) {
                         mergedTagged.insert(mergedMp3Name)
                     }
@@ -7305,6 +7377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.mergedFileTranscribed = mergedTranscribed
                 self.viewModel.mergedFileTagged = mergedTagged
                 self.viewModel.mergedFileTranscriptPaths = mergedPaths
+                self.viewModel.mergedFileTranscribedDates = mergedDates
                 if !mergedTranscribed.isEmpty {
                     self.log("refreshTranscriptionState: \(mergedTranscribed.count) merged file(s) transcribed, \(mergedTranscribed.count - mergedTagged.count) need tagging")
                 }

@@ -47,6 +47,20 @@ struct HiDockStorageStats: Codable {
     let truncated: Bool
 }
 
+/// One day's aggregated meeting activity, for the GitHub-style contribution
+/// heatmap. Tier-1 fields (count/duration/byDevice/transcribed/summarised) come
+/// for free from `syncEntries`; Tier-2 fields (speakers/actionItems) are filled
+/// later from a knowledge-graph–backed per-day index and stay nil until then.
+struct DayActivity {
+    var count: Int = 0
+    var totalDuration: Double = 0          // seconds
+    var byDevice: [String: Int] = [:]      // short label ("H1"/"Plaud") → count
+    var transcribed: Int = 0
+    var summarised: Int = 0
+    var speakers: Int? = nil               // Tier 2
+    var actionItems: Int? = nil            // Tier 2
+}
+
 struct HiDockSyncStatusResponse: Codable {
     let connected: Bool
     let outputDir: String
@@ -256,6 +270,9 @@ struct HiDockSyncRecordingEntry: Identifiable {
     let deviceName: String
     var transcribed: Bool = false
     var transcriptPath: String? = nil
+    /// When the transcription happened — the transcript file's modification
+    /// time (set during the transcript disk-scan). nil until transcribed.
+    var transcribedDate: Date? = nil
     var speakersTagged: Bool = false
     var summaryPath: String? = nil
     /// User explicitly opted out of transcribing this recording. The file
@@ -264,7 +281,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
     /// UI shows "Skipped" and auto-transcribe filters it out.
     var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -272,6 +289,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.deviceName = deviceName
         self.transcribed = transcribed
         self.transcriptPath = transcriptPath
+        self.transcribedDate = transcribedDate
         self.speakersTagged = speakersTagged
         self.summaryPath = summaryPath
         self.transcriptionSkipped = transcriptionSkipped
@@ -355,8 +373,15 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
     case removed
     case failed
     case imported
+    case merged
 
     var id: String { rawValue }
+
+    /// Cases offered in the multi-select Filter menu (everything except `.all`,
+    /// which is the implicit "no filter" / reset).
+    static var selectable: [SyncStatusFilter] {
+        allCases.filter { $0 != .all }
+    }
 
     var label: String {
         switch self {
@@ -370,6 +395,7 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
         case .removed: return "Removed"
         case .failed: return "Failed"
         case .imported: return "Imported"
+        case .merged: return "Merged"
         }
     }
 }
@@ -390,20 +416,19 @@ enum DisplayRow: Identifiable {
 
 enum StatusLevel {
     case normal, success, warning, error, info, secondary
-    /// Used for the "Transcribed" status — distinct from `.success`
-    /// (which remains green for "Downloaded") so Downloaded and
-    /// Transcribed rows are visually distinguishable at a glance.
+    /// "Transcribed" — teal, one step past Downloaded's green in the cool
+    /// progression ramp (green → teal → indigo).
     case transcribed
-    /// "Summarised" — a transcript that also has a typed summary. Indigo,
-    /// distinct from transcribed purple, reads as "one step further processed".
+    /// "Summarised" — indigo, the deepest pipeline state (AI-distilled).
     case summarised
-    /// User-driven opt-out: "I told you to skip this." Cyan reads as a
-    /// deliberate choice — distinct from grey ("not yet acted on")
-    /// and from blue (informational).
+    /// "Merged" — purple, a structural combination; distinct from Imported's
+    /// blue so the two source/structure markers don't share a hue.
+    case merged
+    /// User-driven opt-out ("Skip"): brown — parked / set aside on purpose,
+    /// an earthy low-key tone clearly outside the pipeline colours.
     case skipped
-    /// User-driven destructive action: "I deleted the local copy."
-    /// Renders as muted red — reminds the user a destructive action
-    /// was taken without screaming "error" the way full red would.
+    /// User-driven destructive action ("Removed"): pink — deliberate, but a
+    /// distinct hue from the error red so it never reads as a failure.
     case removed
 }
 
