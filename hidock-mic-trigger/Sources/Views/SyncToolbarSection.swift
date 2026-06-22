@@ -10,11 +10,20 @@ struct SyncToolbarSection: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Action row 1 — transformative selection-driven actions (Merge,
-            // Trim, Skip, Remove). (Import moved up to just under the heatmap.)
-            // Transcribe Selected sits on row 2 next to Download Selected (both
-            // are "process selected rows" verbs and pair visually).
+            // Action row 1 — Import + transformative selection-driven actions
+            // (Merge, Trim, Skip, Remove), all on one tidy row directly beneath
+            // the heatmap (the old status row above was removed, so this row now
+            // sits right under it). Transcribe Selected is on row 2.
             HStack(spacing: 6) {
+                Button {
+                    viewModel.onImportAudioFile()
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                }
+                .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
+
+                Divider().frame(height: 16)
+
                 Button {
                     viewModel.onMergeSelected()
                 } label: {

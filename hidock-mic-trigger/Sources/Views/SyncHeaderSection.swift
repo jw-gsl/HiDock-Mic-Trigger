@@ -42,22 +42,6 @@ struct SyncHeaderSection: View {
                     .padding(.top, 2)
             }
 
-            // Import — lifted up to just beneath the heatmap. Always available
-            // (you import when there's nothing yet), so it's outside the
-            // heatmap's has-recordings gate.
-            HStack(spacing: 6) {
-                Button {
-                    viewModel.onImportAudioFile()
-                } label: {
-                    Label("Import", systemImage: "square.and.arrow.down")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
-                Spacer()
-            }
-
             // Status fallback ONLY when the heatmap is hidden (no recordings) —
             // otherwise the heatmap header carries the refreshing/downloading
             // status. Suppressed while the TranscriptionProgressBar is showing.
@@ -85,6 +69,9 @@ struct SyncHeaderSection: View {
             // menu (which it also was before).
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        // Tight bottom padding so the toolbar's action row sits directly under
+        // the heatmap (no orphan gap now that the status row is gone).
+        .padding(.bottom, 2)
     }
 }

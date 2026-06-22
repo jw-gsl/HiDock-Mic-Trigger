@@ -192,6 +192,8 @@ struct MeetingHeatmapView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .controlSize(.mini)
+            .font(.caption)
             .fixedSize()
             .help("Recorded = when meetings happened. Transcribed = when they were transcribed.")
             legend
