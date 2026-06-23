@@ -126,6 +126,7 @@ on a real Windows build/CI run.
 | Volume device downloads (volume-import) | `AppDelegate.swift` | `main_window.py` | Both | |
 | Download complete notification | User notification | Tray notification | Both | 2026-06-18 — Windows now posts a download-complete tray toast |
 | Plaud cloud sync (account login + cloud recordings) | `PlaudAuth.swift` + `plaud_client.py` | `core/plaud.py` + `ui/plaud_signin_dialog.py` + `Windows-Script/plaud_client.py` | Both | 2026-06-18 — Windows ported: sign-in (QtWebEngine or manual token paste), Pair Plaud, async cloud merge + download routing |
+| Plaud sign-in uses a fresh/ephemeral webview session | `WKWebsiteDataStore.nonPersistent()` per login | Off-the-record `QWebEngineProfile` per dialog | Both | 2026-06-23 — macOS switched off the shared persistent `.default()` store (was reusing a stale `pld_ut` on re-pair / blocked account switching); now matches Windows' fresh-each-time behaviour |
 | Plaud cloud token auto-refresh | `plaud_client.py` refreshes the short-lived `pld_ut`; rotated tokens persisted to Keychain via `PlaudSession.applyingRefreshedTokens` | `core/plaud.apply_refreshed_tokens` (QSettings) | Both | Windows persists rotated tokens from the extractor's `refreshedTokens` payload |
 
 ## Transcription
