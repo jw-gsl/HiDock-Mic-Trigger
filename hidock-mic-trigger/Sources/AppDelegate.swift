@@ -663,6 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onForgetDevice = { [weak self] device in self?.forgetDevice(device) }
         viewModel.onPairVolume = { [weak self] volumeName, subpath in self?.pairVolume(volumeName: volumeName, subpath: subpath) }
         viewModel.onPairPlaud = { [weak self] region in self?.pairPlaud(region: region) }
+        viewModel.onSignOutPlaud = { [weak self] device in self?.signOutPlaud(device) }
         viewModel.onScanVolumes = { [weak self] completion in self?.scanVolumes(completion: completion) }
         viewModel.onRefreshModelStatuses = { [weak self] in self?.refreshModelStatuses() }
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
@@ -4466,6 +4467,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = true
         log("Paired volume: \(volumeName) (subpath: \(subpath ?? "none"))")
+    }
+
+    /// Sign out of a Plaud account but keep it linked as a device. Clears the
+    /// Keychain session (so sync pauses and the next sign-in requires a code)
+    /// while leaving the paired device in place — distinct from `forgetDevice`,
+    /// which removes the account entirely. Re-signing in reuses `pairPlaud`,
+    /// which updates the existing entry in place (it keys on accountId).
+    private func signOutPlaud(_ device: HiDockPairedDevice) {
+        guard device.deviceType == .plaud, let accountId = device.plaudAccountId else { return }
+        PlaudAuthStore.delete(accountId: accountId)
+        markPlaudSignedOut(device)
+        log("Signed out of Plaud account: \(device.cleanName) (still linked)")
+        refreshSyncStatus()
     }
 
     private func pairPlaud(region: String) {

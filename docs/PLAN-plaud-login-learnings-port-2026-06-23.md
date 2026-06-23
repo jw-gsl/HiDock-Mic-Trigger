@@ -89,6 +89,41 @@ app:
 - [ ] Build + verify on Mac: sign in, unpair, re-pair as a different account
       (should show a fresh login form, not auto-adopt the previous session).
 
+## Sign out vs Forget (Device Manager) — 2026-06-23
+
+A Plaud entry is a *cloud account*, so two distinct actions make sense (unlike a
+HiDock/USB device, which only has "Forget"):
+
+- **Sign out** — clear the Plaud session but **keep** the account linked as a
+  device. Reversible: sign back in with a code. Sync pauses meanwhile.
+- **Forget** — remove the Plaud account as a device entirely (current behaviour).
+
+Good news: the "paired but signed-out" state **already exists** and is reused,
+not invented:
+- `plaudSignedOutMessage = "Plaud is not signed in"`, `markPlaudSignedOut(_:)`.
+- `plaudEnvironment(for:)` already marks a device signed-out and returns no token
+  when the Keychain session is missing, so sync skips it cleanly (no 401 spam).
+- The main `DeviceCardView` already detects `plaudSignedOut` (lastError contains
+  "not signed in") and offers a "Sign in" affordance via `onPairPlaud(region)`.
+
+So the only gap is the **Device Manager modal row** (`DeviceRowView`), which only
+exposes "Forget". Plan:
+- macOS: `DeviceRowView` shows, for a Plaud device, **Sign out** (signed in) /
+  **Sign in** (signed out) **plus** Forget. Sign-in reuses `onPairPlaud(region)`;
+  Sign out calls a new `onSignOutPlaud` → `signOutPlaud(_:)` which does
+  `PlaudAuthStore.delete` (clear session) but keeps the device, then
+  `markPlaudSignedOut`. Forget is unchanged.
+- Windows: mirror in `device_manager_dialog.py` (Sign out / Sign in + Forget for
+  Plaud rows), reusing the existing account store + sign-in dialog.
+- One-click (no confirm) to match the existing Forget; Sign out is reversible.
+
+### Completed (this branch)
+- [x] macOS DeviceRowView Sign out / Sign in / Forget for Plaud
+      (`onSignOutPlaud` → `signOutPlaud`; Sign in reuses `onPairPlaud`). Builds.
+- [x] Windows device_manager_dialog parity (Sign out clears account tokens but
+      keeps the `PairedDevice`; Sign in re-runs the sign-in dialog). 53 tests pass.
+- [x] PARITY.md row.
+
 ## Rejected / Not Applicable
 - Porting the wry `cookies()` workaround (#1) — N/A, native cookie APIs on both
   platforms already read all cookies by name.

@@ -3119,8 +3119,15 @@ class MainWindow(QMainWindow):
                 volumes = []
             dlg.pair_widget.set_scan_results(volumes)
 
+        def _on_plaud_signed_out(device_id: str):
+            # The dialog already cleared the account's tokens; refresh so the
+            # device shows as signed-out and Plaud sync pauses for it.
+            self._refresh_device_strip()
+            self._refresh_device_filter_combo()
+
         dlg.deviceForgotten.connect(_on_forget)
         dlg.volumePaired.connect(_on_pair_volume)
+        dlg.plaudSignedOut.connect(_on_plaud_signed_out)
         dlg.pair_widget.scanRequested.connect(_on_scan_volumes)
         try:
             dlg.exec()
