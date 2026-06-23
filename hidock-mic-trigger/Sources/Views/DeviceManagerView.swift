@@ -322,9 +322,10 @@ struct PairPlaudButton: View {
                 Picker("Region", selection: $region) {
                     Text("US").tag("us")
                     Text("EU").tag("eu")
+                    Text("APAC").tag("apac")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .frame(width: 240)
 
                 HStack {
                     Button("Cancel") {

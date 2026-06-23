@@ -63,10 +63,12 @@ app:
    web.plaud.ai setting `pld_ut` is captured by the poll, independent of the
    Google-only `exchangeGoogleSSO` fast path. Low priority; noted below.
 
-### Minor / optional
-- **Region coverage.** macOS `PlaudAPI.baseURL` only maps `eu` → `api-euc1`,
-  else US. No APAC (`api-apse1`). Region is user-picked (us/eu) in the Device
-  Manager. Low priority — only matters for APAC accounts.
+### Region coverage (APAC)
+- The Python extractors on **both** platforms (`usb-extractor/plaud_client.py`,
+  `Windows-Script/plaud_client.py`) already support `apac` → `api-apse1`,
+  including region-redirect resolution, and the **Windows** sign-in UI already
+  offers APAC. The only gap was the macOS **Swift** sign-in: `PlaudAPI.baseURL`
+  (US/EU only) and the region picker (US/EU only). Closed in this branch.
 
 ## Completed
 - [x] Reviewed both platforms' Plaud sign-in against the four Plaud Sync fixes.
@@ -74,14 +76,18 @@ app:
       `WKWebsiteDataStore.default()` (stale-session / can't-switch-account),
       where Windows already uses an off-the-record profile.
 
-## Planned
-- [ ] **macOS:** switch `PlaudLoginWindowController` to
-      `WKWebsiteDataStore.nonPersistent()` for the login webview and poll that
-      store (not `.default()`). Brings it to parity with Windows.
-- [ ] Update `PARITY.md` (Plaud sign-in: both use a fresh/ephemeral webview
-      session).
-- [ ] (Optional, separate change) add APAC region (`api-apse1`) to
-      `PlaudAPI.baseURL` and the region picker.
+## Completed (this branch — 2026-06-23)
+- [x] **macOS:** `PlaudLoginWindowController` now uses
+      `WKWebsiteDataStore.nonPersistent()` for the login webview and polls that
+      store (not `.default()`). At parity with Windows' off-the-record profile.
+- [x] **macOS:** APAC region added — `PlaudAPI.baseURL` maps `apac` →
+      `api-apse1`, and the Connect-Plaud region picker offers US/EU/APAC.
+      (Windows + both Python extractors already had APAC.)
+- [x] Updated `PARITY.md` (fresh/ephemeral Plaud sign-in session row).
+
+## In Progress
+- [ ] Build + verify on Mac: sign in, unpair, re-pair as a different account
+      (should show a fresh login form, not auto-adopt the previous session).
 
 ## Rejected / Not Applicable
 - Porting the wry `cookies()` workaround (#1) — N/A, native cookie APIs on both

@@ -45,7 +45,11 @@ struct PlaudUser: Decodable {
 
 enum PlaudAPI {
     static func baseURL(region: String) -> URL {
-        URL(string: region == "eu" ? "https://api-euc1.plaud.ai" : "https://api.plaud.ai")!
+        switch region {
+        case "eu": return URL(string: "https://api-euc1.plaud.ai")!
+        case "apac": return URL(string: "https://api-apse1.plaud.ai")!
+        default: return URL(string: "https://api.plaud.ai")!
+        }
     }
 
     static func exchangeGoogleSSO(idToken: String, userArea: String, region: String, completion: @escaping (Result<(String, String?), Error>) -> Void) {
