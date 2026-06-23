@@ -36,11 +36,14 @@ class DeviceRowWidget(QWidget):
     """A single row showing one paired device."""
 
     forgetRequested = pyqtSignal(str)  # device_id
+    signOutRequested = pyqtSignal(str)  # device_id (Plaud: clear session, keep account)
+    signInRequested = pyqtSignal(str)   # device_id (Plaud: re-authenticate)
 
-    def __init__(self, device: PairedDevice, connected: bool = False, parent=None):
+    def __init__(self, device: PairedDevice, connected: bool = False, signed_out: bool = False, parent=None):
         super().__init__(parent)
         self.device = device
         self._connected = connected
+        self._signed_out = signed_out
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -111,9 +114,23 @@ class DeviceRowWidget(QWidget):
 
         layout.addLayout(text_layout, stretch=1)
 
-        # Right: forget button
+        # Right: account/device actions. A Plaud account (cloud login) gets a
+        # reversible Sign out / Sign in in addition to Forget; HiDock/USB
+        # devices only have Forget. "Sign out" clears the session but keeps the
+        # account linked; "Forget" removes it entirely.
         btn_layout = QVBoxLayout()
         btn_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        if device.device_type == DeviceType.PLAUD:
+            if signed_out:
+                signin_btn = QPushButton("Sign in")
+                signin_btn.setFixedWidth(70)
+                signin_btn.clicked.connect(lambda: self.signInRequested.emit(device.device_id))
+                btn_layout.addWidget(signin_btn)
+            else:
+                signout_btn = QPushButton("Sign out")
+                signout_btn.setFixedWidth(70)
+                signout_btn.clicked.connect(lambda: self.signOutRequested.emit(device.device_id))
+                btn_layout.addWidget(signout_btn)
         forget_btn = QPushButton("Forget")
         forget_btn.setFixedWidth(70)
         forget_btn.setStyleSheet("color: #f38ba8;")
@@ -224,6 +241,7 @@ class DeviceManagerDialog(QDialog):
     deviceForgotten = pyqtSignal(str)   # device_id — emitted so parent can update state
     volumePaired = pyqtSignal(str, str)  # volume_name, subpath
     plaudPaired = pyqtSignal(object)     # core.plaud.PlaudAccount — emitted on Plaud sign-in
+    plaudSignedOut = pyqtSignal(str)     # device_id — Plaud session cleared, account kept
 
     def __init__(self, devices: list[PairedDevice], connected_ids: set[str] | None = None, parent=None):
         super().__init__(parent)
@@ -337,10 +355,22 @@ class DeviceManagerDialog(QDialog):
 
         for i, device in enumerate(devices):
             connected = device.device_id in self._connected_ids
-            row = DeviceRowWidget(device, connected=connected)
+            row = DeviceRowWidget(device, connected=connected, signed_out=self._plaud_signed_out(device))
             row.forgetRequested.connect(self._on_forget)
+            row.signOutRequested.connect(self._on_sign_out)
+            row.signInRequested.connect(self._on_sign_in)
             self._rows[device.device_id] = row
             self._content_layout.insertWidget(i, row)
+
+    def _plaud_signed_out(self, device: PairedDevice) -> bool:
+        """A Plaud account is signed-out when it's still linked but has no
+        access token (mirrors the macOS "paired but signed-out" state)."""
+        if device.device_type != DeviceType.PLAUD or not device.plaud_account_id:
+            return False
+        from core import plaud as plaud_store
+
+        acct = plaud_store.get_account(device.plaud_account_id)
+        return acct is None or not acct.access_token
 
     def _filtered_devices(self) -> list[PairedDevice]:
         devices = list(self._devices)
@@ -383,6 +413,44 @@ class DeviceManagerDialog(QDialog):
                 pass
         self._devices = [d for d in self._devices if d.device_id != device_id]
         self.deviceForgotten.emit(device_id)
+        self._rebuild()
+
+    def _on_sign_out(self, device_id: str):
+        """Sign out of a Plaud account but keep it linked: clear the stored
+        tokens (so sync pauses and re-signing in needs a code) while leaving the
+        account entry in place. Distinct from Forget, which removes it."""
+        device = next((d for d in self._devices if d.device_id == device_id), None)
+        if device is None or device.device_type != DeviceType.PLAUD or not device.plaud_account_id:
+            return
+        from core import plaud as plaud_store
+
+        acct = plaud_store.get_account(device.plaud_account_id)
+        if acct is not None:
+            acct.access_token = ""
+            acct.refresh_token = None
+            plaud_store.save_account(acct)
+        self.plaudSignedOut.emit(device_id)
+        self._rebuild()
+
+    def _on_sign_in(self, device_id: str):
+        """Re-authenticate a signed-out Plaud account. Reuses the sign-in dialog
+        (seeded with the account's region) and persists the refreshed tokens to
+        the existing account entry."""
+        device = next((d for d in self._devices if d.device_id == device_id), None)
+        if device is None or device.device_type != DeviceType.PLAUD:
+            return
+        from ui.plaud_signin_dialog import PlaudSignInDialog
+
+        dialog = PlaudSignInDialog(region=device.plaud_region or "us", parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        account = dialog.result_account()
+        if account is None or not account.access_token:
+            return
+        from core import plaud as plaud_store
+
+        plaud_store.save_account(account)
+        self.plaudPaired.emit(account)
         self._rebuild()
 
     @pyqtSlot(str, str)

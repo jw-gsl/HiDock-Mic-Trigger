@@ -90,7 +90,12 @@ struct DeviceManagerView: View {
                             DeviceRowView(
                                 device: device,
                                 isConnected: viewModel.syncDeviceConnected[device.deviceId] ?? false,
-                                onForget: { viewModel.onForgetDevice(device) }
+                                isSignedOut: device.deviceType == .plaud
+                                    && (viewModel.syncDeviceLastError[device.deviceId]?.0
+                                        .localizedCaseInsensitiveContains("not signed in") ?? false),
+                                onForget: { viewModel.onForgetDevice(device) },
+                                onSignOut: { viewModel.onSignOutPlaud(device) },
+                                onSignIn: { viewModel.onPairPlaud(device.plaudRegion ?? "us") }
                             )
                             Divider()
                                 .padding(.horizontal, 16)
@@ -164,7 +169,10 @@ private enum DeviceSortKey: Hashable {
 struct DeviceRowView: View {
     let device: HiDockPairedDevice
     let isConnected: Bool
+    let isSignedOut: Bool
     let onForget: () -> Void
+    let onSignOut: () -> Void
+    let onSignIn: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -257,8 +265,32 @@ struct DeviceRowView: View {
                 }
             }
 
-            // Actions
+            // Actions. A Plaud account (cloud login) gets a reversible
+            // Sign out / Sign in in addition to Forget; HiDock/USB devices
+            // only have Forget. "Sign out" clears the session but keeps the
+            // account linked; "Forget" removes it entirely.
             VStack(spacing: 4) {
+                if device.deviceType == .plaud {
+                    if isSignedOut {
+                        Button {
+                            onSignIn()
+                        } label: {
+                            Text("Sign in")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else {
+                        Button {
+                            onSignOut()
+                        } label: {
+                            Text("Sign out")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
                 Button(role: .destructive) {
                     onForget()
                 } label: {
@@ -268,7 +300,7 @@ struct DeviceRowView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            .frame(width: 70)
+            .frame(width: 80)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -322,9 +354,10 @@ struct PairPlaudButton: View {
                 Picker("Region", selection: $region) {
                     Text("US").tag("us")
                     Text("EU").tag("eu")
+                    Text("APAC").tag("apac")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .frame(width: 240)
 
                 HStack {
                     Button("Cancel") {

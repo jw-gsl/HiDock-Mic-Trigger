@@ -45,7 +45,11 @@ struct PlaudUser: Decodable {
 
 enum PlaudAPI {
     static func baseURL(region: String) -> URL {
-        URL(string: region == "eu" ? "https://api-euc1.plaud.ai" : "https://api.plaud.ai")!
+        switch region {
+        case "eu": return URL(string: "https://api-euc1.plaud.ai")!
+        case "apac": return URL(string: "https://api-apse1.plaud.ai")!
+        default: return URL(string: "https://api.plaud.ai")!
+        }
     }
 
     static func exchangeGoogleSSO(idToken: String, userArea: String, region: String, completion: @escaping (Result<(String, String?), Error>) -> Void) {
@@ -171,6 +175,13 @@ final class PlaudLoginWindowController: NSObject, WKNavigationDelegate, WKUIDele
     private var childWindows: [NSWindow] = []
     private var pollTimer: Timer?
     private var completed = false
+    // Ephemeral, per-login data store so every sign-in starts from a clean
+    // web.plaud.ai session (mirrors the Windows app's off-the-record
+    // QWebEngineProfile). Using the shared `.default()` store meant a leftover
+    // `pld_ut` from a previous pairing was captured instantly by `pollCookies`,
+    // so the user could never sign in as a different account and re-pairing
+    // silently re-adopted the old session. We poll *this* store, not `.default()`.
+    private let dataStore = WKWebsiteDataStore.nonPersistent()
 
     init(region: String, log: @escaping (String) -> Void = { _ in }, completion: @escaping (Result<PlaudSession, Error>) -> Void) {
         self.region = region
@@ -182,7 +193,7 @@ final class PlaudLoginWindowController: NSObject, WKNavigationDelegate, WKUIDele
     func show() {
         log("Plaud SSO: opening WebKit login window (region=\(region))")
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
+        config.websiteDataStore = dataStore
         config.userContentController.add(self, name: "plaud")
         config.userContentController.addUserScript(WKUserScript(source: Self.captureScript(region: region), injectionTime: .atDocumentStart, forMainFrameOnly: false))
 
@@ -257,7 +268,7 @@ final class PlaudLoginWindowController: NSObject, WKNavigationDelegate, WKUIDele
     }
 
     private func pollCookies() {
-        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
+        dataStore.httpCookieStore.getAllCookies { [weak self] cookies in
             guard let self, !self.completed else { return }
             let access = cookies.last(where: { $0.name == "pld_ut" && !$0.value.isEmpty })?.value
             let refresh = cookies.last(where: { $0.name == "pld_urt" && !$0.value.isEmpty })?.value

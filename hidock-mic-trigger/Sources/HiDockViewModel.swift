@@ -778,6 +778,7 @@ final class HiDockViewModel: ObservableObject {
     var onForgetDevice: (HiDockPairedDevice) -> Void = { _ in }
     var onPairVolume: (String, String?) -> Void = { _, _ in } // volumeName, subpath
     var onPairPlaud: (String) -> Void = { _ in } // region
+    var onSignOutPlaud: (HiDockPairedDevice) -> Void = { _ in } // clear session, keep device
     var onScanVolumes: (@escaping ([VolumeScanResult]) -> Void) -> Void = { $0([]) }
 
     // MARK: - Session activity badge
