@@ -82,13 +82,17 @@ func findInputDeviceID(named targetName: String) -> AudioDeviceID? {
 
 // MARK: - HiDock device discovery
 
-/// Find the first audio input device whose name starts with "HiDock".
+/// Find the first audio input device that is a HiDock H1.
+///
+/// We match any "HiDock"-prefixed input but explicitly skip the HiDock P1:
+/// only the H1 is held open by the mic trigger. The P1 is a separate device
+/// that should never have its input claimed here.
 func findHiDockDeviceName() -> String? {
     for dev in getAllAudioDevices() {
         guard deviceHasInput(dev) else { continue }
-        if let name = getDeviceName(dev), name.hasPrefix("HiDock") {
-            return name
-        }
+        guard let name = getDeviceName(dev), name.hasPrefix("HiDock") else { continue }
+        if name.contains("P1") { continue }   // skip the HiDock P1
+        return name
     }
     return nil
 }
@@ -262,7 +266,7 @@ let hidockDevice: String
 if let override = config.hidockDevice {
     hidockDevice = override
 } else {
-    hidockDevice = waitForDevice("HiDock audio input device") {
+    hidockDevice = waitForDevice("HiDock H1 audio input device") {
         findHiDockDeviceName()
     }
 }
