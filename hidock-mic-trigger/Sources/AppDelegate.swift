@@ -6329,11 +6329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     }
                     deviceDownloaded = payload.downloaded.count
                     devicePayloads = payload.downloaded
-                    if device.deviceType == .plaud && deviceDownloaded > 0 {
-                        self.syncFilterDeviceId = device.deviceId
-                        self.viewModel.statusFilters = []
-                        self.log("Plaud fresh downloads: showing \(device.cleanName) rows and clearing status filter")
-                    }
+                    // NOTE: deliberately do NOT change the device/status filters
+                    // here. Filters only ever change in response to an explicit
+                    // user action (filter button / device card), never as a
+                    // side effect of downloading or transcribing.
                 }
                 self.downloadNewFromDevices(
                     Array(remaining.dropFirst()),
