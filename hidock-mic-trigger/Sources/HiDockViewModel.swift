@@ -53,8 +53,27 @@ final class HiDockViewModel: ObservableObject {
     /// summarise run starts so the user sees the activity.
     @Published var cliPaneVisible = false
     /// Shared embedded-terminal controller — the SwiftUI pane displays it,
-    /// AppDelegate drives it (runs Ask Claude Code, feeds summarise activity).
+    /// AppDelegate drives it (interactive auth + template authoring).
     let terminalController = TerminalPaneController()
+
+    /// What the right-hand CLI pane currently shows.
+    /// - `.summary`: live formatted readout of a summarise/reclassify run
+    /// - `.chat`: conversational Ask AI (formatted, multi-turn)
+    /// - `.terminal`: raw SwiftTerm shell (auth, template authoring, power use)
+    enum CLIPaneMode { case summary, chat, terminal }
+    @Published var cliPaneMode: CLIPaneMode = .terminal
+    /// Formatted readout for the auto/selected/reclassify summarise flow.
+    let summaryTranscript = AgentTranscript()
+    /// Formatted conversation for Ask AI.
+    let chatTranscript = AgentTranscript()
+    /// Title shown above the chat pane (e.g. the recording name).
+    @Published var chatTitle: String = "Ask AI"
+    /// True while a chat turn is in flight (disables the input box / Send).
+    @Published var chatRunning = false
+    /// User submitted a chat follow-up — AppDelegate runs the next turn.
+    var onSendChat: (String) -> Void = { _ in }
+    /// Open the raw terminal pane (for `claude auth login` / power use).
+    var onOpenRawTerminal: () -> Void = { }
     @Published var mergeGroups: [MergeGroup] = []
     @Published var expandedMergeGroups: Set<String> = []
     @Published var syncBusy = false

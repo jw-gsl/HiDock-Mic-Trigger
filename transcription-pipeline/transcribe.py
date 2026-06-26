@@ -656,6 +656,31 @@ def cmd_summarize(args):
     print(json.dumps(res))
 
 
+def cmd_ask(args):
+    """One conversational turn for the desktop chat view. Reads the prompt from
+    stdin, streams normalized events (NDJSON on stderr), and prints a JSON
+    result {ok, session_id, text} on stdout. Multi-turn = re-invoke with
+    --resume <session_id>. Mirrors transcribe_cpp.cmd_ask."""
+    import sys as _sys
+    from shared.agent_events import EventEmitter
+    from shared.llm_cli import chat_streaming, get_engine
+    prompt = _sys.stdin.read()
+    em = EventEmitter()
+    allowed = None
+    if getattr(args, "allowed_tools", None):
+        allowed = [t.strip() for t in args.allowed_tools.split(",") if t.strip()]
+    text, session_id = chat_streaming(
+        prompt,
+        engine=get_engine(args.engine or "auto"),
+        cwd=getattr(args, "cwd", None),
+        resume=getattr(args, "resume", None),
+        allowed_tools=allowed,
+        on_event=em,
+    )
+    em.done(ok=text is not None, session_id=session_id)
+    print(json.dumps({"ok": text is not None, "session_id": session_id, "text": text}))
+
+
 def cmd_status(_args):
     """Print transcription state as JSON."""
     state = load_state()
@@ -1070,6 +1095,13 @@ def main():
     p_summarize.add_argument("--template", default=None, help="Force a specific template by name (skip auto-classification).")
     p_summarize.add_argument("--events", action="store_true", help="Emit normalized agent events (NDJSON on stderr) for the desktop app's formatted view.")
     p_summarize.set_defaults(func=cmd_summarize)
+
+    p_ask = sub.add_parser("ask", help="One conversational turn (prompt on stdin) for the desktop chat view; streams normalized events.")
+    p_ask.add_argument("--engine", default=None, help="LLM engine (default: config [summarization].engine / auto).")
+    p_ask.add_argument("--cwd", default=None, help="Working directory for the engine (e.g. the transcript's folder).")
+    p_ask.add_argument("--resume", default=None, help="Resume a prior claude session id for multi-turn chat.")
+    p_ask.add_argument("--allowed-tools", default=None, help="Comma-separated claude tool allow-list (e.g. Read,Grep,Glob).")
+    p_ask.set_defaults(func=cmd_ask)
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
     p_detect.set_defaults(func=cmd_detect_engine)

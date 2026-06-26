@@ -625,6 +625,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         viewModel.onSummariseRecording = { [weak self] entry in self?.summariseRecording(entry) }
         viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
+        viewModel.onSendChat = { [weak self] text in self?.runChatTurn(text) }
+        viewModel.onOpenRawTerminal = { [weak self] in self?.openRawTerminalPane() }
         viewModel.onViewSummary = { [weak self] path in
             self?.openSummaryViewer(summaryMdPath: path)
         }
@@ -3356,32 +3358,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// replaces the old summary file, and reopens the viewer on the new one.
     private func reclassifySummary(transcriptPath: String, template: String) {
         guard !transcriptPath.isEmpty else { return }
-        if showCLIWhileSummarising { viewModel.cliPaneVisible = true }
-        viewModel.terminalController.appendActivity("")
-        viewModel.terminalController.appendActivity("──── Reclassifying as \(template) ────")
-        var args = ["summarize", transcriptPath, "--template", template]
+        viewModel.chatTitle = "Reclassifying as \(template)"
+        if showCLIWhileSummarising {
+            viewModel.cliPaneMode = .summary
+            viewModel.cliPaneVisible = true
+        }
+        viewModel.summaryTranscript.reset()
+        var args = ["summarize", transcriptPath, "--template", template, "--events"]
         if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
         runTranscription(arguments: args, timeout: 300, onLine: { [weak self] line in
-            guard let self = self else { return }
-            if line.hasPrefix("STAGE:") {
-                let label = String(line.dropFirst("STAGE:".count)).trimmingCharacters(in: .whitespaces)
-                self.viewModel.terminalController.appendActivity("  › " + label)
-            } else if !line.isEmpty {
-                self.viewModel.terminalController.appendActivity(line)
-            }
+            self?.viewModel.summaryTranscript.ingest(line: line)
         }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.viewModel.summaryTranscript.running = false
                 if case .success(let data) = result,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    (json["summarized"] as? Bool) == true,
                    let path = json["summary_path"] as? String {
-                    self.viewModel.terminalController.appendActivity("──── Saved ✓ \((path as NSString).lastPathComponent) ────")
-                    self.viewModel.terminalController.appendActivity("")
                     self.refreshTranscriptionState()   // updates the Summary tick / entry path
                     self.openSummaryViewer(summaryMdPath: path)
                 } else {
                     self.log("Reclassify failed for \(transcriptPath) -> \(template)")
+                    if self.viewModel.summaryTranscript.errorMessage == nil {
+                        self.viewModel.summaryTranscript.errorMessage = "Reclassify failed."
+                    }
                     self.showError("Reclassify failed — see the CLI pane for details.")
                 }
             }
@@ -3835,32 +3836,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         summariseBusy = true
         viewModel.summarisingNames.insert(name)
-        // Surface the activity in the CLI pane: auto-open it and print a
-        // start marker so the user sees what's happening (both auto- and
-        // manual summarise flow through here). The authoritative run is the
-        // managed subprocess below; the pane shows event-level activity.
-        if showCLIWhileSummarising { viewModel.cliPaneVisible = true }
-        viewModel.terminalController.appendActivity("")
-        viewModel.terminalController.appendActivity("──── Summarising \(name) ────")
+        // Surface the activity in the CLI pane as a live formatted readout: the
+        // pipeline streams normalized events (--events), which we ingest into
+        // the summary transcript. Both auto- and manual summarise flow here.
+        if showCLIWhileSummarising {
+            viewModel.cliPaneMode = .summary
+            viewModel.cliPaneVisible = true
+        }
+        viewModel.summaryTranscript.reset()
         syncViewModelState()
 
-        var args = ["summarize", transcript]
+        var args = ["summarize", transcript, "--events"]
         if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
-        // Stream the summarise subprocess's stderr (Claude's live output +
-        // STAGE: markers) into the CLI pane so the user watches it progress.
+        // Feed the subprocess's stderr event stream into the formatted readout.
         runTranscription(arguments: args, timeout: 300, onLine: { [weak self] line in
-            guard let self = self else { return }
-            if line.hasPrefix("STAGE:") {
-                let label = String(line.dropFirst("STAGE:".count)).trimmingCharacters(in: .whitespaces)
-                self.viewModel.terminalController.appendActivity("  › " + label)
-            } else if !line.isEmpty {
-                self.viewModel.terminalController.appendActivity(line)
-            }
+            self?.viewModel.summaryTranscript.ingest(line: line)
         }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.viewModel.summarisingNames.remove(name)
                 self.summariseBusy = false
+                self.viewModel.summaryTranscript.running = false
                 if case .success(let data) = result,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    (json["summarized"] as? Bool) == true,
@@ -3869,11 +3865,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].summaryPath = path
                     }
                     self.log("Summarised \(name) -> \(path)")
-                    self.viewModel.terminalController.appendActivity("──── Saved ✓ \((path as NSString).lastPathComponent) — click the Summary tick to read it formatted ────")
-                    self.viewModel.terminalController.appendActivity("")
                 } else {
                     self.log("Summarise: no summary produced for \(name)")
-                    self.viewModel.terminalController.appendActivity("──── ✗ \(name): no summary produced ────")
+                    if self.viewModel.summaryTranscript.errorMessage == nil {
+                        self.viewModel.summaryTranscript.errorMessage = "No summary produced for \(name)."
+                    }
                 }
                 self.syncViewModelState()
                 self.processNextSummary()
@@ -3892,9 +3888,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let dir = (transcript as NSString).deletingLastPathComponent
         let file = (transcript as NSString).lastPathComponent
-        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Read the transcript '\(file)' and help me summarise it and answer questions about it.\""
+        // Start a fresh formatted Ask-AI conversation. Read-only tools so the
+        // engine can read the transcript and answer without write access.
+        chatWorkingDir = dir
+        chatSessionId = nil
+        viewModel.chatTitle = "Ask AI — \(entry.recording.outputName)"
+        viewModel.chatTranscript.reset()
+        viewModel.chatTranscript.running = false   // set true by runChatTurn
+        viewModel.cliPaneMode = .chat
         viewModel.cliPaneVisible = true
-        viewModel.terminalController.runCommand(cmd)
+        runChatTurn("Read the transcript '\(file)' and help me summarise it and answer questions about it.")
+    }
+
+    /// Working directory + session for the active Ask-AI conversation. The
+    /// session id (from claude's `meta` event) lets follow-ups resume context.
+    private var chatWorkingDir: String?
+    private var chatSessionId: String?
+
+    /// Run one Ask-AI turn via the pipeline's `ask` subcommand, streaming
+    /// normalized events into the chat transcript. Multi-turn resumes the
+    /// prior claude session.
+    private func runChatTurn(_ prompt: String) {
+        guard !viewModel.chatRunning else { return }
+        viewModel.chatRunning = true
+        viewModel.chatTranscript.addUserMessage(prompt)
+        viewModel.chatTranscript.running = true
+
+        var args = ["ask", "--allowed-tools", "Read,Grep,Glob"]
+        if let dir = chatWorkingDir { args += ["--cwd", dir] }
+        if let sid = chatSessionId { args += ["--resume", sid] }
+        if summarizeEngine != "auto" { args += ["--engine", summarizeEngine] }
+        runTranscription(arguments: args, timeout: 600, stdin: prompt, onLine: { [weak self] line in
+            self?.viewModel.chatTranscript.ingest(line: line)
+        }) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.viewModel.chatRunning = false
+                self.viewModel.chatTranscript.running = false
+                if case .success(let data) = result,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let sid = json["session_id"] as? String, !sid.isEmpty {
+                    self.chatSessionId = sid
+                }
+            }
+        }
+    }
+
+    /// Show the raw SwiftTerm shell pane — kept for `claude auth login` and
+    /// power use now that the AI flows use the formatted views.
+    private func openRawTerminalPane() {
+        viewModel.cliPaneMode = .terminal
+        viewModel.cliPaneVisible = true
+        viewModel.terminalController.ensureStarted()
     }
 
     // MARK: - Firmware
@@ -4648,6 +4693,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let file = url.lastPathComponent
         ensureTemplatesApprovalHook()
         showSyncWindow()
+        // Template authoring stays on the raw interactive terminal: it writes
+        // files with human-in-the-loop approval, which needs claude's
+        // interactive permission prompts (the formatted chat is read-only).
+        viewModel.cliPaneMode = .terminal
         viewModel.cliPaneVisible = true
         // Human-in-the-loop: the AI must PROPOSE and wait for approval before
         // writing — template files are user-curated, so we never let it edit
@@ -4662,6 +4711,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let dir = templatesDir()
         ensureTemplatesApprovalHook()
         showSyncWindow()
+        // Template authoring stays on the raw interactive terminal (see
+        // iterateTemplate): writing files needs claude's interactive approval.
+        viewModel.cliPaneMode = .terminal
         viewModel.cliPaneVisible = true
         // Human-in-the-loop: propose the full file and wait for approval
         // before writing anything.
@@ -6533,7 +6585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, onLine: ((String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, stdin: String? = nil, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, onLine: ((String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         // Single chokepoint for the summarisation provider: when a run asks to
         // summarise and the user picked a specific engine, pass it through.
         // "auto" omits the flag so the pipeline keeps its config/auto default.
@@ -6570,6 +6622,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let errPipe = Pipe()
             process.standardOutput = outPipe
             process.standardError = errPipe
+
+            // Optional stdin (e.g. the `ask` subcommand reads its prompt from
+            // stdin to avoid arg-escaping issues with long/multiline prompts).
+            let inPipe: Pipe? = stdin != nil ? Pipe() : nil
+            if let inPipe = inPipe { process.standardInput = inPipe }
 
             var outData = Data()
             let outQueue = DispatchQueue(label: "hidock.transcription.stdout")
@@ -6622,6 +6679,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 try process.run()
                 DispatchQueue.main.async { self.transcriptionSubprocess = process }
                 NSLog("runTranscription: process started (pid %d)", process.processIdentifier)
+
+                // Feed stdin then close so the child sees EOF and proceeds.
+                if let inPipe = inPipe, let stdin = stdin {
+                    let handle = inPipe.fileHandleForWriting
+                    if let data = stdin.data(using: .utf8) { handle.write(data) }
+                    try? handle.close()
+                }
 
                 let deadline = Date().addingTimeInterval(timeout)
                 while process.isRunning && Date() < deadline {

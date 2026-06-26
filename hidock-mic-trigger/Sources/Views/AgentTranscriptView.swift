@@ -20,6 +20,7 @@ struct AgentBlock: Identifiable, Equatable {
     enum Kind: Equatable {
         case markdown(String)
         case tool(AgentToolActivity)
+        case user(String)
     }
 }
 
@@ -51,6 +52,12 @@ final class AgentTranscript: ObservableObject {
         guard let ev = AgentEvent.parse(line: line) else { return false }
         ingest(ev)
         return true
+    }
+
+    /// Append a distinct user-turn bubble (Ask AI). Subsequent assistant text
+    /// starts a fresh block because the last block is no longer `.markdown`.
+    func addUserMessage(_ text: String) {
+        blocks.append(AgentBlock(id: UUID(), kind: .user(text)))
     }
 
     func ingest(_ event: AgentEvent) {
@@ -123,11 +130,12 @@ struct AgentTranscriptView: View {
                         switch block.kind {
                         case .markdown(let text):
                             Markdown(text)
-                                .markdownTextStyle { FontSize(13) }
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         case .tool(let activity):
                             ToolActivityChip(activity: activity)
+                        case .user(let text):
+                            UserMessageBubble(text: text)
                         }
                     }
                     if transcript.running { StreamingIndicator() }
@@ -261,6 +269,24 @@ private struct ToolActivityChip: View {
         case .running: ProgressView().controlSize(.small).scaleEffect(0.7)
         case .ok: Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundColor(.green)
         case .failed: Image(systemName: "xmark.circle.fill").font(.caption2).foregroundColor(.red)
+        }
+    }
+}
+
+/// A user turn in the Ask-AI conversation, styled as a trailing bubble.
+private struct UserMessageBubble: View {
+    let text: String
+    var body: some View {
+        HStack {
+            Spacer(minLength: 40)
+            Text(text)
+                .font(.callout)
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.accentColor.opacity(0.15))
+                .cornerRadius(10)
+                .frame(alignment: .trailing)
         }
     }
 }

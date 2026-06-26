@@ -351,6 +351,106 @@ def query_streaming(
     return full.strip() if full else None
 
 
+class _SessionSniffer:
+    """Wraps an EventEmitter to record the claude session id from ``meta``
+    events (so the chat caller can resume) while passing everything through."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.session_id = None
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def meta(self, **fields):
+        if fields.get("session_id"):
+            self.session_id = fields["session_id"]
+        self._inner.meta(**fields)
+
+
+def chat_streaming(
+    prompt: str,
+    engine: LLMEngine | None = None,
+    cwd: str | None = None,
+    resume: str | None = None,
+    allowed_tools: list[str] | None = None,
+    timeout: int = 600,
+    on_event=None,
+) -> tuple[str | None, str | None]:
+    """A conversational streaming turn for the desktop chat view.
+
+    For ``claude`` this runs headless ``stream-json`` in ``cwd`` with an
+    optional tool allow-list and ``--resume`` for multi-turn, emits normalized
+    events on ``on_event`` (incl. ``tool`` / ``tool_result``), and returns
+    ``(text, session_id)``. For other engines it is a single-shot text turn
+    (no tools, no session): returns ``(text, None)``.
+    """
+    from shared.agent_events import NULL_EMITTER
+    ev = on_event if on_event is not None else NULL_EMITTER
+
+    if engine is None:
+        engine = get_engine("auto")
+    if engine is None:
+        ev.error("No LLM engine available (is the `claude` CLI installed and signed in?)")
+        return None, None
+
+    if engine.name != "claude":
+        ev.meta(engine=engine.name)
+        full = query(prompt, engine=engine, timeout=timeout)
+        if full:
+            ev.text(full)
+        return full, None
+
+    cmd = [
+        "claude", "--print",
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+    ]
+    if allowed_tools:
+        cmd += ["--allowedTools", ",".join(allowed_tools)]
+    if resume:
+        cmd += ["--resume", resume]
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            cwd=cwd or None,
+        )
+    except FileNotFoundError:
+        ev.error("claude CLI not found")
+        return None, None
+    except Exception as e:
+        ev.error(f"claude chat error: {e}")
+        return None, None
+
+    try:
+        if proc.stdin:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return None, None
+
+    sniffer = _SessionSniffer(ev)
+    try:
+        assert proc.stdout is not None
+        text = _consume_claude_stream(proc.stdout, sniffer)
+        proc.wait(timeout=10)
+    except Exception as e:
+        ev.error(f"claude chat read error: {e}")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        text = None
+    return (text.strip() if text else None), sniffer.session_id
+
+
 def query_json(
     prompt: str,
     engine: LLMEngine | None = None,

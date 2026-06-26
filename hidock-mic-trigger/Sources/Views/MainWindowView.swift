@@ -8,17 +8,35 @@ struct MainWindowView: View {
             mainColumn
             if viewModel.cliPaneVisible {
                 Divider()
-                EmbeddedTerminalPane(
-                    controller: viewModel.terminalController,
-                    onClose: { viewModel.cliPaneVisible = false }
-                )
-                .frame(minWidth: 340, idealWidth: 420, maxWidth: 560)
-                .transition(.move(edge: .trailing))
+                cliPane
+                    .frame(minWidth: 340, idealWidth: 440, maxWidth: 620)
+                    .transition(.move(edge: .trailing))
             }
         }
         .frame(minWidth: viewModel.cliPaneVisible ? 1320 : 980, minHeight: 510)
         .sheet(isPresented: $viewModel.showOnboarding) {
             OnboardingView(viewModel: viewModel)
+        }
+    }
+
+    /// The right-hand pane content, chosen by the current mode. Auth / template
+    /// authoring use the raw terminal; summarise and Ask AI use the formatted
+    /// views.
+    @ViewBuilder private var cliPane: some View {
+        switch viewModel.cliPaneMode {
+        case .summary:
+            SummaryReadoutPane(
+                transcript: viewModel.summaryTranscript,
+                onOpenRawTerminal: { viewModel.onOpenRawTerminal() },
+                onClose: { viewModel.cliPaneVisible = false }
+            )
+        case .chat:
+            AgentChatView(viewModel: viewModel, onClose: { viewModel.cliPaneVisible = false })
+        case .terminal:
+            EmbeddedTerminalPane(
+                controller: viewModel.terminalController,
+                onClose: { viewModel.cliPaneVisible = false }
+            )
         }
     }
 
