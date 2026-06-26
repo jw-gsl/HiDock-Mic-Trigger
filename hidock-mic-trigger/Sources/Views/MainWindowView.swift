@@ -5,15 +5,18 @@ struct MainWindowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            // Expand to fill all slack so the main content sits flush against
+            // the CLI pane — no empty gutter between them.
             mainColumn
+                .frame(maxWidth: .infinity, alignment: .leading)
             if viewModel.cliPaneVisible {
                 Divider()
                 cliPane
-                    .frame(minWidth: 340, idealWidth: 440, maxWidth: 620)
+                    .frame(width: 420)
                     .transition(.move(edge: .trailing))
             }
         }
-        .frame(minWidth: viewModel.cliPaneVisible ? 1320 : 980, minHeight: 510)
+        .frame(minWidth: viewModel.cliPaneVisible ? 1180 : 980, minHeight: 510)
         .sheet(isPresented: $viewModel.showOnboarding) {
             OnboardingView(viewModel: viewModel)
         }

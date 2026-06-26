@@ -130,7 +130,13 @@ struct AgentTranscriptView: View {
                         switch block.kind {
                         case .markdown(let text):
                             Markdown(text)
+                                .markdownTextStyle { FontSize(12) }
+                                .markdownTextStyle(\.code) { FontFamilyVariant(.monospaced); FontSize(11) }
                                 .textSelection(.enabled)
+                                // Accept the proposed (bounded) width and grow
+                                // only vertically, so long lines wrap instead of
+                                // overflowing the narrow pane.
+                                .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         case .tool(let activity):
                             ToolActivityChip(activity: activity)
