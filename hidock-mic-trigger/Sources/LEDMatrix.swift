@@ -12,140 +12,148 @@ struct LEDColumn: Equatable {
 struct LEDEvent {
     let kind: LEDEventKind
     let text: String
-    var priority: Int = 0       // higher clears a lower-priority scroll in progress
+    var priority: Int = 0       // >0 interrupts an idle scroll in progress
 }
 
-/// Drives the LED ticker: a queue of scrolling messages, a sticky blinking REC
-/// indicator while the mic is held, and an idle ticker. Produces `visible` —
-/// the current viewport columns — which `LEDMatrixView` renders. The timer only
-/// runs while there's something to show.
+/// Drives the LED ticker. It is a small state machine that publishes a `track`
+/// (the columns to render) plus a `mode` and a `trackStart` timestamp; the
+/// *view* does the smooth, time-based rendering (60fps via TimelineView) so
+/// scrolling glides at sub-pixel precision instead of stepping column-by-column.
+///
+/// The engine only decides *what* to show and *when* to advance:
+///  - `.scroll` — a message/idle line scrolling right→left; an advance timer
+///    fires when it has fully passed and picks the next thing to show.
+///  - `.blink`  — a sticky, centred REC indicator that blinks (view-driven).
+///  - `.blank`  — a static dim dot-grid (idle, nothing to say).
 final class LEDMatrix: ObservableObject {
-    @Published private(set) var visible: [LEDColumn]
-    /// True while there's something to display (scrolling message, queued
-    /// message, or sticky REC) — used to drive heatmap "takeover".
+    enum Mode: Equatable { case blank, scroll, blink }
+
+    @Published private(set) var track: [LEDColumn] = []
+    @Published private(set) var mode: Mode = .blank
+    @Published private(set) var trackStart: Date = .distantPast
+    /// True while showing a real event (drives heatmap takeover); idle scrolls
+    /// and the static grid do not count.
     @Published private(set) var isActive = false
 
     private let settings: LEDSettings
-    private var viewportCols: Int
-    private var scrollBuffer: [LEDColumn] = []
-    private var pos = 0
+    private(set) var viewportCols: Int
     private var queue: [LEDEvent] = []
-    private var timer: Timer?
-    private var tick = 0
     private var recActive = false
+    private var currentIsIdle = false
     private var idleCursor = 0
-    private var framesSinceIdle = 0
+    private var advanceTimer: Timer?
+    private var started = false
 
     /// Supplies idle-ticker text (clock / streak / queue / meetings) on demand.
     var idleProvider: ((LEDIdleContent) -> String?)?
 
+    /// Columns scrolled per second (also sets the view's pixel speed).
+    var colsPerSecond: Double { max(4, settings.scrollSpeed) }
+
     init(settings: LEDSettings, viewportCols: Int = 48) {
         self.settings = settings
         self.viewportCols = viewportCols
-        self.visible = Array(repeating: .blank, count: viewportCols)
     }
 
     func configure(viewportCols: Int) {
-        guard viewportCols > 0, viewportCols != self.viewportCols else { return }
+        guard viewportCols > 0 else { return }
         self.viewportCols = viewportCols
-        if scrollBuffer.isEmpty { visible = Array(repeating: .blank, count: viewportCols) }
     }
 
     // MARK: Public API
 
-    /// Announce an event. Ignored if the feature or this event kind is off.
     func notify(_ event: LEDEvent) {
         guard settings.enabled, settings.isEnabled(event.kind) else { return }
         if event.priority > 0 { queue.removeAll { $0.priority < event.priority } }
         queue.append(event)
-        ensureRunning()
+        // Interrupt the static grid or an ambient idle line immediately;
+        // otherwise let the current event finish, then the advance timer picks
+        // this one up.
+        if mode != .scroll || currentIsIdle { startNext() }
     }
 
-    /// Mic-trigger holding the HiDock input — show a sticky blinking REC.
     func setRecording(_ active: Bool) {
         guard settings.enabled else { return }
         recActive = active && settings.isEnabled(.micRecording)
-        ensureRunning()
+        // REC is sticky; (re)evaluate unless a real event is mid-scroll.
+        if mode != .scroll || currentIsIdle { startNext() }
     }
 
-    func start() { ensureRunning() }
-    func stop() { timer?.invalidate(); timer = nil }
-
-    // MARK: Engine
-
-    private func ensureRunning() {
-        guard settings.enabled, timer == nil else { return }
-        let interval = 1.0 / max(4.0, settings.scrollSpeed)
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.step() }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+    func start() {
+        guard settings.enabled, !started else { return }
+        started = true
+        startNext()
     }
 
-    private func updateActive() {
-        let active = !scrollBuffer.isEmpty || !queue.isEmpty || recActive
-        if active != isActive { isActive = active }
+    func stop() {
+        advanceTimer?.invalidate(); advanceTimer = nil
+        started = false
     }
 
-    private func step() {
-        tick += 1
-        updateActive()
-        // Currently scrolling a message?
-        if !scrollBuffer.isEmpty {
-            renderWindow()
-            pos += 1
-            if pos > scrollBuffer.count - viewportCols { scrollBuffer = []; pos = 0 }
-            return
-        }
-        // Next queued message?
+    // MARK: State machine
+
+    private func startNext() {
+        advanceTimer?.invalidate(); advanceTimer = nil
+
         if !queue.isEmpty {
             let ev = queue.removeFirst()
-            loadMessage(ev.text, color: color(for: ev.kind))
+            loadScroll(text: ev.text, color: color(for: ev.kind), idle: false)
             return
         }
-        // Sticky REC indicator (blinks).
         if recActive {
-            let on = (tick / max(1, Int(settings.scrollSpeed / 3))) % 2 == 0
-            visible = recFrame(on: on)
+            loadBlink(text: "\(LEDFont.dot) REC", color: recColor)
             return
         }
-        // Idle ticker.
-        if settings.idleTickerEnabled, !settings.idleContents.isEmpty {
-            framesSinceIdle += 1
-            if framesSinceIdle >= Int(settings.scrollSpeed * 3) {  // ~3s gap between idle lines
-                framesSinceIdle = 0
-                if let text = nextIdleText() { loadMessage(text, color: idleColor) }
-            } else {
-                blankIfNeeded()
-            }
+        if settings.idleTickerEnabled, let text = nextIdleText() {
+            loadScroll(text: text, color: idleColor, idle: true)
             return
         }
-        // Nothing to show — blank and park the timer.
-        blankIfNeeded()
-        stop()
+        // Nothing to show — static dim grid; re-probe for idle text shortly.
+        mode = .blank
+        track = Array(repeating: .blank, count: viewportCols)
+        currentIsIdle = false
+        setActive(false)
+        scheduleAdvance(after: 3.0)
     }
 
-    private func loadMessage(_ text: String, color: Color) {
+    private func loadScroll(text: String, color: Color, idle: Bool) {
         let glyphs = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: color) }
         let pad = Array(repeating: LEDColumn.blank, count: viewportCols)
-        scrollBuffer = pad + glyphs + pad
-        pos = 0
-        renderWindow()
-        pos = 1
+        track = pad + glyphs + pad
+        mode = .scroll
+        currentIsIdle = idle
+        trackStart = Date()
+        setActive(!idle)
+        // Duration to scroll the whole track past the viewport, + a small tail.
+        let duration = Double(track.count) / colsPerSecond + 0.2
+        scheduleAdvance(after: duration)
     }
 
-    private func renderWindow() {
-        let end = min(pos + viewportCols, scrollBuffer.count)
-        var window = Array(scrollBuffer[pos..<end])
-        if window.count < viewportCols {
-            window += Array(repeating: .blank, count: viewportCols - window.count)
+    private func loadBlink(text: String, color: Color) {
+        // Centre the REC text within the viewport (static; the view blinks it).
+        var cols = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: color) }
+        if cols.count < viewportCols {
+            let lead = (viewportCols - cols.count) / 2
+            cols = Array(repeating: LEDColumn.blank, count: lead) + cols
+            cols += Array(repeating: LEDColumn.blank, count: viewportCols - cols.count)
+        } else {
+            cols = Array(cols.prefix(viewportCols))
         }
-        visible = window
+        track = cols
+        mode = .blink
+        currentIsIdle = false
+        trackStart = Date()
+        setActive(true)
+        // No advance timer — REC stays until setRecording(false) / an event.
     }
 
-    private func blankIfNeeded() {
-        let blanks = Array(repeating: LEDColumn.blank, count: viewportCols)
-        if visible != blanks { visible = blanks }
+    private func scheduleAdvance(after seconds: TimeInterval) {
+        let t = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in self?.startNext() }
+        RunLoop.main.add(t, forMode: .common)
+        advanceTimer = t
     }
+
+    private func setActive(_ v: Bool) { if v != isActive { isActive = v } }
 
     private func nextIdleText() -> String? {
         let contents = LEDIdleContent.allCases.filter { settings.idleContents.contains($0) }
@@ -158,22 +166,9 @@ final class LEDMatrix: ObservableObject {
         return nil
     }
 
-    /// "● REC" centred-ish, used for the sticky blink.
-    private func recFrame(on: Bool) -> [LEDColumn] {
-        let text = on ? "\(LEDFont.dot) REC" : "  REC"
-        let glyphs = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: recColor) }
-        var frame = glyphs
-        if frame.count < viewportCols {
-            frame += Array(repeating: LEDColumn.blank, count: viewportCols - frame.count)
-        } else if frame.count > viewportCols {
-            frame = Array(frame.prefix(viewportCols))
-        }
-        return frame
-    }
-
     // MARK: Colours
 
-    private var idleColor: Color { settings.colorScheme == .green ? .green : .green }
+    private var idleColor: Color { .green }
     private var recColor: Color { .red }
 
     private func color(for kind: LEDEventKind) -> Color {
