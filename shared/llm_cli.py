@@ -156,11 +156,117 @@ def query(
         return None
 
 
+def _content_blocks(ev: dict) -> list:
+    """The content-block list from an assistant/user stream-json event."""
+    msg = ev.get("message")
+    if isinstance(msg, dict):
+        blocks = msg.get("content")
+        if isinstance(blocks, list):
+            return blocks
+    return []
+
+
+def _tool_result_preview(content, limit: int = 200) -> str | None:
+    """A short text preview of a tool_result's content (str or block list)."""
+    if content is None:
+        return None
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+        text = "\n".join(parts)
+    else:
+        text = str(content)
+    text = text.strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _consume_claude_stream(lines, ev_out, on_text=None, emit_text=True) -> str | None:
+    """Parse Claude ``stream-json`` NDJSON lines into normalized events.
+
+    Pure over an iterable of strings so it can be unit-tested with captured
+    fixtures. Forwards text deltas to ``on_text`` and emits ``meta`` / ``text``
+    / ``tool`` / ``tool_result`` / ``usage`` on ``ev_out``. Returns the final
+    result text (authoritative ``result`` event) or the accumulated deltas.
+
+    When ``emit_text`` is False, raw text deltas are NOT emitted as ``text``
+    events on ``ev_out`` — the caller is expected to forward cleaned text via
+    ``on_text`` (e.g. the summary flow strips a machine header before display).
+    Structured events (meta / tool / tool_result / usage) are emitted either way.
+    """
+    chunks: list[str] = []
+    result_text: str | None = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue                            # skip terminal-escape / non-JSON noise
+        etype = ev.get("type")
+        if etype == "stream_event":
+            inner = ev.get("event") or {}
+            if inner.get("type") == "content_block_delta":
+                delta = inner.get("delta") or {}
+                txt = delta.get("text")
+                if txt:
+                    chunks.append(txt)
+                    if emit_text:
+                        ev_out.text(txt)
+                    if on_text:
+                        try:
+                            on_text(txt)
+                        except Exception:
+                            pass
+        elif etype == "system" and ev.get("subtype") == "init":
+            ev_out.meta(
+                engine="claude",
+                session_id=ev.get("session_id"),
+                model=ev.get("model"),
+            )
+        elif etype == "assistant":
+            # Full tool_use blocks (with complete input) arrive here.
+            for block in _content_blocks(ev):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    ev_out.tool(
+                        id=block.get("id") or "",
+                        name=block.get("name") or "tool",
+                        input=block.get("input"),
+                    )
+        elif etype == "user":
+            # tool_result blocks come back as a user turn.
+            for block in _content_blocks(ev):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    ev_out.tool_result(
+                        id=block.get("tool_use_id") or "",
+                        ok=not bool(block.get("is_error")),
+                        preview=_tool_result_preview(block.get("content")),
+                    )
+        elif etype == "result":
+            if not ev.get("is_error"):
+                result_text = ev.get("result")
+            usage = ev.get("usage") or {}
+            ev_out.usage(
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cost_usd=ev.get("total_cost_usd"),
+            )
+    return result_text if result_text is not None else "".join(chunks)
+
+
 def query_streaming(
     prompt: str,
     engine: LLMEngine | None = None,
     timeout: int = 240,
     on_text=None,
+    on_event=None,
+    emit_text=True,
 ) -> str | None:
     """Stream an LLM response, invoking ``on_text(delta)`` as text arrives.
 
@@ -172,16 +278,29 @@ def query_streaming(
     For other engines (no realtime stream-json support) it falls back to a
     single blocking ``query()`` and calls ``on_text`` once with the whole
     response. Returns the full text, or None on failure.
+
+    ``on_event`` is an optional :class:`shared.agent_events.EventEmitter`. When
+    given, normalized events are emitted alongside ``on_text``: ``meta`` (model
+    / session id), ``text`` deltas, ``tool`` / ``tool_result`` (claude only),
+    and ``usage``. The desktop apps render this stream in their formatted CLI
+    view. For non-claude engines only a single ``text`` event is emitted.
     """
+    from shared.agent_events import NULL_EMITTER
+    ev_out = on_event if on_event is not None else NULL_EMITTER
+
     if engine is None:
         engine = get_engine("auto")
     if engine is None:
         return None
 
     if engine.name != "claude":
+        ev_out.meta(engine=engine.name)
         full = query(prompt, engine=engine, timeout=timeout)
-        if full and on_text:
-            on_text(full)
+        if full:
+            if on_text:
+                on_text(full)
+            if emit_text:
+                ev_out.text(full)
         return full
 
     cmd = [
@@ -217,34 +336,9 @@ def query_streaming(
             pass
         return None
 
-    chunks: list[str] = []
-    result_text: str | None = None
     try:
         assert proc.stdout is not None
-        for line in proc.stdout:               # blocks per line; EOF when claude exits
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except Exception:
-                continue                        # skip terminal-escape / non-JSON noise
-            etype = ev.get("type")
-            if etype == "stream_event":
-                inner = ev.get("event") or {}
-                if inner.get("type") == "content_block_delta":
-                    delta = inner.get("delta") or {}
-                    txt = delta.get("text")
-                    if txt:
-                        chunks.append(txt)
-                        if on_text:
-                            try:
-                                on_text(txt)
-                            except Exception:
-                                pass
-            elif etype == "result":
-                if not ev.get("is_error"):
-                    result_text = ev.get("result")
+        full = _consume_claude_stream(proc.stdout, ev_out, on_text, emit_text=emit_text)
         proc.wait(timeout=10)
     except Exception as e:
         print(f"LLM CLI (claude) streaming read error: {e}", file=sys.stderr)
@@ -252,8 +346,8 @@ def query_streaming(
             proc.kill()
         except Exception:
             pass
+        full = None
 
-    full = result_text if result_text is not None else "".join(chunks)
     return full.strip() if full else None
 
 

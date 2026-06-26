@@ -18,6 +18,7 @@ import re
 import sys
 from pathlib import Path
 
+from shared.agent_events import NULL_EMITTER
 from shared.llm_cli import get_engine, query_json, query_streaming
 
 
@@ -76,14 +77,19 @@ def _recording_dt_from_stem(stem: str) -> str:
 
 
 class _StreamBodyFilter:
-    """Forwards only the human-readable summary body to stderr (the CLI pane):
-    skips the AREA/TITLE/'---' metadata header and any '> **Extraction
-    guidance**' lines, so the streamed output reads cleanly instead of showing
-    the machine header and template instructions."""
+    """Forwards only the human-readable summary body for live display: skips the
+    AREA/TITLE/'---' metadata header and any '> **Extraction guidance**' lines,
+    so the streamed output reads cleanly instead of showing the machine header
+    and template instructions.
 
-    def __init__(self):
+    When an ``events`` emitter is given, each cleaned line is emitted as a
+    normalized ``text`` event (the desktop app's formatted view). Otherwise the
+    cleaned body is written to stderr (legacy CLI-pane display)."""
+
+    def __init__(self, events=None):
         self._buf = ""
         self._in_body = False
+        self._events = events
 
     def __call__(self, delta: str) -> None:
         self._buf += delta
@@ -108,8 +114,11 @@ class _StreamBodyFilter:
             self._in_body = True
         if line.lstrip().startswith("> **Extraction guidance"):
             return
-        sys.stderr.write(line + "\n")
-        sys.stderr.flush()
+        if self._events is not None:
+            self._events.text(line + "\n")
+        else:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
 
 HIDOCK = Path.home() / "HiDock"
 RAW_DIR = HIDOCK / "Raw Transcripts"
@@ -227,6 +236,7 @@ def summarise_typed(
     engine_name: str | None = None,
     stream: bool = True,
     force_template: str | None = None,
+    events=None,
 ) -> dict:
     """Classify + template-summarise a transcript, write the typed summary file.
 
@@ -240,27 +250,36 @@ def summarise_typed(
 
     Returns a JSON-able dict; never raises for the common 'no LLM' / 'no text'
     cases (returns {"summarized": False, "error": ...})."""
+    ev = events or NULL_EMITTER
     transcript_path = Path(transcript_path)
     text = _read_transcript_text(transcript_path)
     if not text.strip():
+        ev.error("No transcript text found")
         return {"summarized": False, "error": "No transcript text found"}
 
     engine = get_engine(engine_name or "auto")
     if engine is None:
-        return {"summarized": False, "error": "No LLM engine available (is the `claude` CLI installed and signed in?)"}
+        msg = "No LLM engine available (is the `claude` CLI installed and signed in?)"
+        ev.error(msg)
+        return {"summarized": False, "error": msg}
 
     templates = available_templates()
     if not templates:
-        return {"summarized": False, "error": f"No templates in {TEMPLATES_DIR}"}
+        msg = f"No templates in {TEMPLATES_DIR}"
+        ev.error(msg)
+        return {"summarized": False, "error": msg}
 
     if force_template and force_template in templates:
         tname = force_template
         reason = f"Manually set to “{tname}”."
         _emit(f"STAGE: Reclassified to {tname} — summarising…")
+        ev.stage(f"Reclassifying as {tname}…")
     else:
         _emit("STAGE: Classifying transcript…")
+        ev.stage("Classifying transcript…")
         tname, reason = classify(text, engine, list(templates.keys()))
         _emit(f"STAGE: Classified as {tname} — summarising…")
+        ev.stage(f"Classified as {tname} — summarising…")
     tcontent = templates[tname].read_text(encoding="utf-8")
 
     # Recording date/time recovered from the filename so the summary can fill a
@@ -288,26 +307,37 @@ def summarise_typed(
     )
 
     if stream:
-        # Filter the streamed view so the CLI pane shows clean body text (no
+        # Filter the streamed view so the display shows clean body text (no
         # AREA/TITLE/--- header, no guidance lines). The full text is still
-        # captured by query_streaming for parsing/saving.
-        sink = _StreamBodyFilter()
-        full = query_streaming(prompt, engine=engine, timeout=240, on_text=sink)
+        # captured by query_streaming for parsing/saving. The filter routes
+        # cleaned text to the events emitter when present, else to stderr.
+        sink = _StreamBodyFilter(events=events)
+        # emit_text=False: structured events (tool/usage/meta) still flow via
+        # `events`, but raw text deltas are filtered by the sink, not emitted
+        # raw — so the header never reaches the formatted view.
+        full = query_streaming(
+            prompt, engine=engine, timeout=240,
+            on_text=sink, on_event=ev, emit_text=False,
+        )
         sink.flush()
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+        if events is None:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
     else:
         from shared.llm_cli import query
         full = query(prompt, engine=engine, timeout=240)
 
     if not full or not full.strip():
+        ev.error("Summarisation produced no content")
         return {"summarized": False, "error": "Summarisation produced no content"}
 
     area_raw, title_raw, md = _parse_headered(full)
     if not md.strip():
+        ev.error("Summarisation produced no content")
         return {"summarized": False, "error": "Summarisation produced no content"}
 
     _emit("STAGE: Writing summary…")
+    ev.stage("Writing summary…")
     area = _sanitize(area_raw or "Other", 40)
     desc = _sanitize(title_raw or transcript_path.stem, 50)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
@@ -326,6 +356,10 @@ def summarise_typed(
     })
     out = SUMMARIES_DIR / f"{transcript_path.stem} - {tname} - {area} - {desc}.md"
     out.write_text(front + "\n\n" + md.rstrip() + "\n", encoding="utf-8")
+    ev.done(
+        ok=True, summary_path=str(out),
+        type=tname, area=area, title=desc,
+    )
     return {
         "summarized": True, "summary_path": str(out),
         "type": tname, "area": area, "title": desc, "classified": reason,

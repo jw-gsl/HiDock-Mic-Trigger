@@ -383,10 +383,15 @@ def cmd_summarize(args):
     """Type-aware, template-driven summary of an existing transcript via Claude
     Code -> ~/HiDock/Summaries/. No-ops cleanly if no LLM/templates available."""
     from shared.typed_summarize import summarise_typed
+    events = None
+    if getattr(args, "events", False):
+        from shared.agent_events import EventEmitter
+        events = EventEmitter()   # normalized NDJSON on stderr for the desktop app
     res = summarise_typed(
         Path(args.transcript_path).expanduser(),
         engine_name=args.summarize_engine,
         force_template=getattr(args, "template", None),
+        events=events,
     )
     print(json.dumps(res))
 
@@ -505,6 +510,7 @@ def main():
     p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")
     p_summarize.add_argument("--summarize-engine", default=None, help="LLM engine (e.g. claude). Default: config [summarization].engine / auto.")
     p_summarize.add_argument("--template", default=None, help="Force a specific template by name (skip auto-classification).")
+    p_summarize.add_argument("--events", action="store_true", help="Emit normalized agent events (NDJSON on stderr) for the desktop app's formatted view.")
     p_summarize.set_defaults(func=cmd_summarize)
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
