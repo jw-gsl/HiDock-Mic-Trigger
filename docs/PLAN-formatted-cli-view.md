@@ -114,19 +114,33 @@ surfaces move to the formatted view.
       reuse as the normalization point.
 
 ## Planned (build order)
-- [ ] Define + document the normalized NDJSON event schema in `shared/`.
-- [ ] Extend `llm_cli.query_streaming` to emit normalized events (claude full;
-      others text-only). Unit tests with captured claude stream-json fixtures.
-- [ ] `transcribe.py summarize --events` → emit the normalized stream.
-- [ ] macOS: `AgentTranscriptView` (markdown + tool chips + stages); wire the
-      summary/reclassify flow to it.
-- [ ] macOS: `AgentChatView` (input box, multi-turn via `--resume`); replace the
-      PTY-typed `claude "…"` Ask-AI / template flows.
-- [ ] Engine fallbacks (codex/gemini/ollama): text-only path + "no tool activity"
-      notice.
-- [ ] Windows: Qt `AgentTranscriptView`/`AgentChatView` equivalents.
-- [ ] Keep raw terminal for auth; add "Open raw terminal" entry point.
+- [x] Define + document the normalized NDJSON event schema in `shared/`
+      (`agent_events.py`, 0x1f-prefixed NDJSON on stderr).
+- [x] Extend `llm_cli.query_streaming` to emit normalized events (claude full;
+      others text-only). Unit tests (`test_agent_events.py`) with captured
+      claude stream-json fixtures. 346 shared tests green.
+- [x] `transcribe.py` / `transcribe_cpp.py` `summarize --events` → normalized
+      stream. Verified end-to-end against real claude.
+- [x] macOS: `AgentEvent` parser + `AgentTranscriptView` (MarkdownUI + tool
+      chips + stages + usage footer); summary/reclassify flow wired to it.
+- [x] macOS: `AgentChatView` + `ask` subcommand + `chat_streaming` (multi-turn
+      via claude `--resume`, read-only tools). `runTranscription` gained stdin.
+- [x] Engine fallbacks (codex/gemini/ollama): text-only via `chat_streaming` /
+      `query_streaming` (no tool events).
+- [x] Keep raw terminal for auth + template authoring; `openRawTerminalPane`.
+- [x] macOS build succeeds (Debug), MarkdownUI 2.4.1 linked, app deployed.
+- [ ] Windows: Qt `AgentTranscriptView`/`AgentChatView` equivalents (consume the
+      same shared event stream).
 - [ ] Update `PARITY.md`.
+- [ ] Runtime GUI smoke (user): click Summarise / Ask AI in the running app.
+
+## Decision log (in-build)
+- Template create/iterate stay on the **raw terminal** — headless can't surface
+  the interactive file-write approval those flows rely on. Only read-only Ask AI
+  moved to the formatted chat.
+- Event channel = **stderr**, 0x1f-prefixed NDJSON; stdout still carries the
+  final result JSON unchanged (backward compatible).
+- Ask AI runs with `--allowedTools Read,Grep,Glob` (read-only).
 
 ## Decisions (confirmed 2026-06-26)
 - **Markdown lib: `swift-markdown-ui`** (SwiftPM dependency) — chosen for proper
