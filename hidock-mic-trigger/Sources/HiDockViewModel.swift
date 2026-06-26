@@ -74,6 +74,15 @@ final class HiDockViewModel: ObservableObject {
     var onSendChat: (String) -> Void = { _ in }
     /// Open the raw terminal pane (for `claude auth login` / power use).
     var onOpenRawTerminal: () -> Void = { }
+
+    // MARK: LED ticker
+    /// Persisted LED-ticker settings (shared with the settings popover).
+    let ledSettings = LEDSettings()
+    /// The LED matrix engine — driven by app events, rendered over the heatmap.
+    lazy var ledMatrix = LEDMatrix(settings: ledSettings)
+    /// Runtime heatmap ↔ LED toggle (seeded from the persisted default view).
+    @Published var heatmapLEDMode: Bool =
+        (UserDefaults.standard.string(forKey: "led.defaultView") == "led")
     @Published var mergeGroups: [MergeGroup] = []
     @Published var expandedMergeGroups: Set<String> = []
     @Published var syncBusy = false

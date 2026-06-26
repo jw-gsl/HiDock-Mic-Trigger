@@ -8,11 +8,14 @@ import SwiftUI
 /// once they're populated.
 struct MeetingHeatmapView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    @ObservedObject var ledMatrix: LEDMatrix
+    @ObservedObject var ledSettings: LEDSettings
 
     /// Day the pointer is currently over — drives the always-visible detail
     /// line (more reliable + immediate than the native `.help()` tooltip on
     /// 11px cells, which it supplements).
     @State private var hoveredDate: Date? = nil
+    @State private var showLEDSettings = false
 
     private let cell: CGFloat = 11
     private let gap: CGFloat = 3
@@ -164,16 +167,26 @@ struct MeetingHeatmapView: View {
         let activity = viewModel.meetingActivityByDay
         let labels = monthLabels(columns)
 
+        // Show the LED ticker instead of the grid when the user toggled LED
+        // mode, or when an event is "taking over" the heatmap briefly.
+        let showLED = ledSettings.enabled
+            && (viewModel.heatmapLEDMode || (ledSettings.eventTakeover && ledMatrix.isActive))
+
         return VStack(alignment: .leading, spacing: 6) {
             header
-            detailLine(activity: activity)
-            ScrollView(.horizontal, showsIndicators: false) {
-                ScrollViewReader { proxy in
-                    VStack(alignment: .leading, spacing: gap) {
-                        monthLabelRow(labels)
-                        gridRow(columns: columns, activity: activity)
+            if showLED {
+                LEDMatrixView(matrix: ledMatrix, settings: ledSettings)
+                    .padding(.vertical, 4)
+            } else {
+                detailLine(activity: activity)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    ScrollViewReader { proxy in
+                        VStack(alignment: .leading, spacing: gap) {
+                            monthLabelRow(labels)
+                            gridRow(columns: columns, activity: activity)
+                        }
+                        .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
                     }
-                    .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
                 }
             }
         }
@@ -202,6 +215,7 @@ struct MeetingHeatmapView: View {
             .fixedSize()
             .help("Recorded = when meetings happened. Transcribed = when they were transcribed.")
             legend
+            ledControls
             Spacer()
             // Refreshing / downloading status lives here now (shows/hides as
             // needed) instead of on its own row — less is more.
@@ -215,6 +229,34 @@ struct MeetingHeatmapView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
+            }
+        }
+    }
+
+    /// LED ticker controls in the header: a heatmap↔LED toggle and a settings
+    /// gear (popover). The toggle persists as the default view.
+    @ViewBuilder private var ledControls: some View {
+        HStack(spacing: 6) {
+            if ledSettings.enabled {
+                Button {
+                    viewModel.heatmapLEDMode.toggle()
+                    ledSettings.defaultView = viewModel.heatmapLEDMode ? .led : .heatmap
+                } label: {
+                    Image(systemName: viewModel.heatmapLEDMode ? "rectangle.grid.1x2.fill" : "lightbulb")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(viewModel.heatmapLEDMode ? .accentColor : .secondary)
+                .help(viewModel.heatmapLEDMode ? "Show the heatmap" : "Show the LED ticker")
+            }
+            Button { showLEDSettings.toggle() } label: {
+                Image(systemName: "gearshape").font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+            .help("LED ticker settings")
+            .popover(isPresented: $showLEDSettings, arrowEdge: .bottom) {
+                LEDSettingsView(settings: ledSettings)
             }
         }
     }

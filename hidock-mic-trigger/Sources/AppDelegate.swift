@@ -627,6 +627,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
         viewModel.onSendChat = { [weak self] text in self?.runChatTurn(text) }
         viewModel.onOpenRawTerminal = { [weak self] in self?.openRawTerminalPane() }
+        // LED idle ticker — supply live stats on demand.
+        viewModel.ledMatrix.idleProvider = { [weak self] content in
+            guard let self = self else { return nil }
+            let cal = Calendar.current
+            switch content {
+            case .clock:
+                let f = DateFormatter(); f.dateFormat = "HH:mm"
+                return f.string(from: Date())
+            case .meetingsToday:
+                let today = cal.startOfDay(for: Date())
+                let n = self.viewModel.meetingActivityByDay[today]?.count ?? 0
+                return n > 0 ? "\(n) TODAY" : nil
+            case .streak:
+                let s = self.meetingStreak()
+                return s > 1 ? "\(s) DAY STREAK" : nil
+            case .queue:
+                let tq = self.viewModel.transcriptionQueue.filter { $0.status == .queued }.count
+                let q = tq + self.summariseQueue.count
+                return q > 0 ? "Q:\(q)" : nil
+            }
+        }
+        viewModel.ledMatrix.start()
         viewModel.onViewSummary = { [weak self] path in
             self?.openSummaryViewer(summaryMdPath: path)
         }
@@ -898,12 +920,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 postNotification(title: "HiDock Recording Started", body: "USB mic is in use — HiDock input held open.")
                 DispatchQueue.main.async {
                     self.viewModel.hidockRecordingActive = true
+                    self.viewModel.ledMatrix.setRecording(true)
                 }
             } else if line.contains("NOT IN USE") && line.contains("releasing HiDock") {
                 log("Trigger: USB mic idle, HiDock recording stopped")
                 postNotification(title: "HiDock Recording Stopped", body: "USB mic went idle — HiDock input released.")
                 DispatchQueue.main.async {
                     self.viewModel.hidockRecordingActive = false
+                    self.viewModel.ledMatrix.setRecording(false)
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                     guard let self = self, self.syncPaired, !self.syncBusy else { return }
@@ -1748,6 +1772,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.stopUptimeTimer()
                 // Trigger child gone → no ffmpeg → HiDock not being held.
                 self?.viewModel.hidockRecordingActive = false
+                self?.viewModel.ledMatrix.setRecording(false)
                 self?.viewModel.hidockRecordingDeviceName = nil
                 self?.updateMenuState()
             }
@@ -3844,6 +3869,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.cliPaneVisible = true
         }
         viewModel.summaryTranscript.reset()
+        viewModel.ledMatrix.notify(LEDEvent(kind: .summarise, text: "SUMMARISING \(name)"))
         syncViewModelState()
 
         var args = ["summarize", transcript, "--events"]
@@ -3865,11 +3891,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].summaryPath = path
                     }
                     self.log("Summarised \(name) -> \(path)")
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .summarise, text: "\(LEDFont.check) SUMMARY \(name)"))
                 } else {
                     self.log("Summarise: no summary produced for \(name)")
                     if self.viewModel.summaryTranscript.errorMessage == nil {
                         self.viewModel.summaryTranscript.errorMessage = "No summary produced for \(name)."
                     }
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .error, text: "\(LEDFont.cross) SUMMARISE FAILED"))
                 }
                 self.syncViewModelState()
                 self.processNextSummary()
@@ -3940,6 +3968,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.cliPaneMode = .terminal
         viewModel.cliPaneVisible = true
         viewModel.terminalController.ensureStarted()
+    }
+
+    /// Consecutive days (ending today or yesterday) that have ≥1 meeting — for
+    /// the LED idle ticker's "N DAY STREAK".
+    private func meetingStreak() -> Int {
+        let cal = Calendar.current
+        let activity = viewModel.meetingActivityByDay
+        var day = cal.startOfDay(for: Date())
+        // Allow the streak to count even if today has no meeting yet.
+        if (activity[day]?.count ?? 0) == 0 {
+            day = cal.date(byAdding: .day, value: -1, to: day) ?? day
+        }
+        var streak = 0
+        while (activity[day]?.count ?? 0) > 0 {
+            streak += 1
+            guard let prev = cal.date(byAdding: .day, value: -1, to: day) else { break }
+            day = prev
+        }
+        return streak
     }
 
     // MARK: - Firmware
@@ -6296,6 +6343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 postSyncDownloadNotification(title: "✅ Downloads Complete", body: body)
                 viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
                 viewModel.syncStatusLevel = .success
+                viewModel.ledMatrix.notify(LEDEvent(kind: .download, text: "\(LEDFont.arrowDown) \(totalDownloaded) NEW"))
             }
             // When nothing was downloaded (the common no-op auto-sweep), leave
             // the status line quiet — refreshSyncStatus restores the normal

@@ -119,41 +119,46 @@ struct AgentTranscriptView: View {
     /// When false, the stage checklist header is hidden (chat doesn't need it).
     var showStages: Bool = true
 
+    private let hPadding: CGFloat = 12
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if showStages && !transcript.stages.isEmpty {
-                        stagesHeader
-                    }
-                    ForEach(transcript.blocks) { block in
-                        switch block.kind {
-                        case .markdown(let text):
-                            Markdown(text)
-                                .markdownTextStyle { FontSize(12) }
-                                .markdownTextStyle(\.code) { FontFamilyVariant(.monospaced); FontSize(11) }
-                                .textSelection(.enabled)
-                                // Accept the proposed (bounded) width and grow
-                                // only vertically, so long lines wrap instead of
-                                // overflowing the narrow pane.
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        case .tool(let activity):
-                            ToolActivityChip(activity: activity)
-                        case .user(let text):
-                            UserMessageBubble(text: text)
+        // GeometryReader gives us the pane's real width; pinning the content to
+        // (width - padding) forces MarkdownUI to wrap to the pane instead of
+        // laying out at its intrinsic (overflowing) width.
+        GeometryReader { geo in
+            let contentWidth = max(0, geo.size.width - hPadding * 2)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if showStages && !transcript.stages.isEmpty {
+                            stagesHeader
                         }
+                        ForEach(transcript.blocks) { block in
+                            switch block.kind {
+                            case .markdown(let text):
+                                Markdown(text)
+                                    .markdownTextStyle { FontSize(12) }
+                                    .markdownTextStyle(\.code) { FontFamilyVariant(.monospaced); FontSize(11) }
+                                    .textSelection(.enabled)
+                                    .frame(width: contentWidth, alignment: .leading)
+                            case .tool(let activity):
+                                ToolActivityChip(activity: activity)
+                                    .frame(width: contentWidth, alignment: .leading)
+                            case .user(let text):
+                                UserMessageBubble(text: text)
+                                    .frame(width: contentWidth, alignment: .trailing)
+                            }
+                        }
+                        if transcript.running { StreamingIndicator() }
+                        if let err = transcript.errorMessage { errorRow(err).frame(width: contentWidth, alignment: .leading) }
+                        if transcript.finished || transcript.costUSD != nil { footer.frame(width: contentWidth) }
+                        Color.clear.frame(height: 1).id("agent-bottom")
                     }
-                    if transcript.running { StreamingIndicator() }
-                    if let err = transcript.errorMessage { errorRow(err) }
-                    if transcript.finished || transcript.costUSD != nil { footer }
-                    Color.clear.frame(height: 1).id("agent-bottom")
+                    .padding(hPadding)
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .onChange(of: transcript.blocks) { _ in
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("agent-bottom", anchor: .bottom) }
+                .onChange(of: transcript.blocks) { _ in
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("agent-bottom", anchor: .bottom) }
+                }
             }
         }
     }
