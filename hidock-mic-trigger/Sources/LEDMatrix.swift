@@ -124,8 +124,10 @@ final class LEDMatrix: ObservableObject {
         currentIsIdle = idle
         trackStart = Date()
         setActive(!idle)
-        // Duration to scroll the whole track past the viewport, + a small tail.
-        let duration = Double(track.count) / colsPerSecond + 0.2
+        // The message has fully exited once the integer offset reaches
+        // track.count - viewportCols (viewport then shows the trailing pad).
+        let steps = max(1, track.count - viewportCols)
+        let duration = Double(steps) / colsPerSecond + 0.4
         scheduleAdvance(after: duration)
     }
 
