@@ -38,6 +38,23 @@ struct HiDockSyncRecording: Codable {
     /// never wanted). Optional for state.json entries written before
     /// the field existed.
     let removed: Bool?
+
+    /// A copy marked as freshly downloaded (file now on disk). Used to flip a
+    /// row to "Downloaded" the instant a transfer finishes, instead of waiting
+    /// for the next (async, ~15s) status probe to re-read state.json.
+    func markedDownloaded(outputPath newPath: String) -> HiDockSyncRecording {
+        HiDockSyncRecording(
+            name: name, createDate: createDate, createTime: createTime,
+            length: length, duration: duration, version: version, mode: mode,
+            signature: signature,
+            outputPath: newPath.isEmpty ? outputPath : newPath,
+            outputName: outputName,
+            downloaded: true, localExists: true,
+            downloadedAt: downloadedAt, lastError: nil, status: status,
+            humanLength: humanLength, trimmed: trimmed,
+            durationEstimated: durationEstimated, removed: removed
+        )
+    }
 }
 
 struct HiDockStorageStats: Codable {
@@ -264,7 +281,9 @@ struct VolumeScanResponse: Codable {
 
 struct HiDockSyncRecordingEntry: Identifiable {
     let id: String
-    let recording: HiDockSyncRecording
+    /// `var` so a just-finished download can flip the row to "Downloaded"
+    /// immediately (see markedDownloaded) without waiting for a status re-probe.
+    var recording: HiDockSyncRecording
     let deviceProductId: Int
     let deviceId: String
     let deviceName: String

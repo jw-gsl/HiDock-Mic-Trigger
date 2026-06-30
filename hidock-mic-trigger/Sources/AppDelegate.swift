@@ -6364,6 +6364,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 viewModel.syncStatusLevel = .success
                 viewModel.ledMatrix.notify(LEDEvent(kind: .syncComplete, text: "\(LEDFont.check) SYNC \(totalDownloaded) NEW"))
             }
+            // Flip the just-downloaded rows to "Downloaded" immediately, keyed by
+            // filename, rather than waiting for the async status re-probe below
+            // (which can lag ~15s and made rows linger on "On device" — and even
+            // jump to "Transcribing" — before showing "Downloaded").
+            if !freshDownloads.isEmpty {
+                let byName = Dictionary(freshDownloads.map { ($0.filename, $0.outputPath) },
+                                        uniquingKeysWith: { a, _ in a })
+                for i in syncEntries.indices {
+                    if let path = byName[syncEntries[i].recording.name],
+                       !syncEntries[i].recording.localExists {
+                        syncEntries[i].recording = syncEntries[i].recording.markedDownloaded(outputPath: path)
+                    }
+                }
+                syncViewModelState()
+            }
             // When nothing was downloaded (the common no-op auto-sweep), leave
             // the status line quiet — refreshSyncStatus restores the normal
             // connected/blank state rather than a misleading "Downloaded 0".
