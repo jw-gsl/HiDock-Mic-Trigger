@@ -5575,7 +5575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
-    private func scheduleAutoDownloadNewRecordings() {
+    private func scheduleAutoDownloadNewRecordings(attempt: Int = 0) {
         // No !syncBusy guard at the entry: the 2s debounce timer is the
         // correct deferral point. Triggers #2 and #3 fire from inside a
         // probe batch where syncBusy is true; we still want to schedule,
@@ -5583,7 +5583,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard syncAutoDownload, syncPaired else { return }
         syncAutoDownloadTimer?.invalidate()
         syncAutoDownloadTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-            guard let self = self, self.syncAutoDownload, self.syncPaired, !self.syncBusy else { return }
+            guard let self = self, self.syncAutoDownload, self.syncPaired else { return }
+            // If the probe batch hasn't settled yet, DON'T drop the request —
+            // a batch can easily run longer than the 2s debounce (status +
+            // P1 + Plaud + transcription-state refresh). Re-arm and retry
+            // until syncBusy clears, bounded so we can't spin forever.
+            if self.syncBusy {
+                if attempt < 15 {
+                    self.scheduleAutoDownloadNewRecordings(attempt: attempt + 1)
+                } else {
+                    self.log("Auto-download: still busy after \(attempt) retries — giving up; next trigger will retry")
+                }
+                return
+            }
             self.downloadNewSyncRecordings()
         }
     }
