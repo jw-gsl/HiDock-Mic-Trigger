@@ -26,7 +26,7 @@ struct LEDEvent {
 ///  - `.blink`  — a sticky, centred REC indicator that blinks (view-driven).
 ///  - `.blank`  — a static dim dot-grid (idle, nothing to say).
 final class LEDMatrix: ObservableObject {
-    enum Mode: Equatable { case blank, scroll, blink }
+    enum Mode: Equatable { case blank, scroll, blink, status }
 
     @Published private(set) var track: [LEDColumn] = []
     @Published private(set) var mode: Mode = .blank
@@ -40,6 +40,10 @@ final class LEDMatrix: ObservableObject {
     private var queue: [LEDEvent] = []
     private var recActive = false
     private var currentIsIdle = false
+    /// Live sticky status (e.g. download %), shown when nothing higher-priority
+    /// is scrolling. Updated in place as the value changes.
+    private var statusText: String?
+    private var statusColor: Color = .blue
     private var idleCursor = 0
     private var advanceTimer: Timer?
     private var started = false
@@ -79,6 +83,21 @@ final class LEDMatrix: ObservableObject {
         if mode != .scroll || currentIsIdle { startNext() }
     }
 
+    /// Set (or clear, with nil) a live sticky status such as download progress.
+    /// Updates in place if already showing a status, so the % can tick without
+    /// resetting any animation.
+    func setStatus(_ text: String?, color: Color = .blue, kind: LEDEventKind = .download) {
+        guard settings.enabled else { return }
+        let allowed = text != nil && settings.isEnabled(kind)
+        statusText = allowed ? text : nil
+        statusColor = color
+        if mode == .status, let t = statusText {
+            loadStatus(text: t, color: statusColor)   // update in place
+        } else if mode != .scroll || currentIsIdle {
+            startNext()
+        }
+    }
+
     func start() {
         guard settings.enabled, !started else { return }
         started = true
@@ -104,6 +123,10 @@ final class LEDMatrix: ObservableObject {
             loadBlink(text: "\(LEDFont.dot) REC", color: recColor)
             return
         }
+        if let status = statusText {
+            loadStatus(text: status, color: statusColor)
+            return
+        }
         if settings.idleTickerEnabled, let text = nextIdleText() {
             loadScroll(text: text, color: idleColor, idle: true)
             return
@@ -113,26 +136,42 @@ final class LEDMatrix: ObservableObject {
         track = Array(repeating: .blank, count: viewportCols)
         currentIsIdle = false
         setActive(false)
-        scheduleAdvance(after: 3.0)
+        scheduleAdvance(after: 1.0)
     }
+
+    /// Trailing blank columns after a message before the next loads. Small so
+    /// messages flow continuously (a big trailing pad reads as "stop / blank").
+    private let trailingPad = 4
 
     private func loadScroll(text: String, color: Color, idle: Bool) {
         let glyphs = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: color) }
-        let pad = Array(repeating: LEDColumn.blank, count: viewportCols)
-        track = pad + glyphs + pad
+        // Leading pad = a full viewport so text scrolls in from the right edge;
+        // small trailing pad so the next message follows without a long blank.
+        let lead = Array(repeating: LEDColumn.blank, count: viewportCols)
+        let trail = Array(repeating: LEDColumn.blank, count: trailingPad)
+        track = lead + glyphs + trail
         mode = .scroll
         currentIsIdle = idle
         trackStart = Date()
         setActive(!idle)
-        // The message has fully exited once the integer offset reaches
-        // track.count - viewportCols (viewport then shows the trailing pad).
+        // Fully exited once the integer offset reaches track.count - viewportCols.
         let steps = max(1, track.count - viewportCols)
-        let duration = Double(steps) / colsPerSecond + 0.4
+        let duration = Double(steps) / colsPerSecond + 0.05
         scheduleAdvance(after: duration)
     }
 
-    private func loadBlink(text: String, color: Color) {
-        // Centre the REC text within the viewport (static; the view blinks it).
+    /// Static, centred, non-blinking sticky text (live status, e.g. download %).
+    private func loadStatus(text: String, color: Color) {
+        track = centered(text: text, color: color)
+        mode = .status
+        currentIsIdle = false
+        trackStart = Date()
+        setActive(true)
+        // Sticky — no advance timer; cleared/updated via setStatus.
+    }
+
+    /// Centre `text` within the viewport, padded/clipped to viewportCols.
+    private func centered(text: String, color: Color) -> [LEDColumn] {
         var cols = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: color) }
         if cols.count < viewportCols {
             let lead = (viewportCols - cols.count) / 2
@@ -141,7 +180,11 @@ final class LEDMatrix: ObservableObject {
         } else {
             cols = Array(cols.prefix(viewportCols))
         }
-        track = cols
+        return cols
+    }
+
+    private func loadBlink(text: String, color: Color) {
+        track = centered(text: text, color: color)
         mode = .blink
         currentIsIdle = false
         trackStart = Date()

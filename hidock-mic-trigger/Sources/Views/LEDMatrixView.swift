@@ -38,27 +38,44 @@ struct LEDMatrixView: View {
         let track = matrix.track
         let off = Color.secondary.opacity(0.10)
 
-        // Integer column offset → the message snaps to grid columns (authentic
-        // LED look). 0 for the static grid / blink.
-        var offset = 0
-        if matrix.mode == .scroll {
-            offset = Int(max(0, now.timeIntervalSince(matrix.trackStart)) * matrix.colsPerSecond)
-        }
-        let blinkOn = matrix.mode == .blink
-            ? Int(max(0, now.timeIntervalSince(matrix.trackStart)) / 0.45) % 2 == 0
-            : true
+        // Continuous offset. For .scroll we keep the fractional part and blend
+        // adjacent columns so lit dots fade across the FIXED grid — the dim dots
+        // never move, only their brightness does, which reads as smooth motion
+        // without the column-snap jerkiness.
+        let elapsed = max(0, now.timeIntervalSince(matrix.trackStart))
+        let offsetCols = matrix.mode == .scroll ? elapsed * matrix.colsPerSecond : 0
+        let base = Int(floor(offsetCols))
+        let frac = offsetCols - Double(base)
+        let blinkOn = matrix.mode == .blink ? Int(elapsed / 0.45) % 2 == 0 : true
 
-        // Fixed grid: every viewport cell is drawn at a stationary position;
-        // only whether it's lit changes.
+        func litColor(_ idx: Int, _ y: Int) -> Color? {
+            guard idx >= 0, idx < track.count else { return nil }
+            let c = track[idx]
+            return (y < c.bits.count && c.bits[y]) ? c.color : nil
+        }
+
         for v in 0..<cols {
-            let idx = v + offset
-            let col: LEDColumn? = (idx >= 0 && idx < track.count) ? track[idx] : nil
             let x = CGFloat(v) * pitch
             for y in 0..<LEDFont.height {
-                let rect = CGRect(x: x, y: CGFloat(y) * pitch, width: cell, height: cell)
-                let lit = (col.map { y < $0.bits.count && $0.bits[y] } ?? false) && blinkOn
-                let color = lit ? (col?.color ?? .clear).opacity(settings.brightness) : off
-                gc.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(color))
+                let path = Path(roundedRect: CGRect(x: x, y: CGFloat(y) * pitch, width: cell, height: cell), cornerRadius: 2)
+                // Stationary dim dot underneath.
+                gc.fill(path, with: .color(off))
+                guard blinkOn else { continue }
+                if matrix.mode == .scroll {
+                    // Blend this grid cell between the two source columns it sits
+                    // between as the message slides (anti-aliased motion).
+                    let c0 = litColor(v + base, y)
+                    let c1 = litColor(v + base + 1, y)
+                    let i0 = c0 != nil ? (1 - frac) : 0
+                    let i1 = c1 != nil ? frac : 0
+                    let intensity = i0 + i1
+                    if intensity > 0.01 {
+                        let color = (c1 ?? c0) ?? .clear
+                        gc.fill(path, with: .color(color.opacity(settings.brightness * intensity)))
+                    }
+                } else if let c = litColor(v, y) {
+                    gc.fill(path, with: .color(c.opacity(settings.brightness)))
+                }
             }
         }
     }

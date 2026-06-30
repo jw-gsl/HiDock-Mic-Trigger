@@ -6174,6 +6174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncDownloadTimer = nil
         syncDownloadStartDate = nil
         viewModel.syncDownloadProgress = nil
+        viewModel.ledMatrix.setStatus(nil)
     }
 
     private func downloadSelectedSyncRecording() {
@@ -6271,6 +6272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
             self.viewModel.syncStatus = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
             self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }) { [weak self] result in
             guard self != nil else { return }
             switch result {
@@ -6411,6 +6413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
             self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
             self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }, onFile: { [weak self] name, started in
             guard let self = self else { return }
             if started { self.beginDownloadProgressIfNeeded() }
@@ -7116,6 +7119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.applyTranscriptionProgress(syntheticPct, itemPath: item.path, filename: filename, position: position, total: total)
         }
 
+        viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "TRANSCRIBING \(filename)"))
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
         args.append("--summarize")  // see transcribeFileDirect for rationale
@@ -7162,12 +7166,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 case .success:
                     self.pendingTranscriptionQueue[idx].status = .completed
                     self.pendingTranscriptionQueue[idx].errorMessage = nil
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "\(LEDFont.check) \(filename)"))
                     // Flag for auto-summarise; refreshTranscriptionState
                     // (called just below) populates transcriptPath, then
                     // queues the typed summary for these names.
                     if self.syncAutoSummarise { self.pendingAutoSummariseNames.insert(filename) }
                 case .failure(let err):
                     self.pendingTranscriptionQueue[idx].status = .failed
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .error, text: "\(LEDFont.cross) TRANSCRIBE FAILED"))
                     // The NSError carries the trimmed stderr text
                     // assembled by `runTranscription` — exactly what we
                     // want shown when the user clicks the red X icon.
