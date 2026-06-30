@@ -1303,6 +1303,30 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
 
         recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
         declared = getattr(query_file_list, "_last_declared_total", None)
+
+        # Self-heal a partial read: the firmware can return fewer frames than it
+        # holds under load (esp. while the device is actively recording), and it
+        # drops the NEWEST first. When the device declares more than it returned,
+        # re-read a few times and keep the most complete result — this recovers
+        # the newest recordings without needing the device to be idle.
+        MAX_LIST_ATTEMPTS = 3
+        attempt = 1
+        while declared is not None and len(recordings) < declared and attempt < MAX_LIST_ATTEMPTS:
+            attempt += 1
+            time.sleep(0.15)   # brief settle so the firmware can refill its buffer
+            try:
+                retry = query_file_list(dev, request_id=2 + attempt, timeout_ms=timeout_ms)
+            except Exception as retry_exc:
+                print(f"file-list retry {attempt} failed: {retry_exc}", file=sys.stderr, flush=True)
+                break
+            retry_declared = getattr(query_file_list, "_last_declared_total", None)
+            if len(retry) > len(recordings):
+                recordings = retry          # keep the most complete read
+            if retry_declared is not None:
+                declared = retry_declared
+        if attempt > 1:
+            print(f"file-list: read {len(recordings)}/{declared} after {attempt} attempt(s)", file=sys.stderr, flush=True)
+
         prev_recs = catalogs.get(cache_key, {}).get("recordings", [])
 
         # Don't let a PARTIAL read evict recordings we've already seen (see
