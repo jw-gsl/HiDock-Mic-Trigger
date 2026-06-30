@@ -1302,7 +1302,14 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         catalogs = state.get("catalogs", {})
 
         recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
-        # Cache the raw catalog for next time
+        declared = getattr(query_file_list, "_last_declared_total", None)
+        prev_recs = catalogs.get(cache_key, {}).get("recordings", [])
+
+        # Don't let a PARTIAL read evict recordings we've already seen (see
+        # merge_partial_catalog).
+        recordings = merge_partial_catalog(recordings, declared, prev_recs)
+
+        # Cache the (merged) catalog for next time
         catalogs[cache_key] = {"recordings": recordings}
         state["catalogs"] = catalogs
         save_state(state, state_path)
@@ -1445,6 +1452,43 @@ def download_one(
         "outputPath": str(out_path),
         "downloaded": written == length,
     }
+
+
+def merge_partial_catalog(
+    live: list[dict],
+    declared: int | None,
+    prev: list[dict],
+) -> list[dict]:
+    """Union a possibly-truncated live file-list read with the cached catalog.
+
+    The H1 firmware truncates its file list under load (and especially while the
+    device is actively recording), returning fewer recordings than it actually
+    holds — and it drops the NEWEST first. A plain overwrite of the cache would
+    then make the newest recordings vanish from the catalog and from
+    download-new, even though they're still physically on the device.
+
+    So when the read looks partial — the device *declares* more than it returned
+    (``declared > len(live)``), or we simply got fewer than we had cached — keep
+    the cached recordings the live read omitted (matched by name; the live entry
+    wins for any name present in both). A genuinely-complete read
+    (``declared == len(live)``) is authoritative and is allowed to shrink, so
+    real on-device deletions still propagate.
+    """
+    returned = len(live)
+    if declared is not None:
+        # Authoritative count from the device header: partial iff it returned
+        # fewer than it declared. A complete read (declared == returned) is
+        # trusted and may shrink (real deletions propagate).
+        likely_partial = declared > returned
+    else:
+        # No declared count to compare against — fall back to "we got fewer
+        # than we had cached" as a partial-read signal.
+        likely_partial = returned < len(prev)
+    if not (likely_partial and prev):
+        return live
+    live_names = {r.get("name") for r in live}
+    extras = [r for r in prev if r.get("name") not in live_names]
+    return live + extras if extras else live
 
 
 def download_new(
