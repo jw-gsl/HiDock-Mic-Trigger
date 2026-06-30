@@ -5317,6 +5317,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         if !isCached {
+            // LED ticker: announce real connect/disconnect transitions.
+            if status.connected != wasConnected {
+                let verb = status.connected ? "CONNECTED" : "DISCONNECTED"
+                viewModel.ledMatrix.notify(LEDEvent(kind: .deviceConnect, text: "\(device.shortName) \(verb)"))
+            }
             syncDeviceConnected[device.deviceId] = status.connected
         }
         if status.connected {
@@ -6345,7 +6350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 postSyncDownloadNotification(title: "✅ Downloads Complete", body: body)
                 viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
                 viewModel.syncStatusLevel = .success
-                viewModel.ledMatrix.notify(LEDEvent(kind: .download, text: "\(LEDFont.arrowDown) \(totalDownloaded) NEW"))
+                viewModel.ledMatrix.notify(LEDEvent(kind: .syncComplete, text: "\(LEDFont.check) SYNC \(totalDownloaded) NEW"))
             }
             // When nothing was downloaded (the common no-op auto-sweep), leave
             // the status line quiet — refreshSyncStatus restores the normal
