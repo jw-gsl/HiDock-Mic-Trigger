@@ -1465,6 +1465,7 @@ def download_new(
 
     downloaded: list[dict] = []
     skipped: list[dict] = []
+    errors: list[dict] = []
     for item in status["recordings"]:
         if item["downloaded"]:
             skipped.append({"filename": item["name"], "reason": "already_downloaded"})
@@ -1492,6 +1493,13 @@ def download_new(
                 product_id=product_id,
             )
             downloaded.append(result)
+        except Exception as exc:
+            # Resilience: one bad file (transient USB error, a recording the
+            # device is still finalising, etc.) must NOT abort the whole batch
+            # and leave every later recording un-downloaded. Record it and move
+            # on — the next auto-download cycle retries it.
+            print(f"download-new: failed for {item['name']}: {exc}", file=sys.stderr, flush=True)
+            errors.append({"filename": item["name"], "error": str(exc)})
         finally:
             print(f"FILE_DONE:{item['name']}", file=sys.stderr, flush=True)
 
@@ -1500,6 +1508,7 @@ def download_new(
         "outputDir": status["outputDir"],
         "downloaded": downloaded,
         "skipped": skipped,
+        "errors": errors,
     }
 
 
