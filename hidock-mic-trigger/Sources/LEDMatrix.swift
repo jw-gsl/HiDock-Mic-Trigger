@@ -5,7 +5,7 @@ import Combine
 struct LEDColumn: Equatable {
     var bits: [Bool]            // top (0) → bottom (6)
     var color: Color
-    static let blank = LEDColumn(bits: Array(repeating: false, count: LEDFont.height), color: .clear)
+    static let blank = LEDColumn(bits: Array(repeating: false, count: LEDFont.height5), color: .clear)
 }
 
 /// A high-level app event the ticker can announce.
@@ -144,7 +144,7 @@ final class LEDMatrix: ObservableObject {
     private let trailingPad = 4
 
     private func loadScroll(text: String, color: Color, idle: Bool) {
-        let glyphs = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: color) }
+        let glyphs = LEDFont.columns5(for: text).map { LEDColumn(bits: $0, color: color) }
         // Leading pad = a full viewport so text scrolls in from the right edge;
         // small trailing pad so the next message follows without a long blank.
         let lead = Array(repeating: LEDColumn.blank, count: viewportCols)
@@ -172,7 +172,7 @@ final class LEDMatrix: ObservableObject {
 
     /// Centre `text` within the viewport, padded/clipped to viewportCols.
     private func centered(text: String, color: Color) -> [LEDColumn] {
-        var cols = LEDFont.columns(for: text).map { LEDColumn(bits: $0, color: color) }
+        var cols = LEDFont.columns5(for: text).map { LEDColumn(bits: $0, color: color) }
         if cols.count < viewportCols {
             let lead = (viewportCols - cols.count) / 2
             cols = Array(repeating: LEDColumn.blank, count: lead) + cols

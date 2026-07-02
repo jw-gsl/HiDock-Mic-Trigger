@@ -16,6 +16,29 @@ enum LEDFont {
     /// Blank column inserted between glyphs.
     static let spacing = 1
 
+    /// Compact 5-row-tall variant (used by the ticker so it fits the middle
+    /// Tue–Sat band of the heatmap grid, keeping the Mon/Sun rows + labels).
+    static let height5 = 5
+    static let width5 = 5
+
+    /// 5-tall columns for a string (each column is `height5` booleans).
+    static func columns5(for text: String) -> [[Bool]] {
+        var out: [[Bool]] = []
+        for ch in text.uppercased() {
+            let rows = (glyphs5[ch] ?? glyphs5[" "]!).map(Array.init)
+            for c in 0..<width5 {
+                var col = [Bool](repeating: false, count: height5)
+                for r in 0..<height5 where r < rows.count {
+                    let line = rows[r]
+                    col[r] = c < line.count && line[c] != " "
+                }
+                out.append(col)
+            }
+            out.append([Bool](repeating: false, count: height5))  // spacer
+        }
+        return out
+    }
+
     /// Columns for a whole string: each glyph's 5 columns + a spacer.
     static func columns(for text: String) -> [Column] {
         var out: [Column] = []
@@ -103,4 +126,56 @@ enum LEDFont {
     static let check: Character = "\u{2713}"
     static let cross: Character = "\u{2717}"
     static let dot: Character = "\u{25CF}"
+
+    /// Compact 5×5 glyphs (5 rows of 5 chars). Uppercase, digits, a few symbols
+    /// and icons. Missing glyphs fall back to blank.
+    static let glyphs5: [Character: [String]] = [
+        " ": ["     ", "     ", "     ", "     ", "     "],
+        "A": [" ### ", "#   #", "#####", "#   #", "#   #"],
+        "B": ["#### ", "#   #", "#### ", "#   #", "#### "],
+        "C": [" ####", "#    ", "#    ", "#    ", " ####"],
+        "D": ["#### ", "#   #", "#   #", "#   #", "#### "],
+        "E": ["#####", "#    ", "#### ", "#    ", "#####"],
+        "F": ["#####", "#    ", "#### ", "#    ", "#    "],
+        "G": [" ####", "#    ", "#  ##", "#   #", " ####"],
+        "H": ["#   #", "#   #", "#####", "#   #", "#   #"],
+        "I": ["#####", "  #  ", "  #  ", "  #  ", "#####"],
+        "J": ["  ###", "   # ", "   # ", "#  # ", " ##  "],
+        "K": ["#   #", "#  # ", "###  ", "#  # ", "#   #"],
+        "L": ["#    ", "#    ", "#    ", "#    ", "#####"],
+        "M": ["#   #", "## ##", "# # #", "#   #", "#   #"],
+        "N": ["#   #", "##  #", "# # #", "#  ##", "#   #"],
+        "O": [" ### ", "#   #", "#   #", "#   #", " ### "],
+        "P": ["#### ", "#   #", "#### ", "#    ", "#    "],
+        "Q": [" ### ", "#   #", "# # #", "#  # ", " ## #"],
+        "R": ["#### ", "#   #", "#### ", "#  # ", "#   #"],
+        "S": [" ####", "#    ", " ### ", "    #", "#### "],
+        "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  "],
+        "U": ["#   #", "#   #", "#   #", "#   #", " ### "],
+        "V": ["#   #", "#   #", "#   #", " # # ", "  #  "],
+        "W": ["#   #", "#   #", "# # #", "# # #", " # # "],
+        "X": ["#   #", " # # ", "  #  ", " # # ", "#   #"],
+        "Y": ["#   #", " # # ", "  #  ", "  #  ", "  #  "],
+        "Z": ["#####", "   # ", "  #  ", " #   ", "#####"],
+        "0": [" ### ", "#  ##", "# # #", "##  #", " ### "],
+        "1": ["  #  ", " ##  ", "  #  ", "  #  ", " ### "],
+        "2": [" ### ", "#   #", "  ## ", " #   ", "#####"],
+        "3": ["#####", "   # ", "  ## ", "#   #", " ### "],
+        "4": ["   # ", "  ## ", " # # ", "#####", "   # "],
+        "5": ["#####", "#    ", "#### ", "    #", "#### "],
+        "6": [" ### ", "#    ", "#### ", "#   #", " ### "],
+        "7": ["#####", "    #", "   # ", "  #  ", " #   "],
+        "8": [" ### ", "#   #", " ### ", "#   #", " ### "],
+        "9": [" ### ", "#   #", " ####", "    #", " ### "],
+        ":": ["     ", "  #  ", "     ", "  #  ", "     "],
+        ".": ["     ", "     ", "     ", "     ", "  #  "],
+        "-": ["     ", "     ", "#####", "     ", "     "],
+        "%": ["#   #", "   # ", "  #  ", " #   ", "#   #"],
+        "/": ["    #", "   # ", "  #  ", " #   ", "#    "],
+        "!": ["  #  ", "  #  ", "  #  ", "     ", "  #  "],
+        "\u{2193}": ["  #  ", "  #  ", "# # #", " ### ", "  #  "],   // ↓
+        "\u{2713}": ["     ", "    #", "#  # ", " ##  ", "     "],   // ✓
+        "\u{2717}": ["#   #", " # # ", "  #  ", " # # ", "#   #"],   // ✗
+        "\u{25CF}": [" ### ", "#####", "#####", "#####", " ### "],   // ●
+    ]
 }

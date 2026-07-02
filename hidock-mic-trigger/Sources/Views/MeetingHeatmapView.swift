@@ -175,8 +175,16 @@ struct MeetingHeatmapView: View {
         return VStack(alignment: .leading, spacing: 6) {
             header
             if showLED {
-                LEDMatrixView(matrix: ledMatrix, settings: ledSettings)
-                    .padding(.vertical, 4)
+                // Keep the calendar chrome — month labels on top, Mon–Sun
+                // labels down the left — and drive only the grid with the LED
+                // ticker (text in the Tue–Sat band).
+                VStack(alignment: .leading, spacing: gap) {
+                    monthLabelRow(labels)
+                    HStack(alignment: .top, spacing: gap) {
+                        weekdayGutter
+                        LEDMatrixView(matrix: ledMatrix, settings: ledSettings)
+                    }
+                }
             } else {
                 detailLine(activity: activity)
                 ScrollView(.horizontal, showsIndicators: false) {
