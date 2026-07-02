@@ -1,13 +1,15 @@
 # Codebase Improvement Plan — Full Bug Audit
 Research date: 2026-07-02
-Sources: four parallel code-audit agents over `hidock-mic-trigger/Sources/`, `usb-extractor/`, `shared/` + `transcription-pipeline/` + `mcp-server/`, and `Windows-App/` + `Windows-Script/` + `mic-trigger/`; findings verified against the code before fixing. Branch: `fix/audit-bugfixes` (off `feature/formatted-cli-view`).
+Sources: four parallel code-audit agents over `hidock-mic-trigger/Sources/`, `usb-extractor/`, `shared/` + `transcription-pipeline/` + `mcp-server/`, and `Windows-App/` + `Windows-Script/` + `mic-trigger/`; findings verified against the code before fixing. Branches: `fix/audit-bugfixes` (first pass, PR #49) and `fix/audit-deferred` (second pass, stacked).
 
 ## Current State
-A whole-codebase audit (2026-07-02) surfaced ~80 findings across all components. The
-highest-impact confirmed bugs were fixed on `fix/audit-bugfixes` (see Completed).
-The remainder are catalogued below by priority so nothing is lost. Test baseline
-before and after fixes: 132 usb-extractor tests + 53 Windows-App tests passing;
-Swift app builds clean.
+A whole-codebase audit (2026-07-02) surfaced ~80 findings across all components.
+Two fix passes ran the same day: the first landed the highest-impact confirmed
+bugs (PR #49); the second (`fix/audit-deferred`) cleared the deferred P1/P2/P3
+backlog — everything below except the Structural section and two
+device/design-gated items. Test count grew 628 → 739 (157 usb-extractor,
+74 Windows-App, 415 shared, 24 mcp-server, 69 transcription-pipeline), all
+passing; Swift app and mic-trigger CLI build clean.
 
 ## Findings (summary)
 The audit's most important theme: **partial-transfer handling**. Several download
@@ -116,119 +118,108 @@ Secondary themes:
 - [x] "Pair Plaud" persisted (the `plaudPaired` signal had no listener, so Plaud
   sync never ran).
 
-## Planned — deferred findings, by priority
+## Completed (2026-07-02, second pass — branch `fix/audit-deferred`)
+Seven parallel fix agents cleared the deferred backlog; all diffs reviewed,
+739 tests green, both Swift targets build.
 
 ### P1 — data integrity / correctness (macOS pipeline)
-- [ ] **Silence-strip timestamp remapping** (`transcribe.py`, `transcribe_parakeet.py`,
-  `transcribe_cohere.py`, `diarize_lite.py`): when >5% silence is stripped, ASR
-  runs on the shortened WAV but diarization + sidecars + SRT use the original
-  timeline — timestamps drift by the stripped amount (wrong speakers, wrong
-  seeks). Needs a per-chunk offset map and one remap pass. The biggest remaining
-  correctness bug in the pipeline; needs its own focused change + tests.
-- [ ] **Sortformer cross-window speaker stitching** (`diarize_sortformer.py`):
-  per-window `speaker_N` labels are pooled without remapping, so labels collide
-  after the first 300 s window; overlap turns are also emitted twice. Fix via
-  majority-overlap label remap in the 30 s overlap region.
-- [ ] **state.json cross-process locking** (`usb-extractor/extractor.py`, also
-  `transcription-pipeline/state.py` status prune): concurrent `status` +
-  `download` invocations do unlocked read-modify-write of the same state file —
-  whichever saves last clobbers the other (lost download records re-trigger
-  auto-downloads; lost `removed` flags resurrect user-suppressed files). Fix:
-  `flock` around load→mutate→save + unique temp names (`mkstemp`).
-- [ ] **Volume duplicate-basename collisions** (`extractor.py` volume path): state
-  keys and output paths use basename only, so `FOLDER01/REC0001.wav` and
-  `FOLDER02/REC0001.wav` share one state record and one destination — last one
-  wins silently. Fix needs a state-key schema change (relative path) with
-  migration for existing `vol:<name>/<basename>` records.
-- [ ] **`whisper_guard` inert on real Whisper output**: `clean_transcript` splits
-  on newlines but `result["text"]` has none, so the hallucination filters never
-  fire. Fix by feeding segment-joined text; needs care because the cleaned text
-  is what gets written (formatting changes).
-- [ ] **Parakeet model-manager entry is fake** (`shared/models.py`): "Download"
-  fetches an HTML page and reports installed; honor `managed_externally`, derive
-  installed via `_python_module_available("parakeet_mlx")`.
-- [ ] **`transcribe_cpp.py` parity ports**: SIGTERM handler (timeout kill leaves
-  state stuck `in_progress` forever) and the stale-transcript status guard —
-  both already exist in `transcribe.py`; this is the backend the bundled app
-  actually runs.
-- [ ] **`llm_cli` timeout enforcement on the streaming path**: the `timeout`
-  parameter is ignored while consuming the claude stream — a hung CLI blocks
-  summarization/chat indefinitely. Needs a wall-clock deadline + kill.
-- [ ] **`models.download_model_if_needed`**: verify `downloaded == Content-Length`
-  before renaming into place (short/HTML bodies currently accepted forever).
+- [x] **Silence-strip timestamp remapping**: `strip_silence_with_map()` returns a
+  piecewise-linear (stripped→original) knot map; all three ASR backends remap
+  segment + word timestamps back to the original timeline before diarization /
+  sidecars / SRT. 24 new tests incl. legacy-output equivalence.
+- [x] **Sortformer cross-window stitching**: greedy max-overlap label remap in the
+  30 s overlap region, fresh labels for unseen speakers, overlap deduped at the
+  midpoint. 7 new tests.
+- [x] **state.json cross-process locking** (extractor): `flock` on a sibling
+  lockfile held across load→mutate→save for every state writer; long transfers
+  re-load fresh state under the lock before saving (merge, not clobber); unique
+  `mkstemp` temp names. Plaud persistence overlays only plaud-owned keys.
+- [x] **state.json locking** (transcription-pipeline): transparent lock in
+  `save_state` + `update_state` locked-RMW helper; cmd_status prune re-verifies
+  under the lock and skips on contention.
+- [x] **Volume duplicate-basename collisions**: state keys are now
+  `vol:<volume>/<relpath>` with read-time legacy-key migration (unique basenames
+  honored, ambiguous ones refused with candidates listed); duplicate basenames
+  get flattened output names (`FOLDER01_REC0001.wav`) so both files survive;
+  round-trips through the Swift app with no Swift change.
+- [x] **whisper_guard actually fires**: single-line Whisper text is split on
+  sentence boundaries (opt-in `segments=` kwarg too); output re-joined with the
+  input's own separator.
+- [x] **transcribe_cpp parity ports**: SIGTERM `_IN_FLIGHT` handler (no more
+  permanently-stuck `in_progress`) and the stale-transcript status guard.
+- [x] **llm_cli stream timeout**: watchdog timer kills a hung claude CLI at the
+  deadline in both streaming paths; timeout reported distinctly.
+- [x] **models.py**: `managed_externally` honored (Parakeet installed = module
+  present; download refuses instead of saving an HTML page); short downloads
+  deleted + raised instead of renamed into place.
+- [x] **diarize_lite whisper-boundary fallback**: misindexing branch removed —
+  overlap-based assignment used unconditionally.
 
 ### P2 — robustness / UX (macOS)
-- [ ] Extractor: top-level try/except in `main()` for JSON-emitting commands so
-  e.g. `usb.core.NoBackendError` (libusb missing) yields `{"error": ...}` JSON
-  instead of a bare traceback the Swift parser chokes on.
-- [ ] Extractor: `mark-downloaded --volume-name` breaks for filenames with
-  spaces/parens (`validate_filename`) and wrongly appends `.mp3` to volume
-  files; skip `output_path_for` for volume/plaud keys.
-- [ ] Extractor: `mark-removed`/`unmark-removed` need `--volume-name` support so
-  volume rows can be keyed correctly (`vol:<name>/<file>`).
-- [ ] Extractor: CMD_TRANSFER frame sequencing — duplicate seq frames are written
-  twice, gaps aren't detected; require `req == last_seq(+1)` and abort on gaps
-  (needs a device-capture to confirm firmware behaviour first).
-- [ ] Extractor: `download_new` disconnected branch should include the `errors`
-  key for schema consistency; `_safe_resolve` prefix check → `is_relative_to`.
-- [ ] Plaud: `downloaded = stored or existing` still trusts pre-fix partial files
-  at the final path; consider a one-off length reconciliation against the API.
-- [ ] Swift: remaining low-severity notes from the audit — overwrite-trim swap
-  ordering can lose the original on a failed move; `importSingleFile`/
-  `probeDuration` beachball the main thread on large files; `reclassifySummary`
-  bypasses the serial summarise queue; `log()` writes from multiple queues with
-  independent FileHandles.
-- [ ] `typed_summarize.py`: add `summarize.py`'s prompt-injection system
-  instruction; fix `_delete_prior_summaries` glob-escaping and delete-after-write
-  ordering.
-- [ ] `summarize.py`: un-double the `{{ }}` braces in prompt templates (model
-  mimics them → JSON extraction fails → silent empty summaries).
-- [ ] `transcript_writer.py`: YAML frontmatter round-trip (quotes in titles,
-  comma-splitting quoted speaker lists, newlines in titles).
-- [ ] `merge_finder.py`: greeting/farewell veto uses substring matching ("they"
-  contains "hey ") — tokenize.
-- [ ] MCP server: rebuild wipes the index before re-indexing and serves the
-  partial index after a mid-rebuild exception — build into a local and swap on
-  success, or make rebuild transactional.
-- [ ] Remaining non-atomic writes: `migrate.py`, `config_store.py`,
-  `recluster_with_anchors.py`, `voice_training.py`, `merge_finder.py`.
-- [ ] `event_log.py`: connection cache ignores `db_path` after first call; not
-  thread-safe.
-- [ ] `audio_utils.extract_embedding`: silent MFCC fallback mixes 40-dim and
-  192-dim vectors → ragged array crash downstream; drop mismatched embeddings.
-- [ ] `pipeline_dispatch.py`: `from transcription_pipeline import config` can
-  never import (hyphenated dir); path-insert like `transcribe.py` does.
-- [ ] `intelligence.py`: empty/unparseable dates always classify meetings stale /
-  people "losing touch".
-- [ ] Misc lows: temp-WAV leak on failed transcriptions, SRT skipped when
-  diarization returns empty segments, `transcript_stats.py` keys action items as
-  `stem + ".mp3"` regardless of extension, `diarize.py` legacy overlap logic.
+- [x] Extractor JSON contract: top-level guard prints `{"error", "connected":
+  false}` JSON for any unexpected exception (e.g. `NoBackendError`).
+- [x] `mark-downloaded`/`mark-removed`/`unmark-*`: correct keys for volume and
+  Plaud rows (`--volume-name` added; no more `validate_filename` crashes on
+  spaces/parens or bogus `.mp3` suffixes); `set-output` skips prefixed keys.
+- [x] `download_new`/`volume_import_new` disconnected branches include `errors`;
+  `_safe_resolve` uses `is_relative_to`.
+- [x] Swift lows: trim swap uses `replaceItemAt` (original can't be lost, errors
+  surfaced); import copy + duration probe off the main thread;
+  `reclassifySummary` serialised through the summarise queue; `log()` writes
+  serialised on a dedicated queue.
+- [x] `typed_summarize`: prompt-injection guard prepended; prior-summary cleanup
+  is glob-safe and delete-after-write.
+- [x] `summarize.py` `{{ }}` braces un-doubled.
+- [x] `transcript_writer` YAML round-trip: quotes escaped, newlines collapsed,
+  quote-aware list parsing (7 new tests).
+- [x] `merge_finder`: word-boundary greeting/farewell vetoes; atomic sidecar save.
+- [x] MCP/knowledge rebuild transactional (rollback on failure; global assigned
+  only on success — a failed rebuild keeps serving the previous index).
+- [x] Remaining atomic writes: `migrate.py`, `config_store.py`,
+  `recluster_with_anchors.py`, `voice_training.py`.
+- [x] `event_log`: per-call connections, cache keyed correctly, thread-safe.
+- [x] `audio_utils.extract_embedding`: explicit failure instead of silent 40-dim
+  MFCC dim-mixing; recluster skips failed segments (diarize() falls back to
+  transcript-without-speakers via transcribe.py's existing catch).
+- [x] `pipeline_dispatch` import fixed (path-insert of hyphenated dir).
+- [x] `intelligence.py`: unknown dates excluded from staleness / losing-touch /
+  recency scoring instead of scoring as ancient.
+- [x] Misc lows: temp-WAV leak (unlink in finally), SRT empty-segments gate,
+  `transcript_stats` stem matching, Parakeet/Cohere PROGRESS/STAGE emitted in
+  the Swift parser's format on stderr, Cohere transformers-v5 tokenizer call.
 
-### P3 — Windows app (secondary platform; batch these if/when Windows gets attention)
-- [ ] `--product-id` parsed but never threaded into `find_device()` — multi-device
-  routing is dead code (paired non-45068 devices probe the wrong dock).
-- [ ] `_on_sync_complete` treats download output as a status payload — table wipes
-  to "0 recordings" after every download; download-then-transcribe never
-  transcribes. Should re-run `_refresh_status()` after downloads.
-- [ ] `_transcribe_selected` passes multiple filenames to the single-filename
-  `download` command (argparse exit 2) and doesn't branch by device type.
-- [ ] Context-menu Download / Mark-as-Downloaded ignore device type (violates the
-  documented device-identity rules; contaminates HiDock state with volume keys).
-- [ ] QSettings read/written from Plaud worker threads (documented constraint
-  violation) — marshal token refresh back to the GUI thread.
-- [ ] Worker threads touch widgets: transcript viewer re-diarize/re-cluster,
-  merge/trim/status-bar updates, feedback submission → route through signals.
-- [ ] `QTimer.singleShot` from plain threads (update checks never deliver);
-  "Restart && Update" runs `sys.exit` on a worker thread so the exe stays locked
-  and the update silently fails.
-- [ ] Mic trigger: COM not initialised on the poll thread (pycaw raises →
-  permanently inactive) and session-based detection counts playback as mic
-  activity; `stop()` races `_start_ffmpeg` leaving orphan ffmpeg.
-- [ ] Ctrl+R bound twice (ambiguous → dead hotkey); `shlex.quote` used for
-  cmd.exe in Ask-Claude; concurrent transcription batches via context menu race
-  `_txq_items`.
-- [ ] mic-trigger Swift CLI: serialise FFmpegHolder access between the poll timer
-  queue and the signal handler.
+### P3 — Windows app + mic-trigger CLI
+- [x] `--product-id` threaded through every USB command path (state records
+  stamped, state-only entries filtered per device, mirroring macOS).
+- [x] Download completion triggers a real `_refresh_status()` (table no longer
+  wipes; download-then-transcribe works) via a `_download_done` sentinel.
+- [x] `_transcribe_selected` + context-menu Download/Mark share per-device
+  command building (volume/Plaud/HiDock branching, one command per file).
+- [x] QSettings confined to the GUI thread (accounts loaded before spawning;
+  rotated tokens persisted via signal).
+- [x] All worker-thread widget access routed through signals (re-diarize,
+  re-cluster, merge, trim, feedback, update checks).
+- [x] "Restart && Update" installs from the GUI thread, guards `sys.frozen`,
+  quits the Qt loop inside the bat's copy window.
+- [x] Mic trigger: COM initialised on the poll thread; capture-endpoint peak
+  meter used when available (falls back to the old session heuristic);
+  stop() joins the poll thread before killing ffmpeg.
+- [x] Ctrl+R ambiguity removed; win32 quoting for Ask-Claude; concurrent
+  transcription batches refused while one runs.
+- [x] mic-trigger CLI: poll timer moved to the main queue, serialising
+  FFmpegHolder with the signal handlers.
+- 21 new Windows tests (74 total).
+
+## Planned — remaining items
+- [ ] **CMD_TRANSFER frame sequencing** (extractor): duplicate seq frames would be
+  written twice, gaps aren't detected. Gated on a real device capture to
+  confirm firmware retransmit behaviour before tightening (`req ==
+  last_seq(+1)`, abort on gaps).
+- [ ] **Plaud pre-fix partial files**: `downloaded = stored or existing` still
+  trusts files downloaded before atomic writes landed; optional one-off length
+  reconciliation against the API if truncated Plaud files ever surface.
+- [ ] `transcribe_parakeet`/`transcribe_cohere`: gate `_diarized.json` writes on
+  non-empty segments (writes an empty-but-valid JSON today; cosmetic).
 
 ### Structural improvements (beyond bug fixes)
 - [ ] **Split `AppDelegate.swift` (7,800 lines)** into focused controllers
