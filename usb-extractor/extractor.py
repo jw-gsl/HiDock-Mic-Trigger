@@ -714,39 +714,70 @@ def query_file_list(dev, request_id: int = 2, timeout_ms: int = 5000) -> list[di
                     out.append(body)
         return out
 
-    # Request #1 — primes the queue. Read frame 1.
-    total_budget_s = max(min(timeout_ms / 1000.0, 30.0), 12.0)
-    half_budget_s = total_budget_s / 2.0
+    # Peek helper: dedupe frames, reassemble header-first, parse, and return
+    # (record_count, declared_total) so the pagination loop knows when it has
+    # collected the whole catalog.
+    def _peek(frames: list[bytes]) -> tuple[int, int | None]:
+        seen_b: set[bytes] = set()
+        uniq: list[bytes] = []
+        for b in frames:
+            if b not in seen_b:
+                seen_b.add(b)
+                uniq.append(b)
+        hidx = next((i for i, b in enumerate(uniq) if len(b) >= 2 and b[0] == 0xFF and b[1] == 0xFF), None)
+        if hidx is None:
+            return 0, None
+        payloads_local = [uniq[hidx]] + [b for i, b in enumerate(uniq) if i != hidx]
+        exp = None
+        h = payloads_local[0]
+        if len(h) >= 6:
+            exp = struct.unpack(">I", h[2:6])[0]
+        recs = parse_query_file_list_payload(payloads_local, expected_count=exp)
+        return len(recs), exp
 
-    req_a = build_simple_request(CMD_QUERY_FILE_LIST, request_id)
-    dev.write(OUT_ENDPOINT, req_a, timeout=timeout_ms)
-    first_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=2.0)
+    # H1 pagination: each QUERY_FILE_LIST request releases the next queued
+    # continuation batch (~143 records). A catalog of N records therefore needs
+    # ceil(N/143)+1 requests — NOT a fixed two. Loop, sending a fresh request
+    # each round, until we've collected the device's DECLARED total (or stop
+    # making progress). This is what recovers recordings a two-request read
+    # would leave truncated (e.g. 371 records: 286 after 2 requests, all 371
+    # after 3).
+    total_budget_s = max(min(timeout_ms / 1000.0, 45.0), 20.0)
+    deadline_all = time.time() + total_budget_s
+    per_request_s = 6.0
+    MAX_REQUESTS = 12
 
-    # Request #2 — releases the queued continuation, then sends its own
-    # response. Read everything.
-    req_b = build_simple_request(CMD_QUERY_FILE_LIST, request_id + 1)
-    dev.write(OUT_ENDPOINT, req_b, timeout=timeout_ms)
-    second_batch = _read_all_frames(time.time() + half_budget_s, idle_stop_s=3.0)
+    collected: list[bytes] = []
+    rid = request_id
+    expected_count = None
+    for i in range(MAX_REQUESTS):
+        req = build_simple_request(CMD_QUERY_FILE_LIST, rid)
+        rid += 1
+        dev.write(OUT_ENDPOINT, req, timeout=timeout_ms)
+        batch = _read_all_frames(min(time.time() + per_request_s, deadline_all), idle_stop_s=2.0)
+        before = len(collected)
+        collected += batch
 
-    # After request #2 the firmware still has a continuation queued —
-    # if we just return, the NEXT command issued against the device
-    # (CMD_TRANSFER for a download, typically) will have its response
-    # preceded by the queued continuation and time out.
-    #
-    # Empirically, CMD_QUERY_TIME *clears* the firmware's pending-
-    # continuation state (discovered when priming with it before the
-    # two list writes broke pagination — it was eating the queue we
-    # needed). Here we use that property intentionally: fire a
-    # QUERY_TIME, drain its reply, and the firmware is back to a
-    # clean state ready for CMD_TRANSFER / CMD_QUERY_FILE_COUNT /
-    # whatever comes next.
+        count, exp = _peek(collected)
+        if exp is not None:
+            expected_count = exp
+        if expected_count is not None and count >= expected_count:
+            break
+        # No new frames this round (and we've done the priming pair) → the
+        # device has no more to give; stop rather than spin to the cap.
+        if i >= 1 and len(collected) == before:
+            break
+        if time.time() >= deadline_all:
+            break
+
+    # The firmware may still have a continuation queued; CMD_QUERY_TIME clears
+    # that pending state so the NEXT command (CMD_TRANSFER for a download)
+    # doesn't get the leftover frames prepended and time out.
     try:
-        send_and_collect(dev, CMD_QUERY_TIME, request_id + 2, timeout_ms=1000, max_reads=4)
+        send_and_collect(dev, CMD_QUERY_TIME, rid + 1, timeout_ms=1000, max_reads=4)
     except Exception:
         pass
     drain_input(dev, timeout_ms=150)
-
-    collected = first_batch + second_batch
 
     if not collected:
         raise HiDockProtocolError("no file list response received")
