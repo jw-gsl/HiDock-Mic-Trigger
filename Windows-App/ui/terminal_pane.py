@@ -152,8 +152,18 @@ class TerminalPane(QWidget):
         self._send(line)
 
     def ask_claude(self, transcript_path: str) -> None:
-        """Run ``claude "<transcript_path>"`` in the shell."""
-        self.run_command(f'claude {shlex.quote(transcript_path)}')
+        """Run ``claude "<transcript_path>"`` in the shell.
+
+        Quoting is shell-specific: ``shlex.quote`` produces POSIX single
+        quotes, which cmd.exe does not strip — the path would reach claude
+        with literal quotes (and backslashes mangled). On Windows the shell
+        is cmd.exe, so wrap in double quotes instead.
+        """
+        if sys.platform == "win32":
+            quoted = f'"{transcript_path}"'
+        else:
+            quoted = shlex.quote(transcript_path)
+        self.run_command(f"claude {quoted}")
 
     def append_activity(self, text: str) -> None:
         """Append a display-only line to the output (NOT shell stdin).

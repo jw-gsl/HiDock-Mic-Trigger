@@ -811,9 +811,9 @@ def pull_file_by_partials_to_path(
     return offset
 
 
-def probe_device(timeout_ms: int = 2000) -> dict:
+def probe_device(timeout_ms: int = 2000, product_id: int | None = None) -> dict:
     try:
-        dev = find_device()
+        dev = find_device(product_id=product_id)
     except FileNotFoundError:
         return {"connected": False, "available": False, "error": "HiDock device not found"}
 
@@ -831,7 +831,7 @@ def probe_device(timeout_ms: int = 2000) -> dict:
         release_device(dev, interface_number)
 
 
-def build_recording_status_items(recordings: list[dict], state: dict, output_dir: Path) -> list[dict]:
+def build_recording_status_items(recordings: list[dict], state: dict, output_dir: Path, product_id: int | None = None) -> list[dict]:
     downloads = state.get("downloads", {})
     items: list[dict] = []
     seen_names: set[str] = set()
@@ -868,6 +868,11 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
         # them to output_path_for()/output_name_for() raises HiDockProtocolError.
         if name.startswith("vol:") or name.startswith("plaud:"):
             continue
+        # Skip orphan records that don't belong to this device (mirrors the
+        # macOS extractor's per-product filtering of state-only entries).
+        stored_pid = stored.get("product_id")
+        if product_id is not None and stored_pid != product_id:
+            continue
         # Lazy fallback: dict.get() evaluates its default eagerly, which would
         # validate `name` even when a stored output_path makes that redundant.
         if "output_path" in stored:
@@ -900,7 +905,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
     return items
 
 
-def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH) -> dict:
+def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH, product_id: int | None = None) -> dict:
     config = load_config(config_path)
     output_dir = resolved_output_dir(config)
     state = load_state(state_path)
@@ -913,7 +918,7 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     }
 
     try:
-        dev = find_device()
+        dev = find_device(product_id=product_id)
     except FileNotFoundError:
         payload["error"] = "HiDock device not found"
         return payload
@@ -927,13 +932,13 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
     try:
         recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
         payload["connected"] = True
-        payload["recordings"] = build_recording_status_items(recordings, state, output_dir)
+        payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
     finally:
         release_device(dev, interface_number)
     return payload
 
 
-def cached_status_payload(config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH) -> dict:
+def cached_status_payload(config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH, product_id: int | None = None) -> dict:
     """Report the cached recording catalogue from state.json WITHOUT a USB probe.
 
     Lets the desktop app paint instantly on launch before the (slower) live
@@ -950,7 +955,7 @@ def cached_status_payload(config_path: Path = DEFAULT_CONFIG_PATH, state_path: P
         "outputDir": str(output_dir),
         "statePath": str(state_path.resolve()),
         "configPath": str(config_path.resolve()),
-        "recordings": build_recording_status_items([], state, output_dir),
+        "recordings": build_recording_status_items([], state, output_dir, product_id=product_id),
     }
 
 
@@ -961,6 +966,7 @@ def download_one(
     timeout_ms: int = 5000,
     config_path: Path = DEFAULT_CONFIG_PATH,
     state_path: Path = DEFAULT_STATE_PATH,
+    product_id: int | None = None,
 ) -> dict:
     config = load_config(config_path)
     if output_dir is None:
@@ -971,7 +977,7 @@ def download_one(
     downloads = state["downloads"]
 
     global _active_dev, _active_intf
-    dev = find_device()
+    dev = find_device(product_id=product_id)
     interface_number = prepare_device(dev)
     _active_dev = dev
     _active_intf = interface_number
@@ -996,13 +1002,16 @@ def download_one(
             timeout_ms=timeout_ms,
         )
     except Exception as exc:
-        downloads[filename] = {
+        error_record = {
             **downloads.get(filename, {}),
             "downloaded": False,
             "last_error": str(exc),
             "output_path": str(output_path_for(filename, output_dir)),
             "updated_at": utc_now_iso(),
         }
+        if product_id is not None:
+            error_record["product_id"] = product_id
+        downloads[filename] = error_record
         save_state(state, state_path)
         raise
     finally:
@@ -1021,6 +1030,8 @@ def download_one(
     }
     if signature is not None:
         record["signature"] = signature
+    if product_id is not None:
+        record["product_id"] = product_id
     downloads[filename] = record
     save_state(state, state_path)
     return {
@@ -1036,8 +1047,9 @@ def download_new(
     timeout_ms: int = 5000,
     config_path: Path = DEFAULT_CONFIG_PATH,
     state_path: Path = DEFAULT_STATE_PATH,
+    product_id: int | None = None,
 ) -> dict:
-    status = status_payload(timeout_ms=timeout_ms, config_path=config_path, state_path=state_path)
+    status = status_payload(timeout_ms=timeout_ms, config_path=config_path, state_path=state_path, product_id=product_id)
     if not status["connected"]:
         return {
             "connected": False,
@@ -1060,6 +1072,7 @@ def download_new(
             timeout_ms=timeout_ms,
             config_path=config_path,
             state_path=state_path,
+            product_id=product_id,
         )
         downloaded.append(result)
 
@@ -1071,8 +1084,8 @@ def download_new(
     }
 
 
-def pull_file(filename: str, out_dir: Path, request_id: int = 1, timeout_ms: int = 5000) -> Path:
-    dev = find_device()
+def pull_file(filename: str, out_dir: Path, request_id: int = 1, timeout_ms: int = 5000, product_id: int | None = None) -> Path:
+    dev = find_device(product_id=product_id)
     interface_number = prepare_device(dev)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / output_name_for(filename)
@@ -1598,11 +1611,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "status":
-        print(json.dumps(status_payload(timeout_ms=args.timeout_ms), indent=2))
+        print(json.dumps(status_payload(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
         return 0
 
     if args.command == "cached-status":
-        print(json.dumps(cached_status_payload(), indent=2))
+        print(json.dumps(cached_status_payload(product_id=args.product_id), indent=2))
         return 0
     if args.command == "set-output":
         config = load_config()
@@ -1616,11 +1629,12 @@ def main() -> int:
             args.filename,
             length=args.length,
             timeout_ms=args.timeout_ms,
+            product_id=args.product_id,
         )
         print(json.dumps(result, indent=2))
         return 0
     if args.command == "download-new":
-        print(json.dumps(download_new(timeout_ms=args.timeout_ms), indent=2))
+        print(json.dumps(download_new(timeout_ms=args.timeout_ms, product_id=args.product_id), indent=2))
         return 0
     if args.command == "plaud-status":
         config = load_config()
@@ -1763,11 +1777,12 @@ def main() -> int:
             out_dir=Path(args.out),
             request_id=args.request_id,
             timeout_ms=args.timeout_ms,
+            product_id=args.product_id,
         )
         print(out_path)
         return 0
     if args.command == "list-files":
-        dev = find_device()
+        dev = find_device(product_id=args.product_id)
         interface_number = prepare_device(dev)
         try:
             items = query_file_list(dev, request_id=args.request_id, timeout_ms=args.timeout_ms)
@@ -1776,7 +1791,7 @@ def main() -> int:
         print(json.dumps(items, indent=2))
         return 0
     if args.command == "pull-block":
-        dev = find_device()
+        dev = find_device(product_id=args.product_id)
         interface_number = prepare_device(dev)
         out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1789,7 +1804,7 @@ def main() -> int:
         print(out_path)
         return 0
     if args.command == "pull-partial":
-        dev = find_device()
+        dev = find_device(product_id=args.product_id)
         interface_number = prepare_device(dev)
         out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1809,7 +1824,7 @@ def main() -> int:
         print(out_path)
         return 0
     if args.command == "pull-full":
-        dev = find_device()
+        dev = find_device(product_id=args.product_id)
         interface_number = prepare_device(dev)
         out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1830,7 +1845,7 @@ def main() -> int:
         print(out_path)
         return 0
     if args.command == "pull-transfer":
-        dev = find_device()
+        dev = find_device(product_id=args.product_id)
         interface_number = prepare_device(dev)
         out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)

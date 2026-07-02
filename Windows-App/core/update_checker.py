@@ -90,8 +90,21 @@ def download_update(
         return None
 
 
-def install_and_restart(exe_path: Path):
-    """Replace the running exe and restart. Works for PyInstaller single-file."""
+def install_and_restart(exe_path: Path) -> bool:
+    """Replace the running exe and restart. Works for PyInstaller single-file.
+
+    Must be called from the GUI (main) thread: it quits the Qt application so
+    the whole process exits inside the batch script's copy window. Calling
+    ``sys.exit`` from a worker thread only kills that thread — the exe stays
+    locked and the bat's ``copy`` fails.
+
+    Returns False (without installing) when not running as a frozen
+    PyInstaller exe — in a dev run ``sys.executable`` is python.exe and the
+    bat would clobber the interpreter.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+
     current_exe = Path(sys.executable).resolve()
 
     # Write a batch script that waits for us to exit, replaces the exe, and relaunches
@@ -104,6 +117,19 @@ rmdir /s /q "{exe_path.parent}"
 """, encoding="utf-8")
 
     subprocess.Popen(["cmd", "/c", str(bat)], creationflags=0x00000008)  # DETACHED_PROCESS
+
+    # Quit the Qt event loop so the process exits (releasing the exe) before
+    # the bat's 2-second wait elapses. Falls back to sys.exit when no Qt app
+    # exists (e.g. called during interpreter-level teardown).
+    try:
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+    except ImportError:
+        app = None
+    if app is not None:
+        app.quit()
+        return True
     sys.exit(0)
 
 

@@ -60,12 +60,20 @@ class MicTrigger:
         self._log("Mic trigger started")
 
     def stop(self):
-        """Stop the mic trigger and release ffmpeg."""
+        """Stop the mic trigger and release ffmpeg.
+
+        Order matters: join the poll thread FIRST, then stop ffmpeg. The old
+        order raced the poll loop — it could observe an active mic and call
+        _start_ffmpeg() after stop() had already torn ffmpeg down, leaking a
+        holder process. _start_ffmpeg also re-checks _running as a belt-and-
+        braces guard.
+        """
         self._running = False
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+        self._thread = None
         self._stop_ffmpeg()
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
         self._log("Mic trigger stopped")
 
     def _log(self, msg: str):
@@ -73,6 +81,30 @@ class MicTrigger:
             self.on_log(msg)
 
     def _poll_loop(self):
+        # pycaw is built on comtypes/COM, which is apartment-threaded: every
+        # thread that calls into it must initialise COM first. Without this,
+        # _is_mic_active raises on every poll and the trigger never fires.
+        # Import is guarded so the loop still runs on non-Windows platforms
+        # (where pycaw/comtypes are absent and detection is disabled anyway).
+        com_initialized = False
+        try:
+            import comtypes
+            comtypes.CoInitialize()
+            com_initialized = True
+        except Exception:
+            pass
+
+        try:
+            self._poll_loop_body()
+        finally:
+            if com_initialized:
+                try:
+                    import comtypes
+                    comtypes.CoUninitialize()
+                except Exception:
+                    pass
+
+    def _poll_loop_body(self):
         last_state = False
         stable_count = 0
 
@@ -107,12 +139,23 @@ class MicTrigger:
 
             time.sleep(self.poll_interval)
 
+    # Peak level (0.0–1.0) above which the capture endpoint counts as in use.
+    CAPTURE_PEAK_THRESHOLD = 0.01
+
     def _is_mic_active(self) -> bool:
         """Check if the trigger mic is actively being used.
 
-        Uses pycaw to check audio meter peak level. A non-zero level
-        indicates the mic is capturing audio.
+        Preferred check: the trigger mic's own capture-endpoint peak level via
+        IAudioMeterInformation — a non-zero peak means the mic is actually
+        capturing audio. Fallback (older pycaw without the IMMDevice handle):
+        the previous session heuristic, which is approximate — GetAllSessions
+        also returns render sessions, so any audio playback counts as
+        activity while the trigger mic merely exists.
         """
+        peak = self._capture_peak()
+        if peak is not None:
+            return peak > self.CAPTURE_PEAK_THRESHOLD
+
         try:
             from pycaw.pycaw import AudioUtilities
 
@@ -137,8 +180,43 @@ class MicTrigger:
         except Exception:
             return False
 
+    def _capture_peak(self) -> float | None:
+        """Peak meter value of the trigger mic's capture endpoint.
+
+        Activates IAudioMeterInformation on the matching IMMDevice (pycaw's
+        AudioDevice keeps it as ``_dev``). Returns None when unavailable —
+        pycaw missing, device not found, or an older pycaw without ``_dev`` —
+        so the caller can fall back to the session heuristic.
+        """
+        try:
+            from ctypes import POINTER, cast
+
+            from comtypes import CLSCTX_ALL
+            from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+
+            for device in AudioUtilities.GetAllDevices():
+                if not device.FriendlyName:
+                    continue
+                if self.trigger_mic_name.lower() not in device.FriendlyName.lower():
+                    continue
+                imm_device = getattr(device, "_dev", None)
+                if imm_device is None:
+                    return None
+                interface = imm_device.Activate(
+                    IAudioMeterInformation._iid_, CLSCTX_ALL, None
+                )
+                meter = cast(interface, POINTER(IAudioMeterInformation))
+                return float(meter.GetPeakValue())
+            return None
+        except Exception:
+            return None
+
     def _start_ffmpeg(self):
         """Launch ffmpeg to hold the HiDock audio input open."""
+        if not self._running:
+            # stop() may have flipped _running while this poll iteration was
+            # mid-flight — never (re)start the holder after a stop.
+            return
         if self._ffmpeg_proc is not None:
             return
 
