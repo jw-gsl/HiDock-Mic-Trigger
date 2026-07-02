@@ -87,6 +87,9 @@ MODEL_REGISTRY = {
         "required": False,
         "platform": "darwin-arm64",
         "managed_externally": True,
+        # The managing package — importable when the user has installed
+        # parakeet-mlx; used as the "installed" signal in get_model_status.
+        "pip_import_name": "parakeet_mlx",
         "stage": "transcription",
         "stage_label": "Transcription (Speech → Text)",
         "category": "pipeline",
@@ -246,18 +249,33 @@ def download_model_if_needed(
     total = int(resp.headers.get("Content-Length", 0))
     downloaded = 0
 
-    with open(tmp, "wb") as f:
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-            downloaded += len(chunk)
-            if on_progress:
-                on_progress(downloaded, total)
-            elif total > 0:
-                pct = int(downloaded * 100 / total)
-                print(f"  {pct}%", file=sys.stderr, flush=True)
+    try:
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if on_progress:
+                    on_progress(downloaded, total)
+                elif total > 0:
+                    pct = int(downloaded * 100 / total)
+                    print(f"  {pct}%", file=sys.stderr, flush=True)
+
+        # A short body (dropped connection, truncated response) must not be
+        # renamed into place — a partial model file would pass the naive
+        # size>1000 "installed" check and break inference later.
+        if total > 0 and downloaded != total:
+            raise OSError(
+                f"Incomplete download for {filename}: got {downloaded} of {total} bytes"
+            )
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
     if dest.exists():
         dest.unlink()
@@ -414,6 +432,16 @@ def get_model_status() -> dict[str, dict]:
             file_size = 0
             filename = None
             url = None
+        elif info.get("managed_externally"):
+            # Weights are managed by an external tool (e.g. parakeet-mlx via
+            # the HuggingFace hub cache) — the registry `url` is an info page,
+            # not a model file, and nothing lands in MODELS_DIR. Installed =
+            # the managing Python package is importable.
+            import_name = info.get("pip_import_name") or ""
+            installed = _python_module_available(import_name)
+            file_size = 0
+            filename = info.get("filename")
+            url = None
         elif info.get("pip_package"):
             import_name = info.get("pip_import_name") or info.get("pip_package")
             installed = _python_module_available(import_name)
@@ -506,6 +534,24 @@ def _cli():
             if info.get("built_in"):
                 print(json.dumps({"ok": True, "built_in": True}))
                 return
+            # Managed-externally models (e.g. Parakeet via parakeet-mlx)
+            # have no downloadable file — the registry `url` is an HTML
+            # info page. Downloading it would write HTML into MODELS_DIR
+            # and report "installed" forever. Refuse with a clear message.
+            if info.get("managed_externally"):
+                import_name = info.get("pip_import_name") or ""
+                print(json.dumps({
+                    "ok": False,
+                    "managed_externally": True,
+                    "error": (
+                        f"{info['name']} is managed externally — its weights are "
+                        f"fetched automatically on first use"
+                        + (f" by the '{import_name}' package" if import_name else "")
+                        + ". There is no file to download here; install the managing "
+                        "package (e.g. `pip install parakeet-mlx`) instead."
+                    ),
+                }))
+                sys.exit(1)
             # pip-installable entries (TEN VAD, NeMo Sortformer) install
             # via `pip install <pkg>`. NeMo additionally relies on the
             # HuggingFace cache to fetch its model weights lazily on

@@ -226,3 +226,62 @@ class TestResearchTopic:
         result = intel.research_topic("nonexistent_topic_xyz")
         assert result["meetings"] == []
         assert result["decisions"] == []
+
+
+class TestUnknownDates:
+    """Meetings with empty/unparseable dates must be treated as unknown —
+    not classified as maximally stale (the old behaviour scored them as
+    999 days ago and always-losing-touch / always-stale)."""
+
+    @pytest.fixture
+    def undated_setup(self):
+        with tempfile.TemporaryDirectory() as d:
+            td = Path(d) / "transcripts"
+            td.mkdir()
+            # Three meetings with Frank, all with an EMPTY date.
+            for i in range(3):
+                path = td / f"undated{i}.md"
+                path.write_text(
+                    "---\n"
+                    f"title: Undated {i}\n"
+                    "type: meeting\n"
+                    "date: \n"
+                    "speakers: [Frank]\n"
+                    "action_items: \n"
+                    "  - task: Do something\n"
+                    "    status: open\n"
+                    "decisions: []\n"
+                    "key_points: []\n"
+                    "tags: [misc]\n"
+                    "---\n\n## Transcript\n\nHello.\n",
+                    encoding="utf-8",
+                )
+            kg = KnowledgeGraph(db_path=Path(d) / "test.db", transcripts_dir=td)
+            kg.rebuild()
+            intel = MeetingIntelligence(kg, losing_touch_days=21, stale_action_days=14)
+            yield intel, kg
+            kg.close()
+
+    def test_days_since_none_for_empty_and_garbage(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        assert MeetingIntelligence._days_since("", now) is None
+        assert MeetingIntelligence._days_since("not-a-date", now) is None
+
+    def test_not_losing_touch_when_dates_unknown(self, undated_setup):
+        intel, _ = undated_setup
+        rel_map = intel.relationship_map()
+        frank = next(p for p in rel_map if p["name"] == "Frank")
+        assert frank["losing_touch"] is False
+        assert frank["days_since"] is None
+
+    def test_undated_actions_not_stale(self, undated_setup):
+        intel, _ = undated_setup
+        report = intel.consistency_report()
+        assert report["stale_actions"] == []
+
+    def test_topic_trends_unknown_date_not_trending(self, undated_setup):
+        intel, _ = undated_setup
+        trends = intel.topic_trends()
+        misc = next(t for t in trends if t["tag"] == "misc")
+        assert misc["trending"] is False

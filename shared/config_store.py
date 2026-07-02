@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -217,9 +218,23 @@ class ConfigStore:
         self._loaded = True
 
     def save(self) -> None:
-        """Write current config to TOML file."""
+        """Write current config to TOML file (atomically, so a crash
+        mid-write can't leave a truncated config.toml)."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(_serialize_toml(self._data), encoding="utf-8")
+        content = _serialize_toml(self._data)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self._path.parent, prefix=self._path.name, suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def get(self, section: str, key: str, default: Any = None) -> Any:
         """Get a config value.

@@ -265,14 +265,21 @@ def extract_embedding(
     Returns:
         1-D embedding vector. Dimension depends on the method used:
         - Neural (TitaNet): 192-dim
-        - MFCC fallback: n_mfcc-dim (default 40)
+        - MFCC fallback (only when no onnx_session is given): n_mfcc-dim
+          (default 40)
+
+    Raises:
+        RuntimeError: If an onnx_session was provided and neural inference
+            fails. A silent MFCC fallback here would return a 40-dim vector
+            into batches of 192-dim ones, producing a ragged array that
+            crashes (or worse, mis-clusters) downstream — callers that can
+            tolerate a missing embedding should catch and skip instead.
     """
     if onnx_session is not None:
         try:
             return extract_neural_embedding(audio, sr, onnx_session)
-        except Exception:
-            # Fall back to MFCC if neural inference fails
-            pass
+        except Exception as e:
+            raise RuntimeError(f"Neural embedding inference failed: {e}") from e
 
     if len(audio) < 400:
         # Too short for meaningful features

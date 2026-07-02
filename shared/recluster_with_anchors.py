@@ -29,7 +29,9 @@ subcommand.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -79,7 +81,14 @@ def _embed_segment(
     chunk = audio[s:e]
     if len(chunk) == 0:
         return None
-    return extract_embedding(chunk, sr=_SAMPLE_RATE, onnx_session=onnx_session)
+    try:
+        return extract_embedding(chunk, sr=_SAMPLE_RATE, onnx_session=onnx_session)
+    except Exception as e:
+        # Embedding failure (extract_embedding raises rather than silently
+        # falling back to a wrong-dimension MFCC vector) — skip this segment.
+        print(f"recluster: embedding failed for [{start_s:.1f}-{end_s:.1f}]: {e}",
+              file=sys.stderr)
+        return None
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -249,9 +258,22 @@ def recluster_with_anchors(
     # Final consecutive-same-speaker merge for clean reading.
     data["segments"] = _merge_consecutive_same_speaker(segments)
 
-    diarized_json_path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    # Atomic write: a crash mid-write must not leave a truncated
+    # _diarized.json (same temp+os.replace pattern as corrections.py).
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=diarized_json_path.parent, prefix=diarized_json_path.name, suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, diarized_json_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
     return {
         "audio_file": audio_path,

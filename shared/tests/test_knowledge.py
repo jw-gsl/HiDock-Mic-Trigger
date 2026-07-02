@@ -205,3 +205,32 @@ class TestStats:
         stats = kg.get_stats()
         assert stats["meetings"] == 0
         kg.close()
+
+
+class TestRebuildTransactional:
+    def test_failed_rebuild_leaves_previous_index_intact(self, kg_env, monkeypatch):
+        """A rebuild that blows up mid-way must roll back — the previous
+        index keeps being served rather than a wiped/partial one."""
+        kg, transcripts_dir = kg_env
+        kg.rebuild()
+        before = kg.get_stats()
+        assert before["meetings"] == 3
+
+        calls = {"n": 0}
+        real = KnowledgeGraph._index_transcript_no_commit
+
+        def exploding(self, file_path):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise RuntimeError("boom mid-rebuild")
+            return real(self, file_path)
+
+        monkeypatch.setattr(KnowledgeGraph, "_index_transcript_no_commit", exploding)
+        with pytest.raises(RuntimeError, match="boom mid-rebuild"):
+            kg.rebuild()
+
+        monkeypatch.setattr(KnowledgeGraph, "_index_transcript_no_commit", real)
+        after = kg.get_stats()
+        assert after == before  # rollback restored everything
+        # And the data is genuinely usable, not just counted
+        assert kg.search("budget")

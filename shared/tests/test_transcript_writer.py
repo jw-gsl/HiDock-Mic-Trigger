@@ -261,3 +261,61 @@ class TestWriteTranscript:
         output = tmp_path / "deep" / "nested" / "test.md"
         write_transcript(output, "Test text")
         assert output.exists()
+
+
+class TestYamlRoundTripEdgeCases:
+    """Round-trip tests for values that used to corrupt the frontmatter:
+    embedded double quotes, commas inside quoted list items, newlines."""
+
+    def _roundtrip(self, **kwargs):
+        fm = build_frontmatter(**kwargs)
+        meta, _ = parse_frontmatter(fm + "\n\nbody")
+        return meta
+
+    def test_title_with_double_quotes(self):
+        title = 'He said "ship it" on the call'
+        meta = self._roundtrip(title=title)
+        assert meta["title"] == title
+
+    def test_title_with_newline_collapsed_to_one_line(self):
+        fm = build_frontmatter(title="Line one\nLine two")
+        # The frontmatter block must stay one line per key — a raw newline
+        # would terminate the title entry and corrupt the block.
+        meta, _ = parse_frontmatter(fm + "\n\nbody")
+        assert meta["title"] == "Line one Line two"
+        assert meta.get("type") == "meeting"  # rest of block still parses
+
+    def test_speaker_with_embedded_comma(self):
+        meta = self._roundtrip(title="T", speakers=["Whiting, James", "Bob"])
+        assert meta["speakers"] == ["Whiting, James", "Bob"]
+
+    def test_inline_list_item_with_colon(self):
+        meta = self._roundtrip(title="T", tags=["budget: q3"])
+        assert meta["tags"] == ["budget: q3"]
+
+    def test_block_list_item_with_colon_not_parsed_as_dict(self):
+        # Items > 40 chars force the block list format ("- item" lines).
+        items = [
+            f"Point {i}: a fairly long key point to force the block format"
+            for i in range(3)
+        ]
+        meta = self._roundtrip(title="T", key_points=items)
+        assert meta["key_points"] == items
+
+    def test_action_item_with_quotes_and_comma_assignee(self):
+        meta = self._roundtrip(
+            title="T",
+            action_items=[{
+                "task": 'Review the "final" doc',
+                "assignee": "Whiting, James",
+                "status": "open",
+            }],
+        )
+        item = meta["action_items"][0]
+        assert item["task"] == 'Review the "final" doc'
+        assert item["assignee"] == "Whiting, James"
+
+    def test_backslash_roundtrip(self):
+        title = 'Path C:\\temp with "quotes"'
+        meta = self._roundtrip(title=title)
+        assert meta["title"] == title

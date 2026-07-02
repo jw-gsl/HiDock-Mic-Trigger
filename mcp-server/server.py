@@ -47,9 +47,12 @@ _intel: MeetingIntelligence | None = None
 def _get_kg() -> KnowledgeGraph:
     global _kg
     if _kg is None:
-        _kg = KnowledgeGraph()
-        # Auto-rebuild on first access
-        _kg.rebuild()
+        kg = KnowledgeGraph()
+        # Auto-rebuild on first access. Assign the global only after the
+        # rebuild succeeds — if it raises, _kg stays None instead of a
+        # half-initialized graph being served as truth on later calls.
+        kg.rebuild()
+        _kg = kg
     return _kg
 
 
@@ -523,8 +526,17 @@ def handle_rebuild_index(args: dict) -> str:
     import time as _time
     from shared.event_log import log_event, EventType
     start = _time.monotonic()
-    _kg = KnowledgeGraph()
-    count = _kg.rebuild()
+    # Reuse the existing graph when we have one (same DB file either way);
+    # only swap the global in after the rebuild succeeds. rebuild() itself
+    # is transactional, so a failure leaves the previous index intact.
+    kg = _kg if _kg is not None else KnowledgeGraph()
+    try:
+        count = kg.rebuild()
+    except Exception as e:
+        log_event(EventType.INDEX_REBUILD, status="error", error=str(e),
+                  duration_s=round(_time.monotonic() - start, 1))
+        return f"Index rebuild FAILED: {e}. The previous index was left intact."
+    _kg = kg
     _intel = None  # Reset intelligence so it picks up new data
     log_event(EventType.INDEX_REBUILD, duration_s=round(_time.monotonic() - start, 1),
               metadata={"count": count})
@@ -617,10 +629,16 @@ def handle_relationship_map(args: dict) -> str:
         flag = " ⚠️ losing touch" if p["losing_touch"] else ""
         actions = f" ({p['open_actions']} open actions)" if p["open_actions"] else ""
         topics = ", ".join(t["tag"] for t in p["topics"][:3]) if p["topics"] else "—"
+        # days_since is None when the last meeting's date is unknown
+        last = (
+            f"last {p['days_since']:.0f}d ago"
+            if p["days_since"] is not None
+            else "last meeting date unknown"
+        )
         lines.append(
             f"- **{p['name']}** — score: {p['score']}, "
             f"{p['meeting_count']} meetings, "
-            f"last {p['days_since']:.0f}d ago, "
+            f"{last}, "
             f"topics: {topics}{actions}{flag}"
         )
 

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -72,25 +74,46 @@ class Event:
 
 _DEFAULT_DB_NAME = "knowledge.db"
 
-_conn_cache: sqlite3.Connection | None = None
+# Default DB path override (set via set_db_path); used when a caller
+# doesn't pass db_path explicitly.
+_default_db_path: Path | None = None
+
+# Connections are opened per call rather than cached: the old cached
+# connection was bound forever to the first path it was created with
+# (silently ignoring later db_path arguments) and couldn't be shared
+# across threads. Event logging is low-frequency, so a short-lived
+# connection per operation is the simplest thread-safe choice.
+_lock = threading.Lock()
+_schema_ready: set[str] = set()
 
 
-def _get_conn(db_path: Path | None = None) -> sqlite3.Connection:
-    """Get or create a connection to the event log database."""
-    global _conn_cache
-    if _conn_cache is not None:
-        return _conn_cache
+def _resolve_db_path(db_path: Path | None) -> Path:
+    if db_path is not None:
+        return Path(db_path)
+    if _default_db_path is not None:
+        return _default_db_path
+    return Path.home() / "HiDock" / "Raw Transcripts" / _DEFAULT_DB_NAME
 
-    if db_path is None:
-        db_path = Path.home() / "HiDock" / "Raw Transcripts" / _DEFAULT_DB_NAME
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    _ensure_schema(conn)
-    _conn_cache = conn
-    return conn
+@contextmanager
+def _connect(db_path: Path | None = None):
+    """Open a connection for a single operation and close it afterwards."""
+    path = _resolve_db_path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        key = str(path.resolve())
+        with _lock:
+            needs_schema = key not in _schema_ready
+        if needs_schema:
+            _ensure_schema(conn)
+            with _lock:
+                _schema_ready.add(key)
+        yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -118,20 +141,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def set_db_path(db_path: Path) -> None:
-    """Override the database path (useful for testing)."""
-    global _conn_cache
-    if _conn_cache is not None:
-        _conn_cache.close()
-        _conn_cache = None
-    _get_conn(db_path)
+    """Override the default database path (useful for testing)."""
+    global _default_db_path
+    _default_db_path = Path(db_path)
+    # Create the DB/schema right away, mirroring the old eager behaviour.
+    with _connect(_default_db_path):
+        pass
 
 
 def close() -> None:
-    """Close the cached connection."""
-    global _conn_cache
-    if _conn_cache is not None:
-        _conn_cache.close()
-        _conn_cache = None
+    """Reset the default path override. Connections are per-call now, so
+    there is no long-lived handle to close; kept for API compatibility."""
+    global _default_db_path
+    _default_db_path = None
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -161,19 +183,19 @@ def log_event(
     Returns:
         The event row ID.
     """
-    conn = _get_conn(db_path)
     now = datetime.now(timezone.utc).isoformat()
     event_str = event_type.value if isinstance(event_type, EventType) else str(event_type)
     meta_json = json.dumps(metadata or {}, ensure_ascii=False)
 
-    cur = conn.execute(
-        """INSERT INTO event_log
-           (timestamp, event_type, file_path, status, duration_s, error, metadata_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (now, event_str, str(file_path), status, duration_s, error, meta_json),
-    )
-    conn.commit()
-    return cur.lastrowid
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """INSERT INTO event_log
+               (timestamp, event_type, file_path, status, duration_s, error, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (now, event_str, str(file_path), status, duration_s, error, meta_json),
+        )
+        conn.commit()
+        return cur.lastrowid
 
 
 # ── Queries ───────────────────────────────────────────────────────────────────
@@ -194,18 +216,18 @@ def recent_events(
     Returns:
         List of Event objects, most recent first.
     """
-    conn = _get_conn(db_path)
-    if event_type:
-        et = event_type.value if isinstance(event_type, EventType) else str(event_type)
-        rows = conn.execute(
-            "SELECT * FROM event_log WHERE event_type = ? ORDER BY timestamp DESC LIMIT ?",
-            (et, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM event_log ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    with _connect(db_path) as conn:
+        if event_type:
+            et = event_type.value if isinstance(event_type, EventType) else str(event_type)
+            rows = conn.execute(
+                "SELECT * FROM event_log WHERE event_type = ? ORDER BY timestamp DESC LIMIT ?",
+                (et, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM event_log ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
 
     return [Event(**dict(r)) for r in rows]
 
@@ -216,31 +238,31 @@ def event_counts(days: int = 30, db_path: Path | None = None) -> dict[str, int]:
     Returns:
         Dict of event_type -> count.
     """
-    conn = _get_conn(db_path)
     cutoff = datetime.now(timezone.utc).isoformat()[:10]  # approximate
-    rows = conn.execute(
-        """SELECT event_type, COUNT(*) as cnt
-           FROM event_log
-           WHERE timestamp >= date(?, '-' || ? || ' days')
-           GROUP BY event_type
-           ORDER BY cnt DESC""",
-        (cutoff, days),
-    ).fetchall()
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT event_type, COUNT(*) as cnt
+               FROM event_log
+               WHERE timestamp >= date(?, '-' || ? || ' days')
+               GROUP BY event_type
+               ORDER BY cnt DESC""",
+            (cutoff, days),
+        ).fetchall()
     return {r["event_type"]: r["cnt"] for r in rows}
 
 
 def errors_since(hours: int = 24, db_path: Path | None = None) -> list[Event]:
     """Get error events from the last N hours."""
-    conn = _get_conn(db_path)
     from datetime import timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    rows = conn.execute(
-        """SELECT * FROM event_log
-           WHERE status = 'error' AND timestamp >= ?
-           ORDER BY timestamp DESC
-           LIMIT 100""",
-        (cutoff,),
-    ).fetchall()
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT * FROM event_log
+               WHERE status = 'error' AND timestamp >= ?
+               ORDER BY timestamp DESC
+               LIMIT 100""",
+            (cutoff,),
+        ).fetchall()
     return [Event(**dict(r)) for r in rows]
 
 

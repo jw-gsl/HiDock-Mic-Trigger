@@ -21,6 +21,8 @@ Usage:
     from shared.whisper_guard import clean_transcript, FilterStats
 
     cleaned, stats = clean_transcript(text, language="en")
+    # or, with raw Whisper segments for precise per-segment filtering:
+    cleaned, stats = clean_transcript(text, language="en", segments=result["segments"])
 """
 from __future__ import annotations
 
@@ -230,8 +232,10 @@ def _filter_trailing_noise(lines: list[str]) -> list[str]:
         if not last:
             lines = lines[:-1]
             continue
-        # Remove known hallucination phrases at the end
-        if last in _HALLUCINATION_PHRASES:
+        # Remove known hallucination phrases at the end. Also compare with
+        # trailing punctuation stripped — sentence-split input carries its
+        # terminal "." / "!" ("Thank you for watching.").
+        if last in _HALLUCINATION_PHRASES or last.rstrip(".!?…").strip() in _HALLUCINATION_PHRASES:
             lines = lines[:-1]
             continue
         # Remove trailing noise markers
@@ -277,10 +281,40 @@ def _check_repetition_density(lines: list[str]) -> float:
 # ── Main Pipeline ──────────────────────────────────────────────────────────
 
 
+def _split_sentences(text: str) -> list[str]:
+    """Split single-line text into sentence-sized units for the line-based
+    filters. Whisper's ``result["text"]`` has no newlines, so without this
+    the multi-line dedup/loop filters would see one giant line and never
+    fire."""
+    parts = re.split(r"(?<=[.!?…])\s+", text.strip())
+    parts = [p for p in parts if p]
+    return parts if parts else [text]
+
+
+def _lines_for_cleaning(text: str, segments: list | None) -> list[str]:
+    """Derive the working line list: per-segment texts when segments are
+    given (most faithful to Whisper's actual output units), otherwise the
+    text's own lines, falling back to sentence-splitting when the text is
+    a single line (the shape ``result["text"]`` callers actually pass)."""
+    if segments:
+        lines = []
+        for seg in segments:
+            seg_text = seg.get("text", "") if isinstance(seg, dict) else str(seg)
+            seg_text = seg_text.strip()
+            if seg_text:
+                lines.append(seg_text)
+        if lines:
+            return lines
+    if "\n" in text:
+        return text.split("\n")
+    return _split_sentences(text)
+
+
 def clean_transcript(
     text: str,
     language: str = "en",
     min_words: int = 3,
+    segments: list | None = None,
 ) -> tuple[str, FilterStats]:
     """Run the full anti-hallucination pipeline on a transcript.
 
@@ -288,15 +322,28 @@ def clean_transcript(
         text: Raw transcript text (may include speaker labels, timestamps).
         language: ISO 639-1 language code (e.g. "en", "es", "ja").
         min_words: Minimum word count; below this the transcript is flagged.
+        segments: Optional raw Whisper segments (dicts with a ``text`` key).
+            When given, filters run per-segment — the most accurate unit.
+            When absent and ``text`` has no newlines (Whisper's
+            ``result["text"]``), the text is split on sentence boundaries so
+            the multi-line filters still work.
 
     Returns:
         Tuple of (cleaned_text, filter_stats).
         If the transcript is likely hallucinated, cleaned_text may be empty
         and stats.is_likely_hallucination will be True.
+        The cleaned text preserves the input's formatting: line-based input
+        is rejoined with newlines; single-line input is rejoined with spaces
+        (no newlines are introduced that weren't in the input).
     """
     stats = FilterStats()
 
-    lines = text.split("\n")
+    # Rejoin with the input's own separator so we never introduce newlines
+    # into a transcript that didn't have them.
+    joiner = "\n" if "\n" in text else " "
+
+    lines = _lines_for_cleaning(text, segments)
+    original_lines = list(lines)
     stats.original_lines = len(lines)
 
     # Filter 1: Consecutive dedup
@@ -330,7 +377,7 @@ def clean_transcript(
         stats.filters_triggered.append("trailing_noise")
 
     # Reassemble text
-    cleaned = "\n".join(lines).strip()
+    cleaned = joiner.join(lines).strip()
 
     # Filter 6: Minimum word count
     stats.final_word_count = _count_words(cleaned)
@@ -340,7 +387,7 @@ def clean_transcript(
 
     # Filter 7: Repetition density — check on original lines to detect
     # cases where dedup already collapsed massive repetition
-    original_content_lines = [l for l in text.split("\n") if l.strip()]
+    original_content_lines = [l for l in original_lines if l.strip()]
     density = _check_repetition_density(original_content_lines)
     if density > 0.5:
         stats.filters_triggered.append("high_repetition")

@@ -11,6 +11,8 @@ meetings to find recurring voices. Supports:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -273,9 +275,23 @@ def _load_review_state() -> dict:
 
 
 def save_review_state(state: dict) -> None:
-    """Save review state to disk."""
+    """Save review state to disk (atomically, so a crash mid-write can't
+    leave a truncated file that wipes confirmations on next load)."""
     REVIEW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REVIEW_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    content = json.dumps(state, indent=2)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=REVIEW_STATE_PATH.parent, prefix=REVIEW_STATE_PATH.name, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, REVIEW_STATE_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def confirm_speaker(name: str) -> None:

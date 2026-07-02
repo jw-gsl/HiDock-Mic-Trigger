@@ -20,6 +20,7 @@ from pathlib import Path
 
 from shared.agent_events import NULL_EMITTER
 from shared.llm_cli import get_engine, query_json, query_streaming
+from shared.summarize import _SYSTEM_INSTRUCTION
 
 
 def _emit(msg: str) -> None:
@@ -190,6 +191,7 @@ def classify(text: str, engine, names: list[str]) -> tuple[str, str]:
     Returns (template_name, one_line_reason)."""
     menu = "\n".join(f"- {n}: {TYPE_HINTS.get(n, 'custom template')}" for n in names)
     prompt = (
+        f"{_SYSTEM_INSTRUCTION}\n\n"
         "Classify this transcript by choosing the single best-matching template "
         "name from the list (consider participants, topics, tone, structure).\n\n"
         f"Templates:\n{menu}\n\n"
@@ -207,13 +209,23 @@ def classify(text: str, engine, names: list[str]) -> tuple[str, str]:
     return fallback, (reason or "No clear match; used the general template.")
 
 
-def _delete_prior_summaries(stem: str) -> None:
+def _delete_prior_summaries(stem: str, keep: Path | None = None) -> None:
     """Remove any existing summaries for this source recording so a
     re-summarise / reclassify REPLACES rather than piling up duplicates.
-    Summary files are named '<stem> - <Type> - <Area> - <Desc>.md'."""
+    Summary files are named '<stem> - <Type> - <Area> - <Desc>.md'.
+
+    Matches by filename prefix rather than glob — recording stems can
+    contain glob metacharacters ('[', ']', '*') which would make a glob
+    pattern silently never match. ``keep`` (the freshly written summary)
+    is never deleted."""
     if not SUMMARIES_DIR.exists():
         return
-    for p in SUMMARIES_DIR.glob(f"{stem} - *.md"):
+    prefix = f"{stem} - "
+    for p in SUMMARIES_DIR.iterdir():
+        if not (p.is_file() and p.suffix == ".md" and p.name.startswith(prefix)):
+            continue
+        if keep is not None and p == keep:
+            continue
         try:
             p.unlink()
         except OSError:
@@ -289,7 +301,10 @@ def summarise_typed(
 
     # Headered text (not JSON) so the streamed output is human-readable in the
     # CLI pane; we still recover the structured Area/Title from the header.
+    # The prompt-injection guard (shared with summarize.py) is prepended so
+    # instructions embedded in the transcript text aren't followed.
     prompt = (
+        f"{_SYSTEM_INSTRUCTION}\n\n"
         f"Summarise the transcript by completing this '{tname}' template, applying ALL "
         "the 'Extraction guidance' notes inside it and keeping its section structure. "
         "Use only information present in the transcript. "
@@ -342,10 +357,6 @@ def summarise_typed(
     desc = _sanitize(title_raw or transcript_path.stem, 50)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Replace any prior summaries for this recording (re-summarise / reclassify
-    # should not pile up duplicate files).
-    _delete_prior_summaries(transcript_path.stem)
-
     front = _frontmatter({
         "type": tname,
         "area": area,
@@ -356,6 +367,11 @@ def summarise_typed(
     })
     out = SUMMARIES_DIR / f"{transcript_path.stem} - {tname} - {area} - {desc}.md"
     out.write_text(front + "\n\n" + md.rstrip() + "\n", encoding="utf-8")
+
+    # Replace any prior summaries for this recording (re-summarise / reclassify
+    # should not pile up duplicate files). Deleting only AFTER the new file is
+    # written means a failed write can't lose both the old and new summary.
+    _delete_prior_summaries(transcript_path.stem, keep=out)
     ev.done(
         ok=True, summary_path=str(out),
         type=tname, area=area, title=desc,

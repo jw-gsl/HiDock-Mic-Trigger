@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 
 # Detection order — first available wins for "auto" mode
@@ -186,6 +187,30 @@ def _tool_result_preview(content, limit: int = 200) -> str | None:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _start_watchdog(proc, timeout: int) -> tuple[threading.Timer, threading.Event]:
+    """Start a wall-clock deadline for a streaming subprocess.
+
+    The blocking stdout iteration has no per-read timeout, so a hung CLI
+    would block forever. Killing the process at the deadline closes its
+    stdout, which terminates the iteration. Returns (timer, timed_out_event);
+    the caller must cancel the timer on completion and treat a set event as
+    a failed (partial) stream.
+    """
+    timed_out = threading.Event()
+
+    def _kill():
+        timed_out.set()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    timer = threading.Timer(timeout, _kill)
+    timer.daemon = True
+    timer.start()
+    return timer, timed_out
+
+
 def _consume_claude_stream(lines, ev_out, on_text=None, emit_text=True) -> str | None:
     """Parse Claude ``stream-json`` NDJSON lines into normalized events.
 
@@ -336,27 +361,34 @@ def query_streaming(
         print(f"LLM CLI (claude) streaming error: {e}", file=sys.stderr)
         return None
 
+    # Wall-clock deadline: without it, a hung CLI blocks the stdout
+    # iteration below forever. Killing the proc at the deadline makes
+    # the iteration terminate and the timeout is reported as a failure.
+    watchdog, timed_out = _start_watchdog(proc, timeout)
     try:
-        if proc.stdin:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
-    except Exception:
         try:
-            proc.kill()
+            if proc.stdin:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
         except Exception:
-            pass
-        return None
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None
 
-    try:
-        assert proc.stdout is not None
-        full = _consume_claude_stream(proc.stdout, ev_out, on_text, emit_text=emit_text)
-    except Exception as e:
-        print(f"LLM CLI (claude) streaming read error: {e}", file=sys.stderr)
         try:
-            proc.kill()
-        except Exception:
-            pass
-        return None
+            assert proc.stdout is not None
+            full = _consume_claude_stream(proc.stdout, ev_out, on_text, emit_text=emit_text)
+        except Exception as e:
+            print(f"LLM CLI (claude) streaming read error: {e}", file=sys.stderr)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None
+    finally:
+        watchdog.cancel()
 
     try:
         proc.wait(timeout=10)
@@ -368,7 +400,10 @@ def query_streaming(
             pass
     else:
         if proc.returncode != 0:
-            print(f"LLM CLI (claude) exited with code {proc.returncode}", file=sys.stderr)
+            if timed_out.is_set():
+                print(f"LLM CLI (claude) timed out after {timeout}s", file=sys.stderr)
+            else:
+                print(f"LLM CLI (claude) exited with code {proc.returncode}", file=sys.stderr)
             full = None
 
     return full.strip() if full else None
@@ -448,28 +483,34 @@ def chat_streaming(
         ev.error(f"claude chat error: {e}")
         return None, None
 
-    try:
-        if proc.stdin:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return None, None
-
+    # Wall-clock deadline — same rationale as query_streaming: a hung CLI
+    # would otherwise block the stdout iteration forever.
+    watchdog, timed_out = _start_watchdog(proc, timeout)
     sniffer = _SessionSniffer(ev)
     try:
-        assert proc.stdout is not None
-        text = _consume_claude_stream(proc.stdout, sniffer)
-    except Exception as e:
-        ev.error(f"claude chat read error: {e}")
         try:
-            proc.kill()
+            if proc.stdin:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
         except Exception:
-            pass
-        return None, sniffer.session_id
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None, None
+
+        try:
+            assert proc.stdout is not None
+            text = _consume_claude_stream(proc.stdout, sniffer)
+        except Exception as e:
+            ev.error(f"claude chat read error: {e}")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None, sniffer.session_id
+    finally:
+        watchdog.cancel()
 
     try:
         proc.wait(timeout=10)
@@ -481,7 +522,10 @@ def chat_streaming(
             pass
     else:
         if proc.returncode != 0:
-            ev.error(f"claude exited with code {proc.returncode}")
+            if timed_out.is_set():
+                ev.error(f"claude timed out after {timeout}s")
+            else:
+                ev.error(f"claude exited with code {proc.returncode}")
             text = None
     return (text.strip() if text else None), sniffer.session_id
 
