@@ -47,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // fan out N concurrent CLI processes.
     private var summariseQueue: [HiDockSyncRecordingEntry] = []
     private var summariseBusy = false
+    // Reclassify requests (summary viewer dropdown) waiting behind a
+    // running summarise — same one-at-a-time gate as summariseQueue, so a
+    // reclassify never runs concurrently with an auto/manual summarise
+    // and interleaves output into the shared summaryTranscript.
+    private var pendingReclassifies: [(transcriptPath: String, template: String)] = []
     // mp3 outputNames that finished transcribing this session and are
     // waiting for their transcriptPath to be populated by the next
     // refreshTranscriptionState, at which point auto-summarise queues them.
@@ -2996,15 +3001,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if !tail.isEmpty { errQueue.sync { stderrData.append(tail) } }
             let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
 
-            // If replacing original, swap files
+            // If replacing original, swap files. replaceItemAt is the
+            // failure-safe primitive: it renames the trimmed file into
+            // place and only discards the original once the swap has
+            // succeeded. The earlier remove-then-move sequence could
+            // delete the original and then fail the move, leaving the
+            // recording surviving only as a hidden temp dotfile — and
+            // `try?` swallowed both errors.
+            var swapError: Error?
             if !saveAsCopy && process.terminationStatus == 0 {
-                try? FileManager.default.removeItem(atPath: path)
-                try? FileManager.default.moveItem(atPath: outputPath, toPath: path)
+                do {
+                    _ = try FileManager.default.replaceItemAt(
+                        URL(fileURLWithPath: path),
+                        withItemAt: URL(fileURLWithPath: outputPath)
+                    )
+                } catch {
+                    swapError = error
+                    // The original is untouched — just drop the orphaned temp.
+                    try? FileManager.default.removeItem(atPath: outputPath)
+                }
             }
 
             DispatchQueue.main.async {
                 self.viewModel.trimBusy = false
-                if process.terminationStatus == 0 {
+                if let swapError = swapError {
+                    self.viewModel.syncStatus = "Trim failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.log("Trim swap failed for \(path): \(swapError.localizedDescription)")
+                    self.showError("Trim finished but the original couldn't be replaced (it is unchanged):\n\(swapError.localizedDescription)")
+                } else if process.terminationStatus == 0 {
                     let name = URL(fileURLWithPath: path).lastPathComponent
                     self.log("Trimmed \(name) (\(start)s–\(end)s)")
                     self.viewModel.syncStatus = "Trimmed \(name)"
@@ -3408,8 +3433,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Re-run the AI summary for a recording against a user-chosen template
     /// (from the viewer's Reclassify dropdown). Streams into the CLI pane,
     /// replaces the old summary file, and reopens the viewer on the new one.
+    /// Routed through the same serial gate as the summarise queue — if a
+    /// summarise (auto or manual) is in flight, the reclassify waits its
+    /// turn instead of spawning a second concurrent CLI process.
     private func reclassifySummary(transcriptPath: String, template: String) {
         guard !transcriptPath.isEmpty else { return }
+        guard !summariseBusy else {
+            pendingReclassifies.append((transcriptPath, template))
+            log("Reclassify queued behind running summarise: \((transcriptPath as NSString).lastPathComponent) -> \(template)")
+            return
+        }
+        runReclassify(transcriptPath: transcriptPath, template: template)
+    }
+
+    /// Actually run a reclassify. Callers must hold the serial summarise
+    /// gate (summariseBusy == false); this sets it for the duration and
+    /// pumps processNextSummary on completion.
+    private func runReclassify(transcriptPath: String, template: String) {
+        summariseBusy = true
         viewModel.chatTitle = "Reclassifying as \(template)"
         if showCLIWhileSummarising {
             viewModel.cliPaneMode = .summary
@@ -3423,6 +3464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.summariseBusy = false
                 self.viewModel.summaryTranscript.running = false
                 if case .success(let data) = result,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -3437,6 +3479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     }
                     self.showError("Reclassify failed — see the CLI pane for details.")
                 }
+                self.processNextSummary()
             }
         }
     }
@@ -3887,7 +3930,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func processNextSummary() {
-        guard !summariseBusy, !summariseQueue.isEmpty else { return }
+        guard !summariseBusy else { return }
+        // Reclassify requests queued while a summarise was running take
+        // the gate first — they're user-initiated and there's at most a
+        // handful of them.
+        if !pendingReclassifies.isEmpty {
+            let next = pendingReclassifies.removeFirst()
+            runReclassify(transcriptPath: next.transcriptPath, template: next.template)
+            return
+        }
+        guard !summariseQueue.isEmpty else { return }
         let entry = summariseQueue.removeFirst()
         let name = entry.recording.outputName
         guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
@@ -4067,29 +4119,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         let recordingsURL = URL(fileURLWithPath: recordingsFolder)
-        try? FileManager.default.createDirectory(
-            at: recordingsURL, withIntermediateDirectories: true
-        )
+        let sources = panel.urls
 
-        var added = 0
-        for source in panel.urls {
-            if let entry = importSingleFile(source, into: recordingsURL) {
-                importedRecordings.append(entry)
-                added += 1
+        // Copy + probe on a background queue — large or network-mounted
+        // files can take seconds and would beachball the UI if done on
+        // the main thread. State mutation + UI updates hop back to main.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            try? FileManager.default.createDirectory(
+                at: recordingsURL, withIntermediateDirectories: true
+            )
+            var entries: [ImportedRecordingEntry] = []
+            for source in sources {
+                if let entry = self.importSingleFile(source, into: recordingsURL) {
+                    entries.append(entry)
+                }
             }
-        }
-        if added > 0 {
-            ImportedRecordingsStore.save(importedRecordings)
-            rebuildSyncEntries()
-            viewModel.syncStatus = "Imported \(added) file\(added == 1 ? "" : "s")"
-            viewModel.syncStatusLevel = .success
-            syncViewModelState()
-            refreshTranscriptionState()
+            guard !entries.isEmpty else { return }
+            DispatchQueue.main.async {
+                self.importedRecordings.append(contentsOf: entries)
+                ImportedRecordingsStore.save(self.importedRecordings)
+                self.rebuildSyncEntries()
+                let added = entries.count
+                self.viewModel.syncStatus = "Imported \(added) file\(added == 1 ? "" : "s")"
+                self.viewModel.syncStatusLevel = .success
+                self.syncViewModelState()
+                self.refreshTranscriptionState()
+            }
         }
     }
 
     /// Copy a single source file into the recordings folder, gather its
     /// basic metadata, and return a persistable ImportedRecordingEntry.
+    /// Runs on a background queue (see importAudioFile) — the copy and
+    /// duration probe can take seconds for large/network files.
     private func importSingleFile(
         _ source: URL, into recordingsURL: URL,
     ) -> ImportedRecordingEntry? {
@@ -7727,32 +7790,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Logging
 
+    /// Serialises file writes from log(). log() is called from the main
+    /// thread, syncExtractorQueue, and transcriptionDispatchQueue — each
+    /// call used to open its own FileHandle, interleaving/corrupting
+    /// lines and racing the rotation. One serial queue keeps appends and
+    /// rotation atomic with respect to each other.
+    private let logWriteQueue = DispatchQueue(label: "hidock.log-write")
+
     private func log(_ message: String) {
         let line = "[\(Date())] \(message)\n"
-        NSLog("%@", message)
+        NSLog("%@", message)   // immediate, thread-safe
         guard let data = line.data(using: .utf8) else { return }
 
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
-           let size = attrs[.size] as? UInt64, size > 5 * 1024 * 1024 {
-            let oldPath = logPath + ".old"
-            try? FileManager.default.removeItem(atPath: oldPath)
-            try? FileManager.default.moveItem(atPath: logPath, toPath: oldPath)
-        }
-
-        do {
-            let logURL = URL(fileURLWithPath: logPath)
-            if FileManager.default.fileExists(atPath: logPath) {
-                let handle = try FileHandle(forWritingTo: logURL)
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try handle.close()
-            } else {
-                let logDir = (logPath as NSString).deletingLastPathComponent
-                try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
-                try data.write(to: logURL)
+        let logPath = self.logPath
+        logWriteQueue.async {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
+               let size = attrs[.size] as? UInt64, size > 5 * 1024 * 1024 {
+                let oldPath = logPath + ".old"
+                try? FileManager.default.removeItem(atPath: oldPath)
+                try? FileManager.default.moveItem(atPath: logPath, toPath: oldPath)
             }
-        } catch {
-            NSLog("Failed to write log: %@", error.localizedDescription)
+
+            do {
+                let logURL = URL(fileURLWithPath: logPath)
+                if FileManager.default.fileExists(atPath: logPath) {
+                    let handle = try FileHandle(forWritingTo: logURL)
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try handle.close()
+                } else {
+                    let logDir = (logPath as NSString).deletingLastPathComponent
+                    try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+                    try data.write(to: logURL)
+                }
+            } catch {
+                NSLog("Failed to write log: %@", error.localizedDescription)
+            }
         }
     }
 

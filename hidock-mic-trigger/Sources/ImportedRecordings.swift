@@ -159,8 +159,10 @@ enum ImportedRecordingsStore {
     static func probeDuration(at path: String) -> Double {
         let url = URL(fileURLWithPath: path)
         let asset = AVURLAsset(url: url)
-        // Synchronous load is fine here — we're on a background thread
-        // during import, not the main queue.
+        // Synchronous load — blocks the calling thread while AVFoundation
+        // parses the file, so import callers must invoke this from a
+        // background queue (importAudioFile dispatches the copy + probe
+        // off the main thread).
         let seconds = CMTimeGetSeconds(asset.duration)
         return seconds.isFinite && seconds > 0 ? seconds : 0
     }
