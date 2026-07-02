@@ -16,6 +16,7 @@ Still inferred:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import platform
@@ -25,7 +26,9 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -99,9 +102,23 @@ def load_json_file(path: Path, default):
 
 def save_json_file(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    os.replace(str(tmp), str(path))
+    # Unique temp name per writer (tempfile.mkstemp) rather than a shared
+    # `<name>.tmp`: the Swift app runs `status` polls and downloads as
+    # overlapping processes, and two writers sharing one temp path can
+    # interleave (writer A renames writer B's half-written temp into place).
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp_name, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -128,6 +145,45 @@ def load_state(state_path: Path = DEFAULT_STATE_PATH) -> dict:
 
 def save_state(state: dict, state_path: Path = DEFAULT_STATE_PATH) -> None:
     save_json_file(state_path, state)
+
+
+@contextmanager
+def state_lock(state_path: Path | None = None):
+    """Cross-process exclusive lock guarding state.json read-modify-write.
+
+    The Swift app runs `status` polls and `download`/`download-new` (and the
+    volume/plaud equivalents) as overlapping separate processes. Each used to
+    do load_state -> mutate -> save_state with no coordination, so whichever
+    process saved last silently clobbered the other's changes: lost
+    `downloaded` records re-triggered auto-downloads (overwriting locally
+    trimmed files) and lost `removed` flags resurrected suppressed rows.
+
+    Every command that writes state must hold this lock across its
+    load -> mutate -> save window. Granularity: do NOT hold the lock across a
+    long USB/network transfer — do the transfer first, then take the lock,
+    re-load the (possibly newer) state, apply this command's mutation, and
+    save. That re-load-under-lock is what makes concurrent writers merge
+    instead of clobber.
+
+    Implemented as fcntl.flock on a sibling lockfile (`state.json.lock`)
+    rather than on state.json itself, because save_json_file replaces
+    state.json via rename — a lock on the replaced inode would be useless.
+    `state_path=None` resolves DEFAULT_STATE_PATH at call time so tests that
+    monkeypatch the module constant are honoured.
+    """
+    if state_path is None:
+        state_path = DEFAULT_STATE_PATH
+    lock_path = state_path.with_name(state_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 def resolved_output_dir(config: dict) -> Path:
@@ -1351,7 +1407,6 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         # the H1. Now we always do a full query_file_list and derive
         # the declared total from its header frame.
         cache_key = str(product_id) if product_id else "default"
-        catalogs = state.get("catalogs", {})
 
         recordings = query_file_list(dev, request_id=2, timeout_ms=timeout_ms)
         declared = getattr(query_file_list, "_last_declared_total", None)
@@ -1379,16 +1434,25 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
         if attempt > 1:
             print(f"file-list: read {len(recordings)}/{declared} after {attempt} attempt(s)", file=sys.stderr, flush=True)
 
-        prev_recs = catalogs.get(cache_key, {}).get("recordings", [])
+        # Persist the catalog under the cross-process lock. The USB read above
+        # can take tens of seconds, during which a concurrent download process
+        # may have recorded new `downloaded` entries — so re-load state HERE
+        # (not the copy from function entry) and mutate that, otherwise this
+        # save would clobber the download's record and re-trigger
+        # auto-download on the next cycle.
+        with state_lock(state_path):
+            state = load_state(state_path)
+            catalogs = state.get("catalogs", {})
+            prev_recs = catalogs.get(cache_key, {}).get("recordings", [])
 
-        # Don't let a PARTIAL read evict recordings we've already seen (see
-        # merge_partial_catalog).
-        recordings = merge_partial_catalog(recordings, declared, prev_recs)
+            # Don't let a PARTIAL read evict recordings we've already seen
+            # (see merge_partial_catalog).
+            recordings = merge_partial_catalog(recordings, declared, prev_recs)
 
-        # Cache the (merged) catalog for next time
-        catalogs[cache_key] = {"recordings": recordings}
-        state["catalogs"] = catalogs
-        save_state(state, state_path)
+            # Cache the (merged) catalog for next time
+            catalogs[cache_key] = {"recordings": recordings}
+            state["catalogs"] = catalogs
+            save_state(state, state_path)
 
         payload["connected"] = True
         payload["recordings"] = build_recording_status_items(recordings, state, output_dir, product_id=product_id)
@@ -1454,8 +1518,6 @@ def download_one(
         output_dir = resolved_output_dir(config)
     else:
         output_dir = output_dir.expanduser().resolve()
-    state = load_state(state_path)
-    downloads = state["downloads"]
 
     global _active_dev, _active_intf
     dev = find_device(product_id=product_id)
@@ -1489,38 +1551,49 @@ def download_one(
             progress=_progress,
         )
     except Exception as exc:
-        error_record = {
-            **downloads.get(filename, {}),
-            "downloaded": False,
-            "last_error": str(exc),
-            "output_path": str(output_path_for(filename, output_dir)),
-            "updated_at": utc_now_iso(),
-        }
-        if product_id is not None:
-            error_record["product_id"] = product_id
-        downloads[filename] = error_record
-        save_state(state, state_path)
+        # Take the lock and re-load state only now (the transfer above can run
+        # for minutes) so a concurrent status/download process's records
+        # survive this save.
+        with state_lock(state_path):
+            state = load_state(state_path)
+            downloads = state["downloads"]
+            error_record = {
+                **downloads.get(filename, {}),
+                "downloaded": False,
+                "last_error": str(exc),
+                "output_path": str(output_path_for(filename, output_dir)),
+                "updated_at": utc_now_iso(),
+            }
+            if product_id is not None:
+                error_record["product_id"] = product_id
+            downloads[filename] = error_record
+            save_state(state, state_path)
         raise
     finally:
         release_device(dev, interface_number)
         _active_dev = None
         _active_intf = None
 
-    record = {
-        **downloads.get(filename, {}),
-        "downloaded": written == length,
-        "downloaded_at": utc_now_iso(),
-        "updated_at": utc_now_iso(),
-        "output_path": str(out_path),
-        "length": length,
-        "last_error": None,
-    }
-    if product_id is not None:
-        record["product_id"] = product_id
-    if signature is not None:
-        record["signature"] = signature
-    downloads[filename] = record
-    save_state(state, state_path)
+    # Same pattern as the error path: lock + fresh load right before saving,
+    # never across the (long) transfer itself.
+    with state_lock(state_path):
+        state = load_state(state_path)
+        downloads = state["downloads"]
+        record = {
+            **downloads.get(filename, {}),
+            "downloaded": written == length,
+            "downloaded_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+            "output_path": str(out_path),
+            "length": length,
+            "last_error": None,
+        }
+        if product_id is not None:
+            record["product_id"] = product_id
+        if signature is not None:
+            record["signature"] = signature
+        downloads[filename] = record
+        save_state(state, state_path)
     return {
         "filename": filename,
         "written": written,
@@ -1580,6 +1653,7 @@ def download_new(
             "outputDir": status["outputDir"],
             "downloaded": [],
             "skipped": [],
+            "errors": [],
             "error": status.get("error"),
         }
 
@@ -1694,10 +1768,13 @@ def pull_file(filename: str, out_dir: Path, request_id: int = 1, timeout_ms: int
 
 VOLUME_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".wma"}
 
+# Overridable for tests (a tmp dir can stand in for /Volumes).
+VOLUMES_ROOT = Path("/Volumes")
+
 
 def _find_volumes() -> list[Path]:
     """Return mount points of removable/external volumes."""
-    volumes_root = Path("/Volumes")
+    volumes_root = VOLUMES_ROOT
     if not volumes_root.exists():
         return []
     mounts = []
@@ -1718,10 +1795,56 @@ def _safe_resolve(base: Path, user_path: str | None) -> Path:
     if ".." in user_path:
         raise ValueError(f"Path traversal detected in: {user_path}")
     resolved = (base / user_path).resolve()
-    base_resolved = base.resolve()
-    if not str(resolved).startswith(str(base_resolved)):
+    if not resolved.is_relative_to(base.resolve()):
         raise ValueError(f"Path escapes base directory: {user_path}")
     return resolved
+
+
+def _is_safe_volume_relpath(name: str) -> bool:
+    """Validate a volume file identifier: a basename or a relative subpath.
+
+    Unlike HiDock device names (SAFE_FILENAME_RE), volume filenames may
+    contain spaces/parentheses; we only reject traversal shapes. Forward
+    slashes ARE allowed — volume_status names duplicated basenames by their
+    scan-root-relative path (e.g. FOLDER01/REC0001.wav) and the app passes
+    that back verbatim.
+    """
+    if not name or "\\" in name or name.startswith("/"):
+        return False
+    return all(part not in ("", ".", "..") for part in name.split("/"))
+
+
+def _volume_output_name(relpath: str, basename_is_unique: bool) -> str:
+    """Local output filename for a volume file.
+
+    Unique basenames keep the plain basename — matching historical behaviour,
+    so existing users' already-imported files keep their paths. When the same
+    basename appears in more than one subdirectory of the scan root, flatten
+    the relpath into the filename (FOLDER01/REC0001.wav -> FOLDER01_REC0001.wav)
+    so both files survive instead of the second import silently overwriting
+    the first.
+    """
+    if basename_is_unique:
+        return relpath.rsplit("/", 1)[-1]
+    return relpath.replace("/", "_")
+
+
+def _volume_scan_index(mount: Path, subpath: str | None) -> tuple[Path, list[Path], dict[Path, str], dict[str, int]]:
+    """Scan a volume and return (scan_root, files, relpath-per-file,
+    basename occurrence counts). The relpath (POSIX separators, relative to
+    the scan root) is the stable per-file identity used for state keys."""
+    scan_root = _safe_resolve(mount, subpath)
+    files = _scan_audio_files(mount, subpath)
+    relpaths: dict[Path, str] = {}
+    basename_counts: dict[str, int] = {}
+    for path in files:
+        try:
+            rel = path.relative_to(scan_root).as_posix()
+        except ValueError:
+            rel = path.name
+        relpaths[path] = rel
+        basename_counts[path.name] = basename_counts.get(path.name, 0) + 1
+    return scan_root, files, relpaths, basename_counts
 
 
 def _scan_audio_files(mount_point: Path, subpath: str | None = None) -> list[Path]:
@@ -1814,7 +1937,7 @@ def volume_status(
     state = load_state(state_path)
     downloads = state.get("downloads", {})
 
-    mount = Path("/Volumes") / volume_name
+    mount = VOLUMES_ROOT / volume_name
     connected = mount.is_dir()
 
     payload = {
@@ -1829,17 +1952,35 @@ def volume_status(
         payload["error"] = f"Volume '{volume_name}' is not mounted"
         return payload
 
-    audio_files = _scan_audio_files(mount, subpath)
+    _scan_root, audio_files, relpaths, basename_counts = _volume_scan_index(mount, subpath)
     items: list[dict] = []
     seen_names: set[str] = set()
 
     for audio_path in audio_files:
         meta = _audio_file_metadata(audio_path)
-        name = meta["name"]
-        state_key = f"vol:{volume_name}/{name}"
+        basename = meta["name"]
+        relpath = relpaths[audio_path]
+        unique = basename_counts.get(basename, 1) == 1
+        # State identity is the path relative to the scan root, NOT the
+        # basename: FOLDER01/REC0001.wav and FOLDER02/REC0001.wav are
+        # different recordings and must not share one state record (the old
+        # basename keying made the second import silently overwrite the
+        # first while both rows showed downloaded).
+        state_key = f"vol:{volume_name}/{relpath}"
+        legacy_key = f"vol:{volume_name}/{basename}"
         seen_names.add(state_key)
-        stored = downloads.get(state_key, {})
-        output_path = Path(stored["output_path"]) if "output_path" in stored else output_dir / name
+        stored = downloads.get(state_key)
+        if stored is None and relpath != basename and unique and legacy_key in downloads:
+            # Read-time migration: older releases keyed subdirectory files by
+            # basename only. Honor the legacy record when the basename is
+            # unambiguous in this scan, so existing users' imported files
+            # don't all flip back to not-downloaded. (Ambiguous basenames get
+            # a fresh record — we can't tell which file the legacy key meant.)
+            stored = downloads[legacy_key]
+            seen_names.add(legacy_key)  # suppress the ghost "state-only" row below
+        stored = stored or {}
+        output_name = _volume_output_name(relpath, unique)
+        output_path = Path(stored["output_path"]) if "output_path" in stored else output_dir / output_name
         local_exists = output_path.exists()
         downloaded = bool(stored.get("downloaded"))
         status = "downloaded" if downloaded else "on_device"
@@ -1848,9 +1989,16 @@ def volume_status(
 
         items.append({
             **meta,
+            # `name` is what the app displays AND passes back to
+            # volume-import / mark commands. Keep the plain basename when it
+            # is unique (least-breaking); use the relpath when duplicated so
+            # the round-trip identifies exactly one file. sourceRelpath
+            # always carries the relpath for clients that want it.
+            "name": basename if unique else relpath,
+            "sourceRelpath": relpath,
             "sourcePath": str(audio_path),
             "outputPath": str(output_path),
-            "outputName": name,
+            "outputName": output_name,
             "downloaded": downloaded,
             "localExists": local_exists,
             "downloadedAt": stored.get("downloaded_at"),
@@ -1879,6 +2027,7 @@ def volume_status(
             "version": 0,
             "mode": "external",
             "signature": stored.get("signature", ""),
+            "sourceRelpath": state_key.split("/", 1)[1],
             "sourcePath": "",
             "outputPath": str(output_path) if output_path else "",
             "outputName": state_key.split("/", 1)[1],
@@ -1904,17 +2053,31 @@ def volume_import_one(
     output_dir: Path | None = None,
     config_path: Path = DEFAULT_CONFIG_PATH,
     state_path: Path = DEFAULT_STATE_PATH,
+    source_relpath: str | None = None,
 ) -> dict:
-    """Copy one audio file from a mounted volume to the recordings folder."""
-    # Validate filename to prevent path traversal
-    if not filename or ".." in filename or "/" in filename or "\\" in filename:
+    """Copy one audio file from a mounted volume to the recordings folder.
+
+    File identity design (least-breaking for the Swift app, which passes the
+    item's `name` back as `filename`): `filename` may be either a plain
+    basename (what volume_status reports for basenames unique in the scan) or
+    a scan-root-relative path like FOLDER01/REC0001.wav (what volume_status
+    reports when the basename is duplicated). `source_relpath`
+    (`--source-relpath`) explicitly pins the file regardless of `filename`,
+    which volume_import_new uses. An ambiguous bare basename (duplicated in
+    the scan, no relpath given) is refused rather than guessing.
+    """
+    requested = source_relpath or filename
+
+    # Validate to prevent path traversal. Forward slashes are allowed (safe
+    # relative subpaths); "..", backslashes and absolute paths are not.
+    if not _is_safe_volume_relpath(requested):
         return {
             "filename": filename,
             "written": 0,
             "expectedLength": 0,
             "outputPath": "",
             "downloaded": False,
-            "error": f"Invalid filename: {filename}",
+            "error": f"Invalid filename: {requested}",
         }
 
     if output_dir is None:
@@ -1922,53 +2085,71 @@ def volume_import_one(
         output_dir = resolved_output_dir(config)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    mount = Path("/Volumes") / volume_name
-    scan_root = _safe_resolve(mount, subpath)
-    source = scan_root / filename
+    mount = VOLUMES_ROOT / volume_name
 
-    # Verify source doesn't escape scan_root after resolution
-    if not str(source.resolve()).startswith(str(scan_root.resolve())):
+    def _failure(message: str, state_key: str | None = None) -> dict:
+        if state_key is not None:
+            with state_lock(state_path):
+                state = load_state(state_path)
+                downloads = state["downloads"]
+                downloads[state_key] = {
+                    **downloads.get(state_key, {}),
+                    "downloaded": False,
+                    "updated_at": utc_now_iso(),
+                    "last_error": message,
+                }
+                save_state(state, state_path)
         return {
             "filename": filename,
             "written": 0,
             "expectedLength": 0,
             "outputPath": "",
             "downloaded": False,
-            "error": f"Path traversal detected: {filename}",
+            "error": message,
         }
 
-    state_key = f"vol:{volume_name}/{filename}"
-    state = load_state(state_path)
-    downloads = state.get("downloads", {})
+    try:
+        scan_root, _audio_files, relpaths, basename_counts = _volume_scan_index(mount, subpath)
+    except ValueError as exc:
+        return _failure(str(exc))
 
-    if not source.is_file():
-        # volume_status scans recursively, so the file may live in a
-        # subdirectory of the scan root even though we're given only its
-        # basename. Fall back to the same recursive scan status used.
-        source = next(
-            (p for p in _scan_audio_files(mount, subpath) if p.name == filename),
-            source,
+    # Resolve the requested name to exactly one file under the scan root.
+    source: Path | None = None
+    candidate = scan_root / requested
+    if not candidate.resolve().is_relative_to(scan_root.resolve()):
+        return _failure(f"Path traversal detected: {requested}")
+    if candidate.is_file():
+        source = candidate
+    elif "/" not in requested:
+        # Bare basename not at the scan root: volume_status scans
+        # recursively, so it may identify a unique subdirectory file by
+        # basename alone. Refuse ambiguous matches — importing the wrong
+        # FOLDERxx/REC0001.wav would corrupt state silently.
+        matches = [p for p in relpaths if p.name == requested]
+        if len(matches) == 1:
+            source = matches[0]
+        elif len(matches) > 1:
+            options = ", ".join(sorted(relpaths[p] for p in matches))
+            return _failure(
+                f"Ambiguous filename {requested!r} matches multiple files ({options}); "
+                f"pass the relative path"
+            )
+
+    if source is None or not source.is_file():
+        missing = scan_root / requested
+        return _failure(
+            f"Source file not found: {missing}",
+            state_key=f"vol:{volume_name}/{requested}",
         )
 
-    if not source.is_file():
-        downloads[state_key] = {
-            **downloads.get(state_key, {}),
-            "downloaded": False,
-            "updated_at": utc_now_iso(),
-            "last_error": f"Source file not found: {source}",
-        }
-        save_state(state, state_path)
-        return {
-            "filename": filename,
-            "written": 0,
-            "expectedLength": 0,
-            "outputPath": "",
-            "downloaded": False,
-            "error": f"Source file not found: {source}",
-        }
+    relpath = relpaths.get(source) or source.relative_to(scan_root).as_posix()
+    basename = source.name
+    unique = basename_counts.get(basename, 1) == 1
+    state_key = f"vol:{volume_name}/{relpath}"
+    legacy_key = f"vol:{volume_name}/{basename}"
 
     stat = source.stat()
-    out_path = output_dir / filename
+    out_path = output_dir / _volume_output_name(relpath, unique)
     # Copy via a temp file so an interrupted copy (yanked volume, I/O error)
     # never leaves a partial file at the final path, where it would look like
     # a complete recording to the transcription pipeline.
@@ -1985,17 +2166,29 @@ def volume_import_one(
     written = out_path.stat().st_size
 
     meta = _audio_file_metadata(source)
-    downloads[state_key] = {
-        "downloaded": written == stat.st_size,
-        "downloaded_at": utc_now_iso(),
-        "updated_at": utc_now_iso(),
-        "output_path": str(out_path),
-        "length": stat.st_size,
-        "last_error": None,
-        "volume_name": volume_name,
-        "signature": meta["signature"],
-    }
-    save_state(state, state_path)
+    # Lock + fresh load only around the state write (never across the copy),
+    # so overlapping status/import processes merge instead of clobbering.
+    with state_lock(state_path):
+        state = load_state(state_path)
+        downloads = state["downloads"]
+        existing = downloads.get(state_key, {})
+        if not existing and relpath != basename and unique:
+            # Write-time migration of a legacy basename-keyed record (see
+            # volume_status): fold it into the relpath key so it stops
+            # appearing as a stale "no longer on volume" row.
+            existing = downloads.pop(legacy_key, {})
+        downloads[state_key] = {
+            **existing,
+            "downloaded": written == stat.st_size,
+            "downloaded_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+            "output_path": str(out_path),
+            "length": stat.st_size,
+            "last_error": None,
+            "volume_name": volume_name,
+            "signature": meta["signature"],
+        }
+        save_state(state, state_path)
 
     return {
         "filename": filename,
@@ -2020,6 +2213,7 @@ def volume_import_new(
             "outputDir": status["outputDir"],
             "downloaded": [],
             "skipped": [],
+            "errors": [],
             "error": status.get("error"),
         }
 
@@ -2044,6 +2238,9 @@ def volume_import_new(
                 output_dir=Path(status["outputDir"]),
                 config_path=config_path,
                 state_path=state_path,
+                # Pin the exact file: with duplicate basenames the bare name
+                # is ambiguous, and volume_status already computed the relpath.
+                source_relpath=item.get("sourceRelpath"),
             )
         except Exception as exc:
             # One unreadable file (flaky SD card, permissions) must not abort
@@ -2063,7 +2260,52 @@ def volume_import_new(
     }
 
 
+def _save_plaud_state(state: dict, account_id: str, state_path: Path = DEFAULT_STATE_PATH) -> None:
+    """Persist the Plaud-owned slices of a mutated state dict under the
+    cross-process lock.
+
+    plaud_client mutates the state dict we pass it (catalog cache + download
+    records) over a potentially long network session. Saving that whole dict
+    would clobber whatever a concurrent HiDock status/download process wrote
+    meanwhile — so instead re-load fresh state under the lock and overlay only
+    the keys a Plaud command can legitimately own: `downloads` entries
+    prefixed `plaud:<account>:` and the `plaud:<account>` catalog.
+    """
+    with state_lock(state_path):
+        fresh = load_state(state_path)
+        prefix = f"plaud:{account_id}:"
+        for key, record in (state.get("downloads") or {}).items():
+            if key.startswith(prefix):
+                fresh["downloads"][key] = record
+        catalog_key = f"plaud:{account_id}"
+        catalog = (state.get("catalogs") or {}).get(catalog_key)
+        if catalog is not None:
+            fresh.setdefault("catalogs", {})[catalog_key] = catalog
+        save_state(fresh, state_path)
+
+
 def main() -> int:
+    """CLI entry point.
+
+    Wraps the real dispatcher so any unexpected exception still puts a JSON
+    error object on stdout. The desktop app parses stdout as JSON for every
+    command it runs; a bare traceback (e.g. usb.core.NoBackendError when
+    libusb is missing — NOT a USBError subclass, so nothing below catches it)
+    used to leave stdout empty and break the Swift parser. KeyboardInterrupt
+    and SystemExit (argparse --help/usage errors) are not Exception subclasses
+    and propagate unchanged.
+    """
+    try:
+        return _main()
+    except Exception as exc:
+        # Keep the traceback for humans on stderr; machines get JSON on stdout.
+        import traceback
+        traceback.print_exc()
+        print(json.dumps({"error": str(exc) or exc.__class__.__name__, "connected": False}, indent=2))
+        return 1
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--product-id", type=int, default=None, help="USB product ID to target a specific HiDock model")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2106,10 +2348,12 @@ def main() -> int:
 
     mark_removed_p = sub.add_parser("mark-removed", help="Flag recordings as locally removed (excluded from auto-download/transcribe)")
     mark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to flag as removed")
+    mark_removed_p.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
     mark_removed_p.add_argument("--plaud-account", default=None, help="For Plaud devices")
 
     unmark_removed_p = sub.add_parser("unmark-removed", help="Clear the removed flag on recordings")
     unmark_removed_p.add_argument("filenames", nargs="+", help="Device-side filenames to clear removed flag on")
+    unmark_removed_p.add_argument("--volume-name", default=None, help="For volume devices: prefix state keys with vol:<name>/")
     unmark_removed_p.add_argument("--plaud-account", default=None, help="For Plaud devices")
 
     cand_p = sub.add_parser("merge-candidates",
@@ -2172,9 +2416,10 @@ def main() -> int:
     vol_status.add_argument("--subpath", default=None, help="Subdirectory within the volume to scan")
 
     vol_import = sub.add_parser("volume-import", help="Import one audio file from a mounted volume")
-    vol_import.add_argument("filename", help="Audio filename on the volume")
+    vol_import.add_argument("filename", help="Audio filename on the volume (basename, or path relative to the scan root for duplicated basenames)")
     vol_import.add_argument("--volume-name", required=True, help="Name of the mounted volume")
     vol_import.add_argument("--subpath", default=None, help="Subdirectory within the volume")
+    vol_import.add_argument("--source-relpath", default=None, help="Scan-root-relative path pinning the exact source file (overrides filename resolution)")
 
     vol_import_new = sub.add_parser("volume-import-new", help="Import all new audio files from a mounted volume")
     vol_import_new.add_argument("--volume-name", required=True, help="Name of the mounted volume")
@@ -2216,7 +2461,7 @@ def main() -> int:
         payload["statePath"] = str(DEFAULT_STATE_PATH.resolve())
         payload["configPath"] = str(DEFAULT_CONFIG_PATH.resolve())
         _attach_refreshed_plaud_tokens(payload, args.account_id)
-        save_state(state)
+        _save_plaud_state(state, args.account_id)
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "plaud-cached-status":
@@ -2241,7 +2486,7 @@ def main() -> int:
                 state,
                 account_id=args.account_id,
             )
-            save_state(state)
+            _save_plaud_state(state, args.account_id)
         except Exception as exc:
             state_key = f"plaud:{args.account_id}:{args.recording_id}"
             downloads = state.setdefault("downloads", {})
@@ -2253,7 +2498,7 @@ def main() -> int:
                 "source": "plaud",
                 "account_id": args.account_id,
             }
-            save_state(state)
+            _save_plaud_state(state, args.account_id)
             raise
         _attach_refreshed_plaud_tokens(payload, args.account_id)
         print(json.dumps(payload, indent=2))
@@ -2264,112 +2509,132 @@ def main() -> int:
         output_dir = resolved_output_dir(config)
         payload = plaud_client.download_new(output_dir, state, account_id=args.account_id)
         _attach_refreshed_plaud_tokens(payload, args.account_id)
-        save_state(state)
+        _save_plaud_state(state, args.account_id)
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "mark-downloaded":
-        state = load_state()
-        downloads = state["downloads"]
         config = load_config()
         output_dir = resolved_output_dir(config)
-        # Look up catalog for size info when marking new entries
-        cache_key = str(args.product_id) if args.product_id else "default"
-        cached_recs = {r["name"]: r for r in state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])}
         marked = []
         vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
         plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
-        for filename in args.filenames:
-            state_key = f"{plaud_prefix}{vol_prefix}{filename}"
-            existing = downloads.get(state_key, {})
-            # Populate length/output_path from catalog if not already set
-            if not existing.get("length") and filename in cached_recs:
-                existing.setdefault("length", cached_recs[filename].get("length"))
-            if not existing.get("output_path"):
-                existing["output_path"] = str(output_path_for(filename, output_dir))
-            record = {
-                **existing,
-                "downloaded": True,
-                "downloaded_at": utc_now_iso(),
-                "updated_at": utc_now_iso(),
-                "last_error": None,
-            }
-            if args.product_id is not None:
-                record["product_id"] = args.product_id
-            if args.plaud_account:
-                record["source"] = "plaud"
-                record["account_id"] = args.plaud_account
-            downloads[state_key] = record
-            marked.append(filename)
-        save_state(state)
+        with state_lock():
+            state = load_state()
+            downloads = state["downloads"]
+            # Look up catalog for size info when marking new entries
+            cache_key = str(args.product_id) if args.product_id else "default"
+            cached_recs = {r["name"]: r for r in state.get("catalogs", {}).get(cache_key, {}).get("recordings", [])}
+            for filename in args.filenames:
+                state_key = f"{plaud_prefix}{vol_prefix}{filename}"
+                existing = downloads.get(state_key, {})
+                # Populate length/output_path from the HiDock catalog if not
+                # already set. Skip output_path_for entirely for volume/plaud
+                # keys: it validates against the HiDock-only filename charset
+                # (raising on spaces/parens common in volume filenames) and
+                # unconditionally appends .mp3, storing a bogus path like
+                # `rec.wav.mp3`. volume_status/plaud status derive the correct
+                # default output path at read time when none is stored.
+                if not args.volume_name and not args.plaud_account:
+                    if not existing.get("length") and filename in cached_recs:
+                        existing.setdefault("length", cached_recs[filename].get("length"))
+                    if not existing.get("output_path"):
+                        existing["output_path"] = str(output_path_for(filename, output_dir))
+                record = {
+                    **existing,
+                    "downloaded": True,
+                    "downloaded_at": utc_now_iso(),
+                    "updated_at": utc_now_iso(),
+                    "last_error": None,
+                }
+                if args.product_id is not None:
+                    record["product_id"] = args.product_id
+                if args.volume_name:
+                    record["volume_name"] = args.volume_name
+                if args.plaud_account:
+                    record["source"] = "plaud"
+                    record["account_id"] = args.plaud_account
+                downloads[state_key] = record
+                marked.append(filename)
+            save_state(state)
         print(json.dumps({"marked": marked}, indent=2))
         return 0
     if args.command == "unmark-downloaded":
-        state = load_state()
-        downloads = state["downloads"]
         unmarked = []
         vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
         plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
-        for filename in args.filenames:
-            state_key = f"{plaud_prefix}{vol_prefix}{filename}"
-            if state_key in downloads:
-                downloads[state_key]["downloaded"] = False
-                downloads[state_key]["updated_at"] = utc_now_iso()
-                unmarked.append(filename)
-        save_state(state)
+        with state_lock():
+            state = load_state()
+            downloads = state["downloads"]
+            for filename in args.filenames:
+                state_key = f"{plaud_prefix}{vol_prefix}{filename}"
+                if state_key in downloads:
+                    downloads[state_key]["downloaded"] = False
+                    downloads[state_key]["updated_at"] = utc_now_iso()
+                    unmarked.append(filename)
+            save_state(state)
         print(json.dumps({"unmarked": unmarked}, indent=2))
         return 0
     if args.command == "mark-trimmed":
-        state = load_state()
-        downloads = state["downloads"]
         flagged = []
-        for filename in args.filenames:
-            if filename in downloads:
-                downloads[filename]["trimmed"] = True
-                downloads[filename]["updated_at"] = utc_now_iso()
-                flagged.append(filename)
-        save_state(state)
+        with state_lock():
+            state = load_state()
+            downloads = state["downloads"]
+            for filename in args.filenames:
+                if filename in downloads:
+                    downloads[filename]["trimmed"] = True
+                    downloads[filename]["updated_at"] = utc_now_iso()
+                    flagged.append(filename)
+            save_state(state)
         print(json.dumps({"trimmed": flagged}, indent=2))
         return 0
     if args.command == "unmark-trimmed":
-        state = load_state()
-        downloads = state["downloads"]
         cleared = []
-        for filename in args.filenames:
-            if filename in downloads and "trimmed" in downloads[filename]:
-                del downloads[filename]["trimmed"]
-                downloads[filename]["updated_at"] = utc_now_iso()
-                cleared.append(filename)
-        save_state(state)
+        with state_lock():
+            state = load_state()
+            downloads = state["downloads"]
+            for filename in args.filenames:
+                if filename in downloads and "trimmed" in downloads[filename]:
+                    del downloads[filename]["trimmed"]
+                    downloads[filename]["updated_at"] = utc_now_iso()
+                    cleared.append(filename)
+            save_state(state)
         print(json.dumps({"untrimmed": cleared}, indent=2))
         return 0
     if args.command == "mark-removed":
-        state = load_state()
-        downloads = state["downloads"]
         flagged = []
+        # Volume rows must be keyed vol:<volume>/<name> — a bare-name record
+        # would pollute the HiDock namespace and never match the volume row.
+        vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
         plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
-        for filename in args.filenames:
-            state_key = f"{plaud_prefix}{filename}"
-            if state_key not in downloads:
-                downloads[state_key] = {"downloaded": False}
-            if state_key in downloads:
+        with state_lock():
+            state = load_state()
+            downloads = state["downloads"]
+            for filename in args.filenames:
+                state_key = f"{plaud_prefix}{vol_prefix}{filename}"
+                if state_key not in downloads:
+                    downloads[state_key] = {"downloaded": False}
                 downloads[state_key]["removed"] = True
                 downloads[state_key]["updated_at"] = utc_now_iso()
+                if args.volume_name:
+                    downloads[state_key]["volume_name"] = args.volume_name
                 flagged.append(filename)
-        save_state(state)
+            save_state(state)
         print(json.dumps({"removed": flagged}, indent=2))
         return 0
     if args.command == "unmark-removed":
-        state = load_state()
-        downloads = state["downloads"]
         cleared = []
+        vol_prefix = f"vol:{args.volume_name}/" if args.volume_name else ""
         plaud_prefix = f"plaud:{args.plaud_account}:" if args.plaud_account else ""
-        for filename in args.filenames:
-            state_key = f"{plaud_prefix}{filename}"
-            if state_key in downloads and "removed" in downloads[state_key]:
-                del downloads[state_key]["removed"]
-                downloads[state_key]["updated_at"] = utc_now_iso()
-                cleared.append(filename)
-        save_state(state)
+        with state_lock():
+            state = load_state()
+            downloads = state["downloads"]
+            for filename in args.filenames:
+                state_key = f"{plaud_prefix}{vol_prefix}{filename}"
+                if state_key in downloads and "removed" in downloads[state_key]:
+                    del downloads[state_key]["removed"]
+                    downloads[state_key]["updated_at"] = utc_now_iso()
+                    cleared.append(filename)
+            save_state(state)
         print(json.dumps({"unremoved": cleared}, indent=2))
         return 0
     if args.command == "merge-candidates":
@@ -2398,22 +2663,28 @@ def main() -> int:
         save_config(config)
 
         # Scan new folder and remap state entries to match existing files
-        state = load_state()
-        downloads = state.get("downloads", {})
-        remapped = 0
-        for name, record in downloads.items():
-            expected = output_dir / output_name_for(name)
-            old_path = record.get("output_path", "")
-            if expected.exists():
-                if str(expected) != old_path:
+        with state_lock():
+            state = load_state()
+            downloads = state.get("downloads", {})
+            remapped = 0
+            for name, record in downloads.items():
+                # Only HiDock device names map through output_name_for();
+                # volume/plaud keys would raise (slashes, spaces) and their
+                # output paths are derived by their own status commands.
+                if name.startswith("vol:") or name.startswith("plaud:"):
+                    continue
+                expected = output_dir / output_name_for(name)
+                old_path = record.get("output_path", "")
+                if expected.exists():
+                    if str(expected) != old_path:
+                        record["output_path"] = str(expected)
+                        remapped += 1
+                elif not Path(old_path).exists() if old_path else True:
+                    # Old path gone and not in new folder either — clear the path
                     record["output_path"] = str(expected)
                     remapped += 1
-            elif not Path(old_path).exists() if old_path else True:
-                # Old path gone and not in new folder either — clear the path
-                record["output_path"] = str(expected)
-                remapped += 1
-        if remapped:
-            save_state(state)
+            if remapped:
+                save_state(state)
 
         print(json.dumps({"outputDir": str(output_dir), "configPath": str(DEFAULT_CONFIG_PATH.resolve()), "remapped": remapped}, indent=2))
         return 0
@@ -2531,7 +2802,12 @@ def main() -> int:
         print(json.dumps(result, indent=2))
         return 0
     if args.command == "volume-import":
-        result = volume_import_one(args.filename, args.volume_name, subpath=args.subpath)
+        result = volume_import_one(
+            args.filename,
+            args.volume_name,
+            subpath=args.subpath,
+            source_relpath=args.source_relpath,
+        )
         print(json.dumps(result, indent=2))
         return 0 if result.get("downloaded") else 1
     if args.command == "volume-import-new":

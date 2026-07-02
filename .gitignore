@@ -51,3 +51,4 @@ Windows-App/core/feedback_token.py
 buildServer.json
 
 .compound-engineering/*.local.yaml
+usb-extractor/state.json.lock
