@@ -372,34 +372,39 @@ final class HiDockViewModel: ObservableObject {
         if let day = heatmapSelectedDay {
             entries = entries.filter { recordingDay($0.recording) == day }
         }
-        entries.sort { a, b in
+        entries.sort { lhs, rhs in
+            // Descending order swaps the operands instead of negating the
+            // ascending result — `!result` returns true for BOTH (a,b) and
+            // (b,a) when keys compare equal (very common for Status), which
+            // violates sort's strict-weak-ordering requirement (undefined
+            // behavior / unstable row order).
+            let a = syncSortAscending ? lhs : rhs
+            let b = syncSortAscending ? rhs : lhs
             let ar = a.recording, br = b.recording
-            let result: Bool
             switch syncSortKey {
             case "status":
-                result = a.statusText.localizedCaseInsensitiveCompare(b.statusText) == .orderedAscending
+                return a.statusText.localizedCaseInsensitiveCompare(b.statusText) == .orderedAscending
             case "name":
-                result = ar.outputName.localizedCaseInsensitiveCompare(br.outputName) == .orderedAscending
+                return ar.outputName.localizedCaseInsensitiveCompare(br.outputName) == .orderedAscending
             case "created":
                 let aKey = "\(ar.createDate) \(ar.createTime)"
                 let bKey = "\(br.createDate) \(br.createTime)"
-                result = aKey < bKey
+                return aKey < bKey
             case "transcribed":
                 // Untranscribed (nil) sort to the bottom in the default
                 // (descending) order via distantPast.
-                result = (a.transcribedDate ?? .distantPast) < (b.transcribedDate ?? .distantPast)
+                return (a.transcribedDate ?? .distantPast) < (b.transcribedDate ?? .distantPast)
             case "duration":
-                result = ar.duration < br.duration
+                return ar.duration < br.duration
             case "size":
-                result = ar.length < br.length
+                return ar.length < br.length
             case "path":
-                result = ar.outputPath.localizedCaseInsensitiveCompare(br.outputPath) == .orderedAscending
+                return ar.outputPath.localizedCaseInsensitiveCompare(br.outputPath) == .orderedAscending
             case "device":
-                result = a.deviceName.localizedCaseInsensitiveCompare(b.deviceName) == .orderedAscending
+                return a.deviceName.localizedCaseInsensitiveCompare(b.deviceName) == .orderedAscending
             default:
-                result = ar.createDate < br.createDate
+                return ar.createDate < br.createDate
             }
-            return syncSortAscending ? result : !result
         }
         return entries
     }

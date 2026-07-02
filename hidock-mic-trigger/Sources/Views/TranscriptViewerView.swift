@@ -11,8 +11,11 @@ class SegmentAudioPlayer: ObservableObject {
 
     func play(audioPath: String, start: Double, end: Double, segmentId: String) {
         stop()
-        guard let url = URL(string: "file://\(audioPath)"),
-              let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        // fileURLWithPath, not URL(string: "file://…") — the latter returns
+        // nil for any path containing a space (un-percent-encoded), silently
+        // breaking playback for user-chosen folders like "My Recordings".
+        let url = URL(fileURLWithPath: audioPath)
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
         self.player = player
         player.currentTime = start
         player.play()

@@ -1685,11 +1685,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         p.standardOutput = outPipe
         p.standardError = Pipe()
 
+        // Line-buffer the CLI's stdout across chunks — availableData can
+        // split a line mid-marker ("Using HiDock audio device: …",
+        // "IN USE … holding HiDock"), and a missed marker leaves sticky
+        // wrong state (e.g. hidockRecordingActive stuck true, which then
+        // suppresses every HiDock probe). Same pattern as the extractor
+        // runners' lineBuffer. Buffer is mutated on the main queue only.
+        var lineBuffer = ""
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             DispatchQueue.main.async {
-                self?.handleCLIOutput(text)
+                lineBuffer += text
+                var lines: [String] = []
+                while let range = lineBuffer.range(of: "\n") {
+                    lines.append(String(lineBuffer[lineBuffer.startIndex..<range.lowerBound]))
+                    lineBuffer = String(lineBuffer[range.upperBound...])
+                }
+                if !lines.isEmpty {
+                    self?.handleCLIOutput(lines.joined(separator: "\n"))
+                }
             }
         }
 
@@ -1700,6 +1715,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.log("Process terminated with status \(status)")
 
                 outPipe.fileHandleForReading.readabilityHandler = nil
+
+                // Only mutate shared trigger state if this handler still
+                // owns self.process. stopTrigger/restartTrigger race this
+                // block via their own waitUntilExit continuations (both
+                // dispatch async to main with no ordering guarantee): if
+                // the continuation ran first it has already nil'd process
+                // — and restartTrigger may have started a NEW child.
+                // Without this guard, the stale handler would orphan that
+                // new process from the app's tracking, and (because the
+                // continuation also cleared stoppingIntentionally) treat
+                // a user-requested stop as a crash and auto-restart it.
+                guard proc === self.process else { return }
 
                 self.process = nil
                 self.processStartDate = nil
@@ -3473,13 +3500,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                process.waitUntilExit()
             } catch {
                 DispatchQueue.main.async { completion([]) }
                 return
             }
 
+            // Drain stdout BEFORE waitUntilExit — the clusters JSON can
+            // exceed the ~64 KB pipe buffer, and read-after-wait deadlocks
+            // (child blocks on write, we block in waitUntilExit). Same
+            // order as refreshMeetingExtraStats.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             guard process.terminationStatus == 0,
                   let clusters = try? JSONDecoder().decode([VoiceClusterData].self, from: data) else {
                 self.log("Voice training: failed to decode clusters (\(data.count) bytes)")
@@ -3529,8 +3560,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.standardError = Pipe()
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Read before waitUntilExit — read-after-wait deadlocks once
+                // the child's output exceeds the pipe buffer (see
+                // refreshMeetingExtraStats for the canonical ordering).
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
                 if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                     speakers = parsed.compactMap { dict in
                         guard let name = dict["name"] as? String else { return nil }
@@ -4467,11 +4501,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        // Summaries are matched by `contains(stem)` — same lookup
-        // findSummaryPath uses — because summary filenames sometimes
-        // have a date prefix or suffix from the prompt template.
+        // Summaries are matched by the "<stem> - <Type> - …" prefix — same
+        // lookup findSummaryPath uses. A `contains(stem)` sweep was
+        // dangerous: a merged file's summary name ("Merged-<childStem>-to-…")
+        // contains its children's stems, so removing a child recording
+        // deleted the merged recording's summary too.
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) {
-            for entry in entries where entry.contains(stem) {
+            for entry in entries where entry.hasPrefix(stem + " - ") {
                 try? FileManager.default.removeItem(atPath: "\(summariesDir)/\(entry)")
             }
         }
@@ -4802,8 +4838,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Read before waitUntilExit — read-after-wait deadlocks once
+                // the status JSON exceeds the pipe buffer (see
+                // refreshMeetingExtraStats for the canonical ordering).
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
                 if let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
                     DispatchQueue.main.async {
                         guard let self = self else { return }
@@ -6394,10 +6433,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             //      how Rec59 got missed: auto-transcribe fired ~14s
             //      before the status probe returned with the new file.)
             //
-            //   2. Backlog (`visibleEntries`) — rows that WERE already in
+            //   2. Backlog (`syncEntries`) — rows that WERE already in
             //      the table before this download run but remained
             //      untranscribed (e.g. user toggled auto-transcribe off
-            //      previously, or a prior transcription failed).
+            //      previously, or a prior transcription failed). Read
+            //      from syncEntries (ALL entries), not visibleEntries —
+            //      an active device / heatmap-day / status filter would
+            //      silently shrink the sweep to whatever the user
+            //      happens to be looking at.
             //
             // Fresh paths come first so the newest recordings jump the
             // queue — matches the default newest-first table sort.
@@ -6405,7 +6448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // lists isn't enqueued twice.
             if self.syncAutoTranscribe, ensureTranscriptionReady() {
                 let freshPaths = freshDownloads.map(\.outputPath)
-                let backlogPaths = self.viewModel.visibleEntries
+                let backlogPaths = self.syncEntries
                     .filter { $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
                     .map(\.recording.outputPath)
                 var seen = Set<String>()
@@ -6774,11 +6817,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 while process.isRunning && Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.5)
                 }
+                // Track whether WE killed the process (timeout) — same
+                // weKilledIt flag runExtractor uses. terminationReason
+                // alone can't tell a timeout kill from a genuine signal
+                // crash (SIGSEGV), and Python may trap SIGTERM and exit
+                // "normally" with 143.
+                var weKilledIt = false
                 if process.isRunning {
                     NSLog("runTranscription: killing hung process (pid %d) after %ds", process.processIdentifier, Int(timeout))
+                    weKilledIt = true
                     process.terminate()
                     Thread.sleep(forTimeInterval: 1)
                     if process.isRunning { process.interrupt() }
+                    // Escalate to SIGKILL after a short grace period —
+                    // mirrors cancelTranscription: the pipeline can be deep
+                    // inside a non-interruptible native call (MPS matmul,
+                    // torch model load) where SIGTERM/SIGINT never land,
+                    // and without SIGKILL the waitUntilExit below would
+                    // block this serial queue forever, wedging the whole
+                    // transcription queue.
+                    if process.isRunning {
+                        Thread.sleep(forTimeInterval: 2)
+                        if process.isRunning {
+                            NSLog("runTranscription: SIGKILL pid %d (didn't respond to SIGTERM/SIGINT)", process.processIdentifier)
+                            kill(process.processIdentifier, SIGKILL)
+                        }
+                    }
                     process.waitUntilExit()
                 } else {
                     NSLog("runTranscription: process exited with status %d", process.terminationStatus)
@@ -6799,7 +6863,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 if process.terminationStatus == 0 {
                     DispatchQueue.main.async { completion(.success(finalOut)) }
-                } else if process.terminationReason == .uncaughtSignal {
+                } else if weKilledIt {
                     let error = NSError(domain: "HiDockTranscription", code: -1, userInfo: [
                         NSLocalizedDescriptionKey: "Transcription timed out after \(Int(timeout))s"
                     ])
@@ -7023,20 +7087,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func enqueueTranscriptions(_ paths: [String]) {
-        // Items that have previously failed or been cancelled still live
-        // in `pendingTranscriptionQueue` so the Queue window can show
-        // their final state. Without resetting their status here, a user
+        // Items that have previously failed, been cancelled, or completed
+        // still live in `pendingTranscriptionQueue` so the Queue window can
+        // show their final state. Without resetting their status here, a user
         // who re-selects those rows and hits Transcribe Selected sees
         // nothing happen: the existing item isn't `.queued`, so
         // processNextInQueue skips it, and the duplicate guard below
         // stops us appending a fresh entry. Retry by flipping the
         // terminal status back to `.queued` and clearing progress so
-        // the retry shows a clean 0%.
+        // the retry shows a clean 0%. `.completed` is included so the
+        // "Already Transcribed → Re-transcribe?" flow actually re-runs
+        // in the same session instead of silently no-op'ing.
         transcriptionCancelled = false
         for path in paths {
             if let idx = pendingTranscriptionQueue.firstIndex(where: { $0.path == path }) {
                 let st = pendingTranscriptionQueue[idx].status
-                if st == .failed || st == .cancelled {
+                if st == .failed || st == .cancelled || st == .completed {
                     pendingTranscriptionQueue[idx].status = .queued
                     pendingTranscriptionQueue[idx].progress = 0
                     pendingTranscriptionQueue[idx].errorMessage = nil
@@ -7193,7 +7259,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.transcriptionProgress = 0
             self.viewModel.transcriptionStatus = ""
 
-            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
+            // Don't overwrite a user cancellation: cancelTranscription has
+            // already marked the item .cancelled (with its own message)
+            // before killing the subprocess — the failure completion for
+            // the killed process would otherwise flip it to .failed with
+            // a misleading error.
+            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }),
+               self.pendingTranscriptionQueue[idx].status != .cancelled {
                 switch result {
                 case .success:
                     self.pendingTranscriptionQueue[idx].status = .completed
@@ -7601,7 +7673,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard ensureTranscriptionReady() else { return }
         didRunLaunchAutoTranscribe = true
 
-        let untranscribed = viewModel.visibleEntries
+        // Sweep ALL entries, not visibleEntries — active device / day /
+        // status filters must not shrink the launch backlog.
+        let untranscribed = syncEntries
             .filter { $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
             .map(\.recording.outputPath)
         guard !untranscribed.isEmpty else { return }
@@ -7640,8 +7714,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let summariesDir = (NSHomeDirectory() as NSString).appendingPathComponent("HiDock/Summaries")
         let baseName = (mp3Name as NSString).deletingPathExtension
         guard let contents = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) else { return nil }
-        // Match summary files that contain the recording base name
-        if let match = contents.first(where: { $0.hasSuffix(".md") && $0.contains(baseName) }) {
+        // Match by the naming convention "<stem> - <Type> - …" (the same
+        // prefix `summaryType` parses). A `contains` match was too loose:
+        // a merged file's summary ("Merged-<childStem>-to-…") contains its
+        // children's stems, so every child row falsely flipped to
+        // "Summarised" pointing at the merged file's summary.
+        if let match = contents.first(where: { $0.hasSuffix(".md") && $0.hasPrefix(baseName + " - ") }) {
             return (summariesDir as NSString).appendingPathComponent(match)
         }
         return nil
@@ -7707,14 +7785,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         do {
             try p.run()
-            p.waitUntilExit()
         } catch {
             log("Build process failed to launch: \(error)")
             return false
         }
 
+        // Drain stderr BEFORE waitUntilExit — swiftc can emit >64 KB of
+        // errors, and read-after-wait deadlocks on a full pipe buffer
+        // (see refreshMeetingExtraStats for the canonical ordering).
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+
         if p.terminationStatus != 0 {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
                 log("Build failed:\n\(errStr)")
             }

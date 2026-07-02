@@ -131,6 +131,12 @@ final class UpdateChecker {
     /// Whether a download is currently in progress.
     private static var isDownloading = false
 
+    /// Retains the download-progress KVO observation for the active download.
+    /// NSKeyValueObservation invalidates itself on deinit, so a function-local
+    /// `let observation = …` dies as soon as the function returns and the
+    /// progress UI never updates. Cleared when the download completes.
+    private static var progressObservation: NSKeyValueObservation?
+
     /// Install pending update if one was downloaded. Call from applicationWillTerminate.
     /// Does NOT relaunch — next open gets the new version.
     static func installPendingUpdateIfNeeded() {
@@ -195,6 +201,7 @@ final class UpdateChecker {
         let task = URLSession.shared.downloadTask(with: downloadURL) { tempURL, response, error in
             DispatchQueue.main.async {
                 isDownloading = false
+                progressObservation = nil
 
                 guard let tempURL = tempURL, error == nil else {
                     NSLog("Update download failed: \(error?.localizedDescription ?? "unknown")")
@@ -218,7 +225,9 @@ final class UpdateChecker {
             }
         }
 
-        let observation = task.progress.observe(\.fractionCompleted) { progress, _ in
+        // Held in the static so it survives this function returning —
+        // see progressObservation.
+        progressObservation = task.progress.observe(\.fractionCompleted) { progress, _ in
             DispatchQueue.main.async {
                 let mb = Double(task.countOfBytesReceived) / (1024 * 1024)
                 let total = Double(task.countOfBytesExpectedToReceive) / (1024 * 1024)
@@ -227,7 +236,6 @@ final class UpdateChecker {
                 }
             }
         }
-        _ = observation
 
         task.resume()
     }
@@ -291,6 +299,7 @@ final class UpdateChecker {
         let task = URLSession.shared.downloadTask(with: downloadURL) { tempURL, response, error in
             DispatchQueue.main.async {
                 progressWindow.close()
+                progressObservation = nil
 
                 guard let tempURL = tempURL, error == nil else {
                     let alert = NSAlert()
@@ -313,8 +322,9 @@ final class UpdateChecker {
             }
         }
 
-        // Observe progress
-        let observation = task.progress.observe(\.fractionCompleted) { progress, _ in
+        // Observe progress — held in the static so it survives this
+        // function returning (see progressObservation).
+        progressObservation = task.progress.observe(\.fractionCompleted) { progress, _ in
             DispatchQueue.main.async {
                 progressBar.doubleValue = progress.fractionCompleted * 100
                 let mb = Double(task.countOfBytesReceived) / (1024 * 1024)
@@ -324,7 +334,6 @@ final class UpdateChecker {
                 }
             }
         }
-        _ = observation // retain
 
         task.resume()
     }

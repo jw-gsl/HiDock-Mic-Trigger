@@ -210,6 +210,11 @@ final class PlaudLoginWindowController: NSObject, WKNavigationDelegate, WKUIDele
         )
         win.center()
         win.title = "Sign in to Plaud"
+        // ARC holds a strong ref via `self.window` while close() would
+        // also release the window under the default
+        // isReleasedWhenClosed=true — the double-release crash pattern
+        // documented on the Trim window in AppDelegate.
+        win.isReleasedWhenClosed = false
         win.contentView = webView
         win.delegate = self
         self.window = win
@@ -242,6 +247,9 @@ final class PlaudLoginWindowController: NSObject, WKNavigationDelegate, WKUIDele
         )
         win.center()
         win.title = "Plaud Sign In"
+        // Same double-release guard as the main login window above —
+        // `childWindows` keeps a strong ref and complete() closes these.
+        win.isReleasedWhenClosed = false
         win.contentView = popup
         childWindows.append(win)
         win.makeKeyAndOrderFront(nil)
