@@ -923,10 +923,17 @@ def transfer_file_stream_to_path(
                     data = bytes(dev.read(IN_ENDPOINT, USB_READ_SIZE, timeout=timeout_ms))
                 except usb.core.USBTimeoutError:
                     timeouts += 1
-                    if received and timeouts >= 8:
-                        break
                     if timeouts >= 8:
-                        raise TimeoutError("timed out waiting for HiDock transfer stream")
+                        # Never promote a partial temp file to the final
+                        # path: a truncated MP3 there looks complete to the
+                        # transcription pipeline and to download-new (which
+                        # would re-request only the partial size and then
+                        # mark the file downloaded). Raising lets the
+                        # BaseException handler below delete the temp file
+                        # and the caller record last_error for a retry.
+                        raise TimeoutError(
+                            f"transfer stalled after {received} of {total_length} bytes for {filename}"
+                        )
                     continue
 
                 timeouts = 0
@@ -945,8 +952,15 @@ def transfer_file_stream_to_path(
                     last_seq = req
                     if not body:
                         if received:
-                            os.replace(str(tmp_path), str(out_path))
-                            return received
+                            # Empty frame is the device's end-of-transfer
+                            # terminator, but we only get here when fewer
+                            # than total_length bytes arrived (a complete
+                            # transfer returns below). Treat it as a failed
+                            # transfer rather than promoting a truncated
+                            # file to the final path.
+                            raise HiDockProtocolError(
+                                f"device ended transfer early: {received} of {total_length} bytes for {filename}"
+                            )
                         continue
                     if received + len(body) > total_length:
                         body = body[: total_length - received]
@@ -1177,6 +1191,12 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
             {
                 **recording,
                 "length": length_for_display,
+                # Authoritative device-catalog byte count. `length` above is
+                # a *display* value that prefers the local file's size (trim
+                # support) — a transfer must never use it as the expected
+                # length, or a partial local file caps the re-download at
+                # the partial size and gets marked complete.
+                "deviceLength": device_length,
                 "duration": duration,
                 "durationEstimated": duration_estimated,
                 "outputPath": str(output_path),
@@ -1233,6 +1253,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "createDate": ts.strftime("%Y/%m/%d") if ts else "",
                 "createTime": ts.strftime("%H:%M:%S") if ts else "",
                 "length": length,
+                "deviceLength": length,
                 "duration": duration,
                 "durationEstimated": duration_estimated,
                 "version": 0,
@@ -1584,7 +1605,12 @@ def download_new(
         try:
             result = download_one(
                 item["name"],
-                length=item["length"],
+                # item["length"] is the display value and reflects the local
+                # file's size when one exists (trim support) — using it here
+                # would truncate a re-download to a partial file's size and
+                # then mark it complete. deviceLength is the device catalog
+                # value; None makes download_one re-query the device.
+                length=item.get("deviceLength") or None,
                 output_dir=Path(status["outputDir"]),
                 timeout_ms=timeout_ms,
                 config_path=config_path,
@@ -1707,13 +1733,26 @@ def _scan_audio_files(mount_point: Path, subpath: str | None = None) -> list[Pat
     for entry in scan_root.rglob("*"):
         if entry.is_file() and entry.suffix.lower() in VOLUME_AUDIO_EXTENSIONS:
             files.append(entry)
-    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def _mtime(p: Path) -> float:
+        # A file can vanish between rglob and stat (volume ejected mid-scan);
+        # don't let one missing file turn the whole scan into a traceback.
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(files, key=_mtime, reverse=True)
 
 
 def _audio_file_metadata(audio_path: Path) -> dict:
     """Build a recording-like metadata dict from a filesystem audio file."""
     stat = audio_path.stat()
-    mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    # Local time, not UTC: these feed createDate/createTime strings shown
+    # verbatim in the app, and UTC shifts recordings by the timezone offset
+    # (a late-night recording even lands on the wrong day). Same fix as
+    # plaud_client._date_parts.
+    mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).astimezone()
 
     duration = stat.st_size / 16000.0  # rough estimate
     duration_estimated = True
@@ -1903,6 +1942,15 @@ def volume_import_one(
     downloads = state.get("downloads", {})
 
     if not source.is_file():
+        # volume_status scans recursively, so the file may live in a
+        # subdirectory of the scan root even though we're given only its
+        # basename. Fall back to the same recursive scan status used.
+        source = next(
+            (p for p in _scan_audio_files(mount, subpath) if p.name == filename),
+            source,
+        )
+
+    if not source.is_file():
         downloads[state_key] = {
             **downloads.get(state_key, {}),
             "downloaded": False,
@@ -1921,7 +1969,19 @@ def volume_import_one(
 
     stat = source.stat()
     out_path = output_dir / filename
-    shutil.copy2(str(source), str(out_path))
+    # Copy via a temp file so an interrupted copy (yanked volume, I/O error)
+    # never leaves a partial file at the final path, where it would look like
+    # a complete recording to the transcription pipeline.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".importing")
+    try:
+        shutil.copy2(str(source), str(tmp_path))
+        os.replace(str(tmp_path), str(out_path))
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     written = out_path.stat().st_size
 
     meta = _audio_file_metadata(source)
@@ -1965,23 +2025,39 @@ def volume_import_new(
 
     downloaded: list[dict] = []
     skipped: list[dict] = []
+    errors: list[dict] = []
     for item in status["recordings"]:
         if item["downloaded"]:
             skipped.append({"filename": item["name"], "reason": "already_downloaded"})
             continue
-        result = volume_import_one(
-            item["name"],
-            volume_name,
-            subpath=subpath,
-            output_dir=Path(status["outputDir"]),
-            config_path=config_path,
-            state_path=state_path,
-        )
+        if item.get("removed"):
+            # Same contract as HiDock download_new: a file the user removed
+            # via the Mac app must not be silently re-imported on the next
+            # auto-sync cycle.
+            skipped.append({"filename": item["name"], "reason": "user_removed"})
+            continue
+        try:
+            result = volume_import_one(
+                item["name"],
+                volume_name,
+                subpath=subpath,
+                output_dir=Path(status["outputDir"]),
+                config_path=config_path,
+                state_path=state_path,
+            )
+        except Exception as exc:
+            # One unreadable file (flaky SD card, permissions) must not abort
+            # the batch or the JSON output the desktop app parses.
+            message = str(exc)
+            _log_warn(f"volume import failed for {item['name']}: {message}")
+            errors.append({"filename": item["name"], "error": message})
+            continue
         downloaded.append(result)
 
     return {
         "connected": True,
         "outputDir": status["outputDir"],
+        "errors": errors,
         "downloaded": downloaded,
         "skipped": skipped,
     }

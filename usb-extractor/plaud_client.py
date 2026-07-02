@@ -695,21 +695,50 @@ def _get_mp3_url(recording_id: str, *, token: str, region: str) -> str | None:
     return str(url) if url else None
 
 
-def _download_url_to_path(url: str, out_path: Path) -> int:
+def _stream_response_to_path(res, out_path: Path) -> int:
+    """Stream an HTTP response body to out_path atomically.
+
+    Writes to a .downloading temp file and renames onto the final path only
+    after the full body arrived. A partial file at the final path would be
+    treated as a completed download forever by the existence checks in
+    status/download-new, so on any failure the temp file is removed and the
+    final path is left untouched.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".downloading")
     written = 0
-    with urllib.request.urlopen(req, timeout=60) as res, out_path.open("wb") as fh:
-        total = int(res.headers.get("Content-Length") or 0)
-        while True:
-            chunk = res.read(256 * 1024)
-            if not chunk:
-                break
-            fh.write(chunk)
-            written += len(chunk)
-            pct = int(written * 100 / total) if total else 0
-            print(f"PROGRESS:{written}:{total}:{pct}", file=sys.stderr, flush=True)
+    total = int(res.headers.get("Content-Length") or 0)
+    try:
+        with tmp_path.open("wb") as fh:
+            while True:
+                chunk = res.read(256 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                written += len(chunk)
+                pct = int(written * 100 / total) if total else 0
+                print(f"PROGRESS:{written}:{total}:{pct}", file=sys.stderr, flush=True)
+        if total and written != total:
+            # Early EOF from the server reads as a clean end-of-stream —
+            # without this check a short body would be renamed into place
+            # and marked downloaded.
+            raise PlaudError(
+                f"download incomplete: got {written} of {total} bytes for {out_path.name}"
+            )
+        os.replace(str(tmp_path), str(out_path))
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return written
+
+
+def _download_url_to_path(url: str, out_path: Path) -> int:
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=60) as res:
+        return _stream_response_to_path(res, out_path)
 
 
 def _download_api_to_path(recording_id: str, *, token: str, region: str, out_path: Path) -> int:
@@ -727,18 +756,8 @@ def _download_api_to_path(recording_id: str, *, token: str, region: str, out_pat
             ),
         },
     )
-    written = 0
-    with urllib.request.urlopen(req, timeout=60) as res, out_path.open("wb") as fh:
-        total = int(res.headers.get("Content-Length") or 0)
-        while True:
-            chunk = res.read(256 * 1024)
-            if not chunk:
-                break
-            fh.write(chunk)
-            written += len(chunk)
-            pct = int(written * 100 / total) if total else 0
-            print(f"PROGRESS:{written}:{total}:{pct}", file=sys.stderr, flush=True)
-    return written
+    with urllib.request.urlopen(req, timeout=60) as res:
+        return _stream_response_to_path(res, out_path)
 
 
 def _get_detail(recording_id: str, *, token: str, region: str) -> dict[str, Any]:
@@ -834,6 +853,7 @@ def download_new(output_dir: Path, state: dict[str, Any], *, account_id: str) ->
 
     downloaded: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     for item in status["recordings"]:
         if item["downloaded"]:
             skipped.append({"filename": item["name"], "reason": "already_downloaded"})
@@ -844,6 +864,24 @@ def download_new(output_dir: Path, state: dict[str, Any], *, account_id: str) ->
         print(f"FILE_START:{item['name']}", file=sys.stderr, flush=True)
         try:
             downloaded.append(download_one(item["name"], output_dir, state, account_id=account_id))
+        except Exception as exc:
+            # One failed recording must not abort the batch: the remaining
+            # files still get their chance, the CLI still emits JSON (the
+            # desktop app parses stdout), and the failure is recorded so
+            # status can surface it.
+            message = str(exc)
+            print(f"[plaud] ERROR: download failed for {item['name']}: {message}", file=sys.stderr, flush=True)
+            errors.append({"filename": item["name"], "error": message})
+            downloads = state.setdefault("downloads", {})
+            state_key = _state_key(account_id, item["name"])
+            downloads[state_key] = {
+                **downloads.get(state_key, {}),
+                "downloaded": False,
+                "last_error": message,
+                "updated_at": _now_iso(),
+                "source": "plaud",
+                "account_id": account_id,
+            }
         finally:
             print(f"FILE_DONE:{item['name']}", file=sys.stderr, flush=True)
 
@@ -851,5 +889,6 @@ def download_new(output_dir: Path, state: dict[str, Any], *, account_id: str) ->
         "connected": True,
         "outputDir": status["outputDir"],
         "downloaded": downloaded,
+        "errors": errors,
         "skipped": skipped,
     }
