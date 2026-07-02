@@ -119,6 +119,107 @@ def _run_window(model, audio_window: np.ndarray, offset_s: float):
     return turns
 
 
+def _stitch_windows(
+    windows: list[tuple[float, list[tuple[float, float, str]]]],
+    overlap_sec: float = _OVERLAP_SEC,
+) -> list[tuple[float, float, str]]:
+    """Join per-window Sortformer turns into one globally-labelled list.
+
+    Sortformer assigns speaker IDs independently per window — window 2's
+    `speaker_0` may be window 1's `speaker_1`. This performs the
+    majority-overlap join the windowing scheme relies on:
+
+    1. **Label remapping** — for each window after the first, pair its raw
+       labels with the previous windows' (already-remapped) global labels
+       by maximum total temporal overlap of same-speaker turns inside the
+       `overlap_sec` region at the window start (greedy one-to-one, largest
+       overlap first). Raw labels with no overlap evidence get fresh global
+       labels — genuinely new speakers stay distinct.
+    2. **De-duplication** — both windows diarized the overlap region, so
+       turns there would otherwise be emitted twice. Earlier windows keep
+       the region up to the overlap midpoint; the new window keeps it from
+       the midpoint on (turns straddling the midpoint are clipped). Each
+       moment of audio is covered exactly once; the same-speaker merge in
+       `diarize()` re-joins turns split at the midpoint.
+
+    Args:
+        windows: list of (offset_s, turns) per window, in chronological
+            order. `turns` use absolute timestamps and raw per-window
+            speaker labels (as returned by `_run_window`).
+        overlap_sec: size of the inter-window overlap region.
+
+    Returns:
+        list of (start_s, end_s, global_label) tuples sorted by start.
+        Global labels are synthetic (`"spk0"`, `"spk1"`, …) — `diarize()`
+        renames them to "Speaker N" by first appearance, so only their
+        cross-window consistency matters.
+    """
+    if not windows:
+        return []
+
+    next_global = 0
+
+    def fresh() -> str:
+        nonlocal next_global
+        label = f"spk{next_global}"
+        next_global += 1
+        return label
+
+    first_turns = sorted(windows[0][1])
+    mapping: dict[str, str] = {}
+    for _, _, raw in first_turns:
+        if raw not in mapping:
+            mapping[raw] = fresh()
+    stitched: list[tuple[float, float, str]] = [
+        (s, e, mapping[raw]) for s, e, raw in first_turns
+    ]
+
+    for offset, turns in windows[1:]:
+        turns = sorted(turns)
+        ov_start = offset
+        ov_end = offset + overlap_sec
+        mid = (ov_start + ov_end) / 2.0
+
+        # Total same-time overlap between each (raw label, global label)
+        # pair inside the overlap region.
+        scores: dict[tuple[str, str], float] = {}
+        for gs, ge, glab in stitched:
+            cs, ce = max(gs, ov_start), min(ge, ov_end)
+            if ce <= cs:
+                continue
+            for ns, ne, raw in turns:
+                o = min(ce, ne) - max(cs, ns)
+                if o > 0:
+                    scores[(raw, glab)] = scores.get((raw, glab), 0.0) + o
+
+        # Greedy one-to-one assignment, largest overlap first
+        # (deterministic tie-break on labels).
+        mapping = {}
+        used_globals: set[str] = set()
+        for (raw, glab), _score in sorted(
+            scores.items(), key=lambda kv: (-kv[1], kv[0])
+        ):
+            if raw in mapping or glab in used_globals:
+                continue
+            mapping[raw] = glab
+            used_globals.add(glab)
+        for _, _, raw in turns:
+            if raw not in mapping:
+                mapping[raw] = fresh()
+
+        # De-duplicate the overlap: earlier windows own [.., mid),
+        # this window owns [mid, ..).
+        stitched = [
+            (gs, min(ge, mid), glab) for gs, ge, glab in stitched if gs < mid
+        ]
+        stitched.extend(
+            (max(ns, mid), ne, mapping[raw]) for ns, ne, raw in turns if ne > mid
+        )
+
+    stitched.sort(key=lambda t: (t[0], t[1]))
+    return stitched
+
+
 def _pick_speaker_by_overlap(span_start: float, span_end: float, turns) -> str | None:
     """Return the speaker label whose turn overlaps `[span_start, span_end]`
     the most. Falls back to nearest turn centre when nothing overlaps —
@@ -323,22 +424,25 @@ def diarize(
     model = _load_diarizer()
 
     # Window long audio — Sortformer runs out of memory on multi-hour
-    # files in one shot. 300s windows with 30s overlap for speaker
-    # stitching across windows (simple majority-overlap join).
+    # files in one shot. 300s windows with 30s overlap; per-window
+    # speaker labels are then reconciled and de-duplicated by
+    # `_stitch_windows` (majority-overlap join in the overlap region).
     all_turns: list[tuple[float, float, str]] = []
     step = int((_WINDOW_SEC - _OVERLAP_SEC) * 16000)
     win_samples = int(_WINDOW_SEC * 16000)
     if len(audio) <= win_samples:
         all_turns = _run_window(model, audio, 0.0)
     else:
+        windows: list[tuple[float, list[tuple[float, float, str]]]] = []
         for start in range(0, len(audio), step):
             end = min(len(audio), start + win_samples)
             window = audio[start:end]
             offset = start / 16000.0
             turns = _run_window(model, window, offset)
-            all_turns.extend(turns)
+            windows.append((offset, turns))
             if end >= len(audio):
                 break
+        all_turns = _stitch_windows(windows, overlap_sec=_OVERLAP_SEC)
 
     if not all_turns:
         # Sortformer returned nothing — fall through to a single-speaker

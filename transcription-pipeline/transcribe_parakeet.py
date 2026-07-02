@@ -72,12 +72,14 @@ signal.signal(signal.SIGINT, _sigterm_handler)
 
 
 def progress(pct: int) -> None:
-    """Emit a progress line the Swift app parses."""
-    print(f"PROGRESS: {pct}", flush=True)
+    """Emit a PROGRESS line on stderr (matches transcribe.py — the Swift
+    parser reads stderr and expects 'PROGRESS:{pct}' with no space)."""
+    print(f"PROGRESS:{pct}", file=sys.stderr, flush=True)
 
 
-def stage(current: int, total: int, label: str) -> None:
-    print(f"STAGE: {current}/{total} {label}", flush=True)
+def stage(current: int, total: int, label: str = "") -> None:
+    """Emit a STAGE line on stderr ('STAGE:{cur}/{total}:{label}')."""
+    print(f"STAGE:{current}/{total}:{label}", file=sys.stderr, flush=True)
 
 
 def _load_parakeet():
@@ -128,6 +130,8 @@ def transcribe_file(
     _IN_FLIGHT = {"key": entry_key}
 
     start_time = time.monotonic()
+    strip_map = None            # stripped→original time map (set when silence stripped)
+    tmp_strip_path: str | None = None  # temp WAV holding the stripped audio
     try:
         total_stages = 5 if diarize else 4
         stage(1, total_stages, "Loading model")
@@ -140,17 +144,19 @@ def transcribe_file(
         stage(2, total_stages, "Transcribing")
         transcribe_path = str(mp3_path)
         import tempfile
-        tmp = None
         try:
             from shared.audio_utils import load_audio
-            from shared.diarize_lite import _replace_silence_with_padding
+            from shared.diarize_lite import strip_silence_with_map
             import soundfile as sf
             raw_audio = load_audio(str(mp3_path), sr=16000)
-            processed = _replace_silence_with_padding(raw_audio, sr=16000)
+            processed, candidate_map = strip_silence_with_map(raw_audio, sr=16000)
             if len(processed) < len(raw_audio) * 0.95:
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp.close()
                 sf.write(tmp.name, processed, 16000)
+                tmp_strip_path = tmp.name
                 transcribe_path = tmp.name
+                strip_map = candidate_map
                 print(
                     f"Silence stripped: {len(raw_audio) / 16000:.0f}s → "
                     f"{len(processed) / 16000:.0f}s",
@@ -163,14 +169,22 @@ def transcribe_file(
         result = model.transcribe(transcribe_path)
         progress(85)
 
-        if tmp is not None:
+        if tmp_strip_path is not None:
             try:
-                Path(tmp.name).unlink()
+                Path(tmp_strip_path).unlink()
             except OSError:
                 pass
+            tmp_strip_path = None
 
         text = result.text.strip()
         segments = _parakeet_result_to_segments(result)
+
+        # ASR ran on the silence-stripped timeline; remap the timestamps back
+        # to the original audio before diarization / sidecar writing, both of
+        # which reference the original file.
+        if strip_map is not None:
+            from shared.diarize_lite import remap_segments
+            remap_segments(segments, strip_map)
 
         # Whisper-Guard still applies — Parakeet's hallucination modes are
         # different but dedup/noise-phrase filtering remains useful.
@@ -317,6 +331,15 @@ def transcribe_file(
             "error": str(e),
             "backend": "parakeet-mlx",
         }
+
+    finally:
+        # Never leak the stripped temp WAV — failed runs previously left it
+        # behind (~115 MB per hour-long recording).
+        if tmp_strip_path is not None:
+            try:
+                Path(tmp_strip_path).unlink()
+            except OSError:
+                pass
 
 
 def acquire_lock():

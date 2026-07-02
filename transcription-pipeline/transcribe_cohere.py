@@ -90,11 +90,14 @@ signal.signal(signal.SIGINT, _sigterm_handler)
 
 
 def progress(pct: int) -> None:
-    print(f"PROGRESS: {pct}", flush=True)
+    """Emit a PROGRESS line on stderr (matches transcribe.py — the Swift
+    parser reads stderr and expects 'PROGRESS:{pct}' with no space)."""
+    print(f"PROGRESS:{pct}", file=sys.stderr, flush=True)
 
 
-def stage(current: int, total: int, label: str) -> None:
-    print(f"STAGE: {current}/{total} {label}", flush=True)
+def stage(current: int, total: int, label: str = "") -> None:
+    """Emit a STAGE line on stderr ('STAGE:{cur}/{total}:{label}')."""
+    print(f"STAGE:{current}/{total}:{label}", file=sys.stderr, flush=True)
 
 
 def _load_cohere_model():
@@ -164,9 +167,10 @@ def _align_text_to_audio(
     model = AutoModelForCTC.from_pretrained(aligner_id).to(device)
     model.eval()
 
-    # Tokenise text into the aligner's vocabulary
-    with processor.as_target_processor():
-        labels = processor(text).input_ids
+    # Tokenise text into the aligner's vocabulary.
+    # (processor.as_target_processor() was removed in transformers v5, which
+    # this backend requires — call the tokenizer directly instead.)
+    labels = processor.tokenizer(text).input_ids
 
     # Run CTC forward pass
     input_values = processor(audio, sampling_rate=sr, return_tensors="pt").input_values.to(device)
@@ -256,9 +260,9 @@ def transcribe_file(
 
         stage(2, total_stages, "Loading and preparing audio")
         from shared.audio_utils import load_audio
-        from shared.diarize_lite import _replace_silence_with_padding
+        from shared.diarize_lite import remap_segments, strip_silence_with_map
         audio = load_audio(str(mp3_path), sr=16000)
-        audio = _replace_silence_with_padding(audio, sr=16000)
+        audio, strip_map = strip_silence_with_map(audio, sr=16000)
 
         progress(20)
         stage(3, total_stages, "Transcribing (Cohere)")
@@ -272,6 +276,11 @@ def transcribe_file(
 
         stage(4, total_stages, "Aligning timestamps")
         segments = _align_text_to_audio(text, audio, 16000, language)
+        # Alignment ran against the silence-stripped audio, so its timestamps
+        # are on the compressed timeline. Remap back to the original audio
+        # before diarization / sidecar writing (both reference the original
+        # file). The map is the identity where nothing was stripped.
+        segments = remap_segments(segments, strip_map)
         progress(80)
 
         # Whisper-Guard is model-agnostic text cleanup, safe to apply to Cohere output too

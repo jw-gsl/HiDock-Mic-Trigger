@@ -169,6 +169,8 @@ def transcribe_file(
     _IN_FLIGHT = {"key": entry_key}
 
     start_time = time.monotonic()
+    strip_map = None            # stripped→original time map (set when silence stripped)
+    tmp_strip_path: str | None = None  # temp WAV holding the stripped audio
     try:
         _log(_ET("TRANSCRIPTION_STARTED"), file_path=str(mp3_path),
              metadata={"model": config.WHISPER_MODEL})
@@ -200,16 +202,19 @@ def transcribe_file(
         transcribe_path = str(mp3_path)
         if asr_backend == "whisper":
             try:
-                from shared.diarize_lite import _replace_silence_with_padding
+                from shared.diarize_lite import strip_silence_with_map
                 from shared.audio_utils import load_audio
                 import soundfile as sf
                 import tempfile
                 raw_audio = load_audio(str(mp3_path), sr=16000)
-                processed = _replace_silence_with_padding(raw_audio, sr=16000)
+                processed, candidate_map = strip_silence_with_map(raw_audio, sr=16000)
                 if len(processed) < len(raw_audio) * 0.95:  # Only use if >5% was stripped
                     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    tmp.close()
                     sf.write(tmp.name, processed, 16000)
+                    tmp_strip_path = tmp.name
                     transcribe_path = tmp.name
+                    strip_map = candidate_map
                     print(f"Silence stripped: {len(raw_audio)/16000:.0f}s → {len(processed)/16000:.0f}s", file=sys.stderr)
             except Exception as e:
                 print(f"Silence stripping skipped: {e}", file=sys.stderr)
@@ -254,12 +259,22 @@ def transcribe_file(
             active_model_name = config.WHISPER_MODEL
         progress(85)
 
-        # Clean up temp file
-        if transcribe_path != str(mp3_path):
+        # Clean up temp file (finally block also covers failure paths)
+        if tmp_strip_path is not None:
             try:
-                Path(transcribe_path).unlink()
+                Path(tmp_strip_path).unlink()
             except OSError:
                 pass
+            tmp_strip_path = None
+
+        # If we transcribed a silence-stripped temp WAV, the ASR timestamps
+        # are on the compressed timeline. Remap them back to the original
+        # audio NOW — diarization runs on the original file and the
+        # .srt/_whisper.json/_diarized.json sidecars reference it, so
+        # un-remapped timestamps would drift early by the stripped amount.
+        if strip_map is not None:
+            from shared.diarize_lite import remap_segments
+            remap_segments(result.get("segments", []), strip_map)
 
         text = result["text"].strip()
 
@@ -364,10 +379,14 @@ def transcribe_file(
         # a no-op if there are no timings at all.
         try:
             from shared.srt_writer import srt_path_for, write_srt
+            # Gate on actual diarized SEGMENTS (like the .md writer does) —
+            # a truthy dict with empty segments would otherwise suppress the
+            # whisper-segment fallback and skip the SRT entirely.
+            _has_diarized = bool(diarized_result and diarized_result.get("segments"))
             write_srt(
                 srt_path_for(transcript_path),
-                diarized_result=diarized_result,
-                whisper_segments=result.get("segments", []) if not diarized_result else None,
+                diarized_result=diarized_result if _has_diarized else None,
+                whisper_segments=None if _has_diarized else result.get("segments", []),
             )
         except Exception as e:
             # SRT is a best-effort sidecar; never let it break the main transcript.
@@ -491,6 +510,15 @@ def transcribe_file(
             "transcribed": False,
             "error": str(e),
         }
+
+    finally:
+        # Never leak the stripped temp WAV (~115 MB/hour of audio) —
+        # failed runs previously left it behind in the temp dir.
+        if tmp_strip_path is not None:
+            try:
+                Path(tmp_strip_path).unlink()
+            except OSError:
+                pass
 
 
 def acquire_lock():
@@ -998,10 +1026,13 @@ def cmd_merge_rediarize(args):
     )
     try:
         from shared.srt_writer import srt_path_for, write_srt
+        # Same gating as transcribe_file: only treat diarization as usable
+        # when it actually produced segments, else fall back to stitched.
+        _has_diarized = bool(diarized_result and diarized_result.get("segments"))
         write_srt(
             srt_path_for(merged_md),
-            diarized_result=diarized_result,
-            whisper_segments=stitched_segments if not diarized_result else None,
+            diarized_result=diarized_result if _has_diarized else None,
+            whisper_segments=None if _has_diarized else stitched_segments,
         )
     except Exception as exc:
         print(f"SRT export failed (non-fatal): {exc}", file=sys.stderr)

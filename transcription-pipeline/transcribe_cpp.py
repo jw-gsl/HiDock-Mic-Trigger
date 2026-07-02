@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,9 +26,53 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import config  # noqa: E402
-from state import load_state, save_state  # noqa: E402
+from state import load_state, save_state, update_state  # noqa: E402
 
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
+
+# Tracks the currently in-flight transcription so the SIGTERM handler can
+# flip its state from "in_progress" to "failed" before the process exits.
+# Without this, a timeout kill leaves state stuck in "in_progress" and the
+# app can never re-queue the recording. Set by transcribe_file, cleared on
+# completion. (Mirrors transcribe.py.)
+_IN_FLIGHT: dict[str, str] | None = None
+
+
+def _sigterm_handler(signum, frame):
+    """Mark the in-flight transcription as failed before exiting.
+
+    Called when the parent process (Swift app) terminates us due to timeout.
+    Updating the state here means a re-queue from the UI will actually run,
+    instead of seeing stale 'in_progress' and either skipping or deadlocking.
+    """
+    global _IN_FLIGHT
+    try:
+        if _IN_FLIGHT is not None:
+            key = _IN_FLIGHT["key"]
+
+            def _mark_failed(state: dict) -> None:
+                existing = state.setdefault("transcriptions", {}).get(key, {})
+                state["transcriptions"][key] = {
+                    **existing,
+                    "status": "failed",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "last_error": f"Terminated by signal {signum} (likely timeout)",
+                }
+
+            # Prefer the locked read-modify-write; if the lock is busy fall
+            # back to an unlocked write — a possibly-racy "failed" beats a
+            # permanently stuck "in_progress".
+            if not update_state(_mark_failed, timeout=1.0):
+                state = load_state()
+                _mark_failed(state)
+                save_state(state)
+    except Exception:
+        pass
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT, _sigterm_handler)
 
 # whisper.cpp GGML model settings
 GGML_MODEL_FILENAME = "ggml-large-v3-turbo-q5_0.bin"
@@ -139,6 +184,11 @@ def transcribe_file(
         "last_error": None,
     }
     save_state(state)
+
+    # Register with the SIGTERM handler so state flips to "failed" instead of
+    # staying stuck at "in_progress" if the parent app kills us via timeout.
+    global _IN_FLIGHT
+    _IN_FLIGHT = {"key": entry_key}
 
     start_time = time.monotonic()
     try:
@@ -259,6 +309,7 @@ def transcribe_file(
 
         progress(100)
 
+        _IN_FLIGHT = None
         return {
             "file": str(mp3_path),
             "transcript_path": str(transcript_path),
@@ -283,6 +334,7 @@ def transcribe_file(
         }
         save_state(state)
 
+        _IN_FLIGHT = None
         return {
             "file": str(mp3_path),
             "transcript_path": None,
@@ -483,15 +535,56 @@ def cmd_status(_args):
     transcripts_dir = config.RAW_TRANSCRIPTS_DIR
     recordings_dir = config.RECORDINGS_DIR
 
+    # Build lookup: mp3 filename -> transcription info.
+    # Verify the transcript file still exists on disk before reporting
+    # `transcribed: True`. Without this check, removing a recording in
+    # the Mac app deletes the .md/.srt/.json files but leaves this
+    # state.json entry stuck at status="completed", so the desktop UI
+    # keeps flipping the row back to "Transcribed" — overriding the
+    # "Removed" status the user just set. This guard reports the row
+    # as not-transcribed once the artifact's gone. (Mirrors transcribe.py.)
     lookup = {}
+    stale_keys: list[str] = []
     for key, info in state.get("transcriptions", {}).items():
+        completed = info.get("status") == "completed"
+        transcript_path = info.get("transcript_path")
+        path_present = bool(transcript_path) and Path(transcript_path).exists()
+        is_transcribed = completed and path_present
+        if completed and not path_present:
+            stale_keys.append(key)
         lookup[key] = {
             "status": info.get("status", "unknown"),
-            "transcript_path": info.get("transcript_path"),
-            "transcribed": info.get("status") == "completed",
+            "transcript_path": transcript_path,
+            "transcribed": is_transcribed,
             "duration_s": info.get("duration_s"),
             "model": info.get("model"),
         }
+
+    # Opportunistically prune state entries whose transcript files have
+    # been deleted out-of-band (most often by the Mac app's Remove
+    # action). Uses the locked read-modify-write so a concurrent
+    # transcription's completion save can't be clobbered (and vice
+    # versa); each entry is re-verified under the lock in case it was
+    # re-transcribed since the scan above. Best-effort — on lock timeout
+    # we skip the prune rather than blocking status; the in-memory
+    # `lookup` already reflects truth for this call.
+    if stale_keys:
+        def _prune(s: dict) -> None:
+            transcriptions = s.get("transcriptions", {})
+            for k in stale_keys:
+                info = transcriptions.get(k)
+                if not info or info.get("status") != "completed":
+                    continue  # changed since scan (e.g. re-queued) — keep
+                tp = info.get("transcript_path")
+                if tp and Path(tp).exists():
+                    continue  # transcript reappeared — keep
+                transcriptions.pop(k, None)
+
+        if not update_state(_prune):
+            print(
+                f"WARN: state lock busy; skipped pruning {len(stale_keys)} stale entries",
+                file=sys.stderr,
+            )
 
     if recordings_dir.exists() and transcripts_dir.exists():
         for mp3 in recordings_dir.iterdir():
