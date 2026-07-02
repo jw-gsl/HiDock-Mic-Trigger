@@ -49,3 +49,5 @@ Windows-App/core/feedback_token.py
 
 # SourceKit-LSP build context (machine-specific, absolute paths)
 buildServer.json
+
+.compound-engineering/*.local.yaml
