@@ -1217,8 +1217,8 @@ class MainWindow(QMainWindow):
     def _update_tray_tooltip(self):
         if self._tray_icon:
             parts = ["HiDock Tools"]
-            if self.mic_trigger.is_running():
-                parts.append("Trigger: Active" if self.mic_trigger.is_holding() else "Trigger: Waiting")
+            if self.mic_trigger.is_running:
+                parts.append("Trigger: Active" if self.mic_trigger.is_holding else "Trigger: Waiting")
             else:
                 parts.append("Trigger: Stopped")
             total = len(self._entries)
@@ -3125,8 +3125,26 @@ class MainWindow(QMainWindow):
             self._refresh_device_strip()
             self._refresh_device_filter_combo()
 
+        def _on_plaud_paired(account):
+            # Persist the paired Plaud device (the dialog saved the account
+            # tokens; without this the device list in QSettings never gains
+            # the Plaud entry and Plaud sync never runs).
+            device = PairedDevice.plaud(
+                account_id=account.account_id,
+                display_name=account.display_name or "Plaud",
+                email=account.email,
+                region=account.region or "us",
+            )
+            self._paired_devices = [
+                d for d in self._paired_devices if d.device_id != device.device_id
+            ]
+            self._paired_devices.append(device)
+            save_paired_devices(self.settings, self._paired_devices)
+            dlg.set_devices(self._paired_devices)
+
         dlg.deviceForgotten.connect(_on_forget)
         dlg.volumePaired.connect(_on_pair_volume)
+        dlg.plaudPaired.connect(_on_plaud_paired)
         dlg.plaudSignedOut.connect(_on_plaud_signed_out)
         dlg.pair_widget.scanRequested.connect(_on_scan_volumes)
         try:

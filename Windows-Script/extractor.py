@@ -862,7 +862,18 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
     for name, stored in downloads.items():
         if name in seen_names:
             continue
-        output_path = Path(stored.get("output_path", output_path_for(name, output_dir)))
+        # Volume/Plaud downloads share state.json under prefixed keys
+        # ("vol:<name>/<file>", "plaud:<acct>:<id>") that are not valid HiDock
+        # filenames — they belong to volume-status / plaud-status, and feeding
+        # them to output_path_for()/output_name_for() raises HiDockProtocolError.
+        if name.startswith("vol:") or name.startswith("plaud:"):
+            continue
+        # Lazy fallback: dict.get() evaluates its default eagerly, which would
+        # validate `name` even when a stored output_path makes that redundant.
+        if "output_path" in stored:
+            output_path = Path(stored["output_path"])
+        else:
+            output_path = output_path_for(name, output_dir)
         local_exists = output_path.exists()
         length = int(stored.get("length", 0))
         items.append(
