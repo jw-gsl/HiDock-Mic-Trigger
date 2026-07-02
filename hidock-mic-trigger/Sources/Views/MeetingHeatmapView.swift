@@ -174,19 +174,20 @@ struct MeetingHeatmapView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             header
+            // The detail line renders in BOTH modes: it disappearing was half
+            // of the visible "jump" when the LED view loaded (everything below
+            // shifted up by one caption row). In LED mode it still shows the
+            // locked day filter + Clear button.
+            detailLine(activity: activity, ledMode: showLED)
             if showLED {
                 // Keep the calendar chrome — month labels on top, Mon–Sun
                 // labels down the left — and drive only the grid with the LED
-                // ticker (text in the Tue–Sat band).
-                VStack(alignment: .leading, spacing: gap) {
-                    monthLabelRow(labels)
-                    HStack(alignment: .top, spacing: gap) {
-                        weekdayGutter
-                        LEDMatrixView(matrix: ledMatrix, settings: ledSettings)
-                    }
-                }
+                // ticker (text in the Tue–Sat band). Geometry must mirror the
+                // heatmap exactly (same trailing weeks, same label positions,
+                // heatmap day colours as the unlit dots) so the switch doesn't
+                // visibly move or drop any pixels.
+                ledPanel(columns: columns, labels: labels, activity: activity)
             } else {
-                detailLine(activity: activity)
                 ScrollView(.horizontal, showsIndicators: false) {
                     ScrollViewReader { proxy in
                         VStack(alignment: .leading, spacing: gap) {
@@ -196,6 +197,55 @@ struct MeetingHeatmapView: View {
                         .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: LED panel
+
+    /// LED mode with heatmap-identical geometry: shows the trailing weeks that
+    /// fit (what the heatmap's scrolled-to-trailing view shows), positions the
+    /// month labels for exactly those weeks, and feeds the day colours in as
+    /// the LED grid's unlit state.
+    private func ledPanel(columns: [[Date?]], labels: [String?], activity: [Date: DayActivity]) -> some View {
+        let pitch = cell + gap
+        let gridHeight = CGFloat(7) * pitch - gap
+        let panelHeight = 11 + gap + gridHeight   // month row + spacing + grid
+        return GeometryReader { geo in
+            let ledWidth = geo.size.width - 30 - gap          // minus weekday gutter
+            let fitCols = max(8, Int((ledWidth + gap) / pitch))
+            let cols = min(labels.count, fitCols)
+            // When the full year doesn't fit, the heatmap sits scrolled to
+            // trailing (right edge flush). Right-align the LED grid the same
+            // way so the dots occupy identical positions in both modes.
+            let leadPad = cols < labels.count ? max(0, ledWidth - (CGFloat(cols) * pitch - gap)) : 0
+            let visLabels = Array(labels.suffix(cols))
+            let visColumns = Array(columns.suffix(cols))
+            VStack(alignment: .leading, spacing: gap) {
+                monthLabelRow(visLabels)
+                    .padding(.leading, leadPad)
+                HStack(alignment: .top, spacing: gap) {
+                    weekdayGutter
+                    LEDMatrixView(
+                        matrix: ledMatrix,
+                        settings: ledSettings,
+                        fixedCols: cols,
+                        background: ledBackground(columns: visColumns, activity: activity)
+                    )
+                    .padding(.leading, leadPad)
+                }
+            }
+        }
+        .frame(height: panelHeight)
+    }
+
+    /// Heatmap day colours per visible column ([col][row]) for the LED grid's
+    /// unlit dots — identical fills to cellView, including clear future days.
+    private func ledBackground(columns: [[Date?]], activity: [Date: DayActivity]) -> [[Color]] {
+        columns.map { week in
+            week.map { date in
+                guard let d = date else { return Color.clear }
+                return fill(level(activity[d]?.count ?? 0))
             }
         }
     }
@@ -249,6 +299,7 @@ struct MeetingHeatmapView: View {
                 Button {
                     viewModel.heatmapLEDMode.toggle()
                     ledSettings.defaultView = viewModel.heatmapLEDMode ? .led : .heatmap
+                    hoveredDate = nil   // hover is inert in LED mode; don't pin a stale day
                 } label: {
                     Image(systemName: viewModel.heatmapLEDMode ? "rectangle.grid.1x2.fill" : "lightbulb")
                         .font(.caption2)
@@ -271,9 +322,12 @@ struct MeetingHeatmapView: View {
 
     /// Always-visible readout that updates as the pointer moves over the grid.
     /// Shows the exact date for every day, including zero-meeting days.
-    private func detailLine(activity: [Date: DayActivity]) -> some View {
+    private func detailLine(activity: [Date: DayActivity], ledMode: Bool = false) -> some View {
         // Hover gives a transient preview; a clicked day stays locked. Show the
-        // hovered day if hovering, else the locked day, else a hint.
+        // hovered day if hovering, else the locked day, else a hint. In LED
+        // mode hover/click are inactive, so the hint is dropped — but the row
+        // itself always renders (fixed caption height) so toggling modes never
+        // shifts the grid below it.
         let activeDay = hoveredDate ?? viewModel.heatmapSelectedDay
         let locked = viewModel.heatmapSelectedDay
         return HStack(spacing: 8) {
@@ -284,7 +338,7 @@ struct MeetingHeatmapView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             } else {
-                Text("Hover a day for details · click to filter the list")
+                Text(ledMode ? " " : "Hover a day for details · click to filter the list")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
