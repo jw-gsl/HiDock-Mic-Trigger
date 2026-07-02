@@ -9,17 +9,21 @@ from config import HIDOCK_ROOT
 
 STATE_PATH = HIDOCK_ROOT / "transcription-pipeline" / "state.json"
 
-_DEFAULT_STATE = {"transcriptions": {}}
+def _default_state() -> dict:
+    # Fresh dict per call: a shared module-level default would alias its
+    # inner "transcriptions" dict across callers, so mutations would leak
+    # between loads.
+    return {"transcriptions": {}}
 
 
 def load_state() -> dict:
     """Load transcription state from disk, returning default if missing/corrupt."""
     if not STATE_PATH.exists():
-        return dict(_DEFAULT_STATE)
+        return _default_state()
     try:
         return json.loads(STATE_PATH.read_text())
     except (json.JSONDecodeError, OSError):
-        return dict(_DEFAULT_STATE)
+        return _default_state()
 
 
 def save_state(state: dict) -> None:

@@ -7,6 +7,8 @@ incremental enrollment. Supports both neural (TitaNet) and MFCC embeddings.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,14 +91,28 @@ def load_library() -> dict:
 def save_library(lib: dict) -> None:
     """Save the voice library to disk.
 
+    Writes atomically (temp file + rename) — a crash mid-write must not
+    leave a truncated embeddings.json, which load_library() would read
+    back as an empty library.
+
     Args:
         lib: Library dict to persist.
     """
     VOICE_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
-    EMBEDDINGS_FILE.write_text(
-        json.dumps(lib, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    content = json.dumps(lib, indent=2, ensure_ascii=False) + "\n"
+    fd, tmp_path = tempfile.mkstemp(
+        dir=VOICE_LIBRARY_DIR, prefix=EMBEDDINGS_FILE.name, suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, EMBEDDINGS_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def enroll_speaker(

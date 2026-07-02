@@ -192,7 +192,8 @@ def _consume_claude_stream(lines, ev_out, on_text=None, emit_text=True) -> str |
     Pure over an iterable of strings so it can be unit-tested with captured
     fixtures. Forwards text deltas to ``on_text`` and emits ``meta`` / ``text``
     / ``tool`` / ``tool_result`` / ``usage`` on ``ev_out``. Returns the final
-    result text (authoritative ``result`` event) or the accumulated deltas.
+    result text (authoritative ``result`` event), the accumulated deltas when
+    no result event arrived, or None when the result event signals an error.
 
     When ``emit_text`` is False, raw text deltas are NOT emitted as ``text``
     events on ``ev_out`` — the caller is expected to forward cleaned text via
@@ -201,6 +202,7 @@ def _consume_claude_stream(lines, ev_out, on_text=None, emit_text=True) -> str |
     """
     chunks: list[str] = []
     result_text: str | None = None
+    errored = False
     for line in lines:
         line = line.strip()
         if not line:
@@ -249,7 +251,9 @@ def _consume_claude_stream(lines, ev_out, on_text=None, emit_text=True) -> str |
                         preview=_tool_result_preview(block.get("content")),
                     )
         elif etype == "result":
-            if not ev.get("is_error"):
+            if ev.get("is_error"):
+                errored = True
+            else:
                 result_text = ev.get("result")
             usage = ev.get("usage") or {}
             ev_out.usage(
@@ -257,7 +261,14 @@ def _consume_claude_stream(lines, ev_out, on_text=None, emit_text=True) -> str |
                 output_tokens=usage.get("output_tokens"),
                 cost_usd=ev.get("total_cost_usd"),
             )
-    return result_text if result_text is not None else "".join(chunks)
+    if result_text is not None:
+        return result_text
+    if errored:
+        # The stream ended in an error (rate limit / usage cap / internal
+        # failure): any accumulated deltas are partial — don't return them
+        # as if they were a complete response.
+        return None
+    return "".join(chunks)
 
 
 def query_streaming(
@@ -339,14 +350,26 @@ def query_streaming(
     try:
         assert proc.stdout is not None
         full = _consume_claude_stream(proc.stdout, ev_out, on_text, emit_text=emit_text)
-        proc.wait(timeout=10)
     except Exception as e:
         print(f"LLM CLI (claude) streaming read error: {e}", file=sys.stderr)
         try:
             proc.kill()
         except Exception:
             pass
-        full = None
+        return None
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        # Stream already completed — a slow-exiting child shouldn't discard it.
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    else:
+        if proc.returncode != 0:
+            print(f"LLM CLI (claude) exited with code {proc.returncode}", file=sys.stderr)
+            full = None
 
     return full.strip() if full else None
 
@@ -440,14 +463,26 @@ def chat_streaming(
     try:
         assert proc.stdout is not None
         text = _consume_claude_stream(proc.stdout, sniffer)
-        proc.wait(timeout=10)
     except Exception as e:
         ev.error(f"claude chat read error: {e}")
         try:
             proc.kill()
         except Exception:
             pass
-        text = None
+        return None, sniffer.session_id
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        # Stream already completed — a slow-exiting child shouldn't discard it.
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    else:
+        if proc.returncode != 0:
+            ev.error(f"claude exited with code {proc.returncode}")
+            text = None
     return (text.strip() if text else None), sniffer.session_id
 
 

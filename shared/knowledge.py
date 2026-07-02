@@ -288,7 +288,10 @@ class KnowledgeGraph:
                 )
 
         # Full-text search entry
-        speakers_text = ", ".join(speakers) if isinstance(speakers, list) else ""
+        speakers_text = (
+            ", ".join(s for s in speakers if isinstance(s, str))
+            if isinstance(speakers, list) else ""
+        )
         conn.execute(
             "INSERT INTO transcript_fts (file_path, title, content, speakers) VALUES (?, ?, ?, ?)",
             (str(file_path), meta.get("title", ""), body, speakers_text),

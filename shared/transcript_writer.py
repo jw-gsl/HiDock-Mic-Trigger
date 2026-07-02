@@ -25,7 +25,9 @@ Output format:
 """
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -330,7 +332,21 @@ def write_transcript(
         content += f"\n## Summary\n\n{summary['summary_text']}\n"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(content, encoding="utf-8")
+    # Atomic write: a crash mid-write must not leave a truncated .md that
+    # downstream consumers treat as a completed transcript.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=output_path.parent, prefix=output_path.name, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return output_path
 
 

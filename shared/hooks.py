@@ -69,7 +69,7 @@ def run_post_transcription_hook(
         env["SOURCE_PATH"] = str(source_path)
 
     summary = summary or {}
-    env["TRANSCRIPT_TITLE"] = summary.get("title", transcript_path.stem)
+    env["TRANSCRIPT_TITLE"] = summary.get("title") or transcript_path.stem
     env["HAS_SUMMARY"] = "true" if summary.get("summary_text") else "false"
 
     speakers = summary.get("speakers", [])

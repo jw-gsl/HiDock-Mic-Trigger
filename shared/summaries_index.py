@@ -72,7 +72,11 @@ def list_summaries(type: str | None = None, area: str | None = None,
     if area:
         res = [s for s in res if area.lower() in s["area"].lower()]
     if since:
-        res = [s for s in res if s["recorded"] and s["recorded"] >= since]
+        # `recorded` uses a space separator ("YYYY-MM-DD HH:MM:SS"); callers
+        # may pass T-separated ISO. Normalize both sides before comparing.
+        since_norm = since.replace("T", " ")
+        res = [s for s in res
+               if s["recorded"] and s["recorded"].replace("T", " ") >= since_norm]
     return res[:limit]
 
 

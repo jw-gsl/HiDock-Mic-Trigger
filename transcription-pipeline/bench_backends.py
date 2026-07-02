@@ -116,7 +116,7 @@ def main():
     )
     parser.add_argument(
         "--diarize", action="store_true",
-        help="Also run diarization (adds ~20–30% to wall-clock)",
+        help="Also run diarization (adds ~20–30%% to wall-clock)",
     )
     parser.add_argument(
         "--skip-whisper", action="store_true",

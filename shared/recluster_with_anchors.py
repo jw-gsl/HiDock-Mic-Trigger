@@ -216,6 +216,7 @@ def recluster_with_anchors(
         new_id = name_to_id.get(best_name, int(seg.get("speaker_id", 0)))
         if int(seg.get("speaker_id", 0)) != new_id:
             seg["speaker_id"] = new_id
+            seg["speaker"] = best_name
             reassigned += 1
         else:
             kept += 1
@@ -235,6 +236,15 @@ def recluster_with_anchors(
         if sid not in cleaned_names and sid in names:
             cleaned_names[sid] = names[sid]
     data["speaker_names"] = cleaned_names
+
+    # Keep every segment's display name in sync with its (possibly new)
+    # speaker_id — the .md renderer resolves via seg["speaker"], and doing
+    # this before the merge means adjacent same-id segments carry the same
+    # name into _merge_consecutive_same_speaker.
+    for seg in segments:
+        sid = str(int(seg.get("speaker_id", 0)))
+        if sid in cleaned_names:
+            seg["speaker"] = cleaned_names[sid]
 
     # Final consecutive-same-speaker merge for clean reading.
     data["segments"] = _merge_consecutive_same_speaker(segments)

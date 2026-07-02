@@ -389,10 +389,12 @@ def handle_get_meeting(args: dict) -> str:
     kg = _get_kg()
     identifier = args["identifier"]
 
-    # Try direct file match first (validate path stays within transcripts_dir)
+    # Try direct file match first (validate path stays within transcripts_dir;
+    # is_relative_to is boundary-safe, unlike a str prefix check which would
+    # accept sibling dirs like ".../Transcripts-archive")
     transcripts_dir = kg.transcripts_dir
     direct = (transcripts_dir / identifier).resolve()
-    if direct.exists() and str(direct).startswith(str(transcripts_dir.resolve())):
+    if direct.exists() and direct.is_relative_to(transcripts_dir.resolve()):
         return direct.read_text(encoding="utf-8")
 
     # Search by title
