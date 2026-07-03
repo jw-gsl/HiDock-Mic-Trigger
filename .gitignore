@@ -49,3 +49,8 @@ Windows-App/core/feedback_token.py
 
 # SourceKit-LSP build context (machine-specific, absolute paths)
 buildServer.json
+
+# Planning docs and security reviews — kept local only, not published.
+# They contain machine-specific paths and internal review detail.
+docs/PLAN-*.md
+docs/SECURITY-REVIEW-*.md

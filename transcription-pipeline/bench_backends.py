@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -25,12 +26,19 @@ TRANSCRIBE_PY = REPO_ROOT / "transcription-pipeline" / "transcribe.py"
 PARAKEET_PY = REPO_ROOT / "transcription-pipeline" / "transcribe_parakeet.py"
 PY = REPO_ROOT / "transcription-pipeline" / ".venv" / "bin" / "python3"
 
+# Where recordings live. Override with HIDOCK_RECORDINGS_DIR; defaults to the
+# standard HiDock folder under the current user's home.
+RECORDINGS_DIR = Path(
+    os.environ.get("HIDOCK_RECORDINGS_DIR", Path.home() / "HiDock" / "Recordings")
+)
+
 DEFAULT_RECORDINGS = [
     # Pick a spread: short / medium / long so both backends are stressed
-    # across the full latency curve. These files are known-good on disk.
-    "/Users/jameswhiting/HiDock/Recordings/2026Apr15-135239-Rec54.mp3",  # 32s
-    "/Users/jameswhiting/HiDock/Recordings/2026Apr15-141813-Rec55.mp3",  # 6.7 min
-    "/Users/jameswhiting/HiDock/Recordings/2026Apr17-130532-Rec59.mp3",  # 27 min
+    # across the full latency curve. Set HIDOCK_RECORDINGS_DIR (and adjust the
+    # filenames) to point at recordings that exist on your machine.
+    str(RECORDINGS_DIR / "2026Apr15-135239-Rec54.mp3"),  # 32s
+    str(RECORDINGS_DIR / "2026Apr15-141813-Rec55.mp3"),  # 6.7 min
+    str(RECORDINGS_DIR / "2026Apr17-130532-Rec59.mp3"),  # 27 min
 ]
 
 
