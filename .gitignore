@@ -52,3 +52,6 @@ buildServer.json
 
 .compound-engineering/*.local.yaml
 usb-extractor/state.json.lock
+
+# Migration/one-off state backups
+usb-extractor/state.json.*-bak

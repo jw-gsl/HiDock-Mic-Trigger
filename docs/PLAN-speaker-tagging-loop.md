@@ -89,7 +89,8 @@ meeting stops nagging even if someone in it is unknown.
 - **`.tagged`** → **`checkmark.seal.fill`** (green) — "confirmed".
 - **`.autoMatched`** → **`sparkles`** badge (blue/amber) — "matched from the
   voice library, confirm to lock in".
-- **`.needsTagging`** → **`tag`** (grey) — the only state that feeds the nag.
+- **`.needsTagging`** → **`tag`** (orange — keep the current orange, not grey) —
+  the only state that feeds the nag.
 Tooltip states the counts ("2 confirmed · 1 auto-matched · 1 unnamed").
 
 ### 4. Verify panel in TranscriptViewerView (closes the loop)
@@ -103,6 +104,31 @@ A "Speakers" section listing each speaker with:
   speaker). Confirming a *correct auto-match* reinforces the centroid;
   confirming a *rename* enrolls/updates that voice. This is the feedback loop.
 - Existing "Re-cluster from my labels" stays (uses confirmed names as anchors).
+
+### 5b. Re-match existing transcripts after the library grows (NEW — no function exists)
+Requested 2026-07-04: after enrolling new voices, sweep existing meetings that
+still have generic `Speaker N` and auto-match them. **This does not exist today**
+— matching only happens inline during diarization, and `_diarized.json` stores no
+per-speaker embeddings. Two complementary pieces:
+- **(a) Store per-speaker embeddings at diarization time.** Add
+  `speaker_embeddings: {id → [192 floats]}` to `_diarized.json` (the diarizer
+  already computes them for matching — just persist them). Then a **cheap**
+  `rematch` re-runs `identify_speaker` against the current library with no audio
+  access. Only helps meetings diarized after this change.
+- **(b) Re-embed fallback for legacy transcripts.** A `rematch <transcript>`
+  pipeline command that, when embeddings aren't stored, re-derives per-speaker
+  embeddings from the audio (TitaNet, as diarization does), matches, and writes
+  any new names into `speaker_names` for still-generic speakers only (never
+  overwrites a user-confirmed name).
+- **Batch entry point:** "Re-match untagged meetings" (menu/toolbar) that runs
+  `rematch` over every `.needsTagging`/`.autoMatched` meeting after an enrol —
+  this is the backlog side of closing the loop. Respect a "don't clobber
+  confirmed names" rule; surface results as new `.autoMatched` (sparkle) for the
+  user to confirm. NB: batch re-embed is CPU-heavy — gate it / queue it so it
+  doesn't fight the transcription queue.
+- Files: shared/diarize_sortformer.py (persist embeddings), shared/voice_library_lite.py
+  (`identify_speaker` already suits), new `rematch` verb in transcribe.py +
+  transcribe_cpp.py, AppDelegate.swift (batch trigger + per-meeting action).
 
 ### 5. Voice-library reinforcement (shared/voice_library_lite.py)
 - `enroll`/update accepts an "reinforce existing" path so a confirmed match

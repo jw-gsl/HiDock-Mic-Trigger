@@ -361,11 +361,12 @@ struct TranscriptViewerView: View {
                     Button {
                         onReclusterWithLabels?(filePath)
                     } label: {
-                        Label("Re-cluster from my labels", systemImage: "person.crop.circle.badge.checkmark")
+                        Label("Re-cluster", systemImage: "person.crop.circle.badge.checkmark")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("Use the speakers you've named as anchors and re-assign every other segment to its closest match. The pieces of the conversation you've already corrected stay put.")
+                    .fixedSize()
+                    .help("Re-assign every un-named segment to its closest match, using the speakers you've named as anchors. Segments you've already corrected stay put.")
                 }
 
                 Button {
