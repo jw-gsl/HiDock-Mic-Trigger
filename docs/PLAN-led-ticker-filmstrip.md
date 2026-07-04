@@ -77,11 +77,12 @@ background flicker.
 - Views/MeetingHeatmapView.swift — pass heatmap day-colour columns as the lit
   heatmap head of the filmstrip (adapt `ledBackground`/`ledPanel`).
 
+## Decisions (2026-07-04)
+- **Reveal-and-return** — the heatmap is home; a message scrolls in from the
+  right, plays, then the panel returns to the heatmap. (Confirmed.)
+- **Keep per-event colours** (blue/amber/red) for messages for now — the user may
+  drop them later for a uniform green panel, but retain them for this build.
+
 ## Open questions
-- Reveal-and-return vs continuous loop of `[heatmap][message]` — recommend
-  reveal-and-return (heatmap is home). Confirm.
 - When multiple events queue, scroll through them back-to-back before returning
   home, or return home between each? (Lean: play the queue, then return.)
-- Colour of ticker text vs heatmap green in the same green family — keep
-  per-event colours for messages (blue/amber/red) so they're distinct from the
-  heatmap's green, or force all ticker text green for a uniform panel? Confirm.

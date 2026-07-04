@@ -66,28 +66,31 @@ Keep `speaker_names` for backward compat; add a parallel `speaker_meta`:
   `identify_speaker` matches (it already has both), else `source:"generic"`.
 - The viewer writes `source:"user"`/`unknown` + `verified:true` on confirm.
 
-### 2. Per-meeting tagging state (replaces the boolean)
-Compute one of:
-- **`.unreviewed`** — nothing confirmed and no auto-match (all generic).
-- **`.partial`** — ≥1 speaker named/matched, but ≥1 still `generic`
-  (not yet reviewed / acknowledged).
-- **`.reviewed`** — every speaker is either named or explicitly `unknown`
-  (i.e. the user has accounted for all of them). Auto-matches count toward
-  "named" but see the icon nuance below.
+### 2. Per-meeting tagging state (SIMPLIFIED per 2026-07-04 discussion)
+The earlier three-state (unreviewed / partial / reviewed) confused: "amber
+partial" vs "grey unreviewed" wasn't a meaningful distinction. Collapse to the
+user's model — **tagged = a multi-speaker meeting with ≥1 confirmed speaker**:
+
+- **Single-speaker meetings are never flagged.** Nothing to disambiguate → no
+  tag state, never in the nag.
+- **`.needsTagging`** — multi-speaker, nothing confirmed and no auto-match.
+- **`.autoMatched`** — multi-speaker, the voice library matched ≥1 speaker but
+  none confirmed yet ("confirm to lock in").
+- **`.tagged`** — multi-speaker, ≥1 speaker confirmed (locked in). Done — even if
+  other speakers remain unknown/unnamed. There is NO separate "partial" state:
+  once you confirm one, the meeting is tagged.
 
 `checkSpeakersTagged` → `speakerReviewState(transcriptPath) -> TaggingState`.
-`needsTaggingCount` counts **`.unreviewed`** meetings only (optionally `.partial`
-too, as a softer secondary count) — so a meeting with one confirmed speaker and
-one acknowledged-unknown no longer nags.
+**The toolbar "N need tagging" pill (SyncToolbarSection ~123) counts only
+`.needsTagging`** — so once you've confirmed one speaker, or a match exists, the
+meeting stops nagging even if someone in it is unknown.
 
-### 3. Icons (RecordingsTableView Tagged column + row)
-- `.reviewed`, all user/unknown confirmed → **`checkmark.seal.fill`** (green) —
-  "verified".
-- `.reviewed` but includes **unconfirmed auto-matches** → **`sparkles` / wand
-  badge** (amber/blue) — "matched from library, confirm to lock in".
-- `.partial` → **`person.crop.circle.badge.checkmark`** (amber) — "some tagged".
-- `.unreviewed` → current **`tag`** (grey) — "needs tagging".
-Tooltip on each states the exact counts ("2 named · 1 auto-matched · 1 unknown").
+### 3. Icons (RecordingsTableView Tagged column + row) — three states
+- **`.tagged`** → **`checkmark.seal.fill`** (green) — "confirmed".
+- **`.autoMatched`** → **`sparkles`** badge (blue/amber) — "matched from the
+  voice library, confirm to lock in".
+- **`.needsTagging`** → **`tag`** (grey) — the only state that feeds the nag.
+Tooltip states the counts ("2 confirmed · 1 auto-matched · 1 unnamed").
 
 ### 4. Verify panel in TranscriptViewerView (closes the loop)
 A "Speakers" section listing each speaker with:
@@ -118,12 +121,28 @@ A "Speakers" section listing each speaker with:
 - Views/TranscriptViewerView.swift — the Speakers verify panel.
 - Views/RecordingsTableView.swift + SyncToolbarSection.swift — new icons/labels.
 
+## Decisions (2026-07-04)
+- **No "partial" state.** Three states only: needsTagging / autoMatched / tagged.
+  A meeting is tagged once ≥1 speaker is confirmed (multi-speaker only).
+- **Nag counts only `.needsTagging`.** (The "toolbar nag" = the "N need tagging"
+  pill in the sync toolbar.)
+- Single-speaker recordings are never flagged for tagging.
+
+## Related
+- **`PLAN-voice-library-ui-and-tagging.md`** — the Voice Library UX (opt-in
+  enrol checkbox at naming, multi-select remove, per-speaker meeting counts,
+  click-count-to-filter, speaker filter, sorting, audition/play samples) and the
+  PYTHONPATH fix. This tagging-loop doc is the deeper design for the state
+  machine + verify panel; that doc is the library-side hand-off. The
+  **enroll-on-confirm** here is the same enrol path that doc's opt-in checkbox
+  drives — keep them consistent (confirming a speaker = enrol, gated by the same
+  opt-in preference).
+
 ## Open questions
-- Should `.partial` still contribute to the toolbar nag (softer), or only
-  `.unreviewed`? (Lean: nag only `.unreviewed`; show `.partial` as the amber
-  icon on the row without a global nag.)
 - Auto-match confidence threshold to surface as "confirm me" vs "trust silently"
   (currently 0.55 to match at all).
 - Where representative per-speaker audio for enroll-on-confirm comes from when
   the viewer confirms (re-derive from the diarized segments vs cache during
-  diarization).
+  diarization). NB `PLAN-voice-library-ui-and-tagging.md` flags that enrolment
+  must persist per-sample provenance (`samples: [...]`) for the play-samples
+  feature — decide that schema BEFORE any bulk enrol so provenance isn't lost.
