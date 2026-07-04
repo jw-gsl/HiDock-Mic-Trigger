@@ -3597,6 +3597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if FileManager.default.fileExists(atPath: scriptPath) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
+            configureVoiceLibraryProcess(process)
             process.arguments = [scriptPath, "list"]
             let pipe = Pipe()
             process.standardOutput = pipe
@@ -3749,6 +3750,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return "\(sharedDir)/voice_library_lite.py"
     }
 
+    /// Configure a `voice_library_lite.py` subprocess so its top-level
+    /// `from shared...` imports resolve: put the repo root on PYTHONPATH and use
+    /// it as cwd (mirrors loadVoiceTrainingData). Without this the process exits
+    /// non-zero with empty output and the UI shows "No voices enrolled".
+    private func configureVoiceLibraryProcess(_ process: Process) {
+        let root = bundledResourcesRoot ?? repoRoot
+        process.currentDirectoryURL = URL(fileURLWithPath: root)
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = NSHomeDirectory()
+        env["PYTHONPATH"] = root
+        process.environment = env
+    }
+
     private func enrollSpeakerInVoiceLibrary(name: String, audioPath: String, start: Double, end: Double) {
         let scriptPath = voiceLibraryScriptPath()
         guard FileManager.default.fileExists(atPath: scriptPath) else { return }
@@ -3756,6 +3770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            if let self = self { self.configureVoiceLibraryProcess(process) }
             process.arguments = [
                 scriptPath, "enroll",
                 "--name", name,
@@ -3785,6 +3800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        configureVoiceLibraryProcess(process)
         process.arguments = [scriptPath, "delete", "--name", name]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
@@ -3803,6 +3819,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        configureVoiceLibraryProcess(process)
         process.arguments = [scriptPath, "rename", "--old", oldName, "--new", newName]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
