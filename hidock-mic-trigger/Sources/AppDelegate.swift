@@ -3363,6 +3363,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         )
 
+        // Single-instance: replace any open transcript viewer instead of stacking duplicates.
+        transcriptViewerWindow?.close()
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3574,6 +3576,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openVoiceLibrary() {
+        // Single-instance: focus the existing window instead of spawning a duplicate.
+        if let existing = voiceLibraryWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         // Shell out to voice_library_lite.py list to get speakers
         let sharedDir: String
         if let root = bundledResourcesRoot {
@@ -4762,6 +4770,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openModelManager() {
+        // Single-instance: focus the existing window instead of spawning a duplicate.
+        if let existing = modelManagerWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         refreshModelStatuses()
 
         let managerView = ModelManagerView(viewModel: viewModel)
