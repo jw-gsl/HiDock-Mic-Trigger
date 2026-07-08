@@ -770,6 +770,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.triggerPID = process?.processIdentifier
         let uptimeStr = formatUptime() ?? ""
         if viewModel.triggerUptime != uptimeStr { viewModel.triggerUptime = uptimeStr }
+        // Anchor for the Mic Trigger row's self-ticking uptime label (changes
+        // only on connect/disconnect, so this guarded write is rare).
+        if viewModel.triggerConnectedSince != triggerConnectedSince {
+            viewModel.triggerConnectedSince = triggerConnectedSince
+        }
         viewModel.autoStartOnLaunch = autoStartOnLaunch
         viewModel.selectedMicName = selectedMicName
         // #3: don't enumerate CoreAudio devices on every state sync (this is
@@ -1661,12 +1666,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard uptimeTimer == nil else { return }
         uptimeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            // Only publish when the string actually changed. @Published fires
-            // on every assignment regardless of equality, so blindly writing
-            // (esp. "" while waiting for a device) re-rendered the whole window
-            // — including the 1700-row table — once a second, forever.
-            let u = self.formatUptime() ?? ""
-            if self.viewModel.triggerUptime != u { self.viewModel.triggerUptime = u }
+            // Menu-bar item only (AppKit, no SwiftUI). The Mic Trigger row's
+            // uptime is now driven by a local TimelineView off
+            // viewModel.triggerConnectedSince, so we deliberately do NOT write
+            // any @Published state here — that used to re-render the whole
+            // window (incl. the 1700-row table) once a second.
             self.updateMenuUptime()
         }
     }

@@ -10,6 +10,14 @@ struct MicTriggerSection: View {
         return f
     }()
 
+    /// Elapsed-since string, matching AppDelegate.formatUptime's format.
+    static func uptimeString(since start: Date, now: Date) -> String {
+        let elapsed = max(0, Int(now.timeIntervalSince(start)))
+        if elapsed < 60 { return "\(elapsed)s" }
+        if elapsed < 3600 { return "\(elapsed / 60)m \(elapsed % 60)s" }
+        return "\(elapsed / 3600)h \((elapsed % 3600) / 60)m"
+    }
+
     private var isDevBuild: Bool {
         #if DEV_BUILD
         return true
@@ -83,10 +91,16 @@ struct MicTriggerSection: View {
                 }
                 // Connected time — shown only when actually connected
                 // (healthy), not while waiting for a device.
-                if viewModel.triggerRunning, viewModel.triggerHealthy, !viewModel.triggerUptime.isEmpty {
-                    Text(viewModel.triggerUptime)
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.secondary)
+                if viewModel.triggerRunning, viewModel.triggerHealthy,
+                   let since = viewModel.triggerConnectedSince {
+                    // Self-ticking: TimelineView updates only this label each
+                    // second — it never writes shared view-model state, so the
+                    // per-second tick can't re-render the rest of the window.
+                    TimelineView(.periodic(from: since, by: 1)) { ctx in
+                        Text(Self.uptimeString(since: since, now: ctx.date))
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
                 }
                 // Last-(re)start timestamp — passive proof that an
                 // unplug/replug actually bounced the trigger. Useful

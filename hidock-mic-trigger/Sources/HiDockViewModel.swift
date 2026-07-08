@@ -23,6 +23,11 @@ final class HiDockViewModel: ObservableObject {
     /// replug cycle did in fact bounce the trigger — useful when
     /// notifications get coalesced or missed by macOS.
     @Published var triggerLastStartedAt: Date?
+    /// When the HiDock became connected (uptime anchor). The Mic Trigger row
+    /// ticks its own uptime label from this via a local TimelineView, so the
+    /// per-second update never touches shared view-model state (which would
+    /// re-render the whole window). Changes only on connect/disconnect.
+    @Published var triggerConnectedSince: Date?
     @Published var selectedMicName: String?
     @Published var autoStartOnLaunch = true
     @Published var availableMics: [String] = []
