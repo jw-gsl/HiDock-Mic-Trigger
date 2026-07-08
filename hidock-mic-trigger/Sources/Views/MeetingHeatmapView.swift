@@ -228,9 +228,8 @@ struct MeetingHeatmapView: View {
                     weekdayGutter
                     LEDMatrixView(
                         matrix: ledMatrix,
-                        settings: ledSettings,
                         fixedCols: cols,
-                        background: ledBackground(columns: visColumns, activity: activity)
+                        heatmap: ledColumns(columns: visColumns, activity: activity)
                     )
                     .padding(.leading, leadPad)
                 }
@@ -239,14 +238,16 @@ struct MeetingHeatmapView: View {
         .frame(height: panelHeight)
     }
 
-    /// Heatmap day colours per visible column ([col][row]) for the LED grid's
-    /// unlit dots — identical fills to cellView, including clear future days.
-    private func ledBackground(columns: [[Date?]], activity: [Date: DayActivity]) -> [[Color]] {
+    /// The heatmap as LED columns — one per visible week, each with a colour per
+    /// day-row: green at the day's meeting-volume intensity, or nil (off) for
+    /// empty / future days. This is the engine's resting content (and what
+    /// scrolls off/on around a message). Not dimmed — full heatmap colours.
+    private func ledColumns(columns: [[Date?]], activity: [Date: DayActivity]) -> [LEDColumn] {
         columns.map { week in
-            week.map { date in
-                guard let d = date else { return Color.clear }
-                return fill(level(activity[d]?.count ?? 0))
-            }
+            LEDColumn(cells: week.map { date -> Color? in
+                guard let d = date, let a = activity[d], a.count > 0 else { return nil }
+                return fill(level(a.count))
+            })
         }
     }
 
