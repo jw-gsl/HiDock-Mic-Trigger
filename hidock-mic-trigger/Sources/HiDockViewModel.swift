@@ -43,7 +43,7 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncStatusLevel: StatusLevel = .secondary
     @Published var syncOutputFolder: String?
     @Published var syncTranscriptFolder: String?
-    @Published var syncEntries: [HiDockSyncRecordingEntry] = []
+    @Published var syncEntries: [HiDockSyncRecordingEntry] = [] { didSet { markDerivedDirty() } }
     @Published var syncCheckedRecordings: Set<String> = []
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
@@ -83,8 +83,8 @@ final class HiDockViewModel: ObservableObject {
     /// Runtime heatmap ↔ LED toggle (seeded from the persisted default view).
     @Published var heatmapLEDMode: Bool =
         (UserDefaults.standard.string(forKey: "led.defaultView") == "led")
-    @Published var mergeGroups: [MergeGroup] = []
-    @Published var expandedMergeGroups: Set<String> = []
+    @Published var mergeGroups: [MergeGroup] = [] { didSet { markDerivedDirty() } }
+    @Published var expandedMergeGroups: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var syncBusy = false
     @Published var syncDownloading = false
     @Published var syncDownloadProgress: String?
@@ -94,15 +94,15 @@ final class HiDockViewModel: ObservableObject {
     /// recordings table can paint that one row "Downloading" (yellow)
     /// while the rest of the pending batch stays "On device".
     @Published var currentlyDownloadingName: String?
-    @Published var syncSortKey: String = "created"
-    @Published var syncSortAscending: Bool = false
-    @Published var syncFilterDeviceId: String?
+    @Published var syncSortKey: String = "created" { didSet { markDerivedDirty() } }
+    @Published var syncSortAscending: Bool = false { didSet { markDerivedDirty() } }
+    @Published var syncFilterDeviceId: String? { didSet { markDerivedDirty() } }
     /// Pipeline-stage filter for the recordings table. Defaults to
     /// `.all`. Combined with `syncFilterDeviceId` (AND) and the
     /// user's sort key inside `visibleEntries`.
     /// Multi-select status filter (stackable, like the Hide menu). Empty = show
     /// all. Entries matching ANY selected status pass (OR semantics).
-    @Published var statusFilters: Set<SyncStatusFilter> = []
+    @Published var statusFilters: Set<SyncStatusFilter> = [] { didSet { markDerivedDirty() } }
 
     /// Whether an entry matches a given status filter.
     func matchesStatusFilter(_ e: HiDockSyncRecordingEntry, _ f: SyncStatusFilter) -> Bool {
@@ -130,14 +130,17 @@ final class HiDockViewModel: ObservableObject {
     }
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
-    @Published var summaryTypeFilter: String? = nil
+    @Published var summaryTypeFilter: String? = nil { didSet { markDerivedDirty() } }
     /// Statuses the user has chosen to hide via the multiselect "Hide" menu.
     /// Values are statusText strings (see `hideableStatuses`). Sticky across
     /// launches. A hidden status is still shown if the user explicitly picks it
     /// in the Filter dropdown (they clearly want to see it then).
     @Published var hiddenStatuses: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "hidockHiddenStatuses") ?? []) {
-        didSet { UserDefaults.standard.set(Array(hiddenStatuses), forKey: "hidockHiddenStatuses") }
+        didSet {
+            UserDefaults.standard.set(Array(hiddenStatuses), forKey: "hidockHiddenStatuses")
+            markDerivedDirty()
+        }
     }
 
     /// The statuses the "Hide" menu offers — the user-driven "already actioned"
@@ -274,7 +277,7 @@ final class HiDockViewModel: ObservableObject {
     /// `needsTaggingCount` surface merge-rediarize results correctly.
     /// Populated by refreshTranscriptionState after each Python `status`
     /// query — same source of truth as the per-row state.
-    @Published var mergedFileTranscribed: Set<String> = []
+    @Published var mergedFileTranscribed: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var mergedFileTagged: Set<String> = []
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
     /// Merged file mp3 name → its transcript mtime (when it was transcribed).
@@ -284,7 +287,7 @@ final class HiDockViewModel: ObservableObject {
     /// Per-recording speaker / action-item counts (mp3 name → counts) parsed
     /// from transcript frontmatter via `transcribe.py activity-stats`, fetched
     /// once on load. Feeds the heatmap Tier-2 tooltip (shown when present).
-    @Published var meetingExtraStats: [String: (speakers: Int, actionItems: Int)] = [:]
+    @Published var meetingExtraStats: [String: (speakers: Int, actionItems: Int)] = [:] { didSet { markDerivedDirty() } }
 
     // MARK: - Computed
 
@@ -327,7 +330,41 @@ final class HiDockViewModel: ObservableObject {
     /// BEFORE the heatmap day-filter and sort. The heatmap is built from this
     /// (so selecting a day doesn't collapse the grid to that one day), while
     /// `visibleEntries` additionally applies the selected-day filter.
+    // MARK: - Derived-list cache
+    // These lists are O(n log n) over `syncEntries` (now ~1700+ after the
+    // HiNotes migration) and were previously recomputed on *every* SwiftUI
+    // render — `filteredEntriesNoDay` ran twice per render (visibleEntries +
+    // meetingActivityByDay), each a full sort. That pegged the main thread and
+    // made the app beachball. Now they're memoised: computed once when an input
+    // changes (derivedDirty set by the inputs' didSet) and cached for reads.
+    private var _filteredEntriesNoDay: [HiDockSyncRecordingEntry] = []
+    private var _visibleEntries: [HiDockSyncRecordingEntry] = []
+    private var _displayRows: [DisplayRow] = []
+    private var _meetingActivityByDay: [Date: DayActivity] = [:]
+    private var derivedDirty = true
+
+    /// Recompute the derived lists once if any input changed. Synchronous, so
+    /// reads are always fresh; the dirty flag makes it a no-op between changes.
+    private func ensureDerived() {
+        guard derivedDirty else { return }
+        derivedDirty = false
+        let filtered = computeFilteredEntriesNoDay()
+        let visible = computeVisibleEntries(filtered)
+        _filteredEntriesNoDay = filtered
+        _visibleEntries = visible
+        _displayRows = computeDisplayRows(visible)
+        _meetingActivityByDay = computeMeetingActivity(filtered)
+    }
+
+    /// Mark the derived lists stale. Cheap (a bool); the recompute is deferred
+    /// to the next read. Called from the inputs' `didSet`.
+    func markDerivedDirty() { derivedDirty = true }
+
     private var filteredEntriesNoDay: [HiDockSyncRecordingEntry] {
+        ensureDerived(); return _filteredEntriesNoDay
+    }
+
+    private func computeFilteredEntriesNoDay() -> [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
             entries = entries.filter {
@@ -366,7 +403,11 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var visibleEntries: [HiDockSyncRecordingEntry] {
-        var entries = filteredEntriesNoDay
+        ensureDerived(); return _visibleEntries
+    }
+
+    private func computeVisibleEntries(_ filtered: [HiDockSyncRecordingEntry]) -> [HiDockSyncRecordingEntry] {
+        var entries = filtered
         // Heatmap day-filter: when a day square is locked, the table narrows to
         // that day (the heatmap grid itself keeps using filteredEntriesNoDay).
         if let day = heatmapSelectedDay {
@@ -411,7 +452,11 @@ final class HiDockViewModel: ObservableObject {
 
     /// Build the display list with merge groups expanded/collapsed
     var displayRows: [DisplayRow] {
-        let entries = visibleEntries
+        ensureDerived(); return _displayRows
+    }
+
+    private func computeDisplayRows(_ visible: [HiDockSyncRecordingEntry]) -> [DisplayRow] {
+        let entries = visible
         // Collect all child names across all merge groups
         let allChildNames = Set(mergeGroups.flatMap(\.childNames))
 
@@ -533,7 +578,7 @@ final class HiDockViewModel: ObservableObject {
     /// filters.
     /// Day locked by clicking a heatmap square — filters the recordings table
     /// to that day (and locks the heatmap detail readout). nil = no day filter.
-    @Published var heatmapSelectedDay: Date? = nil
+    @Published var heatmapSelectedDay: Date? = nil { didSet { markDerivedDirty() } }
 
     /// Which date the heatmap buckets by. Default Recorded ("when the meeting
     /// happened" — the common case); Transcribed = "when I processed it".
@@ -542,7 +587,7 @@ final class HiDockViewModel: ObservableObject {
         var id: String { rawValue }
         var label: String { self == .recorded ? "Recorded" : "Transcribed" }
     }
-    @Published var heatmapDateMode: HeatmapDateMode = .recorded
+    @Published var heatmapDateMode: HeatmapDateMode = .recorded { didSet { markDerivedDirty() } }
 
     /// Click handler for a heatmap square: toggle the day filter on/off.
     func toggleHeatmapDay(_ day: Date) {
@@ -577,10 +622,14 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var meetingActivityByDay: [Date: DayActivity] {
+        ensureDerived(); return _meetingActivityByDay
+    }
+
+    private func computeMeetingActivity(_ filtered: [HiDockSyncRecordingEntry]) -> [Date: DayActivity] {
         let childNames = Set(mergeGroups.flatMap(\.childNames))
         var out: [Date: DayActivity] = [:]
         var countedGroups = Set<String>()
-        for entry in filteredEntriesNoDay {
+        for entry in filtered {
             // A merged recording is ONE meeting: collapse its children into a
             // single count on the group's day (per date-mode) with the merged
             // total duration, rather than counting each piece separately.

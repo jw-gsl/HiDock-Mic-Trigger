@@ -34,7 +34,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var syncOutputFolder: String?
     private var syncTranscriptFolder: String?
-    private var syncEntries: [HiDockSyncRecordingEntry] = []
+    private var syncEntries: [HiDockSyncRecordingEntry] = [] {
+        didSet { syncEntriesVersion &+= 1 }
+    }
+    /// Bumped on every `syncEntries` mutation (incl. element edits, since it's a
+    /// value-type array). Lets syncViewModelState skip pushing an unchanged
+    /// array to the view model (see #4).
+    private var syncEntriesVersion = 0
+    private var lastPushedSyncEntriesVersion = -1
+    /// CoreAudio mic-name cache + last-enumeration time, so syncViewModelState
+    /// doesn't re-enumerate devices on every call (see #3).
+    private var cachedMicNames: [String] = []
+    private var lastMicEnumeration: Date = .distantPast
     private var syncCheckedRecordings: Set<String> = []
     private var syncAutoDownload = false
     private var syncAutoTranscribe = false
@@ -554,7 +565,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func wireViewModel() {
         viewModel.autoStartOnLaunch = autoStartOnLaunch
         viewModel.selectedMicName = selectedMicName
-        viewModel.availableMics = getInputDeviceNames()
+        refreshMicNamesNow()
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
@@ -760,10 +771,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.triggerUptime = formatUptime() ?? ""
         viewModel.autoStartOnLaunch = autoStartOnLaunch
         viewModel.selectedMicName = selectedMicName
-        viewModel.availableMics = getInputDeviceNames()
+        // #3: don't enumerate CoreAudio devices on every state sync (this is
+        // called from ~90 sites). The mic list only changes on a device-change
+        // event, which updates it directly; throttle any stray refresh here.
+        viewModel.availableMics = throttledMicNames()
         viewModel.syncBusy = syncBusy
         viewModel.syncDownloading = syncDownloading
-        viewModel.syncEntries = syncEntries
+        // #4: only push the (now ~1700-element) entries array when it actually
+        // changed — an unchanged reassignment still fires @Published and marks
+        // the derived-list cache dirty for nothing.
+        if syncEntriesVersion != lastPushedSyncEntriesVersion {
+            viewModel.syncEntries = syncEntries
+            lastPushedSyncEntriesVersion = syncEntriesVersion
+        }
         viewModel.syncCheckedRecordings = syncCheckedRecordings
         viewModel.syncAutoDownload = syncAutoDownload
         viewModel.syncAutoTranscribe = syncAutoTranscribe
@@ -946,6 +966,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - CoreAudio device enumeration
 
+    /// Re-enumerate mics now and refresh the cache — call on device-change /
+    /// setup where the list genuinely may have changed.
+    private func refreshMicNamesNow() {
+        cachedMicNames = getInputDeviceNames()
+        lastMicEnumeration = Date()
+        viewModel.availableMics = cachedMicNames
+    }
+
+    /// Cached mic names, re-enumerated at most every 5s. Used on the hot
+    /// syncViewModelState() path so we don't hit CoreAudio on every call.
+    private func throttledMicNames() -> [String] {
+        if cachedMicNames.isEmpty || Date().timeIntervalSince(lastMicEnumeration) > 5 {
+            cachedMicNames = getInputDeviceNames()
+            lastMicEnumeration = Date()
+        }
+        return cachedMicNames
+    }
+
     private func getInputDeviceNames() -> [String] {
         var propsize: UInt32 = 0
         var address = AudioObjectPropertyAddress(
@@ -1067,7 +1105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !disappeared.isEmpty { log("Devices disappeared: \(disappeared)") }
 
         if !appeared.isEmpty || !disappeared.isEmpty {
-            viewModel.availableMics = getInputDeviceNames()
+            refreshMicNamesNow()
             if syncPaired && !syncBusy {
                 log("USB device change detected, refreshing sync status")
                 autoConnectSyncIfPaired()
@@ -1083,7 +1121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let oldMic = selectedMicName
             selectedMicName = preferred
             viewModel.selectedMicName = preferred
-            viewModel.availableMics = getInputDeviceNames()
+            refreshMicNamesNow()
             updateMenuState()
             if process == nil {
                 // Same recovery as selectMic: if the trigger died on a
@@ -1114,7 +1152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let fallback = fallback {
                 selectedMicName = fallback
                 viewModel.selectedMicName = fallback
-                viewModel.availableMics = getInputDeviceNames()
+                refreshMicNamesNow()
                 updateMenuState()
                 if process != nil { restartTrigger() }
                 postMicChangeNotification(
@@ -3513,6 +3551,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         win.center()
         win.title = "Voice Training"
+        applyPanelTabbing(win)
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 600, height: 400)
         win.contentView = NSHostingView(rootView: view)
@@ -3573,6 +3612,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func openVoiceTrainingMenu() {
         showVoiceTraining()
+    }
+
+    /// Group the secondary tool windows into one macOS tabbed window
+    /// ("tabs, not separate windows"). Windows sharing this identifier with
+    /// tabbingMode .preferred are merged into a tab group by AppKit.
+    private func applyPanelTabbing(_ win: NSWindow) {
+        win.tabbingMode = .preferred
+        win.tabbingIdentifier = NSWindow.TabbingIdentifier("com.hidock.tools.panels")
     }
 
     private func openVoiceLibrary() {
@@ -3651,6 +3698,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         win.center()
         win.title = "Voice Library"
+        applyPanelTabbing(win)
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 400, height: 300)
         win.contentView = NSHostingView(rootView: libraryView)
@@ -3885,6 +3933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         win.center()
         win.title = "Terminal"
+        applyPanelTabbing(win)
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 600, height: 320)
         win.contentView = NSHostingView(rootView: view)
@@ -4788,6 +4837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         win.center()
         win.title = "Models"
+        applyPanelTabbing(win)
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 480, height: 300)
         win.contentView = NSHostingView(rootView: managerView)
