@@ -7704,6 +7704,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             DispatchQueue.main.async {
                 self.log("refreshTranscriptionState: got \(lookup.count) entries from status")
+                // Build the summary index ONCE (stem → path). Previously
+                // findSummaryPath listed the entire ~1400-file Summaries dir per
+                // entry — ~1700 full directory scans per refresh, on the main
+                // thread → beachball. Now it's one listing + O(1) lookups.
+                let summaryIndex = self.buildSummaryIndex()
                 var matched = 0
                 for i in self.syncEntries.indices {
                     let mp3Name = self.syncEntries[i].recording.outputName
@@ -7713,8 +7718,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].transcribedDate = self.transcriptModificationDate(info["transcript_path"] as? String)
                         // Check speaker tagging state from diarized JSON
                         self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
-                        // Check if summary exists
-                        self.syncEntries[i].summaryPath = self.findSummaryPath(for: mp3Name)
+                        // Check if summary exists (O(1) via the prebuilt index)
+                        self.syncEntries[i].summaryPath = summaryIndex[(mp3Name as NSString).deletingPathExtension]
                         if self.syncEntries[i].transcribed { matched += 1 }
                     } else {
                         self.syncEntries[i].transcribed = false
@@ -7854,19 +7859,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    private func findSummaryPath(for mp3Name: String) -> String? {
+    /// Build a `stem → summary-path` index by listing the Summaries directory
+    /// ONCE. Summary files are named "<stem> - <Type> - <Area> - <Title>.md",
+    /// so the key is the component before the first " - " (the same prefix the
+    /// old per-entry `findSummaryPath` matched on — avoids a merged file's
+    /// summary, which contains child stems, falsely matching children).
+    /// Replaces ~1700 per-entry directory scans with one listing + O(1) lookups.
+    private func buildSummaryIndex() -> [String: String] {
         let summariesDir = (NSHomeDirectory() as NSString).appendingPathComponent("HiDock/Summaries")
-        let baseName = (mp3Name as NSString).deletingPathExtension
-        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) else { return nil }
-        // Match by the naming convention "<stem> - <Type> - …" (the same
-        // prefix `summaryType` parses). A `contains` match was too loose:
-        // a merged file's summary ("Merged-<childStem>-to-…") contains its
-        // children's stems, so every child row falsely flipped to
-        // "Summarised" pointing at the merged file's summary.
-        if let match = contents.first(where: { $0.hasSuffix(".md") && $0.hasPrefix(baseName + " - ") }) {
-            return (summariesDir as NSString).appendingPathComponent(match)
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) else { return [:] }
+        var index: [String: String] = [:]
+        for name in contents where name.hasSuffix(".md") {
+            guard let sep = name.range(of: " - ") else { continue }
+            let stem = String(name[..<sep.lowerBound])
+            if index[stem] == nil {
+                index[stem] = (summariesDir as NSString).appendingPathComponent(name)
+            }
         }
-        return nil
+        return index
     }
 
     // MARK: - Logging

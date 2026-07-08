@@ -177,8 +177,8 @@ final class HiDockViewModel: ObservableObject {
     /// Chains the extractor flagged as likely-one-conversation. High
     /// confidence ones are styled stronger; the rest sit behind a
     /// "show all" toggle in the merge candidates sheet.
-    @Published var mergeCandidates: [MergeCandidate] = []
-    @Published var mergeCandidatesShowAll = false
+    @Published var mergeCandidates: [MergeCandidate] = [] { didSet { markDerivedDirty() } }
+    @Published var mergeCandidatesShowAll = false { didSet { markDerivedDirty() } }
     /// User-visible "Merge candidates (N)" count — hidden when zero.
     var mergeCandidateCountForBadge: Int {
         let pool = effectiveMergeCandidates
@@ -190,7 +190,10 @@ final class HiDockViewModel: ObservableObject {
     /// candidate. Used by the recordings table to draw the subtle
     /// blue left-border accent on those rows.
     var mergeCandidatePaths: Set<String> {
-        let pool = effectiveMergeCandidates
+        ensureDerived(); return _mergeCandidatePaths
+    }
+
+    private func computeMergeCandidatePaths(_ pool: [MergeCandidate]) -> Set<String> {
         let visible = mergeCandidatesShowAll
             ? pool
             : pool.filter(\.high_confidence)
@@ -217,6 +220,10 @@ final class HiDockViewModel: ObservableObject {
     /// otherwise surface (row tint, tick toggle, toolbar count,
     /// scroll target, right-click menu).
     var effectiveMergeCandidates: [MergeCandidate] {
+        ensureDerived(); return _effectiveMergeCandidates
+    }
+
+    private func computeEffectiveMergeCandidates() -> [MergeCandidate] {
         let mergedStems = Set(mergeGroups.flatMap(\.childNames)
             .map { ($0 as NSString).deletingPathExtension })
         return mergeCandidates.filter { cand in
@@ -341,6 +348,8 @@ final class HiDockViewModel: ObservableObject {
     private var _visibleEntries: [HiDockSyncRecordingEntry] = []
     private var _displayRows: [DisplayRow] = []
     private var _meetingActivityByDay: [Date: DayActivity] = [:]
+    private var _effectiveMergeCandidates: [MergeCandidate] = []
+    private var _mergeCandidatePaths: Set<String> = []
     private var derivedDirty = true
 
     /// Recompute the derived lists once if any input changed. Synchronous, so
@@ -354,6 +363,9 @@ final class HiDockViewModel: ObservableObject {
         _visibleEntries = visible
         _displayRows = computeDisplayRows(visible)
         _meetingActivityByDay = computeMeetingActivity(filtered)
+        let eff = computeEffectiveMergeCandidates()
+        _effectiveMergeCandidates = eff
+        _mergeCandidatePaths = computeMergeCandidatePaths(eff)
     }
 
     /// Mark the derived lists stale. Cheap (a bool); the recompute is deferred
