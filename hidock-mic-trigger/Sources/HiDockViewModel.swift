@@ -350,6 +350,7 @@ final class HiDockViewModel: ObservableObject {
     private var _meetingActivityByDay: [Date: DayActivity] = [:]
     private var _effectiveMergeCandidates: [MergeCandidate] = []
     private var _mergeCandidatePaths: Set<String> = []
+    private var _mergeCandidatesByPath: [String: [MergeCandidate]] = [:]
     private var derivedDirty = true
 
     /// Recompute the derived lists once if any input changed. Synchronous, so
@@ -366,6 +367,25 @@ final class HiDockViewModel: ObservableObject {
         let eff = computeEffectiveMergeCandidates()
         _effectiveMergeCandidates = eff
         _mergeCandidatePaths = computeMergeCandidatePaths(eff)
+        _mergeCandidatesByPath = computeMergeCandidatesByPath(eff)
+    }
+
+    /// The visible candidates that include each mp3 path — so the per-row
+    /// context menu is an O(1) lookup instead of an O(candidates) filter.
+    private func computeMergeCandidatesByPath(_ pool: [MergeCandidate]) -> [String: [MergeCandidate]] {
+        let visible = mergeCandidatesShowAll ? pool : pool.filter(\.high_confidence)
+        var map: [String: [MergeCandidate]] = [:]
+        for cand in visible {
+            for piece in cand.pieces {
+                map[piece.mp3_path, default: []].append(cand)
+            }
+        }
+        return map
+    }
+
+    /// Visible merge candidates that include `path` (cached; O(1)).
+    func mergeCandidates(forPath path: String) -> [MergeCandidate] {
+        ensureDerived(); return _mergeCandidatesByPath[path] ?? []
     }
 
     /// Mark the derived lists stale. Cheap (a bool); the recompute is deferred

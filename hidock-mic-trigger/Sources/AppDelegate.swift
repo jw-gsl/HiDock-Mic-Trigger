@@ -768,7 +768,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let running = process != nil
         viewModel.triggerRunning = running
         viewModel.triggerPID = process?.processIdentifier
-        viewModel.triggerUptime = formatUptime() ?? ""
+        let uptimeStr = formatUptime() ?? ""
+        if viewModel.triggerUptime != uptimeStr { viewModel.triggerUptime = uptimeStr }
         viewModel.autoStartOnLaunch = autoStartOnLaunch
         viewModel.selectedMicName = selectedMicName
         // #3: don't enumerate CoreAudio devices on every state sync (this is
@@ -1660,7 +1661,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard uptimeTimer == nil else { return }
         uptimeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.viewModel.triggerUptime = self.formatUptime() ?? ""
+            // Only publish when the string actually changed. @Published fires
+            // on every assignment regardless of equality, so blindly writing
+            // (esp. "" while waiting for a device) re-rendered the whole window
+            // — including the 1700-row table — once a second, forever.
+            let u = self.formatUptime() ?? ""
+            if self.viewModel.triggerUptime != u { self.viewModel.triggerUptime = u }
             self.updateMenuUptime()
         }
     }
