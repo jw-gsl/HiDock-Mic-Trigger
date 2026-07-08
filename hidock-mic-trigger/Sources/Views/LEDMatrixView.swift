@@ -47,6 +47,7 @@ struct LEDMatrixView: View {
             }
             .onChange(of: cols) { matrix.configure(viewportCols: $0) }
             .onChange(of: heatmap) { matrix.setHeatmap($0) }
+            .onDisappear { matrix.stop() }   // no off-screen spinning
     }
 
     private func draw(_ gc: GraphicsContext, cols: Int) {

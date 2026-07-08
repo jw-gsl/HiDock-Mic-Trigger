@@ -47,6 +47,7 @@ final class LEDMatrix: ObservableObject {
 
     // Timing
     private var timer: Timer?
+    private var idleTimer: Timer?
     private var tick = 0
     private var parkedTicks = 0
     private var idleCursor = 0
@@ -111,7 +112,11 @@ final class LEDMatrix: ObservableObject {
     }
 
     func start() { ensureRunning() }
-    func stop() { timer?.invalidate(); timer = nil; started = false }
+    func stop() {
+        timer?.invalidate(); timer = nil
+        idleTimer?.invalidate(); idleTimer = nil
+        started = false
+    }
 
     // MARK: Engine
 
@@ -127,41 +132,50 @@ final class LEDMatrix: ObservableObject {
 
     private func setActive(_ v: Bool) { if v != isActive { isActive = v } }
 
+    /// Only publish (and thus redraw) when the frame actually changed — critical
+    /// so parked/blink states don't churn the view.
+    private func setColumns(_ new: [LEDColumn]) { if new != columns { columns = new } }
+
+    private func stopFastTimer() { timer?.invalidate(); timer = nil }
+
+    /// The fast (per-column-step) timer runs ONLY while there's motion to show —
+    /// scrolling a message or blinking REC. Static states (heatmap / download
+    /// status) render once and stop it, so idle cost is zero.
     private func step() {
         tick += 1
-        if scrolling {
-            advanceScroll()
-            return
-        }
-        // Parked. Decide what to show.
+        if scrolling { advanceScroll(); return }
         if !queue.isEmpty {
             let ev = queue.removeFirst()
             beginScroll(text: ev.text, color: color(for: ev.kind), idle: false)
             return
         }
-        if recActive {
-            renderREC()
-            return
-        }
-        if let status = statusText {
+        if recActive { renderREC(); return }               // blink — keep ticking
+        if let status = statusText {                        // static — render once, stop
             renderCentered(text: status, color: statusColor)
             setActive(true)
+            stopFastTimer()
             return
         }
-        if settings.idleTickerEnabled, !settings.idleContents.isEmpty {
-            parkedTicks += 1
-            if parkedTicks >= Int(colsPerSecond * 4), let text = nextIdleText() {
-                parkedTicks = 0
-                beginScroll(text: text, color: messageColor, idle: true)
-                return
-            }
-            renderParked()   // heatmap while waiting
-            return
-        }
-        // Nothing to do — show heatmap and STOP the timer (zero idle cost).
+        // Heatmap rest — render once, stop the timer, and (if enabled) arm the
+        // idle ticker via a slow one-shot rather than spinning the fast timer.
         renderParked()
         setActive(false)
-        stop()
+        stopFastTimer()
+        armIdle()
+    }
+
+    private func armIdle() {
+        idleTimer?.invalidate(); idleTimer = nil
+        guard settings.idleTickerEnabled, !settings.idleContents.isEmpty else { return }
+        let t = Timer(timeInterval: 5, repeats: false) { [weak self] _ in
+            guard let self = self,
+                  !self.scrolling, self.queue.isEmpty, !self.recActive, self.statusText == nil,
+                  let text = self.nextIdleText() else { return }
+            self.ensureRunning()
+            self.beginScroll(text: text, color: self.messageColor, idle: true)
+        }
+        RunLoop.main.add(t, forMode: .common)
+        idleTimer = t
     }
 
     // MARK: Scroll
@@ -196,7 +210,7 @@ final class LEDMatrix: ObservableObject {
         if window.count < viewportCols {
             window += Array(repeating: .off, count: viewportCols - window.count)
         }
-        columns = window
+        setColumns(window)
     }
 
     // MARK: Parked / centred renders
@@ -206,17 +220,17 @@ final class LEDMatrix: ObservableObject {
         return heatmap + Array(repeating: .off, count: viewportCols - heatmap.count)
     }
 
-    private func renderParked() { columns = restColumns() }
+    private func renderParked() { setColumns(restColumns()) }
 
     private func renderCentered(text: String, color: Color) {
-        columns = centeredColumns(text, color: color)
+        setColumns(centeredColumns(text, color: color))
     }
 
     private func renderREC() {
         // Blink the red REC roughly twice a second.
         let on = (tick / max(1, Int(colsPerSecond / 2))) % 2 == 0
-        columns = on ? centeredColumns("\(LEDFont.dot) REC", color: recColor)
-                     : Array(repeating: .off, count: viewportCols)
+        setColumns(on ? centeredColumns("\(LEDFont.dot) REC", color: recColor)
+                      : Array(repeating: .off, count: viewportCols))
         setActive(true)
     }
 

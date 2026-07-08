@@ -664,7 +664,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 return q > 0 ? "Q:\(q)" : nil
             }
         }
-        viewModel.ledMatrix.start()
+        // NB: don't start the LED matrix here — the LEDMatrixView starts it in
+        // onAppear when it's actually shown, and events (notify/setRecording)
+        // start it on demand for takeover. Starting at launch would spin the
+        // idle ticker off-screen.
         viewModel.onViewSummary = { [weak self] path in
             self?.openSummaryViewer(summaryMdPath: path)
         }
