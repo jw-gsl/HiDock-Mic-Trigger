@@ -1,88 +1,99 @@
-# LED ticker: fixed grey grid + scrolling green "filmstrip" (kill the flicker)
-Planning date: 2026-07-04
+# LED ticker: fixed dot grid, real LED-sign behaviour
+Planning date: 2026-07-04 · Tightened: 2026-07-09
 Status: PLAN ONLY (no code changes yet)
-Sources: hidock-mic-trigger/Sources/Views/LEDMatrixView.swift (Canvas draw,
-offColor band-ghosting, fixedCols/background params), Views/MeetingHeatmapView.swift
-(ledPanel ~210, ledBackground ~244), LEDMatrix.swift (track/mode/scroll engine).
+Sources: Views/LEDMatrixView.swift (Canvas draw, offColor ghost, background param),
+Views/MeetingHeatmapView.swift (ledPanel, ledBackground), LEDMatrix.swift
+(track/mode/scroll engine).
 
-## Problem
-The ticker still flickers. Two causes in the current implementation:
-1. **Band-ghosting opacity flip.** `offColor` dims the Tue–Sat day-colours to
-   `0.30` opacity *only while a message is showing* (`textShowing && inTextBand`).
-   So the whole 5-row band **flashes darker when a message starts and brightens
-   when it ends** — a visible flicker every message cycle.
-2. **Everything is redrawn every step.** The grey/unlit dots are recomputed and
-   repainted each column step alongside the lit ones, so any timing jitter or
-   opacity change reads as the *background* flickering, not just the text.
+## The model (corrected 2026-07-09 — this supersedes everything below the line)
+Behave like a **real LED sign**:
+- The **dots never move.** The grid is fixed. Motion is an *illusion* created by
+  turning fixed dots **on/off** as content scrolls **right → left**. There is no
+  position animation, no overlay, no ghosting, no sub-pixel — those concepts do
+  not apply.
+- There is **one layer of content** — a virtual horizontal "filmstrip" of
+  columns = `[heatmap columns] + [message columns]`. Each frame, every fixed
+  grid dot is set from the filmstrip sampled at an advancing integer offset. A
+  dot is either **off** (uniform dim grey, always the same) or **on** (a colour).
+- **At rest** the filmstrip is positioned so the viewport shows the **heatmap**
+  (identical to the normal heatmap). On an event, the offset advances so content
+  moves right→left: the heatmap dots wink off column-by-column (appear to slide
+  off the left), the **message winks on from the right in the middle rows**, it
+  travels left across, then the **heatmap winks back in from the right** until it
+  fills the viewport again (back to rest).
+- **Colours:**
+  - Heatmap dots keep their green **intensity gradient** (light→dark = meeting
+    volume — real data).
+  - Message dots are **brightest (full) green**.
+  - **Red** for the REC blink and for error messages. No other per-event
+    colours (blue/amber dropped).
 
-## The model you described (target behaviour)
-Keep a **fixed grey dot grid** that never moves or changes. The **coloured
-(green) content — the heatmap contribution squares AND the ticker text — is a
-single horizontal "filmstrip" that scrolls left**: as a message comes in from the
-right it pushes the heatmap leftward; when it's done, the heatmap slides back.
-Grey dots stay put; only which dots are *green* changes. No band-ghosting, no
-background flicker.
+### Why this is simpler than the current code
+The `draw()` primitive is already right in spirit: it paints dots at fixed
+positions (`x = v*pitch`) and decides lit/off by sampling `track[v+offset]`. What's
+wrong is (a) the heatmap is a *separate static backdrop* (`background`) with the
+message stamped on top, and (b) `offColor` **dims the day colour in the text band
+while a message shows** — that ghost/flip is the "overlay" and the flicker. Fix =
+make the heatmap part of the same filmstrip and delete the ghost.
 
-## Design
-### One fixed backdrop + one scrolling lit layer
-- **Backdrop (drawn once per frame, always identical):** every grid cell gets its
-  dim "off" dot at a fixed position. This layer is **independent of scroll/mode**
-  — it never dims or flips, which removes flicker cause #1.
-- **Lit layer (scrolls):** a **filmstrip** of columns built from:
-  `[heatmap columns] + [spacer] + [message glyph columns] + [spacer]`, where each
-  filmstrip column carries only its *lit* dots (green heatmap levels in rows 0–6;
-  green/coloured text in the Tue–Sat band rows 1–5). The view samples the
-  filmstrip at an integer scroll offset and paints only lit dots on top of the
-  backdrop. Unlit filmstrip cells paint nothing (backdrop shows through).
+## Design (tightened)
+### Fixed grid, two dot states
+- **Off dot:** one constant dim grey, everywhere, every frame. Never dims/flips.
+- **On dot:** colour + brightness from the filmstrip cell (heatmap intensity
+  green / brightest green message / red).
 
-### Motion (home = heatmap)
-- **At rest:** offset positions the filmstrip so the **heatmap fills the
-  viewport** (right-aligned, matching today's scrolled-to-trailing heatmap).
-  Pixel-identical to the heatmap — toggling LED on/off moves nothing.
-- **On event:** animate the offset so the heatmap scrolls left and the message
-  enters from the right, plays through, then the offset returns to the rest
-  position (heatmap home). "Reveal the message, then return" — recommended over
-  an endless loop so the heatmap is the resting state.
-- Grey backdrop never scrolls; only the lit-layer sample offset changes → "green
-  moves, grey stays."
+### The filmstrip (one content buffer, sampled onto the grid)
+- Columns 0–6 rows tall (Mon–Sun). Heatmap columns fill all 7 rows at their day
+  intensity; message columns light only the middle 5 rows (Tue–Sat) in bright
+  green (Mon/Sun rows off for message columns).
+- Order (in right→left scroll terms): `[heatmap][gap][message][gap][heatmap]`.
+  Rest = viewport over a heatmap section. One event = advance the offset through
+  the message and land back on a heatmap section (identical, so it reads as
+  "heatmap → message → heatmap"). Multiple queued messages: chain
+  `[heatmap][msg1][msg2]…[heatmap]` and scroll through once, then rest.
+- **Integer-column stepping** at the scroll-speed rate (this IS how an LED sign
+  moves — one dot-column per step). No fractional offset.
 
-### Crispness / smoothness
-- Integer-column stepping of the lit layer over the fixed grey grid is inherently
-  flicker-free now (the earlier flicker was the ghost flip, not the stepping).
-- If smoother motion is wanted, the lit layer *can* sub-pixel-scroll over the
-  fixed grey grid — but since heatmap squares are day-quantised, integer-column
-  stepping reads correctly and is simplest. Keep the step-rate `TimelineView`
-  redraw (cheap, sharp).
+### Rendering
+- Single `Canvas`, redrawn by `TimelineView` at the column-step rate (keep the
+  current cheap step-rate redraw; drop to a paused state at rest so idle CPU ≈ 0
+  — a static heatmap doesn't need re-drawing).
+- For each fixed cell (v, row): `cell = filmstrip[v + offset]`; if that cell's
+  (row) is lit → fill with its colour·brightness, else fill the constant grey.
 
-### What changes vs current code
-- **Delete the `offColor` band-ghost** (the `0.30` dim of the text band). The
-  backdrop grey is unconditional and constant.
-- **Build a filmstrip** in `LEDMatrix` (or the view) = heatmap columns +
-  message columns, instead of `track` being message-only and the heatmap being a
-  separate `background` array. The heatmap becomes the head of the same
-  scrolling buffer, so it genuinely scrolls (rather than being a static ghost the
-  text is stamped over).
-- `LEDMatrix` gains a "home offset" (heatmap width) and an event-driven scroll
-  target; `mode`/`trackStart` drive the offset animation; on completion it
-  returns to home.
-- `MeetingHeatmapView.ledBackground` (day colours) still supplies the heatmap
-  portion — but as the **lit heatmap columns of the filmstrip**, not as ghosted
-  unlit dots.
+## What changes vs current code
+- **Delete `offColor` ghosting and the separate `background` param.** Off dots
+  are a constant grey; the heatmap is no longer a backdrop.
+- **Build one filmstrip** in `LEDMatrix`: heatmap columns (from the day-colour
+  data MeetingHeatmapView already computes) + message columns, as a single
+  `[LEDColumn]` where each column carries per-row colour. Sample it in `draw()`.
+- **Rest state = heatmap section of the filmstrip**, not "message-only track +
+  static heatmap behind."
+- **Colours:** message columns = brightest green; heatmap columns = intensity
+  green; REC/error = red. Remove blue/amber.
+- **Idle:** when parked on the heatmap with nothing queued, stop the timeline
+  (no redraws) — the fixed heatmap is static, matching the perf work already done
+  elsewhere.
 
 ## Files to touch (when implemented)
-- LEDMatrix.swift — filmstrip buffer (heatmap head + message tail), home/offset
-  + reveal-and-return animation state.
-- Views/LEDMatrixView.swift — draw fixed grey backdrop unconditionally; paint lit
-  filmstrip on top at the scroll offset; remove `offColor` ghosting.
-- Views/MeetingHeatmapView.swift — pass heatmap day-colour columns as the lit
-  heatmap head of the filmstrip (adapt `ledBackground`/`ledPanel`).
+- LEDMatrix.swift — build the unified filmstrip (heatmap head + message +
+  heatmap tail); right→left integer offset; rest-on-heatmap; queue handling;
+  colours (green gradient / bright green / red).
+- Views/LEDMatrixView.swift — remove `offColor`/`background` ghost; draw fixed
+  grey off-dots + on-dots sampled from the filmstrip; pause when parked at rest.
+- Views/MeetingHeatmapView.swift — feed the heatmap day-colour columns into the
+  filmstrip (not as a ghost backdrop). Keep month + weekday labels around it.
 
-## Decisions (2026-07-04)
-- **Reveal-and-return** — the heatmap is home; a message scrolls in from the
-  right, plays, then the panel returns to the heatmap. (Confirmed.)
-- **Keep per-event colours** (blue/amber/red) for messages for now — the user may
-  drop them later for a uniform green panel, but retain them for this build.
+## Decisions (2026-07-09)
+- **Dots are fixed; motion = on/off only.** No position animation / overlay /
+  sub-pixel. Right→left.
+- **Colours:** heatmap intensity-green, message brightest green, REC/errors red;
+  drop blue/amber.
+- Heatmap is the rest state; one event scrolls message through and returns to
+  heatmap.
 
 ## Open questions
-- When multiple events queue, scroll through them back-to-back before returning
-  home, or return home between each? (Lean: play the queue, then return.)
+- Message travel: scroll the message fully across the middle band right→left
+  (marquee), or slide it to centre and hold briefly before continuing? (Lean:
+  marquee straight through — simplest, consistent with "moves right→left".)
+- Multiple queued events: chain into one pass (recommended) vs one pass each.
