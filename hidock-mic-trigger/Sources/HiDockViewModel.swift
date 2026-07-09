@@ -291,6 +291,10 @@ final class HiDockViewModel: ObservableObject {
     /// query — same source of truth as the per-row state.
     @Published var mergedFileTranscribed: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var mergedFileTagged: Set<String> = []
+    /// Merged files where the voice library auto-matched ≥1 speaker but none is
+    /// confirmed yet — the "confirm me" state (blue question mark). Mirrors the
+    /// per-row `speakersAutoMatched`. Excluded from the "needs tagging" nag.
+    @Published var mergedFileAutoMatched: Set<String> = []
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
     /// Merged file mp3 name → its transcript mtime (when it was transcribed).
     /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
@@ -538,12 +542,17 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var needsTaggingCount: Int {
-        let perRow = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
-        // Add merged-file rows that are transcribed-but-not-tagged.
-        // These don't live in syncEntries, so without this they'd
-        // never show up in the count even when the rediarize step
-        // produced a fresh transcript that needs speaker labelling.
-        let perMerge = mergedFileTranscribed.subtracting(mergedFileTagged).count
+        // Only true "needs tagging" rows nag: transcribed, multi-speaker, and
+        // neither confirmed (tagged) nor auto-matched. Auto-matched meetings
+        // ("confirm me") are surfaced by the blue question-mark icon, not the pill.
+        let perRow = syncEntries.filter {
+            $0.transcribed && !$0.speakersTagged && !$0.speakersAutoMatched
+        }.count
+        // Same for merged-file rows (they don't live in syncEntries).
+        let perMerge = mergedFileTranscribed
+            .subtracting(mergedFileTagged)
+            .subtracting(mergedFileAutoMatched)
+            .count
         return perRow + perMerge
     }
 

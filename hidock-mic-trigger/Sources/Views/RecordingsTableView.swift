@@ -264,6 +264,7 @@ struct RecordingsTableView: View {
         let mp3Name = (group.outputPath as NSString).lastPathComponent
         let isTranscribed = viewModel.mergedFileTranscribed.contains(mp3Name)
         let isTagged = viewModel.mergedFileTagged.contains(mp3Name)
+        let isAutoMatched = viewModel.mergedFileAutoMatched.contains(mp3Name)
         let path = viewModel.mergedFileTranscriptPaths[mp3Name]
 
         if isTranscribed && isTagged {
@@ -277,6 +278,17 @@ struct RecordingsTableView: View {
             }
             .buttonStyle(.plain)
             .help("Transcribed and tagged")
+        } else if isTranscribed && isAutoMatched {
+            Button {
+                if let path = path {
+                    viewModel.onOpenTranscriptViewer(path)
+                }
+            } label: {
+                Image(systemName: "questionmark.circle.fill")
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(.plain)
+            .help("Auto-tagged from your voice library — click to verify the speakers")
         } else if isTranscribed {
             Button {
                 if let path = path {

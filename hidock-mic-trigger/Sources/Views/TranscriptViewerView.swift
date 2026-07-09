@@ -37,17 +37,35 @@ class SegmentAudioPlayer: ObservableObject {
 
 // MARK: - Data Models
 
+/// Per-speaker provenance + review state, mirrored from the Python sidecar
+/// (`speaker_meta`). See PLAN-speaker-tagging-loop.md.
+struct SpeakerMeta: Codable {
+    /// "auto" (voice-library match) | "user" (typed/confirmed) | "unknown"
+    /// (acknowledged guest) | "generic" (untouched "Speaker N").
+    var source: String
+    var confidence: Double?
+    var verified: Bool
+}
+
 struct DiarizedTranscript: Codable {
     var version: Int
     var audioFile: String
     var segments: [DiarizedSegment]
     var speakerNames: [String: String]
+    /// Provenance/review state per speaker id. Optional — legacy sidecars omit it.
+    var speakerMeta: [String: SpeakerMeta]?
+    /// Per-speaker embeddings the diarizer stored for cheap re-matching. The
+    /// viewer never reads these, but they MUST survive a save round-trip (an
+    /// explicit CodingKeys list would otherwise drop them and break `rematch`).
+    var speakerEmbeddings: [String: [Double]]?
 
     enum CodingKeys: String, CodingKey {
         case version
         case audioFile = "audio_file"
         case segments
         case speakerNames = "speaker_names"
+        case speakerMeta = "speaker_meta"
+        case speakerEmbeddings = "speaker_embeddings"
     }
 }
 
@@ -424,6 +442,13 @@ struct TranscriptViewerView: View {
                 Divider()
             }
 
+            // Verify speakers — auto-matched voices to confirm/correct so the
+            // meeting counts as reviewed and the voice library keeps improving.
+            if needsVerification {
+                speakerVerifyPanel
+                Divider()
+            }
+
             // Segments list
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
@@ -621,6 +646,72 @@ struct TranscriptViewerView: View {
 
     // MARK: - Subviews
 
+    private var speakerVerifyPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.seal")
+                    .foregroundColor(.blue)
+                Text("Verify speakers")
+                    .font(.caption.weight(.semibold))
+                Text("Confirm each voice to lock it in — this also teaches your voice library.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            ForEach(uniqueSpeakerIds, id: \.self) { id in
+                speakerVerifyRow(id: id)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.blue.opacity(0.04))
+    }
+
+    @ViewBuilder
+    private func speakerVerifyRow(id: Int) -> some View {
+        let name = speakerName(for: id)
+        let prov = provenance(for: id)
+        let verified = speakerMeta(for: id)?.verified ?? false
+
+        HStack(spacing: 8) {
+            speakerPill(speakerId: id, interactive: true)   // tap to rename/correct
+
+            Text(prov.text)
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(prov.color.opacity(0.15), in: Capsule())
+                .foregroundColor(prov.color)
+
+            Spacer()
+
+            if verified {
+                Label("Verified", systemImage: "checkmark.seal.fill")
+                    .font(.caption2)
+                    .foregroundColor(.green)
+            } else {
+                if !isGenericName(name) {
+                    Button {
+                        confirmSpeaker(id)
+                    } label: {
+                        Label("Confirm", systemImage: "checkmark")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("Accept this name, lock it in, and reinforce it in your voice library.")
+                }
+                Button {
+                    markUnknown(id)
+                } label: {
+                    Text("Mark unknown")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Acknowledge an unknown/guest speaker — counts as reviewed, not added to your voice library. Rename via the pill if you know who it is.")
+            }
+        }
+    }
+
     @ViewBuilder
     private func speakerPill(speakerId: Int, interactive: Bool) -> some View {
         let name = speakerName(for: speakerId)
@@ -726,11 +817,81 @@ struct TranscriptViewerView: View {
         transcript.speakerNames["\(speakerId)"] = trimmed
         editingSpeakerId = nil
 
+        // Typing a name IS confirming it — mark verified/user so the meeting
+        // counts as reviewed and stops nagging.
+        setMeta(speakerId, source: "user", verified: true, confidence: nil)
+
         // Find a segment from this speaker to use for enrollment
         if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
             onEnrollSpeaker(trimmed, audioPath, segment.start, segment.end)
         }
 
+        saveTranscript()
+    }
+
+    // MARK: - Speaker verification (provenance + confirm loop)
+
+    /// True for an untouched "Speaker N" label.
+    private func isGenericName(_ name: String) -> Bool {
+        name.range(of: #"^Speaker \d+$"#, options: .regularExpression) != nil
+    }
+
+    private func speakerMeta(for id: Int) -> SpeakerMeta? {
+        transcript.speakerMeta?["\(id)"]
+    }
+
+    private func setMeta(_ id: Int, source: String, verified: Bool, confidence: Double?) {
+        var m = transcript.speakerMeta ?? [:]
+        m["\(id)"] = SpeakerMeta(source: source, confidence: confidence, verified: verified)
+        transcript.speakerMeta = m
+    }
+
+    /// The provenance chip shown next to each speaker in the verify panel.
+    private func provenance(for id: Int) -> (text: String, color: Color) {
+        let name = speakerName(for: id)
+        let m = speakerMeta(for: id)
+        let verified = m?.verified ?? false
+        // Legacy sidecars have no meta — infer from the name.
+        let source = m?.source ?? (isGenericName(name) ? "generic" : "auto")
+
+        if verified {
+            return source == "unknown" ? ("unknown", .secondary) : ("confirmed", .green)
+        }
+        switch source {
+        case "auto":
+            if let c = m?.confidence { return ("auto \(Int((c * 100).rounded()))%", .blue) }
+            return ("auto", .blue)
+        case "unknown":
+            return ("unknown", .secondary)
+        default:
+            return isGenericName(name) ? ("unnamed", .orange) : ("auto", .blue)
+        }
+    }
+
+    /// Any multi-speaker meeting with an unverified speaker still to review.
+    private var needsVerification: Bool {
+        guard uniqueSpeakerIds.count > 1 else { return false }
+        return uniqueSpeakerIds.contains { !(speakerMeta(for: $0)?.verified ?? false) }
+    }
+
+    /// Confirm the current (auto/typed) name — lock it in and reinforce the
+    /// voice library so future meetings match this voice better.
+    private func confirmSpeaker(_ id: Int) {
+        let name = speakerName(for: id)
+        guard !isGenericName(name) else { return }   // nothing to confirm without a name
+        let existingSource = speakerMeta(for: id)?.source
+        setMeta(id, source: existingSource == "user" ? "user" : "auto",
+                verified: true, confidence: speakerMeta(for: id)?.confidence)
+        if let segment = transcript.segments.first(where: { $0.speakerId == id }) {
+            onEnrollSpeaker(name, audioPath, segment.start, segment.end)
+        }
+        saveTranscript()
+    }
+
+    /// Acknowledge a speaker the user genuinely can't name — counts as reviewed
+    /// but is NOT enrolled into the voice library.
+    private func markUnknown(_ id: Int) {
+        setMeta(id, source: "unknown", verified: true, confidence: nil)
         saveTranscript()
     }
 

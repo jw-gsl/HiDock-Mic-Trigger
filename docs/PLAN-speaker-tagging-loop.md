@@ -1,6 +1,42 @@
 # Speaker tagging: close the verify → voice-library loop
 Planning date: 2026-07-04
-Status: PLAN ONLY (no code changes yet)
+Status: IMPLEMENTED 2026-07-09 (branch feature/speaker-verify-loop) — see "Implementation" below
+
+## Implementation (2026-07-09)
+Full plan built end-to-end. Done:
+- **Provenance + embeddings in the sidecar.** Both diarizers (Sortformer +
+  lite) now write `speaker_meta` `{id:{source,confidence,verified}}` and
+  `speaker_embeddings` `{id:[floats]}` alongside `speaker_names`. Auto-matches
+  start `source:"auto", verified:false`. (shared/diarize_sortformer.py,
+  shared/diarize_lite.py)
+- **Rematch core + CLI.** shared/speaker_meta.py `rematch_diarized()` re-matches
+  still-generic speakers vs the current library (stored-embedding fast path +
+  audio re-embed fallback), never clobbers a verified name, updates segment text.
+  New `rematch` verb in transcribe.py AND transcribe_cpp.py (regens .md on change).
+  Tests: shared/tests/test_speaker_meta.py.
+- **Tri-state Swift model.** `speakerReviewState()` replaces `checkSpeakersTagged`
+  (tagged / autoMatched / needsTagging; single-speaker never flagged; legacy
+  non-generic name → autoMatched so old auto-tags surface for verification).
+  SyncEntry.speakersAutoMatched + viewModel.mergedFileAutoMatched. Icons:
+  green check / blue questionmark.circle.fill (opens viewer) / orange tag.
+  needsTaggingCount counts ONLY needsTagging.
+- **Verify panel** in TranscriptViewerView: per-speaker provenance chip
+  (auto NN% / confirmed / unknown / unnamed), Confirm (verified + enroll/
+  reinforce), rename-to-confirm (source=user), Mark unknown (no enroll). Shows
+  only while a speaker is unverified. DiarizedTranscript gained speakerMeta +
+  speakerEmbeddings (the latter preserved through save so rematch keeps working).
+- **Batch re-match** in the Voice Library window ("Re-match untagged meetings"),
+  runs the rematch verb sequentially over every unconfirmed meeting, then
+  refreshes the icons. (AppDelegate.rematchUntaggedMeetings)
+
+Known follow-ups: table icons refresh on the next `refreshTranscriptionState`,
+not instantly on confirm-in-viewer (pre-existing latency); renames in the verify
+panel don't regenerate the .md (pre-existing — only rematch/recluster do).
+
+---
+Original plan below.
+
+Planning date: 2026-07-04
 Sources: hidock-mic-trigger/Sources/AppDelegate.swift (checkSpeakersTagged ~7751,
 refreshTranscriptionState ~7634, needsTaggingCount wiring), HiDockViewModel.swift
 (needsTaggingCount ~458, mergedFileTagged), Views/TranscriptViewerView.swift

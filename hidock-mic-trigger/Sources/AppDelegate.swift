@@ -3212,6 +3212,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Batch "close the loop": after enrolling new voices, sweep every
+    /// transcribed-but-unconfirmed meeting and re-match its still-generic
+    /// speakers against the current voice library. Runs the meetings
+    /// sequentially — rematch re-embeds audio for legacy sidecars, which is
+    /// CPU-heavy, so we deliberately don't fan them out against the
+    /// transcription queue. New matches surface as the blue "confirm me" state.
+    private func rematchUntaggedMeetings() {
+        guard ensureTranscriptionReady() else { return }
+
+        func diarizedPath(fromTranscript mdPath: String) -> String? {
+            let url = URL(fileURLWithPath: mdPath)
+            let base = url.deletingPathExtension().lastPathComponent
+            let dir = url.deletingLastPathComponent()
+            let p = dir.appendingPathComponent(base + "_diarized.json").path
+            return FileManager.default.fileExists(atPath: p) ? p : nil
+        }
+
+        // Every transcribed meeting that isn't confirmed yet (needsTagging or
+        // autoMatched) is a rematch candidate — including merged files.
+        var paths: [String] = []
+        for entry in syncEntries where entry.transcribed && !entry.speakersTagged {
+            if let md = entry.transcriptPath, let jp = diarizedPath(fromTranscript: md) { paths.append(jp) }
+        }
+        for name in viewModel.mergedFileTranscribed.subtracting(viewModel.mergedFileTagged) {
+            if let md = viewModel.mergedFileTranscriptPaths[name], let jp = diarizedPath(fromTranscript: md) { paths.append(jp) }
+        }
+        let jsonPaths = Array(Set(paths))
+
+        guard !jsonPaths.isEmpty else {
+            viewModel.syncStatus = "No unconfirmed meetings to re-match"
+            viewModel.syncStatusLevel = .secondary
+            syncViewModelState()
+            return
+        }
+
+        log("Re-matching \(jsonPaths.count) unconfirmed meeting(s) against the voice library")
+        var remaining = jsonPaths
+        var totalRematched = 0
+
+        func runNext() {
+            guard let jp = remaining.first else {
+                self.viewModel.syncStatus = totalRematched > 0
+                    ? "Re-match complete — \(totalRematched) speaker(s) newly matched, confirm them"
+                    : "Re-match complete — no new matches"
+                self.viewModel.syncStatusLevel = .success
+                self.syncViewModelState()
+                self.refreshTranscriptionState()   // repaint the tag-column icons
+                return
+            }
+            remaining.removeFirst()
+            let done = jsonPaths.count - remaining.count
+            self.viewModel.syncStatus = "Re-matching meeting \(done)/\(jsonPaths.count)…"
+            self.viewModel.syncStatusLevel = .secondary
+            self.syncViewModelState()
+
+            self.runTranscription(arguments: ["rematch", jp]) { [weak self] result in
+                guard let self = self else { return }
+                if case .success(let data) = result,
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let n = obj["rematched"] as? Int {
+                    totalRematched += n
+                }
+                runNext()
+            }
+        }
+        runNext()
+    }
+
     // MARK: - Feedback History
 
     private var feedbackHistoryPath: String {
@@ -3693,6 +3761,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
 
+        // Meetings that are transcribed but not yet confirmed — the rematch
+        // candidates (needsTagging + autoMatched), including merged files.
+        let unconfirmedCount = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
+            + viewModel.mergedFileTranscribed.subtracting(viewModel.mergedFileTagged).count
+
         let libraryView = VoiceLibraryView(
             speakers: speakers,
             onDelete: { [weak self] name in
@@ -3700,6 +3773,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onRename: { [weak self] oldName, newName in
                 self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
+            },
+            unconfirmedMeetingCount: unconfirmedCount,
+            onRematchAll: { [weak self] in
+                self?.rematchUntaggedMeetings()
             }
         )
 
@@ -7730,7 +7807,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].transcriptPath = info["transcript_path"] as? String
                         self.syncEntries[i].transcribedDate = self.transcriptModificationDate(info["transcript_path"] as? String)
                         // Check speaker tagging state from diarized JSON
-                        self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
+                        let review = self.speakerReviewState(transcriptPath: info["transcript_path"] as? String)
+                        self.syncEntries[i].speakersTagged = review.tagged
+                        self.syncEntries[i].speakersAutoMatched = review.autoMatched
                         // Check if summary exists (O(1) via the prebuilt index)
                         self.syncEntries[i].summaryPath = summaryIndex[(mp3Name as NSString).deletingPathExtension]
                         if self.syncEntries[i].transcribed { matched += 1 }
@@ -7739,6 +7818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].transcriptPath = nil
                         self.syncEntries[i].transcribedDate = nil
                         self.syncEntries[i].speakersTagged = false
+                        self.syncEntries[i].speakersAutoMatched = false
                         self.syncEntries[i].summaryPath = nil
                     }
                     // Apply the transcription-skip flag from the user's
@@ -7757,6 +7837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 // include it. We mirror exactly the per-row logic.
                 var mergedTranscribed: Set<String> = []
                 var mergedTagged: Set<String> = []
+                var mergedAutoMatched: Set<String> = []
                 var mergedPaths: [String: String] = [:]
                 var mergedDates: [String: Date] = [:]
                 for group in self.mergeGroups {
@@ -7767,12 +7848,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     let path = info["transcript_path"] as? String
                     if let path = path { mergedPaths[mergedMp3Name] = path }
                     if let d = self.transcriptModificationDate(path) { mergedDates[mergedMp3Name] = d }
-                    if self.checkSpeakersTagged(transcriptPath: path) {
-                        mergedTagged.insert(mergedMp3Name)
-                    }
+                    let review = self.speakerReviewState(transcriptPath: path)
+                    if review.tagged { mergedTagged.insert(mergedMp3Name) }
+                    if review.autoMatched { mergedAutoMatched.insert(mergedMp3Name) }
                 }
                 self.viewModel.mergedFileTranscribed = mergedTranscribed
                 self.viewModel.mergedFileTagged = mergedTagged
+                self.viewModel.mergedFileAutoMatched = mergedAutoMatched
                 self.viewModel.mergedFileTranscriptPaths = mergedPaths
                 self.viewModel.mergedFileTranscribedDates = mergedDates
                 if !mergedTranscribed.isEmpty {
@@ -7847,8 +7929,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Speaker Tagging & Summary Helpers
 
-    private func checkSpeakersTagged(transcriptPath: String?) -> Bool {
-        guard let mdPath = transcriptPath else { return false }
+    /// Tri-state speaker-review outcome for a transcript (see
+    /// PLAN-speaker-tagging-loop.md). Read from the `_diarized.json` sidecar's
+    /// `speaker_names` + `speaker_meta`:
+    ///   - `tagged`      = a multi-speaker meeting with ≥1 user-confirmed speaker
+    ///                     (or a single-speaker meeting — nothing to disambiguate).
+    ///   - `autoMatched` = the voice library matched ≥1 speaker but none is
+    ///                     confirmed yet ("confirm me"). Never true when tagged.
+    ///   - neither       = needs tagging (multi-speaker, nothing named/matched) —
+    ///                     the only state that feeds the "N need tagging" nag.
+    /// Legacy sidecars without `speaker_meta`: a non-generic name is inferred as
+    /// an unverified auto-match, so previously auto-tagged meetings surface for
+    /// verification rather than silently reading as confirmed.
+    private func speakerReviewState(transcriptPath: String?) -> (tagged: Bool, autoMatched: Bool) {
+        guard let mdPath = transcriptPath else { return (false, false) }
         let mdURL = URL(fileURLWithPath: mdPath)
         let baseName = mdURL.deletingPathExtension().lastPathComponent
         let dirURL = mdURL.deletingLastPathComponent()
@@ -7857,19 +7951,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard FileManager.default.fileExists(atPath: diarizedPath),
               let data = FileManager.default.contents(atPath: diarizedPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let speakerNames = json["speaker_names"] as? [String: String] else {
-            return false
+              let speakerNames = json["speaker_names"] as? [String: String],
+              !speakerNames.isEmpty else {
+            return (false, false)
         }
 
-        if speakerNames.isEmpty { return false }
-        let untaggedPattern = try? NSRegularExpression(pattern: "^Speaker \\d+$")
-        for (_, name) in speakerNames {
+        // Single-speaker meetings are never flagged — nothing to disambiguate.
+        if speakerNames.count <= 1 { return (true, false) }
+
+        let meta = json["speaker_meta"] as? [String: [String: Any]] ?? [:]
+        let genericPattern = try? NSRegularExpression(pattern: "^Speaker \\d+$")
+        func isGeneric(_ name: String) -> Bool {
             let range = NSRange(name.startIndex..., in: name)
-            if untaggedPattern?.firstMatch(in: name, range: range) != nil {
-                return false
-            }
+            return genericPattern?.firstMatch(in: name, range: range) != nil
         }
-        return true
+
+        var anyVerified = false
+        var anyNamed = false   // a real (non-generic) name — auto or user
+        for (id, name) in speakerNames {
+            if (meta[id]?["verified"] as? Bool) == true { anyVerified = true }
+            if !isGeneric(name) { anyNamed = true }
+        }
+
+        if anyVerified { return (true, false) }      // ≥1 confirmed → tagged
+        if anyNamed { return (false, true) }         // matched but unconfirmed → confirm me
+        return (false, false)                        // nothing → needs tagging
     }
 
     /// Build a `stem → summary-path` index by listing the Summaries directory

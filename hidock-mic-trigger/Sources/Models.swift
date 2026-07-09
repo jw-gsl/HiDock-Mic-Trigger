@@ -292,7 +292,13 @@ struct HiDockSyncRecordingEntry: Identifiable {
     /// When the transcription happened — the transcript file's modification
     /// time (set during the transcript disk-scan). nil until transcribed.
     var transcribedDate: Date? = nil
+    /// True once ≥1 speaker in a multi-speaker meeting has been user-confirmed
+    /// (locked in). "Tagged / done" — even if others remain unknown.
     var speakersTagged: Bool = false
+    /// True when the voice library auto-matched ≥1 speaker but none is confirmed
+    /// yet — the "confirm me" state. Mutually exclusive with speakersTagged
+    /// (tagged wins). Drives the blue question-mark icon; does NOT nag.
+    var speakersAutoMatched: Bool = false
     var summaryPath: String? = nil
     /// User explicitly opted out of transcribing this recording. The file
     /// is downloaded but they don't want it in the transcription queue.
@@ -300,7 +306,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
     /// UI shows "Skipped" and auto-transcribe filters it out.
     var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, speakersAutoMatched: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -310,6 +316,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.transcriptPath = transcriptPath
         self.transcribedDate = transcribedDate
         self.speakersTagged = speakersTagged
+        self.speakersAutoMatched = speakersAutoMatched
         self.summaryPath = summaryPath
         self.transcriptionSkipped = transcriptionSkipped
     }
