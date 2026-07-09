@@ -15,24 +15,25 @@ struct LEDEvent {
     var priority: Int = 0
 }
 
-/// Drives the LED ticker as a **real LED sign**: the dots never move — the
-/// engine sets each fixed dot on/off to create the illusion of content scrolling
-/// **right → left**. It publishes `columns` (the current viewport, one `LEDColumn`
-/// per grid column); the view just paints them. At rest it shows the heatmap and
-/// stops its timer (zero idle cost); an event scrolls a message through the
-/// middle rows and returns to the heatmap.
+/// Drives the LED ticker as a **real LED sign on a conveyor**: the dots never
+/// move — the engine sets fixed dots on/off so content appears to scroll
+/// **right → left, constantly**. Each cycle it builds a strip
+/// `heatmap + gap + (REC / download% / queued messages / idle line) + gap` and
+/// scrolls it; at the end it immediately starts the next cycle. So the heatmap
+/// scrolls off the left, the message follows, and the heatmap scrolls back on —
+/// continuous movement while the panel is shown. It runs ONLY between
+/// `start()`/`stop()` (the view calls these on appear/disappear), so it costs
+/// nothing when the panel isn't visible.
 final class LEDMatrix: ObservableObject {
     /// Current viewport content (exactly `viewportCols` columns). The view draws
-    /// this directly — no sampling/offset logic in the view.
+    /// this directly.
     @Published private(set) var columns: [LEDColumn] = []
-    /// True while a real event/REC is showing (kept for the heatmap-takeover
-    /// check in the view).
-    @Published private(set) var isActive = false
 
     private let settings: LEDSettings
     private(set) var viewportCols: Int
 
-    /// Resting content — the heatmap, one column (7 rows) per visible week.
+    /// The heatmap, one column (7 rows) per visible week — the conveyor's base
+    /// content. Updated when the meeting data changes.
     private var heatmap: [LEDColumn] = []
     private var queue: [LEDEvent] = []
     private var recActive = false
@@ -42,30 +43,20 @@ final class LEDMatrix: ObservableObject {
     // Scroll state
     private var filmstrip: [LEDColumn] = []
     private var offset = 0
-    private var scrolling = false
-    private var currentIsIdle = false
-
-    // Timing
     private var timer: Timer?
-    private var idleTimer: Timer?
-    private var tick = 0
-    private var parkedTicks = 0
     private var idleCursor = 0
-    private var started = false
 
-    /// Supplies idle-ticker text (clock / streak / queue / meetings) on demand.
+    /// Supplies idle-ticker text (clock / streak / queue / meetings).
     var idleProvider: ((LEDIdleContent) -> String?)?
 
     /// Columns scrolled per second (integer stepping — one dot-column per step).
     var colsPerSecond: Double { max(4, settings.scrollSpeed) }
     private var stepInterval: TimeInterval { 1.0 / colsPerSecond }
 
-    // Colours
-    private let offCell: Color? = nil
-    private var messageColor: Color { .green }              // brightest green
+    // Colours: green everywhere except REC / errors (red).
+    private var messageColor: Color { .green }
     private var recColor: Color { .red }
     private func color(for kind: LEDEventKind) -> Color {
-        // Green everywhere except REC / errors (red). Blue/amber dropped.
         (kind == .error || kind == .micRecording) ? .red : .green
     }
 
@@ -76,188 +67,111 @@ final class LEDMatrix: ObservableObject {
     }
 
     func configure(viewportCols: Int) {
-        guard viewportCols > 0, viewportCols != self.viewportCols else { return }
+        guard viewportCols > 0 else { return }
         self.viewportCols = viewportCols
-        if !scrolling { renderParked() }
     }
 
-    // MARK: Public API
+    // MARK: Public API — these just update state; the running loop folds them in.
 
-    /// Set the resting heatmap content (per-row colours; nil = off).
     func setHeatmap(_ cols: [LEDColumn]) {
         guard cols != heatmap else { return }
         heatmap = cols
-        if !scrolling && !recActive && statusText == nil { renderParked() }
     }
 
     func notify(_ event: LEDEvent) {
         guard settings.enabled, settings.isEnabled(event.kind) else { return }
         if event.priority > 0 { queue.removeAll { $0.priority < event.priority } }
         queue.append(event)
-        ensureRunning()
     }
 
     func setRecording(_ active: Bool) {
-        guard settings.enabled else { return }
         recActive = active && settings.isEnabled(.micRecording)
-        ensureRunning()
     }
 
-    /// Live sticky status (e.g. download %), shown centred while active.
     func setStatus(_ text: String?, color: Color = .green, kind: LEDEventKind = .download) {
-        guard settings.enabled else { return }
         statusText = (text != nil && settings.isEnabled(kind)) ? text : nil
         statusColor = color
-        ensureRunning()
     }
 
-    func start() { ensureRunning() }
+    /// Start/stop the conveyor. The view calls these on appear/disappear so the
+    /// ticker only runs (and only costs CPU) while it's on screen.
+    func start() {
+        guard settings.enabled, timer == nil else { return }
+        beginCycle()
+        let t = Timer(timeInterval: stepInterval, repeats: true) { [weak self] _ in self?.step() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
     func stop() {
         timer?.invalidate(); timer = nil
-        idleTimer?.invalidate(); idleTimer = nil
-        started = false
     }
 
     // MARK: Engine
 
-    private func ensureRunning() {
-        guard settings.enabled else { return }
-        started = true
-        if timer == nil {
-            let t = Timer(timeInterval: stepInterval, repeats: true) { [weak self] _ in self?.step() }
-            RunLoop.main.add(t, forMode: .common)
-            timer = t
-        }
-    }
-
-    private func setActive(_ v: Bool) { if v != isActive { isActive = v } }
-
-    /// Only publish (and thus redraw) when the frame actually changed — critical
-    /// so parked/blink states don't churn the view.
-    private func setColumns(_ new: [LEDColumn]) { if new != columns { columns = new } }
-
-    private func stopFastTimer() { timer?.invalidate(); timer = nil }
-
-    /// The fast (per-column-step) timer runs ONLY while there's motion to show —
-    /// scrolling a message or blinking REC. Static states (heatmap / download
-    /// status) render once and stop it, so idle cost is zero.
     private func step() {
-        tick += 1
-        if scrolling { advanceScroll(); return }
+        if offset > filmstrip.count - viewportCols {
+            beginCycle()          // loop straight into the next pass — constant movement
+        } else {
+            renderWindow()
+            offset += 1
+        }
+    }
+
+    /// Build one conveyor pass: heatmap, then whatever's pending, then a gap so
+    /// the heatmap of the next pass scrolls back on cleanly.
+    private func beginCycle() {
+        let gap = Array(repeating: LEDColumn.off, count: 6)
+        var strip = fullHeatmapColumns() + gap
+        var hadContent = false
+        if recActive {
+            strip += messageColumns("\(LEDFont.dot) REC", color: recColor) + gap
+            hadContent = true
+        }
+        if let s = statusText {
+            strip += messageColumns(s, color: statusColor) + gap
+            hadContent = true
+        }
         if !queue.isEmpty {
-            let ev = queue.removeFirst()
-            beginScroll(text: ev.text, color: color(for: ev.kind), idle: false)
-            return
+            for ev in queue { strip += messageColumns(ev.text, color: color(for: ev.kind)) + gap }
+            queue.removeAll()
+            hadContent = true
         }
-        if recActive { renderREC(); return }               // blink — keep ticking
-        if let status = statusText {                        // static — render once, stop
-            renderCentered(text: status, color: statusColor)
-            setActive(true)
-            stopFastTimer()
-            return
+        if !hadContent, settings.idleTickerEnabled, let t = nextIdleText() {
+            strip += messageColumns(t, color: messageColor) + gap
         }
-        // Heatmap rest — render once, stop the timer, and (if enabled) arm the
-        // idle ticker via a slow one-shot rather than spinning the fast timer.
-        renderParked()
-        setActive(false)
-        stopFastTimer()
-        armIdle()
-    }
-
-    private func armIdle() {
-        idleTimer?.invalidate(); idleTimer = nil
-        guard settings.idleTickerEnabled, !settings.idleContents.isEmpty else { return }
-        let t = Timer(timeInterval: 5, repeats: false) { [weak self] _ in
-            guard let self = self,
-                  !self.scrolling, self.queue.isEmpty, !self.recActive, self.statusText == nil,
-                  let text = self.nextIdleText() else { return }
-            self.ensureRunning()
-            self.beginScroll(text: text, color: self.messageColor, idle: true)
-        }
-        RunLoop.main.add(t, forMode: .common)
-        idleTimer = t
-    }
-
-    // MARK: Scroll
-
-    private func beginScroll(text: String, color: Color, idle: Bool) {
-        let rest = restColumns()
-        let gap = Array(repeating: LEDColumn.off, count: 3)
-        filmstrip = rest + gap + messageColumns(text, color: color) + gap + rest
+        filmstrip = strip
         offset = 0
-        scrolling = true
-        currentIsIdle = idle
-        parkedTicks = 0
-        setActive(!idle)
         renderWindow()
         offset = 1
     }
 
-    private func advanceScroll() {
-        if offset > filmstrip.count - viewportCols {
-            scrolling = false
-            filmstrip = []
-            step()               // immediately decide the next state (queue / park)
-            return
-        }
-        renderWindow()
-        offset += 1
+    private func fullHeatmapColumns() -> [LEDColumn] {
+        heatmap.isEmpty ? Array(repeating: .off, count: viewportCols) : heatmap
     }
 
     private func renderWindow() {
+        guard !filmstrip.isEmpty else { return }
+        let start = max(0, offset)
         let end = min(offset + viewportCols, filmstrip.count)
-        var window = Array(filmstrip[max(0, offset)..<end])
+        var window = start < end ? Array(filmstrip[start..<end]) : []
         if window.count < viewportCols {
             window += Array(repeating: .off, count: viewportCols - window.count)
         }
-        setColumns(window)
-    }
-
-    // MARK: Parked / centred renders
-
-    private func restColumns() -> [LEDColumn] {
-        if heatmap.count >= viewportCols { return Array(heatmap.suffix(viewportCols)) }
-        return heatmap + Array(repeating: .off, count: viewportCols - heatmap.count)
-    }
-
-    private func renderParked() { setColumns(restColumns()) }
-
-    private func renderCentered(text: String, color: Color) {
-        setColumns(centeredColumns(text, color: color))
-    }
-
-    private func renderREC() {
-        // Blink the red REC roughly twice a second.
-        let on = (tick / max(1, Int(colsPerSecond / 2))) % 2 == 0
-        setColumns(on ? centeredColumns("\(LEDFont.dot) REC", color: recColor)
-                      : Array(repeating: .off, count: viewportCols))
-        setActive(true)
+        columns = window
     }
 
     // MARK: Column builders
 
-    /// Message glyph columns: the 5-row font placed in rows 1–5 (Tue–Sat);
-    /// Mon/Sun rows off. Lit dots use `color`.
+    /// Message glyph columns: the 5-row font in rows 1–5 (Tue–Sat), Mon/Sun off.
     private func messageColumns(_ text: String, color: Color) -> [LEDColumn] {
         LEDFont.columns5(for: text).map { glyphCol in
             var cells = [Color?](repeating: nil, count: LEDFont.height)
             for r in 0..<LEDFont.height5 where r < glyphCol.count && glyphCol[r] {
-                cells[r + 1] = color               // +1 → Tue–Sat band
+                cells[r + 1] = color
             }
             return LEDColumn(cells: cells)
         }
-    }
-
-    private func centeredColumns(_ text: String, color: Color) -> [LEDColumn] {
-        var cols = messageColumns(text, color: color)
-        if cols.count < viewportCols {
-            let lead = (viewportCols - cols.count) / 2
-            cols = Array(repeating: LEDColumn.off, count: lead) + cols
-            cols += Array(repeating: LEDColumn.off, count: viewportCols - cols.count)
-        } else {
-            cols = Array(cols.prefix(viewportCols))
-        }
-        return cols
     }
 
     private func nextIdleText() -> String? {

@@ -8,7 +8,11 @@ import SwiftUI
 /// once they're populated.
 struct MeetingHeatmapView: View {
     @ObservedObject var viewModel: HiDockViewModel
-    @ObservedObject var ledMatrix: LEDMatrix
+    /// NOT @ObservedObject on purpose: the matrix updates ~20×/s while the
+    /// conveyor scrolls, and only the small LED Canvas (LEDMatrixView, which
+    /// observes it) should redraw — never this parent (which would re-render the
+    /// heatmap/labels and cost real CPU). We just hand it down.
+    var ledMatrix: LEDMatrix
     @ObservedObject var ledSettings: LEDSettings
 
     /// Day the pointer is currently over — drives the always-visible detail
@@ -169,8 +173,9 @@ struct MeetingHeatmapView: View {
 
         // Show the LED ticker instead of the grid when the user toggled LED
         // mode, or when an event is "taking over" the heatmap briefly.
-        let showLED = ledSettings.enabled
-            && (viewModel.heatmapLEDMode || (ledSettings.eventTakeover && ledMatrix.isActive))
+        // LED mode is an explicit toggle now; the conveyor runs constantly while
+        // shown, so there's no isActive/takeover to observe.
+        let showLED = ledSettings.enabled && viewModel.heatmapLEDMode
 
         return VStack(alignment: .leading, spacing: 6) {
             header
