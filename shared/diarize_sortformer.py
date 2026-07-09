@@ -352,13 +352,24 @@ def _collect_speaker_audio(audio: np.ndarray, turns, label: str, sr: int = 16000
 
 def _resolve_speaker_names(
     audio: np.ndarray, turns, internal_labels: list[str], sr: int = 16000,
-) -> dict[str, str]:
+) -> dict[str, dict]:
     """Try to match each Sortformer speaker against the voice library.
-    Returns a mapping from internal label ("Speaker 1", "Speaker 2", …)
-    to display name — the enrolled name when there's a confident match,
-    or the same "Speaker N" label otherwise. Silently returns identity
-    mapping if TitaNet or the voice library aren't available."""
-    fallback = {label: label for label in internal_labels}
+
+    Returns a mapping from internal label ("Speaker 1", "Speaker 2", …) to a
+    per-speaker info dict:
+        {"name": str, "source": "auto"|"generic", "confidence": float|None,
+         "embedding": list[float]|None}
+    - `name` is the enrolled name on a confident match, else the "Speaker N"
+      label.
+    - `source` is "auto" when matched from the voice library, else "generic".
+    - `embedding` is the L2-normalised TitaNet embedding (persisted so a later
+      `rematch` can re-identify without touching the audio again).
+    Silently returns generic identity info if TitaNet or the voice library
+    aren't available."""
+    fallback = {
+        label: {"name": label, "source": "generic", "confidence": None, "embedding": None}
+        for label in internal_labels
+    }
     try:
         from shared.audio_utils import extract_embedding
         from shared.voice_library_lite import identify_speaker
@@ -375,11 +386,11 @@ def _resolve_speaker_names(
         print(f"Sortformer: TitaNet load failed ({e}); using generic labels", file=sys.stderr)
         return fallback
 
-    names: dict[str, str] = {}
+    info: dict[str, dict] = {}
     for label in internal_labels:
         chunk = _collect_speaker_audio(audio, turns, label, sr=sr)
         if chunk.size == 0:
-            names[label] = label
+            info[label] = {"name": label, "source": "generic", "confidence": None, "embedding": None}
             continue
         try:
             emb = extract_embedding(chunk, sr=sr, onnx_session=session)
@@ -387,16 +398,19 @@ def _resolve_speaker_names(
             if norm > 1e-10:
                 emb = (emb / norm).astype(np.float32)
             matched, confidence = identify_speaker(emb, threshold=0.55)
+            emb_list = [float(x) for x in emb]
         except Exception as e:
             print(f"Sortformer: embed/match failed for {label}: {e}", file=sys.stderr)
-            names[label] = label
+            info[label] = {"name": label, "source": "generic", "confidence": None, "embedding": None}
             continue
         if matched:
-            names[label] = matched
+            info[label] = {"name": matched, "source": "auto",
+                           "confidence": float(confidence), "embedding": emb_list}
             print(f"  Auto-matched {label} → {matched} ({confidence:.0%})", file=sys.stderr)
         else:
-            names[label] = label
-    return names
+            info[label] = {"name": label, "source": "generic",
+                           "confidence": None, "embedding": emb_list}
+    return info
 
 
 def diarize(
@@ -465,6 +479,8 @@ def diarize(
             "audio_file": str(audio_path),
             "segments": segments_out,
             "speaker_names": {"0": "Speaker 1"},
+            "speaker_meta": {"0": {"source": "generic", "confidence": None, "verified": False}},
+            "speaker_embeddings": {},
             "backend": "sortformer",
         }
 
@@ -491,7 +507,8 @@ def diarize(
     # their longest turns and try identify_speaker against the user's
     # enrolled library. Adds enrolled-name auto-tagging parity with the
     # lite path (PLAN-diarization-improvements.md, step 10 in lite).
-    display_names = _resolve_speaker_names(audio, renamed_turns, internal_labels, sr=16000)
+    speaker_info = _resolve_speaker_names(audio, renamed_turns, internal_labels, sr=16000)
+    display_names = {label: speaker_info[label]["name"] for label in internal_labels}
 
     # Assign speakers per Whisper segment. Word-level alignment when
     # the Whisper output carries per-word timestamps; falls back to
@@ -512,6 +529,20 @@ def diarize(
         str(spk_id): display_names.get(label, label)
         for label, spk_id in label_to_id.items()
     }
+    # Provenance + review state per speaker (see PLAN-speaker-tagging-loop.md).
+    # Auto-matched names start unverified so the app can flag them for the user
+    # to confirm; generic "Speaker N" labels are untouched.
+    speaker_meta: dict[str, dict] = {}
+    speaker_embeddings: dict[str, list] = {}
+    for label, spk_id in label_to_id.items():
+        inf = speaker_info.get(label, {})
+        speaker_meta[str(spk_id)] = {
+            "source": inf.get("source", "generic"),
+            "confidence": inf.get("confidence"),
+            "verified": False,
+        }
+        if inf.get("embedding") is not None:
+            speaker_embeddings[str(spk_id)] = inf["embedding"]
 
     for seg in raw_segments:
         label = seg.get("speaker") or internal_labels[0]
@@ -552,5 +583,7 @@ def diarize(
         "audio_file": str(audio_path),
         "segments": segments_out,
         "speaker_names": speaker_names,
+        "speaker_meta": speaker_meta,
+        "speaker_embeddings": speaker_embeddings,
         "backend": "sortformer",
     }

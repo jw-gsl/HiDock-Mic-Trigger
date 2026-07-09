@@ -889,6 +889,52 @@ def cmd_recluster_with_anchors(args):
     print(_json.dumps(summary))
 
 
+def cmd_rematch(args):
+    """Re-match still-generic speakers in an existing transcript against the
+    current voice library (used after enrolling new voices). Never overwrites a
+    user-confirmed name. Re-derives per-speaker embeddings from audio when the
+    sidecar predates embedding storage (unless --no-audio)."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    progress(5)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import rematch_diarized
+    progress(10)
+    summary = rematch_diarized(data, audio_fallback=not getattr(args, "no_audio", False))
+    progress(90)
+
+    json_path.write_text(
+        _json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # Regenerate the .md only when a name actually changed.
+    if summary.get("rematched", 0) > 0:
+        try:
+            from shared.transcript_writer import write_transcript
+            md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+            body_text = " ".join(
+                seg.get("text", "").strip()
+                for seg in data.get("segments", [])
+                if seg.get("text")
+            )
+            write_transcript(
+                md_path,
+                body_text,
+                source_path=Path(data.get("audio_file", "")),
+                model="rematch",
+                diarized_result=data,
+            )
+        except Exception as exc:
+            print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+
+    progress(100)
+    print(_json.dumps({"status": "completed", **summary}))
+
+
 def cmd_merge_rediarize(args):
     """Build a merged transcript from existing per-piece transcripts.
 
@@ -1106,6 +1152,18 @@ def main():
         help="Cosine-similarity threshold (0-1). Below this, segments keep their existing speaker. Defaults to the conservative value tuned in shared.recluster_with_anchors.",
     )
     p_recluster.set_defaults(func=cmd_recluster_with_anchors)
+
+    p_rematch = sub.add_parser(
+        "rematch",
+        help="Re-match still-generic speakers against the current voice library (after enrolling new voices)",
+    )
+    p_rematch.add_argument("json_path", help="Path to _diarized.json file")
+    p_rematch.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
+    )
+    p_rematch.set_defaults(func=cmd_rematch)
 
     p_merge = sub.add_parser(
         "merge-rediarize",

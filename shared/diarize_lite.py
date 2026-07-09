@@ -1007,12 +1007,18 @@ def diarize(
     print(f"  Final speakers: {n_final}", file=sys.stderr)
 
     # Step 10: Auto-match against voice library (from minutes v0.10.0)
+    # Also record provenance (speaker_meta) + the per-speaker centroid
+    # (speaker_embeddings) so the app can flag auto-matches for verification and
+    # a later `rematch` can re-identify without touching the audio.
     speaker_names = {}
+    speaker_meta = {}
+    speaker_embeddings = {}
     for spk_id in range(n_final):
         # Compute centroid for this speaker
         spk_indices = [i for i, s in enumerate(ws_speakers) if s == spk_id]
         if not spk_indices:
             speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+            speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
             continue
 
         # Get embeddings for this speaker's whisper segments via speech segments
@@ -1039,16 +1045,20 @@ def diarize(
             norm = np.linalg.norm(centroid)
             if norm > 1e-10:
                 centroid = centroid / norm
+            speaker_embeddings[str(spk_id)] = [float(x) for x in centroid]
 
             # Check voice library
             matched_name, confidence = identify_speaker(centroid, threshold=0.55)
             if matched_name:
                 speaker_names[str(spk_id)] = matched_name
+                speaker_meta[str(spk_id)] = {"source": "auto", "confidence": float(confidence), "verified": False}
                 print(f"  Auto-matched speaker {spk_id} → {matched_name} ({confidence:.0%})", file=sys.stderr)
             else:
                 speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+                speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
         else:
             speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+            speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
 
     # Step 11: Build output, merge same-speaker, split long segments
     raw_segments = []
@@ -1085,6 +1095,8 @@ def diarize(
         "audio_file": str(audio_path),
         "segments": segments_out,
         "speaker_names": speaker_names,
+        "speaker_meta": speaker_meta,
+        "speaker_embeddings": speaker_embeddings,
     }
 
 
@@ -1107,4 +1119,6 @@ def _build_single_speaker_result(audio_path, whisper_segments):
     return {
         "version": 1, "audio_file": str(audio_path),
         "segments": segments_out, "speaker_names": {"0": "Speaker 1"},
+        "speaker_meta": {"0": {"source": "generic", "confidence": None, "verified": False}},
+        "speaker_embeddings": {},
     }
