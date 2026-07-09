@@ -1117,7 +1117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             refreshMicNamesNow()
             if syncPaired && !syncBusy {
                 log("USB device change detected, refreshing sync status")
-                autoConnectSyncIfPaired()
+                autoConnectSyncIfPaired(usbTriggered: true)
             }
         }
 
@@ -1966,7 +1966,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func autoConnectSyncIfPaired(startTriggerOnCompletion: Bool = false) {
+    /// - Parameter usbTriggered: true when called from a USB/CoreAudio
+    ///   device-change event. Plaud is an API account, not a physical USB
+    ///   device, so a USB change tells us nothing about it — we skip re-probing
+    ///   Plaud in that case (it's refreshed on app open and manual refresh).
+    ///   This also stops a USB audio blip from needlessly re-fetching the Plaud
+    ///   catalog and rebuilding its rows.
+    private func autoConnectSyncIfPaired(startTriggerOnCompletion: Bool = false, usbTriggered: Bool = false) {
         // If we were asked to start the trigger on completion but we
         // short-circuit (busy, extractor missing), still honour the
         // promise — otherwise the app launches with no trigger running.
@@ -2059,6 +2065,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // idle to pick up new recordings.
             let recording = self.viewModel.hidockRecordingActive
             let probeDevices = devices.filter { device in
+                // Plaud is an API, not a USB device — a USB/audio device change
+                // is irrelevant to it, so don't re-probe it on USB churn.
+                if usbTriggered && device.deviceType == .plaud {
+                    self.log("Auto-connect: skipping Plaud \(device.cleanName) — USB-change trigger doesn't affect an API account")
+                    return false
+                }
                 if device.deviceType == .volume || device.deviceType == .plaud { return true }
                 if !recording { return true }
                 self.log("Auto-connect: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
@@ -2959,6 +2971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             transcriptPath: existing.transcriptPath,
             transcribedDate: existing.transcribedDate,
             speakersTagged: existing.speakersTagged,
+            speakersAutoMatched: existing.speakersAutoMatched,
             summaryPath: existing.summaryPath,
             transcriptionSkipped: existing.transcriptionSkipped
         )
@@ -4372,15 +4385,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func mergeImportedIntoSyncEntries() {
         // Remove any existing imported entries, then append fresh ones from
         // the persisted list. This keeps device-reported entries untouched.
+        // Carry transcription/tagging state forward across the rebuild (by name)
+        // so a reconnect/refresh doesn't blank an imported row's icon.
+        let previousByName = Dictionary(
+            syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
+                .map { ($0.recording.name, $0) },
+            uniquingKeysWith: { a, _ in a }
+        )
         syncEntries.removeAll { $0.deviceId == IMPORTED_DEVICE_ID }
         let stableImportedPid = Int(truncatingIfNeeded: IMPORTED_DEVICE_ID.hashValue)
         for entry in importedRecordings {
             let rec = ImportedRecordingsStore.asSyncRecording(entry)
+            let prev = previousByName[rec.name]
             let sync = HiDockSyncRecordingEntry(
                 recording: rec,
                 deviceProductId: stableImportedPid,
                 deviceId: IMPORTED_DEVICE_ID,
-                deviceName: IMPORTED_DEVICE_NAME
+                deviceName: IMPORTED_DEVICE_NAME,
+                transcribed: prev?.transcribed ?? false,
+                transcriptPath: prev?.transcriptPath,
+                transcribedDate: prev?.transcribedDate,
+                speakersTagged: prev?.speakersTagged ?? false,
+                speakersAutoMatched: prev?.speakersAutoMatched ?? false,
+                summaryPath: prev?.summaryPath,
+                transcriptionSkipped: prev?.transcriptionSkipped ?? false
             )
             syncEntries.append(sync)
         }
@@ -5644,6 +5672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     transcriptPath: prev?.transcriptPath,
                     transcribedDate: prev?.transcribedDate,
                     speakersTagged: prev?.speakersTagged ?? false,
+                    speakersAutoMatched: prev?.speakersAutoMatched ?? false,
                     summaryPath: prev?.summaryPath,
                     transcriptionSkipped: prev?.transcriptionSkipped ?? false
                 ))
