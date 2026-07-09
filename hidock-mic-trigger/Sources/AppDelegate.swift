@@ -88,6 +88,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
     private var syncAutoDownloadTimer: Timer?
+    /// Lightweight periodic check for new Plaud recordings. Plaud is an API, not
+    /// a USB device, so nothing else surfaces new recordings on it — this poll
+    /// does. It only runs the expensive refresh/auto-download when the Plaud
+    /// catalog actually changed (see pollPlaudForChanges).
+    private var plaudPollTimer: Timer?
     private var syncExtractorProcess: Process?
     private let syncExtractorQueue = DispatchQueue(label: "hidock.extractor", qos: .userInitiated)
     // Concurrent queue used ONLY for launch cache-paint reads (cached-status /
@@ -441,6 +446,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // attached yet. startTrigger fires from the autoConnect
         // completion.
         autoConnectSyncIfPaired(startTriggerOnCompletion: true)
+
+        // Start the lightweight Plaud new-recording poll (no-op until a Plaud
+        // account is paired). App-open already probed via autoConnect above.
+        startPlaudPollTimer()
 
         // Wire update status to the footer bar
         UpdateChecker.onStatusUpdate = { [weak self] (text: String) in
@@ -5899,6 +5908,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 return
             }
             self.downloadNewSyncRecordings()
+        }
+    }
+
+    /// Poll interval for the Plaud new-recording check. Defaults to 2 minutes;
+    /// override with the `plaudPollIntervalSeconds` user default (0 disables).
+    private var plaudPollInterval: TimeInterval {
+        let v = UserDefaults.standard.double(forKey: "plaudPollIntervalSeconds")
+        return v > 0 ? v : 120
+    }
+
+    private func startPlaudPollTimer() {
+        plaudPollTimer?.invalidate()
+        let interval = plaudPollInterval
+        guard interval > 0 else { log("Plaud poll disabled (interval 0)"); return }
+        // Always-on timer; the tick itself no-ops when no Plaud account is
+        // paired, so we don't need to start/stop it on pairing changes.
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.pollPlaudForChanges()
+        }
+        t.tolerance = min(15, interval * 0.2)   // let the OS coalesce it — saves power
+        plaudPollTimer = t
+        log("Plaud poll timer started (every \(Int(interval))s)")
+    }
+
+    /// Lightweight steady-state check: hit the Plaud API for each paired Plaud
+    /// account and, ONLY when its catalog actually changed vs what's displayed,
+    /// route through the normal render path (which rebuilds the rows, fires
+    /// auto-download, and refreshes transcription state). When nothing changed
+    /// we just keep the connection dot fresh — no row rebuild, no library
+    /// rescan, no extra subprocesses. Plaud never touches USB, so this can't
+    /// interfere with the mic trigger / HiDock.
+    private func pollPlaudForChanges() {
+        guard !syncBusy else { return }   // don't stack on a live refresh
+        let plauds = syncPairedDevices.filter { $0.deviceType == .plaud }
+        guard !plauds.isEmpty else { return }
+        guard ensureExtractorReady() else { return }
+
+        for device in plauds {
+            let args = plaudExtractorArguments("plaud-status", device: device)
+            runExtractor(arguments: args, productId: nil, environment: plaudEnvironment(for: device)) { [weak self] result in
+                guard let self = self else { return }
+                guard case .success(let data) = result,
+                      let payload = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) else { return }
+                DispatchQueue.main.async {
+                    let polled = Set(payload.recordings.map { $0.name })
+                    let current = Set(
+                        self.syncEntries.filter { $0.deviceId == device.deviceId }.map { $0.recording.name }
+                    )
+                    // Non-empty + differs from what's shown → something changed.
+                    // (Empty = signed-out / transient error — don't wipe rows.)
+                    if !payload.recordings.isEmpty, polled != current {
+                        self.log("Plaud poll: \(device.cleanName) catalog changed (\(current.count)→\(polled.count)) — refreshing")
+                        self.renderSyncStatus(payload, device: device)   // rebuild + auto-download + disk scan
+                        self.refreshTranscriptionState()
+                        self.syncViewModelState()
+                    } else {
+                        // Unchanged — just keep the card's connection state fresh.
+                        if payload.connected { self.syncDeviceLastOK[device.deviceId] = Date() }
+                        self.syncDeviceConnected[device.deviceId] = payload.connected
+                        self.syncViewModelState()
+                    }
+                }
+            }
         }
     }
 
