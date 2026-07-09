@@ -25,10 +25,10 @@ struct MeetingHeatmapView: View {
     private let gap: CGFloat = 3
     private let weeksBack = 52        // 52 columns back + current week = 53 columns
 
-    /// Monday-first calendar (matches UK weekday convention).
+    /// Sunday-first calendar (rows read Sun→Sat, top→bottom).
     private var calendar: Calendar {
         var c = Calendar.current
-        c.firstWeekday = 2
+        c.firstWeekday = 1
         return c
     }
 
@@ -163,7 +163,7 @@ struct MeetingHeatmapView: View {
 
     // MARK: View
 
-    private let weekdayCol = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    private let weekdayCol = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
     var body: some View {
         let today = calendar.startOfDay(for: Date())

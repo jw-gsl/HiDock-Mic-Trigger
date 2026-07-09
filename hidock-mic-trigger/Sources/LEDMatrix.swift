@@ -110,12 +110,17 @@ final class LEDMatrix: ObservableObject {
     // MARK: Engine
 
     private func step() {
-        if offset > filmstrip.count - viewportCols {
-            beginCycle()          // loop straight into the next pass — constant movement
-        } else {
-            renderWindow()
-            offset += 1
+        guard !filmstrip.isEmpty else { beginCycle(); return }
+        offset += 1
+        if offset >= filmstrip.count {
+            // Completed a full pass. Rebuild to fold in any new content — the
+            // seam is at the heatmap's start in BOTH the old and new strip, so
+            // it's continuous (no jump). Everything that differs (messages) is
+            // off-screen at this moment.
+            beginCycle()
+            return
         }
+        renderWindow()
     }
 
     /// Build one conveyor pass: heatmap, then whatever's pending, then a gap so
@@ -143,7 +148,6 @@ final class LEDMatrix: ObservableObject {
         filmstrip = strip
         offset = 0
         renderWindow()
-        offset = 1
     }
 
     private func fullHeatmapColumns() -> [LEDColumn] {
@@ -151,13 +155,12 @@ final class LEDMatrix: ObservableObject {
     }
 
     private func renderWindow() {
-        guard !filmstrip.isEmpty else { return }
-        let start = max(0, offset)
-        let end = min(offset + viewportCols, filmstrip.count)
-        var window = start < end ? Array(filmstrip[start..<end]) : []
-        if window.count < viewportCols {
-            window += Array(repeating: .off, count: viewportCols - window.count)
-        }
+        let n = filmstrip.count
+        guard n > 0 else { return }
+        // Circular read: the strip's tail (trailing gap) flows seamlessly back
+        // into its head (the heatmap), so the loop never cuts/jumps.
+        var window = [LEDColumn](); window.reserveCapacity(viewportCols)
+        for i in 0..<viewportCols { window.append(filmstrip[(offset + i) % n]) }
         columns = window
     }
 

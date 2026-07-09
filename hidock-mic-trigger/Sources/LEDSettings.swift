@@ -79,7 +79,7 @@ final class LEDSettings: ObservableObject {
         autoRevertSeconds = dblOr("autoRevert", 6)
         colorScheme = LEDColorScheme(rawValue: u.string(forKey: "led.color") ?? "") ?? .perEvent
         brightness = dblOr("brightness", 1.0)
-        scrollSpeed = dblOr("speed", 22)
+        scrollSpeed = dblOr("speed", 12)   // columns/sec — slower, calmer default
         idleTickerEnabled = boolOr("idle", true)
         micVU = boolOr("micVU", true)
         bootAnimation = boolOr("boot", true)
