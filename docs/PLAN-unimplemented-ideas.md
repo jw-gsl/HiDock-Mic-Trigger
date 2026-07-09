@@ -130,6 +130,28 @@ Update checker exists but the actual download+install flow needs testing.
 - [ ] Test full-text search
 - [ ] Wire into transcript viewer (search within meeting)
 
+#### Knowledge Graph + Draggable Timeline (idea, 2026-07-09)
+When we build the knowledge-graph **visualisation**, pair the node graph with a
+**draggable timeline** so you can see how knowledge connections between people
+and meetings **progress over time** — not just a static snapshot.
+- **Model:** the graph already links entities (people, meetings, topics/action
+  items) via `shared/knowledge.py`. Each edge/node carries a date (meeting
+  date). The timeline is a time axis you scrub.
+- **Interaction:** drag a playhead/scrubber (or a range window) along the
+  timeline; the graph re-renders to show only the connections that existed
+  *up to* (or *within*) that point — edges appear/thicken as relationships
+  recur, so you watch a person's or topic's network grow meeting by meeting.
+- **Use cases:** "when did X and Y start collaborating?", how a topic spread
+  across people over months, who a project pulled in over time, spotting when a
+  relationship went quiet.
+- **Reuse:** the meeting-heatmap already buckets activity by day and the graph
+  data is dated — the timeline is a scrub control over that same date dimension,
+  driving a filter on which nodes/edges the graph draws. Consider an
+  animate/play button to sweep the window automatically.
+- **Open questions:** cumulative-to-date vs sliding-window view (offer both?);
+  how to lay out nodes stably so they don't jump as edges appear (fixed
+  positions / force layout with pinned seeds); performance at many nodes.
+
 ### LLM Summarization Testing
 **Priority: LOW**
 The summarize feature exists but hasn't been tested end-to-end.
