@@ -8,41 +8,122 @@ class SegmentAudioPlayer: ObservableObject {
     @Published var playingSegmentId: String?
     private var player: AVAudioPlayer?
     private var stopTimer: Timer?
+    private var decodeProcess: Process?
+    private var tempURL: URL?
+    /// Bumped on every play()/stop() so a slow ffmpeg decode that finishes after
+    /// the user moved on doesn't start playing the wrong clip.
+    private var generation = 0
+
+    /// ffmpeg locations, in preference order. Plaud recordings are Opus muxed in
+    /// Ogg but named ".mp3", which Core Audio (AVAudioPlayer) cannot decode — we
+    /// fall back to ffmpeg to extract the segment.
+    private static let ffmpegCandidates = [
+        "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg",
+    ]
+    private static var ffmpegPath: String? {
+        ffmpegCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
 
     func play(audioPath: String, start: Double, end: Double, segmentId: String) {
         stop()
-        // fileURLWithPath, not URL(string: "file://…") — the latter returns
-        // nil for any path containing a space (un-percent-encoded), silently
-        // breaking playback for user-chosen folders like "My Recordings".
-        let url = URL(fileURLWithPath: audioPath)
         guard FileManager.default.fileExists(atPath: audioPath) else {
             NSLog("SegmentAudioPlayer: audio file not found at \(audioPath)")
             NSSound.beep()
             return
         }
-        guard let player = try? AVAudioPlayer(contentsOf: url) else {
-            NSLog("SegmentAudioPlayer: AVAudioPlayer could not open \(audioPath)")
+
+        // Fast path: real mp3/wav/m4a open directly and seek cleanly.
+        // fileURLWithPath, not URL(string: "file://…") — the latter returns nil
+        // for any path containing a space, silently breaking playback.
+        let url = URL(fileURLWithPath: audioPath)
+        if let player = try? AVAudioPlayer(contentsOf: url) {
+            self.player = player
+            player.prepareToPlay()      // without this the first play() can no-op
+            player.currentTime = max(0, start)
+            player.play()
+            playingSegmentId = segmentId
+            armStopTimer(after: end - start)
+            return
+        }
+
+        // Fallback: Core Audio couldn't open it (e.g. Opus). Use ffmpeg to
+        // decode just this segment to a temp WAV, then play that from 0.
+        decodeAndPlayViaFFmpeg(audioPath: audioPath, start: start, end: end, segmentId: segmentId)
+    }
+
+    private func decodeAndPlayViaFFmpeg(audioPath: String, start: Double, end: Double, segmentId: String) {
+        guard let ffmpeg = Self.ffmpegPath else {
+            NSLog("SegmentAudioPlayer: cannot decode \(audioPath) and no ffmpeg found")
             NSSound.beep()
             return
         }
-        self.player = player
-        // prepareToPlay() before seeking — without it the first play() can
-        // silently no-op and currentTime seeks are unreliable on macOS.
-        player.prepareToPlay()
-        player.currentTime = max(0, start)
-        player.play()
-        playingSegmentId = segmentId
-        let duration = end - start
-        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+        let duration = max(0.1, end - start)
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hidock-seg-\(UUID().uuidString).wav")
+        tempURL = out
+
+        generation += 1
+        let gen = generation
+        playingSegmentId = segmentId   // optimistic — shows the stop icon while decoding
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ffmpeg)
+        // -ss/-t before -i = fast input seek; downmix to 16k mono (voice preview).
+        proc.arguments = [
+            "-y", "-nostdin",
+            "-ss", String(format: "%.3f", max(0, start)),
+            "-t", String(format: "%.3f", duration),
+            "-i", audioPath,
+            "-ar", "16000", "-ac", "1",
+            out.path,
+        ]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                guard let self = self, gen == self.generation else {
+                    try? FileManager.default.removeItem(at: out)   // stale — clean up
+                    return
+                }
+                self.decodeProcess = nil
+                guard p.terminationStatus == 0,
+                      let player = try? AVAudioPlayer(contentsOf: out) else {
+                    NSLog("SegmentAudioPlayer: ffmpeg decode failed for \(audioPath)")
+                    self.playingSegmentId = nil
+                    NSSound.beep()
+                    return
+                }
+                self.player = player
+                player.prepareToPlay()
+                player.play()
+                self.armStopTimer(after: duration)
+            }
+        }
+        do {
+            try proc.run()
+            decodeProcess = proc
+        } catch {
+            NSLog("SegmentAudioPlayer: failed to launch ffmpeg: \(error)")
+            playingSegmentId = nil
+            NSSound.beep()
+        }
+    }
+
+    private func armStopTimer(after duration: Double) {
+        stopTimer = Timer.scheduledTimer(withTimeInterval: max(0.1, duration), repeats: false) { [weak self] _ in
             self?.stop()
         }
     }
 
     func stop() {
+        generation += 1               // invalidate any in-flight decode
         player?.stop()
         player = nil
         stopTimer?.invalidate()
         stopTimer = nil
+        if let proc = decodeProcess, proc.isRunning { proc.terminate() }
+        decodeProcess = nil
+        if let t = tempURL { try? FileManager.default.removeItem(at: t); tempURL = nil }
         playingSegmentId = nil
     }
 }

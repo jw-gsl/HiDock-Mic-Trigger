@@ -7663,6 +7663,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     syncEntries[i].transcriptPath = (transcriptDir as NSString).appendingPathComponent(base + ".md")
                 }
                 syncEntries[i].transcribedDate = transcriptModificationDate(syncEntries[i].transcriptPath)
+                // Compute the tagging state here too. Without it the row shows a
+                // transient "needs tagging" (orange) until the async status
+                // refresh computes the real state — which flickered against the
+                // auto-matched (blue ?) state on load.
+                let review = speakerReviewState(transcriptPath: syncEntries[i].transcriptPath)
+                syncEntries[i].speakersTagged = review.tagged
+                syncEntries[i].speakersAutoMatched = review.autoMatched
                 flipped += 1
             }
         }
