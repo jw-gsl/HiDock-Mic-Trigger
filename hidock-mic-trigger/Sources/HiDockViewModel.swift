@@ -53,6 +53,14 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
     @Published var syncAutoSummarise = false
+    /// How often to poll paired Plaud accounts for new recordings (seconds).
+    /// 0 = off. Plaud is an API, so this is the only thing that surfaces new
+    /// recordings on it. Changed via the device manager; applied by AppDelegate.
+    @Published var plaudPollIntervalSeconds: Double = 120
+    var onSetPlaudPollInterval: (Double) -> Void = { _ in }
+    /// True when at least one paired device is a Plaud account (gates the
+    /// poll-interval control).
+    var hasPlaudAccount: Bool { syncPairedDevices.contains { $0.deviceType == .plaud } }
     /// Whether the right-hand embedded CLI pane is shown. Toggled by the
     /// bottom-bar "CLI" button; auto-set true when an Ask Claude Code or a
     /// summarise run starts so the user sees the activity.

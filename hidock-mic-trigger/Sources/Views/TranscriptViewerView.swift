@@ -349,6 +349,19 @@ struct TranscriptViewerView: View {
     /// window commits the edit and deselects it (the field otherwise stays
     /// active with no way to dismiss it).
     @FocusState private var nameFieldFocused: Bool
+    /// Live per-speaker confidence (id-string → 0–1) from the background CLI:
+    /// how well each speaker's voice matches the enrolled voice of its name.
+    @State private var liveConfidence: [String: Double] = [:]
+    /// A rename that collided with another speaker's name — pending the user's
+    /// choice to merge the two speakers or cancel.
+    @State private var pendingMerge: PendingMerge?
+
+    struct PendingMerge: Identifiable {
+        let id = UUID()
+        let from: Int      // the speaker just renamed
+        let to: Int        // the existing speaker that already has this name
+        let name: String
+    }
     @State var rediarizeNSpeakers: Int = 2
     @State var transcriptHistory: [DiarizedTranscript] = []
     /// Layer 1 v2 — currently active mid-segment word-range selection.
@@ -365,6 +378,10 @@ struct TranscriptViewerView: View {
     /// a user-edited speaker name as an anchor centroid. Optional so
     /// older call-sites (rediarize-only flow) keep compiling.
     var onReclusterWithLabels: ((String) -> Void)?
+    /// Score each speaker's voice against its assigned name in the library
+    /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
+    /// so older call-sites keep compiling.
+    var onScoreSpeakers: ((String, @escaping ([String: Double]) -> Void) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -564,6 +581,17 @@ struct TranscriptViewerView: View {
             if !focused, let id = editingSpeakerId {
                 commitRename(speakerId: id)
             }
+        }
+        .onAppear { refreshConfidence() }
+        .confirmationDialog(
+            "Merge speakers?",
+            isPresented: Binding(get: { pendingMerge != nil }, set: { if !$0 { pendingMerge = nil } }),
+            presenting: pendingMerge
+        ) { merge in
+            Button("Merge into one speaker") { confirmMerge(merge); pendingMerge = nil }
+            Button("Cancel", role: .cancel) { pendingMerge = nil }
+        } message: { merge in
+            Text("“\(merge.name)” is already assigned to \(speakerName(for: merge.to)). Two speakers can't share a name — merge them into one person? This reassigns \(speakerName(for: merge.from))'s segments to \(merge.name).")
         }
     }
 
@@ -787,6 +815,17 @@ struct TranscriptViewerView: View {
                 .background(prov.color.opacity(0.15), in: Capsule())
                 .foregroundColor(prov.color)
 
+            // Live voice-match confidence against the enrolled voice of this name.
+            if let badge = confidenceBadge(for: id) {
+                Text(badge.text)
+                    .font(.caption2.weight(.medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(badge.color.opacity(0.15), in: Capsule())
+                    .foregroundColor(badge.color)
+                    .help("How closely this speaker's voice matches the enrolled voice for \(speakerName(for: id)).")
+            }
+
             Spacer()
 
             if verified {
@@ -925,6 +964,18 @@ struct TranscriptViewerView: View {
             return
         }
 
+        // Two speakers can't share a name — that's almost always one person
+        // split into two clusters. If the typed name already belongs to another
+        // speaker, offer to merge them instead of creating a duplicate.
+        if let otherId = uniqueSpeakerIds.first(where: {
+            $0 != speakerId && speakerName(for: $0).caseInsensitiveCompare(trimmed) == .orderedSame
+        }) {
+            editingSpeakerId = nil
+            nameFieldFocused = false
+            pendingMerge = PendingMerge(from: speakerId, to: otherId, name: trimmed)
+            return
+        }
+
         transcript.speakerNames["\(speakerId)"] = trimmed
         editingSpeakerId = nil
         nameFieldFocused = false
@@ -939,6 +990,7 @@ struct TranscriptViewerView: View {
         }
 
         saveTranscript()
+        refreshConfidence()
     }
 
     // MARK: - Speaker verification (provenance + confirm loop)
@@ -998,6 +1050,7 @@ struct TranscriptViewerView: View {
             onEnrollSpeaker(name, audioPath, segment.start, segment.end)
         }
         saveTranscript()
+        refreshConfidence()
     }
 
     /// Acknowledge a speaker the user genuinely can't name — counts as reviewed
@@ -1005,6 +1058,35 @@ struct TranscriptViewerView: View {
     private func markUnknown(_ id: Int) {
         setMeta(id, source: "unknown", verified: true, confidence: nil)
         saveTranscript()
+    }
+
+    /// Merge the just-renamed speaker into the existing speaker that already has
+    /// that name (they're the same person split across two clusters).
+    private func confirmMerge(_ merge: PendingMerge) {
+        mapSpeaker(from: merge.from, to: merge.to)   // reassigns segments + saves
+        // The surviving speaker now carries a confirmed, user-set identity.
+        setMeta(merge.to, source: "user", verified: true, confidence: nil)
+        if let segment = transcript.segments.first(where: { $0.speakerId == merge.to }) {
+            onEnrollSpeaker(merge.name, audioPath, segment.start, segment.end)
+        }
+        saveTranscript()
+        refreshConfidence()
+    }
+
+    /// Ask the background CLI to score each speaker's voice against its assigned
+    /// name in the voice library, and cache the result for the verify chips.
+    private func refreshConfidence() {
+        onScoreSpeakers?(filePath) { scores in
+            self.liveConfidence = scores
+        }
+    }
+
+    /// A colour-coded "match NN%" badge for a speaker, when we have a live score.
+    private func confidenceBadge(for id: Int) -> (text: String, color: Color)? {
+        guard let c = liveConfidence["\(id)"] else { return nil }
+        let pct = Int((c * 100).rounded())
+        let color: Color = c >= 0.75 ? .green : (c >= 0.55 ? .orange : .red)
+        return ("match \(pct)%", color)
     }
 
     private func copyAllToClipboard() {

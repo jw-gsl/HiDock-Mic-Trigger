@@ -61,6 +61,38 @@ def ensure_speaker_meta(data: dict) -> dict:
     return meta
 
 
+def score_speakers(data: dict) -> dict:
+    """Confidence that each speaker's assigned name is correct.
+
+    For every speaker that has a stored embedding AND whose current name is
+    enrolled in the voice library, compute the cosine similarity between the
+    speaker's embedding and that enrolled voice's centroid. This is a live
+    "how sure are we this is really <name>" score (0–1), and works for
+    user-named speakers too — not just the auto-match confidence captured at
+    diarization time.
+
+    Returns {speaker_id: confidence} for the speakers we could score (others
+    omitted — generic/unknown names, un-enrolled names, or no embedding).
+    """
+    from shared.voice_library_lite import cosine_similarity, load_library
+
+    lib = load_library().get("speakers", {})
+    names = data.get("speaker_names", {}) or {}
+    embeddings = data.get("speaker_embeddings") or {}
+
+    out: dict[str, float] = {}
+    for sid, name in names.items():
+        emb = embeddings.get(sid)
+        entry = lib.get(name)
+        if emb is None or entry is None:
+            continue
+        stored = entry.get("embedding")
+        if not stored or len(stored) != len(emb):
+            continue   # different embedding model/dim — not comparable
+        out[sid] = round(float(cosine_similarity(emb, stored)), 4)
+    return out
+
+
 def _collect_speaker_audio(audio: np.ndarray, segments: list, speaker_id: int,
                            sr: int = 16000, max_seconds: float = 10.0,
                            min_seconds: float = 1.0) -> np.ndarray:

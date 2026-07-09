@@ -579,6 +579,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncPaired = syncPaired
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
+        viewModel.plaudPollIntervalSeconds = plaudPollInterval
         viewModel.syncAutoTranscribe = UserDefaults.standard.bool(forKey: syncAutoTranscribeKey)
         syncAutoTranscribe = viewModel.syncAutoTranscribe
         viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
@@ -632,6 +633,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onToggleAutoTranscribe = { [weak self] in self?.toggleAutoTranscribe() }
         viewModel.onToggleAutoSummarise = { [weak self] in self?.toggleAutoSummarise() }
+        viewModel.onSetPlaudPollInterval = { [weak self] seconds in self?.setPlaudPollInterval(seconds) }
         viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onSummariseSelected = { [weak self] in self?.summariseSelectedRecordings() }
@@ -3200,6 +3202,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Background voice-match scoring for the transcript viewer's verify panel.
+    /// Runs the fast `speaker-confidence` verb (no audio/model load) and returns
+    /// {speaker-id-string: confidence 0–1}. Best-effort — empty map on any error.
+    private func scoreSpeakers(jsonPath: String, completion: @escaping ([String: Double]) -> Void) {
+        guard ensureTranscriptionReady() else { completion([:]); return }
+        runTranscription(arguments: ["speaker-confidence", jsonPath]) { result in
+            var map: [String: Double] = [:]
+            if case .success(let data) = result,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let conf = obj["confidence"] as? [String: Any] {
+                for (k, v) in conf {
+                    if let d = (v as? NSNumber)?.doubleValue { map[k] = d }
+                }
+            }
+            DispatchQueue.main.async { completion(map) }
+        }
+    }
+
     private func rediarizeTranscript(jsonPath: String, nSpeakers: Int?) {
         guard ensureTranscriptionReady() else { return }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
@@ -3501,6 +3521,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onReclusterWithLabels: { [weak self] jsonPath in
                 self?.reclusterTranscriptWithLabels(jsonPath: jsonPath)
+            },
+            onScoreSpeakers: { [weak self] jsonPath, completion in
+                self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
             }
         )
 
@@ -5916,6 +5939,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var plaudPollInterval: TimeInterval {
         let v = UserDefaults.standard.double(forKey: "plaudPollIntervalSeconds")
         return v > 0 ? v : 120
+    }
+
+    /// Persist a new Plaud poll cadence (seconds; 0 = off) and restart the timer.
+    private func setPlaudPollInterval(_ seconds: Double) {
+        UserDefaults.standard.set(seconds, forKey: "plaudPollIntervalSeconds")
+        viewModel.plaudPollIntervalSeconds = seconds
+        startPlaudPollTimer()   // re-reads the interval; stops the timer if 0
+        log("Plaud poll interval set to \(Int(seconds))s")
     }
 
     private func startPlaudPollTimer() {

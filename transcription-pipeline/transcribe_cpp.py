@@ -477,6 +477,20 @@ def cmd_rematch(args):
     print(_json.dumps({"status": "completed", **summary}))
 
 
+def cmd_speaker_confidence(args):
+    """Per-speaker confidence that each assigned name is correct (cosine
+    similarity of the speaker's stored embedding to the enrolled voice of that
+    name). Mirrors transcribe.py. Fast — no audio, no model load."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import score_speakers
+    print(_json.dumps({"status": "completed", "confidence": score_speakers(data)}))
+
+
 def cmd_summarize(args):
     """Type-aware, template-driven summary of an existing transcript via Claude
     Code -> ~/HiDock/Summaries/. No-ops cleanly if no LLM/templates available."""
@@ -681,6 +695,13 @@ def main():
         help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
     )
     p_rematch.set_defaults(func=cmd_rematch)
+
+    p_confidence = sub.add_parser(
+        "speaker-confidence",
+        help="Per-speaker confidence that each assigned name matches the enrolled voice (JSON)",
+    )
+    p_confidence.add_argument("json_path", help="Path to _diarized.json file")
+    p_confidence.set_defaults(func=cmd_speaker_confidence)
 
     p_summarize = sub.add_parser("summarize", help="Type-aware template summary of an existing transcript -> ~/HiDock/Summaries/")
     p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")

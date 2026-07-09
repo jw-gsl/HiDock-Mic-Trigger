@@ -6,6 +6,7 @@ from shared.speaker_meta import (
     infer_source,
     is_generic_name,
     rematch_diarized,
+    score_speakers,
 )
 
 
@@ -56,6 +57,20 @@ def test_rematch_matches_generic_from_stored_embedding():
     assert data["speaker_meta"]["1"] == {"source": "auto", "confidence": 0.81, "verified": False}
     # segment text reflects the new name (so a regenerated .md is correct)
     assert data["segments"][1]["speaker"] == "Chris"
+
+
+def test_score_speakers():
+    data = {
+        "speaker_names": {"0": "James", "1": "Speaker 2", "2": "Chris"},
+        "speaker_embeddings": {"0": [1.0, 0.0], "1": [0.0, 1.0], "2": [0.6, 0.8]},
+    }
+    lib = {"speakers": {"James": {"embedding": [1.0, 0.0]},
+                        "Chris": {"embedding": [0.0, 1.0]}}}
+    with patch("shared.voice_library_lite.load_library", return_value=lib):
+        scores = score_speakers(data)
+    assert scores["0"] == 1.0            # James: identical → perfect
+    assert abs(scores["2"] - 0.8) < 1e-6  # Chris: cos([.6,.8],[0,1]) = 0.8
+    assert "1" not in scores              # Speaker 2: not enrolled → skipped
 
 
 def test_rematch_never_touches_verified_or_named():

@@ -935,6 +935,21 @@ def cmd_rematch(args):
     print(_json.dumps({"status": "completed", **summary}))
 
 
+def cmd_speaker_confidence(args):
+    """Report per-speaker confidence that each assigned name is correct
+    (cosine similarity of the speaker's stored embedding to the enrolled voice
+    of that name). JSON: {"confidence": {speaker_id: 0..1}}. Fast — no audio,
+    no model load; just reads the sidecar + the voice library."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import score_speakers
+    print(_json.dumps({"status": "completed", "confidence": score_speakers(data)}))
+
+
 def cmd_merge_rediarize(args):
     """Build a merged transcript from existing per-piece transcripts.
 
@@ -1164,6 +1179,13 @@ def main():
         help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
     )
     p_rematch.set_defaults(func=cmd_rematch)
+
+    p_confidence = sub.add_parser(
+        "speaker-confidence",
+        help="Per-speaker confidence that each assigned name matches the enrolled voice (JSON)",
+    )
+    p_confidence.add_argument("json_path", help="Path to _diarized.json file")
+    p_confidence.set_defaults(func=cmd_speaker_confidence)
 
     p_merge = sub.add_parser(
         "merge-rediarize",
