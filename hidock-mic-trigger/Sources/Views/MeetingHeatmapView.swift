@@ -20,6 +20,10 @@ struct MeetingHeatmapView: View {
     /// 11px cells, which it supplements).
     @State private var hoveredDate: Date? = nil
     @State private var showLEDSettings = false
+    /// True while the LED is scrolling back home after an off-tap — the mode flag
+    /// stays true until the animation finishes, so use this to flip the button to
+    /// its "off" look immediately for feedback.
+    @State private var ledWindingDown = false
 
     private let cell: CGFloat = 11
     private let gap: CGFloat = 3
@@ -302,26 +306,31 @@ struct MeetingHeatmapView: View {
     @ViewBuilder private var ledControls: some View {
         HStack(spacing: 6) {
             if ledSettings.enabled {
+                let ledOn = viewModel.heatmapLEDMode && !ledWindingDown
                 Button {
                     hoveredDate = nil   // hover is inert in LED mode; don't pin a stale day
-                    if viewModel.heatmapLEDMode {
-                        // Turning LED off: let the conveyor scroll back to the
-                        // resting heatmap, then swap to the static grid — no jump.
+                    if viewModel.heatmapLEDMode && !ledWindingDown {
+                        // Turning LED off: flip the button to its "off" look now for
+                        // instant feedback, but let the conveyor scroll back to the
+                        // resting heatmap before swapping to the static grid — no jump.
+                        ledWindingDown = true
                         ledMatrix.returnHomeThenStop {
                             viewModel.heatmapLEDMode = false
+                            ledWindingDown = false
                             ledSettings.defaultView = .heatmap
                         }
-                    } else {
+                    } else if !viewModel.heatmapLEDMode {
                         viewModel.heatmapLEDMode = true
+                        ledWindingDown = false
                         ledSettings.defaultView = .led
                     }
                 } label: {
-                    Image(systemName: viewModel.heatmapLEDMode ? "rectangle.grid.1x2.fill" : "lightbulb")
+                    Image(systemName: ledOn ? "rectangle.grid.1x2.fill" : "lightbulb")
                         .font(.caption2)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(viewModel.heatmapLEDMode ? .accentColor : .secondary)
-                .help(viewModel.heatmapLEDMode ? "Show the heatmap" : "Show the LED ticker")
+                .foregroundColor(ledOn ? .accentColor : .secondary)
+                .help(ledOn ? "Show the heatmap" : "Show the LED ticker")
             }
             Button { showLEDSettings.toggle() } label: {
                 Image(systemName: "gearshape").font(.caption2)
