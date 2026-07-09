@@ -45,6 +45,16 @@ final class LEDMatrix: ObservableObject {
     private var offset = 0
     private var timer: Timer?
     private var idleCursor = 0
+    /// Cached "home" strip (trailing-week heatmap + gap). Rebuilt only when the
+    /// heatmap changes — avoids rebuilding ~50 columns every loop (the seam
+    /// jitter).
+    private var baseStrip: [LEDColumn] = []
+    private var baseDirty = true
+    /// Whether the current pass carries a message (so a graceful stop knows when
+    /// it's back to a clean heatmap-only pass).
+    private var cycleHasContent = false
+    /// Set by returnHomeThenStop: run once the conveyor is back at home.
+    private var pendingHomeStop: (() -> Void)?
 
     /// Supplies idle-ticker text (clock / streak / queue / meetings).
     var idleProvider: ((LEDIdleContent) -> String?)?
@@ -67,8 +77,9 @@ final class LEDMatrix: ObservableObject {
     }
 
     func configure(viewportCols: Int) {
-        guard viewportCols > 0 else { return }
+        guard viewportCols > 0, viewportCols != self.viewportCols else { return }
         self.viewportCols = viewportCols
+        baseDirty = true   // home width changed → rebuild cached strip
     }
 
     // MARK: Public API — these just update state; the running loop folds them in.
@@ -76,6 +87,7 @@ final class LEDMatrix: ObservableObject {
     func setHeatmap(_ cols: [LEDColumn]) {
         guard cols != heatmap else { return }
         heatmap = cols
+        baseDirty = true   // heatmap changed → rebuild cached home strip
     }
 
     func notify(_ event: LEDEvent) {
@@ -104,7 +116,16 @@ final class LEDMatrix: ObservableObject {
     }
 
     func stop() {
+        pendingHomeStop = nil
         timer?.invalidate(); timer = nil
+    }
+
+    /// Graceful stop: keep scrolling until the conveyor is back at home (the full
+    /// heatmap), then stop and run `completion`. Used when toggling the LED off so
+    /// it slides back to the resting heatmap instead of freezing/jumping mid-pass.
+    func returnHomeThenStop(_ completion: @escaping () -> Void) {
+        guard timer != nil else { completion(); return }   // not running → nothing to wind down
+        pendingHomeStop = completion
     }
 
     // MARK: Engine
@@ -113,10 +134,22 @@ final class LEDMatrix: ObservableObject {
         guard !filmstrip.isEmpty else { beginCycle(); return }
         offset += 1
         if offset >= filmstrip.count {
-            // Completed a full pass. Rebuild to fold in any new content — the
-            // seam is at the heatmap's start in BOTH the old and new strip, so
-            // it's continuous (no jump). Everything that differs (messages) is
-            // off-screen at this moment.
+            // Completed a full pass — we're back at the seam (home = heatmap start).
+            if let done = pendingHomeStop {
+                // Graceful stop: settle on the bare heatmap (no trailing message)
+                // and stop. This is the resting frame the static heatmap matches,
+                // so the hand-off is seamless — no jump.
+                pendingHomeStop = nil
+                rebuildBaseIfNeeded()
+                filmstrip = baseStrip
+                offset = 0
+                renderWindow()
+                timer?.invalidate(); timer = nil
+                done()
+                return
+            }
+            // Rebuild to fold in any new content — the seam is at the heatmap's
+            // start in BOTH the old and new strip, so it's continuous (no jump).
             beginCycle()
             return
         }
@@ -126,8 +159,9 @@ final class LEDMatrix: ObservableObject {
     /// Build one conveyor pass: heatmap, then whatever's pending, then a gap so
     /// the heatmap of the next pass scrolls back on cleanly.
     private func beginCycle() {
+        rebuildBaseIfNeeded()
         let gap = Array(repeating: LEDColumn.off, count: 6)
-        var strip = fullHeatmapColumns() + gap
+        var strip = baseStrip                 // heatmap (home) + gap, cached
         var hadContent = false
         if recActive {
             strip += messageColumns("\(LEDFont.dot) REC", color: recColor) + gap
@@ -144,14 +178,29 @@ final class LEDMatrix: ObservableObject {
         }
         if !hadContent, settings.idleTickerEnabled, let t = nextIdleText() {
             strip += messageColumns(t, color: messageColor) + gap
+            hadContent = true
         }
         filmstrip = strip
+        cycleHasContent = hadContent
         offset = 0
         renderWindow()
     }
 
-    private func fullHeatmapColumns() -> [LEDColumn] {
-        heatmap.isEmpty ? Array(repeating: .off, count: viewportCols) : heatmap
+    /// Rebuild the cached home strip (trailing-week heatmap + a trailing gap).
+    /// Only runs when the heatmap actually changed, so a plain loop doesn't
+    /// rebuild ~50 columns every pass (that rebuild cost is the seam jitter).
+    private func rebuildBaseIfNeeded() {
+        guard baseDirty else { return }
+        baseDirty = false
+        baseStrip = homeColumns() + Array(repeating: LEDColumn.off, count: 6)
+    }
+
+    /// The resting view: the trailing `viewportCols` weeks — identical to what the
+    /// static heatmap grid shows, so stopping here hands off without a jump.
+    private func homeColumns() -> [LEDColumn] {
+        if heatmap.isEmpty { return Array(repeating: .off, count: viewportCols) }
+        if heatmap.count >= viewportCols { return Array(heatmap.suffix(viewportCols)) }
+        return heatmap + Array(repeating: .off, count: viewportCols - heatmap.count)
     }
 
     private func renderWindow() {

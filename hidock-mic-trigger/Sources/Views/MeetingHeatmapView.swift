@@ -303,9 +303,18 @@ struct MeetingHeatmapView: View {
         HStack(spacing: 6) {
             if ledSettings.enabled {
                 Button {
-                    viewModel.heatmapLEDMode.toggle()
-                    ledSettings.defaultView = viewModel.heatmapLEDMode ? .led : .heatmap
                     hoveredDate = nil   // hover is inert in LED mode; don't pin a stale day
+                    if viewModel.heatmapLEDMode {
+                        // Turning LED off: let the conveyor scroll back to the
+                        // resting heatmap, then swap to the static grid — no jump.
+                        ledMatrix.returnHomeThenStop {
+                            viewModel.heatmapLEDMode = false
+                            ledSettings.defaultView = .heatmap
+                        }
+                    } else {
+                        viewModel.heatmapLEDMode = true
+                        ledSettings.defaultView = .led
+                    }
                 } label: {
                     Image(systemName: viewModel.heatmapLEDMode ? "rectangle.grid.1x2.fill" : "lightbulb")
                         .font(.caption2)
