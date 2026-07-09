@@ -477,9 +477,7 @@ final class HiDockViewModel: ObservableObject {
             case "name":
                 return ar.outputName.localizedCaseInsensitiveCompare(br.outputName) == .orderedAscending
             case "created":
-                let aKey = "\(ar.createDate) \(ar.createTime)"
-                let bKey = "\(br.createDate) \(br.createTime)"
-                return aKey < bKey
+                return Self.createdSortKey(ar) < Self.createdSortKey(br)
             case "transcribed":
                 // Untranscribed (nil) sort to the bottom in the default
                 // (descending) order via distantPast.
@@ -493,10 +491,28 @@ final class HiDockViewModel: ObservableObject {
             case "device":
                 return a.deviceName.localizedCaseInsensitiveCompare(b.deviceName) == .orderedAscending
             default:
-                return ar.createDate < br.createDate
+                return Self.createdSortKey(ar) < Self.createdSortKey(br)
             }
         }
         return entries
+    }
+
+    /// A chronologically-comparable key for the "created" sort, robust to a
+    /// missing `createDate`. HiDock/Plaud/volume all emit createDate as
+    /// "yyyy/MM/dd" + createTime "HH:MM:SS" → digits "yyyymmddhhmmss". When
+    /// createDate is empty (e.g. a Plaud cached-status paint), fall back to the
+    /// leading "yyyy-MM-dd HH-mm-ss" timestamp in the filename — otherwise those
+    /// rows sorted to the bottom and newer Plaud meetings dropped below older
+    /// HiDock ones on launch.
+    private static func createdSortKey(_ rec: HiDockSyncRecording) -> String {
+        let cd = rec.createDate.trimmingCharacters(in: .whitespaces)
+        if !cd.isEmpty {
+            return (cd + rec.createTime).filter { $0.isNumber }
+        }
+        let candidate = rec.outputName.isEmpty ? rec.name : rec.outputName
+        let digits = candidate.prefix(19).filter { $0.isNumber }
+        // Pad so a partial fallback still orders sensibly against full keys.
+        return digits.isEmpty ? "" : String(digits)
     }
 
     /// Build the display list with merge groups expanded/collapsed

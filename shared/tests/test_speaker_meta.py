@@ -6,6 +6,7 @@ from shared.speaker_meta import (
     infer_source,
     is_generic_name,
     rematch_diarized,
+    resolve_name_collisions,
     score_speakers,
 )
 
@@ -57,6 +58,31 @@ def test_rematch_matches_generic_from_stored_embedding():
     assert data["speaker_meta"]["1"] == {"source": "auto", "confidence": 0.81, "verified": False}
     # segment text reflects the new name (so a regenerated .md is correct)
     assert data["segments"][1]["speaker"] == "Chris"
+
+
+def test_resolve_name_collisions_keeps_best_demotes_rest():
+    names = {"0": "Natasha", "1": "James", "2": "Natasha"}
+    meta = {
+        "0": {"source": "auto", "confidence": 0.6, "verified": False},
+        "1": {"source": "auto", "confidence": 0.9, "verified": False},
+        "2": {"source": "auto", "confidence": 0.8, "verified": False},
+    }
+    resolve_name_collisions(names, meta)
+    assert names["2"] == "Natasha"       # higher confidence keeps the name
+    assert names["0"] == "Speaker 1"     # demoted to generic
+    assert meta["0"]["source"] == "generic"
+    assert names["1"] == "James"         # untouched
+
+
+def test_resolve_name_collisions_never_demotes_verified():
+    names = {"0": "Natasha", "1": "Natasha"}
+    meta = {
+        "0": {"source": "user", "confidence": None, "verified": True},
+        "1": {"source": "auto", "confidence": 0.99, "verified": False},
+    }
+    resolve_name_collisions(names, meta)
+    assert names["0"] == "Natasha"       # verified is protected even vs higher conf
+    assert names["1"] == "Speaker 2"     # the unverified one is demoted
 
 
 def test_score_speakers():

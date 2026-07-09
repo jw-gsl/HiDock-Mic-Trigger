@@ -544,6 +544,14 @@ def diarize(
         if inf.get("embedding") is not None:
             speaker_embeddings[str(spk_id)] = inf["embedding"]
 
+    # Don't let two speakers auto-match the same enrolled voice (over-clustering
+    # splitting one person). Keep the best; revert the rest to generic.
+    try:
+        from shared.speaker_meta import resolve_name_collisions
+        resolve_name_collisions(speaker_names, speaker_meta)
+    except Exception as e:  # noqa: BLE001 - best effort, never break diarization
+        print(f"Sortformer: name-collision resolve skipped ({e})", file=sys.stderr)
+
     for seg in raw_segments:
         label = seg.get("speaker") or internal_labels[0]
         spk_id = label_to_id.get(label, 0)

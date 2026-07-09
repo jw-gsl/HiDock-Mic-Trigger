@@ -1060,6 +1060,14 @@ def diarize(
             speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
             speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
 
+    # Don't let two speakers auto-match the same enrolled voice (over-clustering
+    # splitting one person). Keep the best; revert the rest to generic.
+    try:
+        from shared.speaker_meta import resolve_name_collisions
+        resolve_name_collisions(speaker_names, speaker_meta)
+    except Exception as e:  # noqa: BLE001 - best effort, never break diarization
+        print(f"  Name-collision resolve skipped ({e})", file=sys.stderr)
+
     # Step 11: Build output, merge same-speaker, split long segments
     raw_segments = []
     for ws, spk in zip(whisper_segments, ws_speakers):

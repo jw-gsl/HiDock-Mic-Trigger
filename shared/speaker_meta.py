@@ -61,6 +61,44 @@ def ensure_speaker_meta(data: dict) -> dict:
     return meta
 
 
+def resolve_name_collisions(speaker_names: dict, speaker_meta: dict) -> tuple[dict, dict]:
+    """Ensure no enrolled name is auto-assigned to more than one speaker.
+
+    Over-clustering can split one person into two speakers that BOTH match the
+    same enrolled voice — leaving e.g. two "Natasha Fura" rows. When that
+    happens, keep the single best speaker for that name (verified wins, then
+    highest confidence) and revert the others to a generic "Speaker N" label so
+    the user can review/merge them. Never demotes a user-verified name. Mutates
+    both dicts in place and returns them."""
+    from collections import defaultdict
+
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for sid, name in speaker_names.items():
+        by_name[name].append(sid)
+
+    for name, sids in by_name.items():
+        if len(sids) < 2 or is_generic_name(name):
+            continue
+
+        def rank(sid: str):
+            m = speaker_meta.get(sid, {}) or {}
+            return (1 if m.get("verified") else 0, m.get("confidence") or 0.0)
+
+        # Highest-ranked keeps the name; demote the rest (unless user-verified).
+        for sid in sorted(sids, key=rank, reverse=True)[1:]:
+            m = speaker_meta.get(sid, {}) or {}
+            if m.get("verified"):
+                continue
+            try:
+                generic = f"Speaker {int(sid) + 1}"
+            except (TypeError, ValueError):
+                generic = "Speaker ?"
+            speaker_names[sid] = generic
+            speaker_meta[sid] = {"source": "generic", "confidence": None, "verified": False}
+
+    return speaker_names, speaker_meta
+
+
 def score_speakers(data: dict) -> dict:
     """Confidence that each speaker's assigned name is correct.
 
@@ -214,6 +252,10 @@ def rematch_diarized(data: dict, threshold: float = _MATCH_THRESHOLD,
             result["rematched"] += 1
             result["matches"].append({"id": sid, "name": matched, "confidence": float(confidence)})
             print(f"  Re-matched speaker {sid} → {matched} ({confidence:.0%})", file=sys.stderr)
+
+    # A rematch can also produce a collision (two generics both matching the
+    # same enrolled voice) — dedupe so we never write duplicate names.
+    resolve_name_collisions(names, meta)
 
     # Reflect any new names into the segment text so a regenerated .md is correct.
     for seg in data.get("segments", []):

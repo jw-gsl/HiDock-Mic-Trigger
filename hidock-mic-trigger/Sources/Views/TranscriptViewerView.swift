@@ -828,7 +828,18 @@ struct TranscriptViewerView: View {
 
             Spacer()
 
-            if verified {
+            if let partner = duplicatePartner(for: id) {
+                // Same name as an earlier speaker — offer to merge them into one.
+                Button {
+                    pendingMerge = PendingMerge(from: id, to: partner, name: speakerName(for: id))
+                } label: {
+                    Label("Merge duplicate", systemImage: "arrow.triangle.merge")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.orange)
+                .help("This name is assigned to two speakers — merge them into one person.")
+            } else if verified {
                 Label("Verified", systemImage: "checkmark.seal.fill")
                     .font(.caption2)
                     .foregroundColor(.green)
@@ -1032,10 +1043,32 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// Any multi-speaker meeting with an unverified speaker still to review.
+    /// Any multi-speaker meeting with an unverified speaker still to review, or
+    /// one where two speakers share a name (a duplicate to merge).
     private var needsVerification: Bool {
         guard uniqueSpeakerIds.count > 1 else { return false }
+        if hasDuplicateNames { return true }
         return uniqueSpeakerIds.contains { !(speakerMeta(for: $0)?.verified ?? false) }
+    }
+
+    /// True when a real (non-generic) name is assigned to more than one speaker —
+    /// e.g. the auto-matcher mapped one person's two clusters to the same voice.
+    private var hasDuplicateNames: Bool {
+        let named = uniqueSpeakerIds
+            .map { speakerName(for: $0).lowercased() }
+            .filter { !isGenericName($0) }
+        return Set(named).count != named.count
+    }
+
+    /// The earliest OTHER speaker that shares this speaker's (non-generic) name,
+    /// if any. Returned only for the later of the pair so a "merge" affordance
+    /// shows once, and the merge folds the later speaker into the earlier one.
+    private func duplicatePartner(for id: Int) -> Int? {
+        let name = speakerName(for: id)
+        guard !isGenericName(name) else { return nil }
+        return uniqueSpeakerIds.first {
+            $0 < id && speakerName(for: $0).caseInsensitiveCompare(name) == .orderedSame
+        }
     }
 
     /// Confirm the current (auto/typed) name — lock it in and reinforce the
