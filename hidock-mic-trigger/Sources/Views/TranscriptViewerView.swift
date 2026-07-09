@@ -355,6 +355,9 @@ struct TranscriptViewerView: View {
     /// A rename that collided with another speaker's name — pending the user's
     /// choice to merge the two speakers or cancel.
     @State private var pendingMerge: PendingMerge?
+    /// When set, the segment list is narrowed to just this speaker so you can
+    /// listen through their turns and check the voice is really theirs.
+    @State private var speakerFilter: Int?
 
     struct PendingMerge: Identifiable {
         let id = UUID()
@@ -539,7 +542,11 @@ struct TranscriptViewerView: View {
                         ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
                             speakerPill(speakerId: speakerId, interactive: true)
                                 .contextMenu {
+                                    Button(speakerFilter == speakerId ? "Show all speakers" : "Show only this speaker") {
+                                        speakerFilter = (speakerFilter == speakerId) ? nil : speakerId
+                                    }
                                     if uniqueSpeakerIds.count > 1 {
+                                        Divider()
                                         ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
                                             Button("Merge into \(speakerName(for: targetId))") {
                                                 mapSpeaker(from: speakerId, to: targetId)
@@ -563,11 +570,31 @@ struct TranscriptViewerView: View {
                 Divider()
             }
 
-            // Segments list
+            // "Listening to one speaker" banner — click Show all to clear.
+            if let f = speakerFilter {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.circle.fill")
+                        .foregroundColor(colorForSpeaker(f))
+                    Text("Showing only \(speakerName(for: f)) — play through to check the voice")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Show all") { speakerFilter = nil }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(colorForSpeaker(f).opacity(0.08))
+                Divider()
+            }
+
+            // Segments list (narrowed to one speaker when a filter is active).
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
-                        segmentRow(segmentIndex: idx, segment: segment)
+                        if speakerFilter == nil || segment.speakerId == speakerFilter {
+                            segmentRow(segmentIndex: idx, segment: segment)
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -827,6 +854,16 @@ struct TranscriptViewerView: View {
             }
 
             Spacer()
+
+            // Listen to just this speaker to check the voice is really theirs.
+            Button {
+                speakerFilter = (speakerFilter == id) ? nil : id
+            } label: {
+                Image(systemName: speakerFilter == id ? "waveform.circle.fill" : "waveform.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(speakerFilter == id ? .accentColor : .secondary)
+            .help("Show only \(speakerName(for: id))'s segments so you can play through and check the voice.")
 
             if let partner = duplicatePartner(for: id) {
                 // Same name as an earlier speaker — offer to merge them into one.
