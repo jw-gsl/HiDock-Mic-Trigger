@@ -15,9 +15,21 @@ class SegmentAudioPlayer: ObservableObject {
         // nil for any path containing a space (un-percent-encoded), silently
         // breaking playback for user-chosen folders like "My Recordings".
         let url = URL(fileURLWithPath: audioPath)
-        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        guard FileManager.default.fileExists(atPath: audioPath) else {
+            NSLog("SegmentAudioPlayer: audio file not found at \(audioPath)")
+            NSSound.beep()
+            return
+        }
+        guard let player = try? AVAudioPlayer(contentsOf: url) else {
+            NSLog("SegmentAudioPlayer: AVAudioPlayer could not open \(audioPath)")
+            NSSound.beep()
+            return
+        }
         self.player = player
-        player.currentTime = start
+        // prepareToPlay() before seeking — without it the first play() can
+        // silently no-op and currentTime seeks are unreliable on macOS.
+        player.prepareToPlay()
+        player.currentTime = max(0, start)
         player.play()
         playingSegmentId = segmentId
         let duration = end - start
@@ -252,6 +264,10 @@ struct TranscriptViewerView: View {
     @State var transcript: DiarizedTranscript
     @State var editingSpeakerId: Int? = nil
     @State var editingName: String = ""
+    /// Tracks focus of the inline name field so clicking anywhere else in the
+    /// window commits the edit and deselects it (the field otherwise stays
+    /// active with no way to dismiss it).
+    @FocusState private var nameFieldFocused: Bool
     @State var rediarizeNSpeakers: Int = 2
     @State var transcriptHistory: [DiarizedTranscript] = []
     /// Layer 1 v2 — currently active mid-segment word-range selection.
@@ -461,6 +477,13 @@ struct TranscriptViewerView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 400)
+        .onChange(of: nameFieldFocused) { focused in
+            // Clicking anywhere else in the window resigns the field's focus —
+            // commit the pending edit so it doesn't stay stuck in edit mode.
+            if !focused, let id = editingSpeakerId {
+                commitRename(speakerId: id)
+            }
+        }
     }
 
     // MARK: - Inline word-range split (Layer 1 v2)
@@ -728,6 +751,8 @@ struct TranscriptViewerView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
                 .controlSize(.small)
+                .focused($nameFieldFocused)
+                .onAppear { nameFieldFocused = true }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -738,6 +763,7 @@ struct TranscriptViewerView: View {
                 if interactive {
                     editingSpeakerId = speakerId
                     editingName = speakerName(for: speakerId)
+                    nameFieldFocused = true
                 }
             } label: {
                 HStack(spacing: 4) {
@@ -809,13 +835,18 @@ struct TranscriptViewerView: View {
 
     private func commitRename(speakerId: Int) {
         let trimmed = editingName.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
+        // Empty, or unchanged from the current name → just close the editor
+        // (no save/enroll). Unchanged matters because clicking off to deselect
+        // routes through here and shouldn't re-enroll the same voice.
+        guard !trimmed.isEmpty, trimmed != speakerName(for: speakerId) else {
             editingSpeakerId = nil
+            nameFieldFocused = false
             return
         }
 
         transcript.speakerNames["\(speakerId)"] = trimmed
         editingSpeakerId = nil
+        nameFieldFocused = false
 
         // Typing a name IS confirming it — mark verified/user so the meeting
         // counts as reviewed and stops nagging.
