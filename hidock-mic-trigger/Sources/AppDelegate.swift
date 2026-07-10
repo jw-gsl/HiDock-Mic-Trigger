@@ -3524,6 +3524,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onScoreSpeakers: { [weak self] jsonPath, completion in
                 self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
+            },
+            onListVoiceNames: { [weak self] completion in
+                self?.listVoiceLibraryNames(completion: completion)
             }
         )
 
@@ -3841,6 +3844,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         voiceLibraryWindow = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// List enrolled voice-library names (for the transcript viewer's
+    /// map-to-existing-speaker autocomplete). Best-effort — empty on error.
+    private func listVoiceLibraryNames(completion: @escaping ([String]) -> Void) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { completion([]); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.voiceLibraryPythonPath())
+            self.configureVoiceLibraryProcess(process)
+            process.arguments = [scriptPath, "list"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            var names: [String] = []
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    names = parsed.compactMap { $0["name"] as? String }
+                }
+            } catch {
+                self.log("listVoiceLibraryNames failed: \(error.localizedDescription)")
+            }
+            DispatchQueue.main.async { completion(names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }) }
+        }
     }
 
     private func voiceLibraryPythonPath() -> String {

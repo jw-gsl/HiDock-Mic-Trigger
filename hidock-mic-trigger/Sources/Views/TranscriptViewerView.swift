@@ -358,6 +358,10 @@ struct TranscriptViewerView: View {
     /// When set, the segment list is narrowed to just this speaker so you can
     /// listen through their turns and check the voice is really theirs.
     @State private var speakerFilter: Int?
+    /// Enrolled voice-library names, for the rename autocomplete. Picking one
+    /// maps the speaker to that exact enrolled voice (so confirming reinforces
+    /// the same centroid instead of fragmenting into near-duplicate names).
+    @State private var libraryNames: [String] = []
 
     struct PendingMerge: Identifiable {
         let id = UUID()
@@ -385,6 +389,9 @@ struct TranscriptViewerView: View {
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
     var onScoreSpeakers: ((String, @escaping ([String: Double]) -> Void) -> Void)?
+    /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
+    /// autocomplete). Optional so older call-sites keep compiling.
+    var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -605,11 +612,20 @@ struct TranscriptViewerView: View {
         .onChange(of: nameFieldFocused) { focused in
             // Clicking anywhere else in the window resigns the field's focus —
             // commit the pending edit so it doesn't stay stuck in edit mode.
-            if !focused, let id = editingSpeakerId {
-                commitRename(speakerId: id)
+            // Deferred so a click on an autocomplete suggestion (which also
+            // resigns focus) can commit ITS name first and clear editing — the
+            // deferred block then sees editing cleared and no-ops, instead of
+            // committing the half-typed prefix.
+            if !focused {
+                let id = editingSpeakerId
+                DispatchQueue.main.async {
+                    if let id = id, editingSpeakerId == id {
+                        commitRename(speakerId: id)
+                    }
+                }
             }
         }
-        .onAppear { refreshConfidence() }
+        .onAppear { refreshConfidence(); refreshLibraryNames() }
         .confirmationDialog(
             "Merge speakers?",
             isPresented: Binding(get: { pendingMerge != nil }, set: { if !$0 { pendingMerge = nil } }),
@@ -832,6 +848,7 @@ struct TranscriptViewerView: View {
         let prov = provenance(for: id)
         let verified = speakerMeta(for: id)?.verified ?? false
 
+        VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 8) {
             speakerPill(speakerId: id, interactive: true)   // tap to rename/correct
 
@@ -900,6 +917,13 @@ struct TranscriptViewerView: View {
                 .controlSize(.small)
                 .help("Acknowledge an unknown/guest speaker — counts as reviewed, not added to your voice library. Rename via the pill if you know who it is.")
             }
+        }
+
+        // Autocomplete: while renaming this speaker, offer existing enrolled
+        // voices to map onto (keeps names canonical → better matching).
+        if editingSpeakerId == id {
+            nameSuggestions(for: id)
+        }
         }
     }
 
@@ -1039,6 +1063,7 @@ struct TranscriptViewerView: View {
 
         saveTranscript()
         refreshConfidence()
+        refreshLibraryNames()
     }
 
     // MARK: - Speaker verification (provenance + confirm loop)
@@ -1121,6 +1146,7 @@ struct TranscriptViewerView: View {
         }
         saveTranscript()
         refreshConfidence()
+        refreshLibraryNames()
     }
 
     /// Acknowledge a speaker the user genuinely can't name — counts as reviewed
@@ -1141,6 +1167,7 @@ struct TranscriptViewerView: View {
         }
         saveTranscript()
         refreshConfidence()
+        refreshLibraryNames()
     }
 
     /// Ask the background CLI to score each speaker's voice against its assigned
@@ -1148,6 +1175,54 @@ struct TranscriptViewerView: View {
     private func refreshConfidence() {
         onScoreSpeakers?(filePath) { scores in
             self.liveConfidence = scores
+        }
+    }
+
+    /// Load the enrolled voice names for the rename autocomplete.
+    private func refreshLibraryNames() {
+        onListVoiceNames?() { names in self.libraryNames = names }
+    }
+
+    /// Autocomplete suggestions for the speaker currently being renamed: enrolled
+    /// voices matching what's typed. Picking one maps to that exact voice.
+    @ViewBuilder
+    private func nameSuggestions(for id: Int) -> some View {
+        let q = editingName.trimmingCharacters(in: .whitespaces).lowercased()
+        let current = speakerName(for: id).lowercased()
+        let matches = libraryNames
+            .filter { q.isEmpty || $0.lowercased().contains(q) }
+            .filter { $0.lowercased() != current }
+            .prefix(6)
+        if !matches.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Map to an existing voice")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                ForEach(Array(matches), id: \.self) { name in
+                    Button {
+                        editingName = name
+                        commitRename(speakerId: id)   // synchronous → maps to this exact voice
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "person.crop.circle.fill.badge.checkmark")
+                                .foregroundColor(.accentColor)
+                            Text(name).font(.caption)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 2)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+            .padding(.leading, 20)
+            .frame(maxWidth: 280, alignment: .leading)
         }
     }
 
