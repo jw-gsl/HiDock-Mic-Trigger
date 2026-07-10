@@ -3205,16 +3205,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Background voice-match scoring for the transcript viewer's verify panel.
     /// Runs the fast `speaker-confidence` verb (no audio/model load) and returns
     /// {speaker-id-string: confidence 0–1}. Best-effort — empty map on any error.
-    private func scoreSpeakers(jsonPath: String, completion: @escaping ([String: Double]) -> Void) {
+    private func scoreSpeakers(jsonPath: String, completion: @escaping ([String: SpeakerScore]) -> Void) {
         guard ensureTranscriptionReady() else { completion([:]); return }
         runTranscription(arguments: ["speaker-confidence", jsonPath]) { result in
-            var map: [String: Double] = [:]
+            var map: [String: SpeakerScore] = [:]
             if case .success(let data) = result,
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let conf = obj["confidence"] as? [String: Any] {
-                for (k, v) in conf {
-                    if let d = (v as? NSNumber)?.doubleValue { map[k] = d }
-                }
+               let conf = obj["confidence"],
+               let confData = try? JSONSerialization.data(withJSONObject: conf),
+               let decoded = try? JSONDecoder().decode([String: SpeakerScore].self, from: confData) {
+                map = decoded
             }
             DispatchQueue.main.async { completion(map) }
         }

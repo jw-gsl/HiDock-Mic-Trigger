@@ -397,7 +397,7 @@ def _resolve_speaker_names(
             norm = float(np.linalg.norm(emb))
             if norm > 1e-10:
                 emb = (emb / norm).astype(np.float32)
-            matched, confidence = identify_speaker(emb, threshold=0.55)
+            matched, confidence = identify_speaker(emb, threshold=0.65)
             emb_list = [float(x) for x in emb]
         except Exception as e:
             print(f"Sortformer: embed/match failed for {label}: {e}", file=sys.stderr)

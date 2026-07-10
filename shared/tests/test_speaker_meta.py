@@ -85,18 +85,29 @@ def test_resolve_name_collisions_never_demotes_verified():
     assert names["1"] == "Speaker 2"     # the unverified one is demoted
 
 
-def test_score_speakers():
+def test_score_speakers_margin():
+    # Speaker 0 clearly matches James (1.0) far above Chris → big margin.
+    # Speaker 2's centroid is closer to Chris than to its assigned "James" →
+    # the assignment is suspect (best != assigned, negative margin).
     data = {
-        "speaker_names": {"0": "James", "1": "Speaker 2", "2": "Chris"},
-        "speaker_embeddings": {"0": [1.0, 0.0], "1": [0.0, 1.0], "2": [0.6, 0.8]},
+        "speaker_names": {"0": "James", "1": "Speaker 2", "2": "James"},
+        "speaker_embeddings": {"0": [1.0, 0.0], "1": [0.0, 1.0], "2": [0.2, 0.98]},
     }
     lib = {"speakers": {"James": {"embedding": [1.0, 0.0]},
                         "Chris": {"embedding": [0.0, 1.0]}}}
     with patch("shared.voice_library_lite.load_library", return_value=lib):
         scores = score_speakers(data)
-    assert scores["0"] == 1.0            # James: identical → perfect
-    assert abs(scores["2"] - 0.8) < 1e-6  # Chris: cos([.6,.8],[0,1]) = 0.8
-    assert "1" not in scores              # Speaker 2: not enrolled → skipped
+
+    # Speaker 0: assigned James is clearly best; runner-up Chris much lower.
+    assert scores["0"]["best"] == "James"
+    assert scores["0"]["runnerUp"] == "Chris"
+    assert scores["0"]["margin"] > 0.9
+
+    # Speaker 2: assigned James but Chris matches better → margin negative, and
+    # `best` names the real closest voice so the UI can flag it.
+    assert scores["2"]["assigned"] == "James"
+    assert scores["2"]["best"] == "Chris"
+    assert scores["2"]["margin"] < 0
 
 
 def test_rematch_never_touches_verified_or_named():

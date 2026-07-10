@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 _GENERIC_RE = re.compile(r"^Speaker \d+$")
-_MATCH_THRESHOLD = 0.55
+_MATCH_THRESHOLD = 0.65
 
 
 def is_generic_name(name: str | None) -> bool:
@@ -100,17 +100,28 @@ def resolve_name_collisions(speaker_names: dict, speaker_meta: dict) -> tuple[di
 
 
 def score_speakers(data: dict) -> dict:
-    """Confidence that each speaker's assigned name is correct.
+    """Margin-based confidence that each speaker's assigned name is correct.
 
-    For every speaker that has a stored embedding AND whose current name is
-    enrolled in the voice library, compute the cosine similarity between the
-    speaker's embedding and that enrolled voice's centroid. This is a live
-    "how sure are we this is really <name>" score (0–1), and works for
-    user-named speakers too — not just the auto-match confidence captured at
-    diarization time.
+    A raw cosine similarity to the assigned voice is misleading: the auto-matcher
+    picked that name *because* it was the closest, and cosine runs high even
+    between different people, so a wrong match still shows a high number. Instead,
+    for each speaker with a stored embedding we score it against EVERY enrolled
+    voice and report how clearly the assigned name stands out from the rest:
 
-    Returns {speaker_id: confidence} for the speakers we could score (others
-    omitted — generic/unknown names, un-enrolled names, or no embedding).
+        {speaker_id: {
+            "assigned":      current name,
+            "score":         cosine to the assigned voice (null if not enrolled),
+            "best":          closest enrolled voice overall,
+            "bestScore":     its cosine,
+            "runnerUp":      best enrolled voice OTHER than the assigned name,
+            "runnerUpScore": its cosine,
+            "margin":        score - runnerUpScore  (how much the assigned name
+                             beats the next-best voice; negative ⇒ another voice
+                             matches better, i.e. the assignment is suspect),
+        }}
+
+    The margin — not the absolute score — is what tells a confident match from a
+    coin-flip. Omitted for speakers with no embedding or an empty library.
     """
     from shared.voice_library_lite import cosine_similarity, load_library
 
@@ -118,16 +129,36 @@ def score_speakers(data: dict) -> dict:
     names = data.get("speaker_names", {}) or {}
     embeddings = data.get("speaker_embeddings") or {}
 
-    out: dict[str, float] = {}
+    out: dict[str, dict] = {}
     for sid, name in names.items():
         emb = embeddings.get(sid)
-        entry = lib.get(name)
-        if emb is None or entry is None:
+        if emb is None:
             continue
-        stored = entry.get("embedding")
-        if not stored or len(stored) != len(emb):
-            continue   # different embedding model/dim — not comparable
-        out[sid] = round(float(cosine_similarity(emb, stored)), 4)
+        sims: list[tuple[str, float]] = []
+        for lname, ldata in lib.items():
+            stored = ldata.get("embedding")
+            if not stored or len(stored) != len(emb):
+                continue   # different embedding model/dim — not comparable
+            sims.append((lname, round(float(cosine_similarity(emb, stored)), 4)))
+        if not sims:
+            continue
+        sims.sort(key=lambda x: x[1], reverse=True)
+
+        assigned_score = next((s for n, s in sims if n == name), None)
+        best_other = next(((n, s) for n, s in sims if n != name), None)
+
+        entry: dict = {
+            "assigned": name,
+            "score": assigned_score,
+            "best": sims[0][0],
+            "bestScore": sims[0][1],
+        }
+        if best_other is not None:
+            entry["runnerUp"] = best_other[0]
+            entry["runnerUpScore"] = best_other[1]
+            if assigned_score is not None:
+                entry["margin"] = round(assigned_score - best_other[1], 4)
+        out[sid] = entry
     return out
 
 

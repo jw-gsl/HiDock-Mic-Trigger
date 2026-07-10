@@ -140,6 +140,19 @@ struct SpeakerMeta: Codable {
     var verified: Bool
 }
 
+/// Margin-based voice-match result for one speaker (from the `speaker-confidence`
+/// CLI). The margin — how clearly the assigned name beats the next-best enrolled
+/// voice — is the real signal; a raw cosine looks high even when wrong.
+struct SpeakerScore: Codable {
+    var assigned: String?
+    var score: Double?          // cosine to the assigned voice (nil if not enrolled)
+    var best: String?           // closest enrolled voice overall
+    var bestScore: Double?
+    var runnerUp: String?       // best enrolled voice other than the assigned name
+    var runnerUpScore: Double?
+    var margin: Double?         // score - runnerUpScore (negative ⇒ another voice fits better)
+}
+
 struct DiarizedTranscript: Codable {
     var version: Int
     var audioFile: String
@@ -345,13 +358,16 @@ struct TranscriptViewerView: View {
     @State var transcript: DiarizedTranscript
     @State var editingSpeakerId: Int? = nil
     @State var editingName: String = ""
+    /// Which pill location owns the active edit ("legend" / "verify"), so the
+    /// TextField only appears where you clicked, not on every pill for that id.
+    @State private var editingContext: String = "legend"
     /// Tracks focus of the inline name field so clicking anywhere else in the
     /// window commits the edit and deselects it (the field otherwise stays
     /// active with no way to dismiss it).
     @FocusState private var nameFieldFocused: Bool
     /// Live per-speaker confidence (id-string → 0–1) from the background CLI:
     /// how well each speaker's voice matches the enrolled voice of its name.
-    @State private var liveConfidence: [String: Double] = [:]
+    @State private var liveConfidence: [String: SpeakerScore] = [:]
     /// A rename that collided with another speaker's name — pending the user's
     /// choice to merge the two speakers or cancel.
     @State private var pendingMerge: PendingMerge?
@@ -388,7 +404,7 @@ struct TranscriptViewerView: View {
     /// Score each speaker's voice against its assigned name in the library
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
-    var onScoreSpeakers: ((String, @escaping ([String: Double]) -> Void) -> Void)?
+    var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
     /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
     /// autocomplete). Optional so older call-sites keep compiling.
     var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
@@ -725,9 +741,12 @@ struct TranscriptViewerView: View {
         guard idx >= 0, idx < transcript.segments.count else { return }
         let segment = transcript.segments[idx]
         let words = segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        let startWord = wordRange.lowerBound
-        let endWord = wordRange.upperBound
-        guard startWord >= 0, endWord < words.count, startWord <= endWord else { return }
+        guard !words.isEmpty else { return }
+        // Clamp to valid indices rather than bailing — a selection that runs to
+        // the very end of a block could produce an out-of-range upper bound,
+        // which silently did nothing when the user clicked a speaker.
+        let startWord = max(0, min(wordRange.lowerBound, words.count - 1))
+        let endWord = max(startWord, min(wordRange.upperBound, words.count - 1))
 
         transcriptHistory.append(transcript)
 
@@ -833,9 +852,16 @@ struct TranscriptViewerView: View {
                     .foregroundColor(.secondary)
                 Spacer()
             }
-            ForEach(uniqueSpeakerIds, id: \.self) { id in
-                speakerVerifyRow(id: id)
+            // Bound the height and scroll — with many speakers this used to grow
+            // unbounded and push the transcript off-screen.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(uniqueSpeakerIds, id: \.self) { id in
+                        speakerVerifyRow(id: id)
+                    }
+                }
             }
+            .frame(maxHeight: uniqueSpeakerIds.count > 4 ? 170 : .infinity)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -850,7 +876,7 @@ struct TranscriptViewerView: View {
 
         VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 8) {
-            speakerPill(speakerId: id, interactive: true)   // tap to rename/correct
+            speakerPill(speakerId: id, interactive: true, context: "verify")   // tap to rename/correct
 
             Text(prov.text)
                 .font(.caption2.weight(.medium))
@@ -921,18 +947,22 @@ struct TranscriptViewerView: View {
 
         // Autocomplete: while renaming this speaker, offer existing enrolled
         // voices to map onto (keeps names canonical → better matching).
-        if editingSpeakerId == id {
+        if editingSpeakerId == id && editingContext == "verify" {
             nameSuggestions(for: id)
         }
         }
     }
 
     @ViewBuilder
-    private func speakerPill(speakerId: Int, interactive: Bool) -> some View {
+    private func speakerPill(speakerId: Int, interactive: Bool, context: String = "legend") -> some View {
         let name = speakerName(for: speakerId)
         let color = colorForSpeaker(speakerId)
 
-        if editingSpeakerId == speakerId {
+        // Only the pill in the SAME place you clicked shows the editor — without
+        // the context check, editingSpeakerId matched every pill for that
+        // speaker (legend + each transcript row), so the field appeared down in
+        // the transcript instead of where you tapped.
+        if editingSpeakerId == speakerId && editingContext == context {
             HStack(spacing: 4) {
                 Circle()
                     .fill(color)
@@ -954,6 +984,7 @@ struct TranscriptViewerView: View {
             Button {
                 if interactive {
                     editingSpeakerId = speakerId
+                    editingContext = context
                     editingName = speakerName(for: speakerId)
                     nameFieldFocused = true
                 }
@@ -1002,7 +1033,9 @@ struct TranscriptViewerView: View {
                     .frame(width: 50, alignment: .leading)
 
                 if hasSpeakers {
-                    speakerPill(speakerId: segment.speakerId, interactive: true)
+                    // Editable here too — a unique per-row context means the
+                    // editor opens on THIS pill, not the legend or another row.
+                    speakerPill(speakerId: segment.speakerId, interactive: true, context: "segment-\(idx)")
                 }
 
                 WordTokensView(
@@ -1091,12 +1124,13 @@ struct TranscriptViewerView: View {
         // Legacy sidecars have no meta — infer from the name.
         let source = m?.source ?? (isGenericName(name) ? "generic" : "auto")
 
+        // Source word only — the numeric confidence lives in the separate
+        // "match NN%" badge, so we don't show the same percentage twice.
         if verified {
             return source == "unknown" ? ("unknown", .secondary) : ("confirmed", .green)
         }
         switch source {
         case "auto":
-            if let c = m?.confidence { return ("auto \(Int((c * 100).rounded()))%", .blue) }
             return ("auto", .blue)
         case "unknown":
             return ("unknown", .secondary)
@@ -1226,12 +1260,30 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// A colour-coded "match NN%" badge for a speaker, when we have a live score.
+    /// A voice-match badge based on the MARGIN over other enrolled voices, not a
+    /// raw cosine (which looks high even when the match is wrong). Flags the case
+    /// the user hit — another enrolled voice fits better than the assigned name.
     private func confidenceBadge(for id: Int) -> (text: String, color: Color)? {
-        guard let c = liveConfidence["\(id)"] else { return nil }
-        let pct = Int((c * 100).rounded())
-        let color: Color = c >= 0.75 ? .green : (c >= 0.55 ? .orange : .red)
-        return ("match \(pct)%", color)
+        guard let s = liveConfidence["\(id)"] else { return nil }
+        // Assigned name isn't enrolled yet — hint at the closest known voice.
+        guard let assignedScore = s.score else {
+            if let best = s.best { return ("sounds like \(best)", .secondary) }
+            return nil
+        }
+        // Another enrolled voice matches better than the assigned name → suspect.
+        if let best = s.best, best != s.assigned,
+           let bestScore = s.bestScore, bestScore > assignedScore + 0.02 {
+            return ("looks more like \(best)", .red)
+        }
+        // Assigned IS the closest — how clearly does it beat the runner-up?
+        guard let margin = s.margin else {
+            return ("only voice enrolled", .secondary)   // nothing to compare against
+        }
+        if margin >= 0.08 { return ("clear match", .green) }
+        if let ru = s.runnerUp {
+            return margin >= 0.03 ? ("close vs \(ru)", .orange) : ("ambiguous vs \(ru)", .red)
+        }
+        return ("weak match", .orange)
     }
 
     private func copyAllToClipboard() {
@@ -1270,19 +1322,11 @@ struct TranscriptViewerView: View {
         // Remove the old speaker name
         transcript.speakerNames.removeValue(forKey: "\(sourceId)")
 
-        // Re-merge consecutive same-speaker segments
-        var merged: [DiarizedSegment] = []
-        for seg in transcript.segments {
-            if let last = merged.last, last.speakerId == seg.speakerId {
-                var updated = merged.removeLast()
-                updated.text += " " + seg.text
-                // Can't mutate end directly on the struct — rebuild
-                merged.append(DiarizedSegment(start: updated.start, end: seg.end, speakerId: updated.speakerId, text: updated.text))
-            } else {
-                merged.append(seg)
-            }
-        }
-        transcript.segments = merged
+        // NOTE: deliberately DON'T concatenate consecutive same-speaker segments
+        // here. The old re-merge glued every adjacent turn into one unbounded
+        // block (the diarizer caps block length; this didn't), which turned a
+        // clean transcript into a wall of text and broke word-range selection.
+        // Leaving the segments as-is keeps the readable per-turn blocks.
 
         saveTranscript()
     }

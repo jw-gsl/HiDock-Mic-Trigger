@@ -1048,7 +1048,7 @@ def diarize(
             speaker_embeddings[str(spk_id)] = [float(x) for x in centroid]
 
             # Check voice library
-            matched_name, confidence = identify_speaker(centroid, threshold=0.55)
+            matched_name, confidence = identify_speaker(centroid, threshold=0.65)
             if matched_name:
                 speaker_names[str(spk_id)] = matched_name
                 speaker_meta[str(spk_id)] = {"source": "auto", "confidence": float(confidence), "verified": False}
