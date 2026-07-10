@@ -6031,9 +6031,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncDeviceConnected[device.deviceId] = payload.connected
                         self.syncViewModelState()
                     }
+                    // Sweep any pending (undownloaded) Plaud recordings. The
+                    // renderSyncStatus auto-download triggers only fire on a
+                    // count-rise or a fresh connect, so a static backlog of
+                    // "On device" cloud recordings never downloaded on its own.
+                    // With auto-download on, the poll is the natural place to
+                    // pull them.
+                    self.autoDownloadPendingPlaud(device, payload: payload)
                 }
             }
         }
+    }
+
+    /// When auto-download is on, pull any undownloaded Plaud cloud recordings.
+    /// Plaud has no count-rise/fresh-connect event for an existing backlog, so
+    /// this poll-driven sweep is what actually fetches "On device" items.
+    /// Guarded on syncBusy/syncDownloading so it never stacks; the poll cadence
+    /// (default 2 min) doubles as the retry interval for any that failed.
+    private func autoDownloadPendingPlaud(_ device: HiDockPairedDevice, payload: HiDockSyncStatusResponse) {
+        guard viewModel.syncAutoDownload, !syncBusy, !syncDownloading, payload.connected else { return }
+        let hasPending = payload.recordings.contains { !$0.downloaded && !($0.removed ?? false) }
+        guard hasPending else { return }
+        log("Plaud poll: auto-downloading pending recordings for \(device.cleanName)")
+        syncBusy = true
+        syncViewModelState()
+        downloadNewFromDevices([device], totalDownloaded: 0, freshDownloads: [])
     }
 
     private func refreshSyncStatus(manual: Bool = false) {
