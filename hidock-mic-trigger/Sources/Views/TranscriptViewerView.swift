@@ -6,8 +6,17 @@ import AVFoundation
 
 class SegmentAudioPlayer: ObservableObject {
     @Published var playingSegmentId: String?
+    /// Index of the word currently being spoken in the playing segment (for the
+    /// karaoke highlight). Approximated from elapsed/duration since the diarized
+    /// segments carry no per-word timing. Only re-published when it changes, so
+    /// it doesn't re-render the transcript on every timer tick.
+    @Published var playingWordIndex: Int = 0
     private var player: AVAudioPlayer?
     private var stopTimer: Timer?
+    private var progressTimer: Timer?
+    private var playBaseline: Double = 0   // player.currentTime at the segment's start
+    private var playDuration: Double = 1
+    private var playWordCount: Int = 0
     private var decodeProcess: Process?
     private var tempURL: URL?
     /// Bumped on every play()/stop() so a slow ffmpeg decode that finishes after
@@ -24,7 +33,7 @@ class SegmentAudioPlayer: ObservableObject {
         ffmpegCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    func play(audioPath: String, start: Double, end: Double, segmentId: String) {
+    func play(audioPath: String, start: Double, end: Double, segmentId: String, wordCount: Int = 0) {
         stop()
         guard FileManager.default.fileExists(atPath: audioPath) else {
             NSLog("SegmentAudioPlayer: audio file not found at \(audioPath)")
@@ -42,16 +51,37 @@ class SegmentAudioPlayer: ObservableObject {
             player.currentTime = max(0, start)
             player.play()
             playingSegmentId = segmentId
+            // Direct path plays from `start`, so the segment's t=0 is at currentTime `start`.
+            startProgressTracking(baseline: max(0, start), duration: end - start, wordCount: wordCount)
             armStopTimer(after: end - start)
             return
         }
 
         // Fallback: Core Audio couldn't open it (e.g. Opus). Use ffmpeg to
         // decode just this segment to a temp WAV, then play that from 0.
-        decodeAndPlayViaFFmpeg(audioPath: audioPath, start: start, end: end, segmentId: segmentId)
+        decodeAndPlayViaFFmpeg(audioPath: audioPath, start: start, end: end, segmentId: segmentId, wordCount: wordCount)
     }
 
-    private func decodeAndPlayViaFFmpeg(audioPath: String, start: Double, end: Double, segmentId: String) {
+    /// Drive the karaoke word cursor from playback position. Publishes
+    /// `playingWordIndex` only when the word changes (a few Hz at most).
+    private func startProgressTracking(baseline: Double, duration: Double, wordCount: Int) {
+        progressTimer?.invalidate()
+        playBaseline = baseline
+        playDuration = max(0.001, duration)
+        playWordCount = wordCount
+        playingWordIndex = 0
+        guard wordCount > 0 else { return }
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self = self, let p = self.player else { return }
+            let frac = min(max((p.currentTime - self.playBaseline) / self.playDuration, 0), 1)
+            let idx = min(self.playWordCount - 1, Int(frac * Double(self.playWordCount)))
+            if idx != self.playingWordIndex { self.playingWordIndex = idx }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        progressTimer = t
+    }
+
+    private func decodeAndPlayViaFFmpeg(audioPath: String, start: Double, end: Double, segmentId: String, wordCount: Int = 0) {
         guard let ffmpeg = Self.ffmpegPath else {
             NSLog("SegmentAudioPlayer: cannot decode \(audioPath) and no ffmpeg found")
             NSSound.beep()
@@ -96,6 +126,8 @@ class SegmentAudioPlayer: ObservableObject {
                 self.player = player
                 player.prepareToPlay()
                 player.play()
+                // Temp WAV holds just this segment, so it plays from t=0.
+                self.startProgressTracking(baseline: 0, duration: duration, wordCount: wordCount)
                 self.armStopTimer(after: duration)
             }
         }
@@ -121,10 +153,13 @@ class SegmentAudioPlayer: ObservableObject {
         player = nil
         stopTimer?.invalidate()
         stopTimer = nil
+        progressTimer?.invalidate()
+        progressTimer = nil
         if let proc = decodeProcess, proc.isRunning { proc.terminate() }
         decodeProcess = nil
         if let t = tempURL { try? FileManager.default.removeItem(at: t); tempURL = nil }
         playingSegmentId = nil
+        playingWordIndex = 0
     }
 }
 
@@ -300,6 +335,8 @@ private struct WordFramesKey: PreferenceKey {
 private struct WordTokensView: View {
     let words: [String]
     let activeRange: ClosedRange<Int>?
+    /// Word currently being spoken (karaoke highlight), or nil when not playing.
+    var playingWord: Int? = nil
     let onRangeChange: (ClosedRange<Int>) -> Void
 
     @State private var wordFrames: [Int: CGRect] = [:]
@@ -314,10 +351,15 @@ private struct WordTokensView: View {
         FlowLayout(spacing: 0, lineSpacing: 1) {
             ForEach(Array(words.enumerated()), id: \.offset) { i, w in
                 let inRange = activeRange.map { $0.contains(i) } ?? false
+                let isPlaying = (i == playingWord)
                 let display = (i == words.count - 1) ? w : "\(w) "
                 Text(display)
                     .font(.body)
-                    .background(inRange ? Color.blue.opacity(0.28) : Color.clear)
+                    .foregroundColor(isPlaying ? .primary : nil)
+                    .background(
+                        inRange ? Color.blue.opacity(0.28)
+                            : (isPlaying ? Color.yellow.opacity(0.45) : Color.clear)
+                    )
                     .background(
                         GeometryReader { proxy in
                             Color.clear.preference(
@@ -1018,7 +1060,7 @@ struct TranscriptViewerView: View {
                     if audioPlayer.playingSegmentId == segment.id {
                         audioPlayer.stop()
                     } else {
-                        audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id)
+                        audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id, wordCount: words.count)
                     }
                 } label: {
                     Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
@@ -1041,6 +1083,7 @@ struct TranscriptViewerView: View {
                 WordTokensView(
                     words: words,
                     activeRange: activeRange,
+                    playingWord: audioPlayer.playingSegmentId == segment.id ? audioPlayer.playingWordIndex : nil,
                     onRangeChange: { newRange in
                         selection = SegmentSelection(segmentIndex: idx, range: newRange)
                     }
