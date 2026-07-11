@@ -92,6 +92,18 @@ struct RecordingsTableView: View {
                         }
                     }
                 }
+                // Loading spinner while the initial cached list is read on
+                // launch, so the table isn't just a blank rectangle.
+                .overlay {
+                    if viewModel.recordingsLoading && viewModel.displayRows.isEmpty {
+                        VStack(spacing: 10) {
+                            ProgressView()
+                            Text("Loading recordings…")
+                                .font(.callout)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
         }
         .overlay(

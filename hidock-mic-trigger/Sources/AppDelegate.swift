@@ -419,6 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // suppress flag stops any intervening syncViewModelState (e.g. from
         // showSyncWindow) pushing the imported-only list first.
         suppressSyncEntriesPush = true
+        viewModel.recordingsLoading = true
         mergeImportedIntoSyncEntries()
         let imp = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
         log("After rebuildSyncEntries: syncEntries=\(syncEntries.count) imported=\(imp.count)")
@@ -1956,6 +1957,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // imported rows (which the launch path deliberately didn't push yet).
         guard !hidocks.isEmpty || !plauds.isEmpty, ensureExtractorReady() else {
             suppressSyncEntriesPush = false
+            viewModel.recordingsLoading = false
             applyTranscribedFromDiskScan()
             viewModel.syncEntries = syncEntries
             refreshTranscriptionState()
@@ -2007,6 +2009,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // before the single combined push below.
             for (device, payload) in cached { self.renderSyncStatus(payload, device: device) }
             self.suppressSyncEntriesPush = false
+            self.viewModel.recordingsLoading = false
             self.log("Paint-from-cache: \(cached.count) cached catalog(s) loaded together, refreshing transcription state")
             // Two-phase transcribed-state population: the sync disk
             // scan below lands the table on Transcribed immediately

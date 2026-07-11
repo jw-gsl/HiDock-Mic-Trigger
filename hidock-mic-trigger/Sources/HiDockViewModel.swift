@@ -124,6 +124,9 @@ final class HiDockViewModel: ObservableObject {
     /// recording name → the named people in that meeting (from the diarized
     /// sidecars, refreshed alongside transcription state). Drives the people
     /// filter + the Voice Library "# meetings" count.
+    /// True during the initial launch load (cache read) so the list can show a
+    /// spinner instead of a blank table until the first combined paint lands.
+    @Published var recordingsLoading = false
     @Published var meetingPeople: [String: Set<String>] = [:] { didSet { markDerivedDirty() } }
     /// Active people filter (empty = off). Combined AND with device/status/day.
     @Published var syncFilterPeople: Set<String> = [] { didSet { markDerivedDirty() } }
