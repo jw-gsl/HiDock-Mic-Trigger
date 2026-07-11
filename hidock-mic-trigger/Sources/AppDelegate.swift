@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// array to the view model (see #4).
     private var syncEntriesVersion = 0
     private var lastPushedSyncEntriesVersion = -1
+    /// While true, syncViewModelState won't push the entries array — used during
+    /// launch so the imported-only list doesn't paint before the cache load.
+    private var suppressSyncEntriesPush = false
     /// CoreAudio mic-name cache + last-enumeration time, so syncViewModelState
     /// doesn't re-enumerate devices on every call (see #3).
     private var cachedMicNames: [String] = []
@@ -412,7 +415,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if needsSave { ImportedRecordingsStore.save(importedRecordings) }
         // Build imported rows into syncEntries but DON'T push to the view yet —
         // loadCachedCatalogsForPaintOnLaunch pushes imported + device catalogs
-        // together in one pass, so imported no longer flashes up first.
+        // together in one pass, so imported no longer flashes up first. The
+        // suppress flag stops any intervening syncViewModelState (e.g. from
+        // showSyncWindow) pushing the imported-only list first.
+        suppressSyncEntriesPush = true
         mergeImportedIntoSyncEntries()
         let imp = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
         log("After rebuildSyncEntries: syncEntries=\(syncEntries.count) imported=\(imp.count)")
@@ -809,7 +815,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // #4: only push the (now ~1700-element) entries array when it actually
         // changed — an unchanged reassignment still fires @Published and marks
         // the derived-list cache dirty for nothing.
-        if syncEntriesVersion != lastPushedSyncEntriesVersion {
+        // During launch, hold the entries push until the cache paint is ready so
+        // the imported-only list doesn't flash up before the devices. Everything
+        // else in this method still syncs normally.
+        if syncEntriesVersion != lastPushedSyncEntriesVersion, !suppressSyncEntriesPush {
             viewModel.syncEntries = syncEntries
             lastPushedSyncEntriesVersion = syncEntriesVersion
         }
@@ -1946,6 +1955,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // No paired devices → nothing cached to load, but still paint the
         // imported rows (which the launch path deliberately didn't push yet).
         guard !hidocks.isEmpty || !plauds.isEmpty, ensureExtractorReady() else {
+            suppressSyncEntriesPush = false
             applyTranscribedFromDiskScan()
             viewModel.syncEntries = syncEntries
             refreshTranscriptionState()
@@ -1992,7 +2002,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
+            // Keep the push suppressed THROUGH the render loop (renderSyncStatus
+            // may sync internally) so no device paints alone; release it just
+            // before the single combined push below.
             for (device, payload) in cached { self.renderSyncStatus(payload, device: device) }
+            self.suppressSyncEntriesPush = false
             self.log("Paint-from-cache: \(cached.count) cached catalog(s) loaded together, refreshing transcription state")
             // Two-phase transcribed-state population: the sync disk
             // scan below lands the table on Transcribed immediately
