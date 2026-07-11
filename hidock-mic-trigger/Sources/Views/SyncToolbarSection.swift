@@ -10,16 +10,16 @@ struct SyncToolbarSection: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Action row 1 — Import + transformative selection-driven actions
-            // (Merge, Trim, Skip, Remove), all on one tidy row directly beneath
-            // the heatmap (the old status row above was removed, so this row now
-            // sits right under it). Transcribe Selected is on row 2.
+            // Action row — everything you DO to selected rows, icon-only to save
+            // space: Import · Merge/Trim/Skip/Remove · Download/Transcribe/
+            // Summarise. Tooltips carry the names. Status counts sit on the right.
             HStack(spacing: 6) {
                 Button {
                     viewModel.onImportAudioFile()
                 } label: {
                     Label("Import", systemImage: "square.and.arrow.down")
                 }
+                .labelStyle(.iconOnly)
                 .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
 
                 Divider().frame(height: 16)
@@ -29,19 +29,14 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Merge", systemImage: "arrow.triangle.merge")
                 }
-                // Local-file op — don't gate on `syncBusy` (which is set
-                // whenever any device is probing). Only block during an
-                // active download (file being written) or in-flight trim.
+                .labelStyle(.iconOnly)
+                .help("Merge the selected recordings into one")
+                // Local-file op — don't gate on `syncBusy`. Only block during an
+                // active download or in-flight trim.
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count < 2)
 
                 Button {
                     if let entry = viewModel.visibleEntries.first(where: {
-                        // localExists, not `downloaded && localExists`:
-                        // a row can have the file on disk but
-                        // `downloaded=false` if the device-reported
-                        // length and the actual byte count differ
-                        // slightly. The flag is for download-decisioning;
-                        // file ops should ask the filesystem.
                         viewModel.syncCheckedRecordings.contains($0.recording.name) && $0.recording.localExists
                     }) {
                         viewModel.onTrimRecording(entry.recording.outputPath)
@@ -49,27 +44,60 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Trim", systemImage: "scissors")
                 }
+                .labelStyle(.iconOnly)
+                .help("Trim the selected recording")
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count != 1)
 
-                // Skip: mark selected device-side recordings as
-                // "downloaded" without pulling bytes — hides them from
-                // future download-new sweeps. Mirrors the action that
-                // used to live in SyncHeaderSection.
                 Button {
                     viewModel.onMarkDownloaded()
                 } label: {
                     Label("Skip", systemImage: "forward.fill")
                 }
+                .labelStyle(.iconOnly)
                 .disabled(viewModel.syncBusy || !viewModel.hasSelection)
-                .help("Mark selected on-device recordings as 'don't download' — they'll stop appearing in download-new sweeps")
+                .help("Skip — mark selected on-device recordings as 'don't download' so they drop out of download-new sweeps")
 
                 Button {
                     viewModel.onRemoveSelected()
                 } label: {
                     Label("Remove", systemImage: "trash")
                 }
-                .help("Remove imported files entirely, delete local copies of downloaded HiDock recordings. Device copies are preserved.")
+                .labelStyle(.iconOnly)
+                .help("Remove imported files entirely / delete local copies of downloaded HiDock recordings. Device copies are preserved.")
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || !viewModel.hasSelection)
+
+                Divider().frame(height: 16)
+
+                // Pipeline verbs on the selection — moved here from the filter row.
+                Button {
+                    viewModel.onDownloadSelected()
+                } label: {
+                    Label(viewModel.selectionIncludesTrimmed ? "Re-download Selected" : "Download Selected",
+                          systemImage: "arrow.down.circle")
+                }
+                .labelStyle(.iconOnly)
+                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
+                .help(viewModel.selectionIncludesTrimmed
+                      ? "Re-download Selected — replaces the trimmed local file with the device original."
+                      : "Download the selected recordings from the device")
+
+                Button {
+                    viewModel.onTranscribeSelected()
+                } label: {
+                    Label("Transcribe Selected", systemImage: "text.bubble")
+                }
+                .labelStyle(.iconOnly)
+                .help("Transcribe the selected recordings")
+                .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
+
+                Button {
+                    viewModel.onSummariseSelected()
+                } label: {
+                    Label("Summarise Selected", systemImage: "sparkles")
+                }
+                .labelStyle(.iconOnly)
+                .disabled(viewModel.syncDownloading || !viewModel.hasSelection)
+                .help("Summarise (via Claude Code) each selected transcribed recording. Untranscribed selections are skipped.")
 
                 Spacer()
 
@@ -120,21 +148,22 @@ struct SyncToolbarSection: View {
                     .help("Click to jump to the first suggested row. Tick the 'Potential merge' box on each row you want to combine, then click 'Merge N selected'.")
                 }
 
-                if !viewModel.allPeople.isEmpty {
-                    peopleFilterMenu
-                }
-
+                // Status counts — responsive: truncate rather than push the row
+                // wider than the window. (People filter moved to the filter row.)
                 if viewModel.needsTaggingCount > 0 {
-                    Label("\(viewModel.needsTaggingCount) need tagging", systemImage: "tag.fill")
+                    Label("\(viewModel.needsTaggingCount) to tag", systemImage: "tag.fill")
                         .font(.caption.weight(.medium))
                         .foregroundColor(.orange)
+                        .fixedSize()
+                        .help("\(viewModel.needsTaggingCount) transcribed recordings still need speaker tagging")
                 }
-                // Counts summary ("N shown · M total · K downloaded") sits here
-                // next to "need tagging" — moved off its own header row.
                 if !viewModel.syncSummary.isEmpty {
                     Text(viewModel.syncSummary)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(-1)
                 }
             }
             .buttonStyle(.bordered)
@@ -280,81 +309,16 @@ struct SyncToolbarSection: View {
                     .help("Show only recordings whose summary was classified as this type.")
                 }
 
-                // "Process selected rows" verbs cluster here: Download
-                // Selected and Transcribe Selected sit side-by-side
-                // because they're the two things the user does to
-                // narrowed-down rows. Download Selected re-labels to
-                // "Re-download Selected" when any selected row is
-                // locally trimmed, so the user sees the click will
-                // overwrite the trimmed copy with the device original.
-                Button {
-                    viewModel.onDownloadSelected()
-                } label: {
-                    let label = viewModel.selectionIncludesTrimmed
-                        ? "Re-download Selected"
-                        : "Download Selected"
-                    Label(label, systemImage: "arrow.down.circle")
+                // People filter — sits with the other narrowing controls.
+                if !viewModel.allPeople.isEmpty {
+                    peopleFilterMenu
                 }
-                .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
-                .help(viewModel.selectionIncludesTrimmed
-                      ? "At least one selected recording is trimmed — re-downloading will replace the trimmed local file with the device's original."
-                      : "Download the selected recordings from the device")
-
-                Button {
-                    viewModel.onTranscribeSelected()
-                } label: {
-                    Label("Transcribe Selected", systemImage: "text.bubble")
-                }
-                .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
-
-                // Summarise Selected sits right after Transcribe Selected —
-                // the natural next verb once rows are transcribed. Runs the
-                // typed Claude Code summary (one at a time, queued) for each
-                // selected transcribed row; untranscribed selections are
-                // skipped. Independent of transcription, so it isn't gated on
-                // transcriptionBusy.
-                Button {
-                    viewModel.onSummariseSelected()
-                } label: {
-                    Label("Summarise Selected", systemImage: "sparkles")
-                }
-                .disabled(viewModel.syncDownloading || !viewModel.hasSelection)
-                .help("Generate a typed summary (via Claude Code) for each selected transcribed recording. Untranscribed selections are skipped.")
-
-                // (Download New removed in 2026-04-26 cleanup — it was
-                // dead UI in every realistic state. Auto-download
-                // covers the "I want the new ones" case when on; when
-                // off, the renderSyncStatus auto-fire on file-count
-                // rise + the manual Refresh + Select New + Download
-                // Selected path together cover the rest. The
-                // workhorse `downloadNewSyncRecordings` stays in
-                // AppDelegate because the auto-download trigger calls
-                // it directly.)
 
                 Spacer()
 
-                Toggle("Auto-download", isOn: Binding(
-                    get: { viewModel.syncAutoDownload },
-                    set: { _ in viewModel.onToggleAutoDownload() }
-                ))
-                .toggleStyle(.checkbox)
-
-                Toggle("Auto-transcribe", isOn: Binding(
-                    get: { viewModel.syncAutoTranscribe },
-                    set: { _ in viewModel.onToggleAutoTranscribe() }
-                ))
-                .toggleStyle(.checkbox)
-
-                // When on, each recording that finishes transcribing this
-                // session is automatically given a typed summary via Claude
-                // Code. Newly-transcribed files only — backlog is left to the
-                // Summarise Selected button to avoid fanning out many runs.
-                Toggle("Auto-summarise", isOn: Binding(
-                    get: { viewModel.syncAutoSummarise },
-                    set: { _ in viewModel.onToggleAutoSummarise() }
-                ))
-                .toggleStyle(.checkbox)
-                .help("Automatically summarise (via Claude Code) each recording as it finishes transcribing. Applies to newly-transcribed files; use Summarise Selected for the backlog.")
+                // Auto-download / transcribe / summarise — collapsed into one
+                // dropdown to save space.
+                autoMenu
             }
             .font(.caption)
             .buttonStyle(.bordered)
@@ -366,6 +330,27 @@ struct SyncToolbarSection: View {
 
     /// People filter — multi-select with an Any/All mode. Filters the list to
     /// meetings containing the selected people.
+    /// Auto-download / transcribe / summarise as checkable menu items — one
+    /// compact dropdown instead of three inline checkboxes.
+    private var autoMenu: some View {
+        let onCount = [viewModel.syncAutoDownload, viewModel.syncAutoTranscribe, viewModel.syncAutoSummarise]
+            .filter { $0 }.count
+        return Menu {
+            Toggle("Auto-download", isOn: Binding(
+                get: { viewModel.syncAutoDownload }, set: { _ in viewModel.onToggleAutoDownload() }))
+            Toggle("Auto-transcribe", isOn: Binding(
+                get: { viewModel.syncAutoTranscribe }, set: { _ in viewModel.onToggleAutoTranscribe() }))
+            Toggle("Auto-summarise", isOn: Binding(
+                get: { viewModel.syncAutoSummarise }, set: { _ in viewModel.onToggleAutoSummarise() }))
+        } label: {
+            Label(onCount > 0 ? "Auto (\(onCount))" : "Auto", systemImage: "bolt.horizontal.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundColor(onCount > 0 ? .accentColor : .secondary)
+        .help("Automatically download / transcribe / summarise new recordings as they arrive.")
+    }
+
     private var peopleFilterMenu: some View {
         let selected = viewModel.syncFilterPeople
         return Menu {

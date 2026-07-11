@@ -889,10 +889,20 @@ struct TranscriptViewerView: View {
         // count. (The old per-speaker "dot + name %/wpm" list overflowed into a
         // meaningless row of dots when a meeting had many detected speakers.)
         let totalTalk = speakerStats.reduce(0.0) { $0 + $1.talkTime }
+        // Duration + speaker count take their intrinsic width FIRST (fixedSize),
+        // then the proportion bar fills whatever's left — GeometryReader is
+        // greedy, so if it came first it swallowed the row and the count
+        // overlapped it.
         return HStack(spacing: 10) {
             Text(formatTime(seconds: totalDuration))
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
+                .fixedSize()
+
+            Text("\(speakerStats.count) speaker\(speakerStats.count == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize()
 
             GeometryReader { geo in
                 HStack(spacing: 1) {
@@ -906,11 +916,6 @@ struct TranscriptViewerView: View {
             }
             .frame(height: 8)
             .help("Talk-time split by speaker")
-
-            Text("\(speakerStats.count) speaker\(speakerStats.count == 1 ? "" : "s")")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)

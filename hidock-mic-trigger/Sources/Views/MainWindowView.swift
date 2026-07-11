@@ -147,9 +147,10 @@ struct MainWindowView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                         .font(.caption)
                 }
+                .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .disabled(viewModel.syncBusy)
-                .help("Probe paired devices for fresh status.")
+                .help("Refresh — probe paired devices for fresh status.")
 
                 if !viewModel.updateStatusText.isEmpty {
                     Label {

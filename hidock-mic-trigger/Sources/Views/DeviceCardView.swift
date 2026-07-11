@@ -264,10 +264,14 @@ struct DeviceCardView: View {
                     Text(formatStorage(used: usedGB, capacity: capGB, truncated: stats?.truncated ?? false))
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     if let files = stats?.totalFiles {
                         Text("· \(files) files")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .layoutPriority(-1)
                     }
                     Spacer(minLength: 0)
                 }
@@ -438,7 +442,9 @@ struct DeviceStripView: View {
             }
     }
 
-    private let columns = [GridItem(.adaptive(minimum: 320), spacing: 8)]
+    // Narrower minimum so three cards fit on a row at typical widths (freeing
+    // vertical space for the recordings list). Card content truncates to fit.
+    private let columns = [GridItem(.adaptive(minimum: 260), spacing: 8)]
 
     var body: some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
