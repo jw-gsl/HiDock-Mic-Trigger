@@ -11,7 +11,27 @@ struct RecordingsTableView: View {
     /// scroll freely.
     @State private var didScrollToTop = false
 
+    /// Sum of the fixed column widths — the table's natural width. Below this the
+    /// table scrolls horizontally; above it, the trailing Spacer fills.
+    private static let tableContentWidth: CGFloat = 1160
+
     var body: some View {
+        GeometryReader { geo in
+            let w = max(geo.size.width, Self.tableContentWidth)
+            ScrollView(.horizontal, showsIndicators: true) {
+                tableBody(width: w)
+                    .frame(width: w, height: geo.size.height)
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
+        )
+        .padding(.horizontal, 4)
+    }
+
+    @ViewBuilder
+    private func tableBody(width w: CGFloat) -> some View {
         VStack(spacing: 0) {
             // Column headers
             HStack(spacing: 0) {
@@ -106,11 +126,6 @@ struct RecordingsTableView: View {
                 }
             }
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
-        )
-        .padding(.horizontal, 4)
     }
 
     // MARK: - Header

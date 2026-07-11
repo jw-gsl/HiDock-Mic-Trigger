@@ -548,25 +548,26 @@ struct TranscriptViewerView: View {
                     .help("Undo the last speaker change (merge / re-assign).")
                 }
 
+                // Icon-only so they always fit the (narrow) pane.
                 Button {
                     copyAllToClipboard()
                 } label: {
-                    Label("Copy All", systemImage: "doc.on.doc")
+                    Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
-                .help("Copy the whole transcript (with speaker names + timestamps) to the clipboard.")
+                .help("Copy All — the whole transcript (speaker names + timestamps) to the clipboard.")
 
                 Button {
                     let mdPath = filePath.replacingOccurrences(of: "_diarized.json", with: ".md")
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: mdPath)])
                 } label: {
-                    Label("Show File", systemImage: "folder")
+                    Image(systemName: "folder")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Reveal the transcript's markdown file in Finder.")
+                .help("Show File — reveal the transcript's markdown file in Finder.")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -831,6 +832,7 @@ struct TranscriptViewerView: View {
     /// Secondary strip grouping the speaker-fixing actions, each shown only when
     /// it applies, with plain-language tooltips.
     private var speakerToolsBar: some View {
+      ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 8) {
             Text("Speakers")
                 .font(.caption.weight(.semibold))
@@ -870,14 +872,14 @@ struct TranscriptViewerView: View {
                 .fixedSize()
                 .help("Start over — detect the speakers again from scratch (using the count on the left). Discards the current split and any names.")
             }
-
-            Spacer()
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
-        .background(Color.secondary.opacity(0.04))
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Color.secondary.opacity(0.04))
     }
 
     // MARK: - Stats Header
