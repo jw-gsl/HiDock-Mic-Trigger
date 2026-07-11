@@ -3836,6 +3836,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onRename: { [weak self] oldName, newName in
                 self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
+            },
+            meetingCounts: viewModel.personMeetingCounts,
+            onFilterToPerson: { [weak self] name in
+                guard let self = self else { return }
+                self.viewModel.syncFilterPeople = [name]
+                self.viewModel.syncPeopleFilterMode = .any
+                self.syncWindow?.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
             }
         )
 
@@ -8089,6 +8097,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 // thread → beachball. Now it's one listing + O(1) lookups.
                 let summaryIndex = self.buildSummaryIndex()
                 var matched = 0
+                // recording name → the named people in that meeting (people filter).
+                var meetingPeople: [String: Set<String>] = [:]
                 for i in self.syncEntries.indices {
                     let mp3Name = self.syncEntries[i].recording.outputName
                     if let info = lookup[mp3Name] {
@@ -8099,6 +8109,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         let review = self.speakerReviewState(transcriptPath: info["transcript_path"] as? String)
                         self.syncEntries[i].speakersTagged = review.tagged
                         self.syncEntries[i].speakersAutoMatched = review.autoMatched
+                        if !review.people.isEmpty {
+                            meetingPeople[self.syncEntries[i].recording.name] = Set(review.people)
+                        }
                         // Check if summary exists (O(1) via the prebuilt index)
                         self.syncEntries[i].summaryPath = summaryIndex[(mp3Name as NSString).deletingPathExtension]
                         if self.syncEntries[i].transcribed { matched += 1 }
@@ -8140,12 +8153,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     let review = self.speakerReviewState(transcriptPath: path)
                     if review.tagged { mergedTagged.insert(mergedMp3Name) }
                     if review.autoMatched { mergedAutoMatched.insert(mergedMp3Name) }
+                    if !review.people.isEmpty { meetingPeople[mergedMp3Name] = Set(review.people) }
                 }
                 self.viewModel.mergedFileTranscribed = mergedTranscribed
                 self.viewModel.mergedFileTagged = mergedTagged
                 self.viewModel.mergedFileAutoMatched = mergedAutoMatched
                 self.viewModel.mergedFileTranscriptPaths = mergedPaths
                 self.viewModel.mergedFileTranscribedDates = mergedDates
+                self.viewModel.meetingPeople = meetingPeople
                 if !mergedTranscribed.isEmpty {
                     self.log("refreshTranscriptionState: \(mergedTranscribed.count) merged file(s) transcribed, \(mergedTranscribed.count - mergedTagged.count) need tagging")
                 }
@@ -8230,8 +8245,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Legacy sidecars without `speaker_meta`: a non-generic name is inferred as
     /// an unverified auto-match, so previously auto-tagged meetings surface for
     /// verification rather than silently reading as confirmed.
-    private func speakerReviewState(transcriptPath: String?) -> (tagged: Bool, autoMatched: Bool) {
-        guard let mdPath = transcriptPath else { return (false, false) }
+    private func speakerReviewState(transcriptPath: String?) -> (tagged: Bool, autoMatched: Bool, people: [String]) {
+        guard let mdPath = transcriptPath else { return (false, false, []) }
         let mdURL = URL(fileURLWithPath: mdPath)
         let baseName = mdURL.deletingPathExtension().lastPathComponent
         let dirURL = mdURL.deletingLastPathComponent()
@@ -8242,19 +8257,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let speakerNames = json["speaker_names"] as? [String: String],
               !speakerNames.isEmpty else {
-            return (false, false)
+            return (false, false, [])
         }
 
-        // Single-speaker meetings are never flagged — nothing to disambiguate.
-        if speakerNames.count <= 1 { return (true, false) }
-
-        let meta = json["speaker_meta"] as? [String: [String: Any]] ?? [:]
         let genericPattern = try? NSRegularExpression(pattern: "^Speaker \\d+$")
         func isGeneric(_ name: String) -> Bool {
             let range = NSRange(name.startIndex..., in: name)
             return genericPattern?.firstMatch(in: name, range: range) != nil
         }
 
+        // Named (non-generic) people in this meeting — the people-filter source.
+        let people = Array(Set(speakerNames.values.filter { !isGeneric($0) }))
+
+        // Single-speaker meetings are never flagged — nothing to disambiguate.
+        if speakerNames.count <= 1 { return (true, false, people) }
+
+        let meta = json["speaker_meta"] as? [String: [String: Any]] ?? [:]
         var anyVerified = false
         var anyNamed = false   // a real (non-generic) name — auto or user
         for (id, name) in speakerNames {
@@ -8262,9 +8280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if !isGeneric(name) { anyNamed = true }
         }
 
-        if anyVerified { return (true, false) }      // ≥1 confirmed → tagged
-        if anyNamed { return (false, true) }         // matched but unconfirmed → confirm me
-        return (false, false)                        // nothing → needs tagging
+        if anyVerified { return (true, false, people) }      // ≥1 confirmed → tagged
+        if anyNamed { return (false, true, people) }         // matched but unconfirmed → confirm me
+        return (false, false, people)                        // nothing → needs tagging
     }
 
     /// Build a `stem → summary-path` index by listing the Summaries directory

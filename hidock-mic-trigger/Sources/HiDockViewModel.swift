@@ -1,6 +1,10 @@
 import SwiftUI
 import Combine
 
+/// Whether the people filter requires a meeting to contain ANY or ALL of the
+/// selected people.
+enum PeopleFilterMode: String { case any, all }
+
 final class HiDockViewModel: ObservableObject {
     // MARK: - Mic Trigger State
     @Published var triggerRunning = false
@@ -116,6 +120,28 @@ final class HiDockViewModel: ObservableObject {
     /// Multi-select status filter (stackable, like the Hide menu). Empty = show
     /// all. Entries matching ANY selected status pass (OR semantics).
     @Published var statusFilters: Set<SyncStatusFilter> = [] { didSet { markDerivedDirty() } }
+
+    /// recording name → the named people in that meeting (from the diarized
+    /// sidecars, refreshed alongside transcription state). Drives the people
+    /// filter + the Voice Library "# meetings" count.
+    @Published var meetingPeople: [String: Set<String>] = [:] { didSet { markDerivedDirty() } }
+    /// Active people filter (empty = off). Combined AND with device/status/day.
+    @Published var syncFilterPeople: Set<String> = [] { didSet { markDerivedDirty() } }
+    /// Whether a meeting must contain ANY or ALL of the filtered people.
+    @Published var syncPeopleFilterMode: PeopleFilterMode = .any { didSet { markDerivedDirty() } }
+
+    /// Every named person seen across meetings, sorted — for the filter menu.
+    var allPeople: [String] {
+        Array(Set(meetingPeople.values.flatMap { $0 })).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+    /// person name → number of meetings they appear in.
+    var personMeetingCounts: [String: Int] {
+        var counts: [String: Int] = [:]
+        for people in meetingPeople.values {
+            for p in people { counts[p, default: 0] += 1 }
+        }
+        return counts
+    }
 
     /// Whether an entry matches a given status filter.
     func matchesStatusFilter(_ e: HiDockSyncRecordingEntry, _ f: SyncStatusFilter) -> Bool {
@@ -418,6 +444,17 @@ final class HiDockViewModel: ObservableObject {
         if let filterDeviceId = syncFilterDeviceId {
             entries = entries.filter {
                 $0.deviceId == filterDeviceId
+            }
+        }
+        // People filter (AND-ed with the others). ANY = meeting includes at least
+        // one of the selected people; ALL = includes every selected person.
+        if !syncFilterPeople.isEmpty {
+            entries = entries.filter { e in
+                let people = meetingPeople[e.recording.name] ?? []
+                switch syncPeopleFilterMode {
+                case .any: return !people.isDisjoint(with: syncFilterPeople)
+                case .all: return syncFilterPeople.isSubset(of: people)
+                }
             }
         }
         // (Hide Downloaded toggle removed in 2026-04-26 cleanup —

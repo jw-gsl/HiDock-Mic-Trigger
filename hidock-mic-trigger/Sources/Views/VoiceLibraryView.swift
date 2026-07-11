@@ -11,12 +11,45 @@ struct VoiceLibrarySpeaker: Identifiable {
 
 // MARK: - VoiceLibraryView
 
+enum VoiceSortKey: String, CaseIterable, Identifiable {
+    case name, samples, meetings, updated
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .name: return "Name"
+        case .samples: return "Samples"
+        case .meetings: return "Meetings"
+        case .updated: return "Recent"
+        }
+    }
+}
+
 struct VoiceLibraryView: View {
     @State var speakers: [VoiceLibrarySpeaker]
     @State private var editingId: String? = nil
     @State private var editingName: String = ""
+    @State private var search = ""
+    @State private var sortKey: VoiceSortKey = .name
     let onDelete: (String) -> Void
     let onRename: (String, String) -> Void
+    /// person name → number of meetings they appear in (for display + sort).
+    var meetingCounts: [String: Int] = [:]
+    /// Filter the main recordings list to meetings this person is in.
+    var onFilterToPerson: ((String) -> Void)? = nil
+
+    private var visibleSpeakers: [VoiceLibrarySpeaker] {
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        let filtered = q.isEmpty ? speakers
+            : speakers.filter { $0.name.lowercased().contains(q) }
+        return filtered.sorted { a, b in
+            switch sortKey {
+            case .name: return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            case .samples: return a.sampleCount > b.sampleCount
+            case .meetings: return (meetingCounts[a.name] ?? 0) > (meetingCounts[b.name] ?? 0)
+            case .updated: return a.lastUpdated > b.lastUpdated
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,13 +70,31 @@ struct VoiceLibraryView: View {
 
             Divider()
 
+            // Search + sort
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                TextField("Search speakers…", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                Divider().frame(height: 16)
+                Text("Sort:").font(.caption.weight(.medium)).foregroundColor(.secondary)
+                Picker("", selection: $sortKey) {
+                    ForEach(VoiceSortKey.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 260)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
             if speakers.isEmpty {
                 emptyState
             } else {
                 speakerList
             }
         }
-        .frame(minWidth: 400, minHeight: 300)
+        .frame(minWidth: 460, minHeight: 320)
     }
 
     // MARK: - Empty State
@@ -70,8 +121,19 @@ struct VoiceLibraryView: View {
 
     private var speakerList: some View {
         List {
-            ForEach(speakers) { speaker in
+            ForEach(visibleSpeakers) { speaker in
                 HStack {
+                    if let onFilterToPerson = onFilterToPerson {
+                        Button {
+                            onFilterToPerson(speaker.name)
+                        } label: {
+                            Image(systemName: "line.3.horizontal.decrease.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.accentColor)
+                        .help("Show only meetings \(speaker.name) is in")
+                    }
+
                     if editingId == speaker.id {
                         TextField("Name", text: $editingName, onCommit: {
                             commitRename(speaker: speaker)
@@ -90,7 +152,8 @@ struct VoiceLibraryView: View {
 
                     Spacer()
 
-                    Text("\(speaker.sampleCount) sample\(speaker.sampleCount == 1 ? "" : "s")")
+                    let meetings = meetingCounts[speaker.name] ?? 0
+                    Text("\(speaker.sampleCount) sample\(speaker.sampleCount == 1 ? "" : "s") · \(meetings) meeting\(meetings == 1 ? "" : "s")")
                         .font(.caption)
                         .foregroundColor(.secondary)
 

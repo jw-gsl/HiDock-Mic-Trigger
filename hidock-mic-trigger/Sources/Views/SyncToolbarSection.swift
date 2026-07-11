@@ -120,6 +120,10 @@ struct SyncToolbarSection: View {
                     .help("Click to jump to the first suggested row. Tick the 'Potential merge' box on each row you want to combine, then click 'Merge N selected'.")
                 }
 
+                if !viewModel.allPeople.isEmpty {
+                    peopleFilterMenu
+                }
+
                 if viewModel.needsTaggingCount > 0 {
                     Label("\(viewModel.needsTaggingCount) need tagging", systemImage: "tag.fill")
                         .font(.caption.weight(.medium))
@@ -358,5 +362,44 @@ struct SyncToolbarSection: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
+    }
+
+    /// People filter — multi-select with an Any/All mode. Filters the list to
+    /// meetings containing the selected people.
+    private var peopleFilterMenu: some View {
+        let selected = viewModel.syncFilterPeople
+        return Menu {
+            Picker("Match", selection: Binding(
+                get: { viewModel.syncPeopleFilterMode },
+                set: { viewModel.syncPeopleFilterMode = $0 }
+            )) {
+                Text("Any of these people").tag(PeopleFilterMode.any)
+                Text("All of these people").tag(PeopleFilterMode.all)
+            }
+            Divider()
+            ForEach(viewModel.allPeople, id: \.self) { person in
+                let count = viewModel.personMeetingCounts[person] ?? 0
+                Button {
+                    if selected.contains(person) { viewModel.syncFilterPeople.remove(person) }
+                    else { viewModel.syncFilterPeople.insert(person) }
+                } label: {
+                    Label("\(person)  (\(count))",
+                          systemImage: selected.contains(person) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+            if !selected.isEmpty {
+                Divider()
+                Button("Clear people filter", role: .destructive) {
+                    viewModel.syncFilterPeople = []
+                }
+            }
+        } label: {
+            Label(selected.isEmpty ? "People" : "People (\(selected.count))",
+                  systemImage: "person.crop.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundColor(selected.isEmpty ? .secondary : .accentColor)
+        .help("Filter the list to meetings that include the people you pick (Any or All).")
     }
 }
