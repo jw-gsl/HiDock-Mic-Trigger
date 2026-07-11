@@ -4,19 +4,23 @@ struct MainWindowView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Expand to fill all slack so the main content sits flush against
-            // the detail pane — no empty gutter between them.
-            mainColumn
-                .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
             if viewModel.detailPaneVisible {
-                Divider()
-                detailPane
-                    .frame(width: 460)
-                    .transition(.move(edge: .trailing))
+                // Native resizable split — draggable divider, each side clipped
+                // to its own region (no overlap), both responsive.
+                HSplitView {
+                    mainColumn
+                        .frame(minWidth: 560, maxWidth: .infinity)
+                        .layoutPriority(1)
+                    detailPane
+                        .frame(minWidth: 480, idealWidth: 640, maxWidth: .infinity)
+                }
+            } else {
+                mainColumn
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(minWidth: viewModel.detailPaneVisible ? 1220 : 980, minHeight: 510)
+        .frame(minWidth: viewModel.detailPaneVisible ? 1280 : 980, minHeight: 510)
         .sheet(isPresented: $viewModel.showOnboarding) {
             OnboardingView(viewModel: viewModel)
         }
@@ -29,7 +33,10 @@ struct MainWindowView: View {
             detailTabStrip
             Divider()
             detailContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 
     private var detailTabStrip: some View {

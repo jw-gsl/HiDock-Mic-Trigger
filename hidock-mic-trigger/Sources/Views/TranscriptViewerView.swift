@@ -652,7 +652,7 @@ struct TranscriptViewerView: View {
                 .padding(.vertical, 8)
             }
         }
-        .frame(minWidth: 600, minHeight: 400)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
         .onChange(of: nameFieldFocused) { focused in
             // Clicking anywhere else in the window resigns the field's focus —
             // commit the pending edit so it doesn't stay stuck in edit mode.

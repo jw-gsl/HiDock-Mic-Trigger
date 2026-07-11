@@ -68,7 +68,7 @@ struct SummaryViewerView: View {
                 }
             }
         }
-        .frame(minWidth: 460, minHeight: 360)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
         .onAppear(perform: load)
     }
 

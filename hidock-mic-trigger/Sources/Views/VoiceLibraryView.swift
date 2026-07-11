@@ -94,7 +94,7 @@ struct VoiceLibraryView: View {
                 speakerList
             }
         }
-        .frame(minWidth: 460, minHeight: 320)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
     }
 
     // MARK: - Empty State
