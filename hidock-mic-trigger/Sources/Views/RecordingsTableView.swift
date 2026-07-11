@@ -11,13 +11,15 @@ struct RecordingsTableView: View {
     /// scroll freely.
     @State private var didScrollToTop = false
 
-    /// Sum of the fixed column widths — the table's natural width. Below this the
-    /// table scrolls horizontally; above it, the trailing Spacer fills.
-    private static let tableContentWidth: CGFloat = 1160
+    /// Hide the lower-priority columns (Transcribed date, Size) when the detail
+    /// pane is open so the narrowed list fits without much horizontal scrolling.
+    private var showExtraColumns: Bool { !viewModel.detailPaneVisible }
+    /// Table's natural width — Transcribed(140) + Size(70) drop out when hidden.
+    private var tableContentWidth: CGFloat { showExtraColumns ? 1160 : 950 }
 
     var body: some View {
         GeometryReader { geo in
-            let w = max(geo.size.width, Self.tableContentWidth)
+            let w = max(geo.size.width, tableContentWidth)
             ScrollView(.horizontal, showsIndicators: true) {
                 tableBody(width: w)
                     .frame(width: w, height: geo.size.height)
@@ -50,9 +52,13 @@ struct RecordingsTableView: View {
                 headerButton("Summary", key: nil, width: 80)
                 headerButton("Recording", key: "name", width: 220)
                 headerButton("Created", key: "created", width: 155)
-                headerButton("Transcribed", key: "transcribed", width: 140)
+                if showExtraColumns {
+                    headerButton("Transcribed", key: "transcribed", width: 140)
+                }
                 headerButton("Length", key: "duration", width: 70)
-                headerButton("Size", key: "size", width: 70)
+                if showExtraColumns {
+                    headerButton("Size", key: "size", width: 70)
+                }
                 Text("").frame(width: 50) // actions
                 Spacer(minLength: 0)
             }
@@ -235,11 +241,13 @@ struct RecordingsTableView: View {
                 .frame(width: 155, alignment: .leading)
 
             // Transcribed — the merged file's transcript mtime.
-            let mergedTranscriptPath = viewModel.mergedFileTranscriptPaths[(group.outputPath as NSString).lastPathComponent]
-            Text(transcribedDateString(forPath: mergedTranscriptPath))
-                .font(.caption.monospacedDigit())
-                .foregroundColor(mergedTranscriptPath == nil ? .secondary.opacity(0.5) : .primary)
-                .frame(width: 140, alignment: .leading)
+            if showExtraColumns {
+                let mergedTranscriptPath = viewModel.mergedFileTranscriptPaths[(group.outputPath as NSString).lastPathComponent]
+                Text(transcribedDateString(forPath: mergedTranscriptPath))
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(mergedTranscriptPath == nil ? .secondary.opacity(0.5) : .primary)
+                    .frame(width: 140, alignment: .leading)
+            }
 
             // Length (total)
             Text(formatRecordingDuration(group.totalDuration))
@@ -247,9 +255,11 @@ struct RecordingsTableView: View {
                 .frame(width: 70, alignment: .leading)
 
             // Size (total)
-            Text(humanSize(totalSize))
-                .font(.caption.monospacedDigit())
-                .frame(width: 70, alignment: .leading)
+            if showExtraColumns {
+                Text(humanSize(totalSize))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 70, alignment: .leading)
+            }
 
             // Actions — width + alignment match the recording row so
             // folder icons line up across rows. The merge-parent gets
@@ -493,10 +503,12 @@ struct RecordingsTableView: View {
 
             // Transcribed — when the transcription happened (transcript file
             // mtime). Dash until transcribed.
-            Text(entry.transcribedDate.map { Self.transcribedDateFormatter.string(from: $0) } ?? "—")
-                .font(.caption.monospacedDigit())
-                .foregroundColor(entry.transcribedDate == nil ? .secondary.opacity(0.5) : .primary)
-                .frame(width: 140, alignment: .leading)
+            if showExtraColumns {
+                Text(entry.transcribedDate.map { Self.transcribedDateFormatter.string(from: $0) } ?? "—")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(entry.transcribedDate == nil ? .secondary.opacity(0.5) : .primary)
+                    .frame(width: 140, alignment: .leading)
+            }
 
             // The extractor pre-download estimate is `file_size / 8000`
             // (assumes 64 kbps), which is correct for H1 (16 kHz/64 kbps)
@@ -526,9 +538,11 @@ struct RecordingsTableView: View {
                       ? "Estimated duration — actual value will appear after download (read from MP3)"
                       : "")
 
-            Text(entry.recording.humanLength)
-                .font(.caption.monospacedDigit())
-                .frame(width: 70, alignment: .leading)
+            if showExtraColumns {
+                Text(entry.recording.humanLength)
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 70, alignment: .leading)
+            }
 
             HStack(spacing: 4) {
                 // Show in Finder gates on `localExists` only, not on the

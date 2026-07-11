@@ -885,38 +885,32 @@ struct TranscriptViewerView: View {
     // MARK: - Stats Header
 
     private var statsHeader: some View {
-        HStack(spacing: 12) {
+        // Compact: duration + a full-width talk-time proportion bar + speaker
+        // count. (The old per-speaker "dot + name %/wpm" list overflowed into a
+        // meaningless row of dots when a meeting had many detected speakers.)
+        let totalTalk = speakerStats.reduce(0.0) { $0 + $1.talkTime }
+        return HStack(spacing: 10) {
             Text(formatTime(seconds: totalDuration))
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
 
-            // Talk time split per speaker — visual bars
-            let totalTalk = speakerStats.reduce(0.0) { $0 + $1.talkTime }
-            ForEach(speakerStats, id: \.speakerId) { stat in
-                let pct = totalTalk > 0 ? stat.talkTime / totalTalk * 100 : 0
-                let color = colorForSpeaker(stat.speakerId)
-                let wpm = stat.talkTime > 0 ? Int(Double(stat.wordCount) / (stat.talkTime / 60)) : 0
-                HStack(spacing: 4) {
-                    Circle().fill(color).frame(width: 6, height: 6)
-                    Text("\(speakerName(for: stat.speakerId)) \(String(format: "%.0f%%", pct))  \(wpm)wpm")
-                        .font(.caption)
-                }
-            }
-
-            // Stacked bar showing the split visually
             GeometryReader { geo in
                 HStack(spacing: 1) {
                     ForEach(speakerStats, id: \.speakerId) { stat in
                         let frac = totalTalk > 0 ? stat.talkTime / totalTalk : 0
                         RoundedRectangle(cornerRadius: 2)
-                            .fill(colorForSpeaker(stat.speakerId).opacity(0.7))
-                            .frame(width: max(2, geo.size.width * CGFloat(frac)))
+                            .fill(colorForSpeaker(stat.speakerId).opacity(0.75))
+                            .frame(width: max(1, geo.size.width * CGFloat(frac)))
                     }
                 }
             }
-            .frame(width: 120, height: 10)
+            .frame(height: 8)
+            .help("Talk-time split by speaker")
 
-            Spacer()
+            Text("\(speakerStats.count) speaker\(speakerStats.count == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
