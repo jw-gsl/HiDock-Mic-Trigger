@@ -68,10 +68,43 @@ final class HiDockViewModel: ObservableObject {
     /// Whether the right-hand embedded CLI pane is shown. Toggled by the
     /// bottom-bar "CLI" button; auto-set true when an Ask Claude Code or a
     /// summarise run starts so the user sees the activity.
-    @Published var cliPaneVisible = false
+    @Published var cliPaneVisible = false { didSet { if cliPaneVisible { activeDetailTabId = "cli" } } }
     /// Shared embedded-terminal controller — the SwiftUI pane displays it,
     /// AppDelegate drives it (interactive auth + template authoring).
     let terminalController = TerminalPaneController()
+
+    // MARK: - Right-hand detail pane tabs
+    // Views that used to be separate windows (transcripts, summaries, Voice
+    // Library, Device Manager, …) are hosted here as tabs alongside the CLI, so
+    // several meetings can be open at once. AppDelegate builds the content.
+    struct DetailTab: Identifiable {
+        let id: String        // stable per subject → re-opening focuses the same tab
+        var title: String
+        let icon: String
+        let content: AnyView
+    }
+    @Published var detailTabs: [DetailTab] = []
+    /// Active tab id, or "cli" for the CLI pane.
+    @Published var activeDetailTabId: String = "cli"
+    /// The right pane is shown when the CLI or any hosted tab is present.
+    var detailPaneVisible: Bool { cliPaneVisible || !detailTabs.isEmpty }
+
+    /// Open (or focus, if already open) a hosted tab.
+    func showDetailTab(_ tab: DetailTab) {
+        if let i = detailTabs.firstIndex(where: { $0.id == tab.id }) {
+            detailTabs[i] = tab   // refresh content/title
+        } else {
+            detailTabs.append(tab)
+        }
+        activeDetailTabId = tab.id
+    }
+
+    func closeDetailTab(_ id: String) {
+        detailTabs.removeAll { $0.id == id }
+        if activeDetailTabId == id {
+            activeDetailTabId = detailTabs.last?.id ?? "cli"
+        }
+    }
 
     /// What the right-hand CLI pane currently shows.
     /// - `.summary`: live formatted readout of a summarise/reclassify run

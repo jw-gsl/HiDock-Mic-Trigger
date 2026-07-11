@@ -6,19 +6,93 @@ struct MainWindowView: View {
     var body: some View {
         HStack(spacing: 0) {
             // Expand to fill all slack so the main content sits flush against
-            // the CLI pane — no empty gutter between them.
+            // the detail pane — no empty gutter between them.
             mainColumn
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if viewModel.cliPaneVisible {
+            if viewModel.detailPaneVisible {
                 Divider()
-                cliPane
-                    .frame(width: 420)
+                detailPane
+                    .frame(width: 460)
                     .transition(.move(edge: .trailing))
             }
         }
-        .frame(minWidth: viewModel.cliPaneVisible ? 1180 : 980, minHeight: 510)
+        .frame(minWidth: viewModel.detailPaneVisible ? 1220 : 980, minHeight: 510)
         .sheet(isPresented: $viewModel.showOnboarding) {
             OnboardingView(viewModel: viewModel)
+        }
+    }
+
+    /// The right-hand pane: a tab strip over the CLI + any hosted windows
+    /// (transcripts, summaries, tool views).
+    private var detailPane: some View {
+        VStack(spacing: 0) {
+            detailTabStrip
+            Divider()
+            detailContent
+        }
+    }
+
+    private var detailTabStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                if viewModel.cliPaneVisible {
+                    detailTabChip(id: "cli", title: cliTabTitle, icon: "terminal") {
+                        viewModel.cliPaneVisible = false
+                        if viewModel.activeDetailTabId == "cli" {
+                            viewModel.activeDetailTabId = viewModel.detailTabs.last?.id ?? "cli"
+                        }
+                    }
+                }
+                ForEach(viewModel.detailTabs) { tab in
+                    detailTabChip(id: tab.id, title: tab.title, icon: tab.icon) {
+                        viewModel.closeDetailTab(tab.id)
+                    }
+                }
+            }
+            .padding(6)
+        }
+        .background(.ultraThinMaterial)
+    }
+
+    private func detailTabChip(id: String, title: String, icon: String, onClose: @escaping () -> Void) -> some View {
+        let active = viewModel.activeDetailTabId == id
+        return HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 10))
+            Text(title).font(.caption).lineLimit(1)
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: 170)
+        .contentShape(Rectangle())
+        .onTapGesture { viewModel.activeDetailTabId = id }
+    }
+
+    @ViewBuilder private var detailContent: some View {
+        if viewModel.activeDetailTabId == "cli", viewModel.cliPaneVisible {
+            cliPane
+        } else if let tab = viewModel.detailTabs.first(where: { $0.id == viewModel.activeDetailTabId }) {
+            tab.content
+        } else if viewModel.cliPaneVisible {
+            cliPane
+        } else if let first = viewModel.detailTabs.first {
+            first.content
+        } else {
+            Color.clear
+        }
+    }
+
+    private var cliTabTitle: String {
+        switch viewModel.cliPaneMode {
+        case .summary: return "Summary"
+        case .chat: return "Ask AI"
+        case .terminal: return "Terminal"
         }
     }
 

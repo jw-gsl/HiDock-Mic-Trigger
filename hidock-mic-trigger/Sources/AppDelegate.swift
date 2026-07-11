@@ -3430,23 +3430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             )
         }
 
-        if feedbackHistoryWindow == nil {
-            let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
-                styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                backing: .buffered, defer: false
-            )
-            win.center()
-            win.title = "My Feedback"
-            win.isReleasedWhenClosed = false
-            win.minSize = NSSize(width: 500, height: 300)
-            feedbackHistoryWindow = win
-        }
-
-        let hostingView = NSHostingView(rootView: FeedbackHistoryView(items: items))
-        feedbackHistoryWindow?.contentView = hostingView
-        feedbackHistoryWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "feedback", title: "My Feedback", icon: "bubble.left.and.text.bubble.right", view: FeedbackHistoryView(items: items))
     }
 
     @objc private func showSyncWindow() {
@@ -3586,22 +3570,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         )
 
-        // Single-instance: replace any open transcript viewer instead of stacking duplicates.
-        transcriptViewerWindow?.close()
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Transcript — \(transcript.audioFile)"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 600, height: 400)
-        win.contentView = NSHostingView(rootView: viewer)
+        // Host as a tab in the right pane (one per transcript — re-opening the
+        // same meeting focuses its existing tab).
+        let title = (transcript.audioFile as NSString).lastPathComponent
+        showDetailTab(id: "transcript:\(diarizedPath)", title: title, icon: "waveform", view: viewer)
+    }
 
-        transcriptViewerWindow = win
-        win.makeKeyAndOrderFront(nil)
+    /// Open (or focus) a view as a tab in the right-hand detail pane, and bring
+    /// the main window forward. Replaces the old per-view NSWindow.
+    private func showDetailTab(id: String, title: String, icon: String, view: some View) {
+        viewModel.showDetailTab(HiDockViewModel.DetailTab(id: id, title: title, icon: icon, content: AnyView(view)))
+        syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -3639,20 +3618,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.reclassifySummary(transcriptPath: transcriptPath, template: template)
             }
         )
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Summary — \((summaryMdPath as NSString).lastPathComponent)"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 460, height: 360)
-        win.contentView = NSHostingView(rootView: viewer)
-        summaryViewerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        let title = (summaryMdPath as NSString).lastPathComponent
+        showDetailTab(id: "summary:\(summaryMdPath)", title: title, icon: "doc.text", view: viewer)
     }
 
     /// Re-run the AI summary for a recording against a user-chosen template
@@ -3714,11 +3681,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Voice Training
 
     private func showVoiceTraining() {
-        if let existing = voiceTrainingWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
         let view = VoiceTrainingView(
             onEnroll: { [weak self] name, audioPath, start, end in
                 self?.enrollSpeakerInVoiceLibrary(name: name, audioPath: audioPath, start: start, end: end)
@@ -3727,22 +3689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.loadVoiceTrainingData(completion: completion)
             }
         )
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 550),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Voice Training"
-        applyPanelTabbing(win)
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 600, height: 400)
-        win.contentView = NSHostingView(rootView: view)
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        voiceTrainingWindow = win
+        showDetailTab(id: "voiceTraining", title: "Voice Training", icon: "waveform.badge.mic", view: view)
     }
 
     private func loadVoiceTrainingData(completion: @escaping ([VoiceClusterData]) -> Void) {
@@ -3816,12 +3763,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openVoiceLibrary() {
-        // Single-instance: focus the existing window instead of spawning a duplicate.
-        if let existing = voiceLibraryWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
         // Shell out to voice_library_lite.py list to get speakers
         let sharedDir: String
         if let root = bundledResourcesRoot {
@@ -3891,22 +3832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         )
 
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Voice Library"
-        applyPanelTabbing(win)
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 400, height: 300)
-        win.contentView = NSHostingView(rootView: libraryView)
-
-        voiceLibraryWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "voiceLibrary", title: "Voice Library", icon: "person.2.wave.2", view: libraryView)
     }
 
     /// List enrolled voice-library names (for the transcript viewer's
@@ -5017,29 +4943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Device Manager
 
     private func openDeviceManager() {
-        if let existing = deviceManagerWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let managerView = DeviceManagerView(viewModel: viewModel)
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 480),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Device Manager"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 560, height: 400)
-        win.contentView = NSHostingView(rootView: managerView)
-
-        deviceManagerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "deviceManager", title: "Device Manager", icon: "externaldrive.connected.to.line.below", view: DeviceManagerView(viewModel: viewModel))
     }
 
     private func forgetDevice(_ device: HiDockPairedDevice) {
@@ -5167,31 +5071,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func openModelManager() {
         // Single-instance: focus the existing window instead of spawning a duplicate.
-        if let existing = modelManagerWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
         refreshModelStatuses()
-
-        let managerView = ModelManagerView(viewModel: viewModel)
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Models"
-        applyPanelTabbing(win)
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 480, height: 300)
-        win.contentView = NSHostingView(rootView: managerView)
-
-        modelManagerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "models", title: "Models", icon: "shippingbox", view: ModelManagerView(viewModel: viewModel))
     }
 
     // MARK: - Summary Templates Manager
@@ -5237,26 +5118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openTemplatesManager() {
-        if let existing = templatesManagerWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let view = TemplatesManagerView(viewModel: viewModel)
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Summary Templates"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 460, height: 360)
-        win.contentView = NSHostingView(rootView: view)
-        templatesManagerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "templates", title: "Summary Templates", icon: "doc.badge.gearshape", view: TemplatesManagerView(viewModel: viewModel))
     }
 
     /// Open Claude Code in the embedded CLI pane, cd'd into the templates
@@ -7955,25 +7817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func showTranscriptionQueueWindow() {
-        if let existing = transcriptionQueueWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-        let queueView = TranscriptionQueueView(viewModel: viewModel)
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 450, height: 400),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Transcription Queue"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 350, height: 250)
-        win.contentView = NSHostingView(rootView: queueView)
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        transcriptionQueueWindow = win
+        showDetailTab(id: "queue", title: "Transcription Queue", icon: "list.bullet.rectangle", view: TranscriptionQueueView(viewModel: viewModel))
     }
 
     /// Synchronous, filesystem-only pass that marks entries as
