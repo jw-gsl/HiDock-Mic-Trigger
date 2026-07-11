@@ -1307,6 +1307,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let voiceTrainingItem = NSMenuItem(title: "Voice Training...", action: #selector(openVoiceTrainingMenu), keyEquivalent: "")
         voiceTrainingItem.target = self
         menu.addItem(voiceTrainingItem)
+        let buildLibraryItem = NSMenuItem(title: "Build Voice Library from Tagged Meetings", action: #selector(buildVoiceLibraryMenu), keyEquivalent: "")
+        buildLibraryItem.target = self
+        menu.addItem(buildLibraryItem)
+        let rematchAllItem = NSMenuItem(title: "Re-match Untagged Meetings", action: #selector(rematchUntaggedMenu), keyEquivalent: "")
+        rematchAllItem.target = self
+        menu.addItem(rematchAllItem)
         let modelManagerItem = NSMenuItem(title: "Models...", action: #selector(openModelManagerMenu), keyEquivalent: "")
         modelManagerItem.target = self
         menu.addItem(modelManagerItem)
@@ -3522,6 +3528,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onReclusterWithLabels: { [weak self] jsonPath in
                 self?.reclusterTranscriptWithLabels(jsonPath: jsonPath)
             },
+            onRematch: { [weak self] jsonPath in
+                self?.rematchTranscript(jsonPath: jsonPath)
+            },
+            onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
+                self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)
+            },
             onScoreSpeakers: { [weak self] jsonPath, completion in
                 self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
             },
@@ -3743,6 +3755,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         showVoiceTraining()
     }
 
+    @objc private func buildVoiceLibraryMenu() {
+        buildVoiceLibraryFromTranscripts()
+    }
+
+    @objc private func rematchUntaggedMenu() {
+        rematchUntaggedMeetings()
+    }
+
     /// Group the secondary tool windows into one macOS tabbed window
     /// ("tabs, not separate windows"). Windows sharing this identifier with
     /// tabbingMode .preferred are merged into a tab group by AppKit.
@@ -3809,11 +3829,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
 
-        // Meetings that are transcribed but not yet confirmed — the rematch
-        // candidates (needsTagging + autoMatched), including merged files.
-        let unconfirmedCount = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
-            + viewModel.mergedFileTranscribed.subtracting(viewModel.mergedFileTagged).count
-
         let libraryView = VoiceLibraryView(
             speakers: speakers,
             onDelete: { [weak self] name in
@@ -3821,10 +3836,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onRename: { [weak self] oldName, newName in
                 self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
-            },
-            unconfirmedMeetingCount: unconfirmedCount,
-            onRematchAll: { [weak self] in
-                self?.rematchUntaggedMeetings()
             }
         )
 
@@ -4013,6 +4024,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self?.log("Failed to enroll speaker '\(name)': \(error)")
                 }
             }
+        }
+    }
+
+    /// Enrol a speaker from the diarizer's stored centroid (name + sidecar path +
+    /// speaker id) — a far more robust voiceprint than a single audio segment,
+    /// and no audio decode (works for Opus/Plaud too).
+    private func enrollSpeakerFromDiarized(name: String, diarizedPath: String, speakerId: Int) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            if let self = self { self.configureVoiceLibraryProcess(process) }
+            process.arguments = [
+                scriptPath, "enroll-diarized",
+                "--name", name, "--json", diarizedPath, "--id", "\(speakerId)",
+            ]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run(); process.waitUntilExit()
+                DispatchQueue.main.async { self?.log("Enrolled '\(name)' (centroid) in voice library") }
+            } catch {
+                DispatchQueue.main.async { self?.log("Failed to enroll '\(name)' from diarized: \(error)") }
+            }
+        }
+    }
+
+    /// Build the voice library from the tagged backlog — enrol every trustworthy
+    /// named speaker across all transcripts (excludes unverified auto-matches).
+    private func buildVoiceLibraryFromTranscripts() {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        viewModel.syncStatus = "Building voice library from tagged meetings…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            if let self = self { self.configureVoiceLibraryProcess(process) }
+            process.arguments = [scriptPath, "enroll-from-transcripts", "--dir", dir]
+            let out = Pipe(); process.standardOutput = out; process.standardError = Pipe()
+            var enrolled = 0
+            do {
+                try process.run()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let n = obj["enrolled"] as? Int { enrolled = n }
+            } catch {
+                self?.log("Build voice library failed: \(error)")
+            }
+            DispatchQueue.main.async {
+                self?.viewModel.syncStatus = "Voice library updated — \(enrolled) voice sample(s) added"
+                self?.viewModel.syncStatusLevel = .success
+                self?.syncViewModelState()
+            }
+        }
+    }
+
+    /// Re-match a single transcript's still-generic speakers against the library.
+    private func rematchTranscript(jsonPath: String) {
+        guard ensureTranscriptionReady() else { return }
+        viewModel.syncStatus = "Re-matching speakers…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        runTranscription(arguments: ["rematch", jsonPath]) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                self.viewModel.syncStatus = "Re-match complete — reopen to see changes"
+                self.viewModel.syncStatusLevel = .success
+                self.transcriptViewerWindow?.close()
+                self.transcriptViewerWindow = nil
+                let mdPath = jsonPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self.openTranscriptViewer(transcriptMdPath: mdPath)
+                }
+                self.refreshTranscriptionState()
+            case .failure(let error):
+                self.viewModel.syncStatus = "Re-match failed"
+                self.viewModel.syncStatusLevel = .error
+                self.log("Re-match failed: \(error.localizedDescription)")
+            }
+            self.syncViewModelState()
         }
     }
 

@@ -17,13 +17,6 @@ struct VoiceLibraryView: View {
     @State private var editingName: String = ""
     let onDelete: (String) -> Void
     let onRename: (String, String) -> Void
-    /// Sweep every unconfirmed meeting and re-match its speakers against the
-    /// current library. Optional so older call-sites keep compiling. The Int is
-    /// the number of unconfirmed meetings, shown on the button.
-    var unconfirmedMeetingCount: Int = 0
-    var onRematchAll: (() -> Void)? = nil
-
-    @State private var rematchStarted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,31 +41,6 @@ struct VoiceLibraryView: View {
                 emptyState
             } else {
                 speakerList
-            }
-
-            // Re-match footer — close the loop after enrolling/renaming voices.
-            if let onRematchAll = onRematchAll, unconfirmedMeetingCount > 0 {
-                Divider()
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundColor(.blue)
-                    Text("\(unconfirmedMeetingCount) meeting\(unconfirmedMeetingCount == 1 ? "" : "s") to re-check")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button {
-                        rematchStarted = true
-                        onRematchAll()
-                    } label: {
-                        Label("Re-match untagged meetings", systemImage: "sparkle.magnifyingglass")
-                    }
-                    .controlSize(.small)
-                    .disabled(rematchStarted)
-                    .help("Re-run voice-library matching on every unconfirmed meeting. New matches appear as \"confirm me\" (blue) in the recordings list.")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.ultraThinMaterial)
             }
         }
         .frame(minWidth: 400, minHeight: 300)

@@ -443,6 +443,13 @@ struct TranscriptViewerView: View {
     /// a user-edited speaker name as an anchor centroid. Optional so
     /// older call-sites (rediarize-only flow) keep compiling.
     var onReclusterWithLabels: ((String) -> Void)?
+    /// Re-match still-generic speakers in THIS transcript against the voice
+    /// library (`rematch` verb). Optional so older call-sites keep compiling.
+    var onRematch: ((String) -> Void)?
+    /// Enrol a speaker from the diarized sidecar's stored centroid (name,
+    /// jsonPath, speakerId) — a far better voiceprint than one short segment.
+    /// Falls back to onEnrollSpeaker (audio) when nil.
+    var onEnrollSpeakerFromDiarized: ((String, String, Int) -> Void)?
     /// Score each speaker's voice against its assigned name in the library
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
@@ -527,6 +534,8 @@ struct TranscriptViewerView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
+                // Document-level actions only. Speaker tools live in their own
+                // strip below so this bar doesn't get clunky.
                 if !transcriptHistory.isEmpty {
                     Button {
                         undoMerge()
@@ -536,37 +545,7 @@ struct TranscriptViewerView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .keyboardShortcut("z", modifiers: .command)
-                }
-
-                if onRediarize != nil {
-                    Stepper("Speakers: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
-                        .font(.caption)
-                        .frame(width: 140)
-
-                    Button {
-                        onRediarize?(filePath, rediarizeNSpeakers)
-                    } label: {
-                        Label("Re-diarize", systemImage: "person.2.wave.2")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                // Layer 2 — re-cluster the rest of the transcript using
-                // the segments the user has already named as anchors.
-                // Only useful when at least one speaker has been
-                // renamed away from the default "Speaker N", so we
-                // hide the button otherwise.
-                if onReclusterWithLabels != nil, hasUserNamedSpeakers {
-                    Button {
-                        onReclusterWithLabels?(filePath)
-                    } label: {
-                        Label("Re-cluster", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .fixedSize()
-                    .help("Re-assign every un-named segment to its closest match, using the speakers you've named as anchors. Segments you've already corrected stay put.")
+                    .help("Undo the last speaker change (merge / re-assign).")
                 }
 
                 Button {
@@ -577,9 +556,9 @@ struct TranscriptViewerView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
+                .help("Copy the whole transcript (with speaker names + timestamps) to the clipboard.")
 
                 Button {
-                    // Reveal the markdown transcript file in Finder
                     let mdPath = filePath.replacingOccurrences(of: "_diarized.json", with: ".md")
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: mdPath)])
                 } label: {
@@ -587,12 +566,19 @@ struct TranscriptViewerView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Reveal the transcript's markdown file in Finder.")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background(.ultraThinMaterial)
 
             Divider()
+
+            // Speaker tools — grouped so the top bar stays clean.
+            if hasSpeakers {
+                speakerToolsBar
+                Divider()
+            }
 
             // Stats header
             if hasSpeakers && !speakerStats.isEmpty {
@@ -838,6 +824,58 @@ struct TranscriptViewerView: View {
         onEnrollSpeaker(speakerNameForEnrol, audioPath, rangeStartTime, rangeEndTime)
 
         saveTranscript()
+    }
+
+    // MARK: - Speaker tools
+
+    /// Secondary strip grouping the speaker-fixing actions, each shown only when
+    /// it applies, with plain-language tooltips.
+    private var speakerToolsBar: some View {
+        HStack(spacing: 8) {
+            Text("Speakers")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+
+            if onRematch != nil {
+                Button {
+                    onRematch?(filePath)
+                } label: {
+                    Label("Re-match", systemImage: "sparkle.magnifyingglass")
+                }
+                .help("Fill in any unnamed speakers by matching their voice against your saved Voice Library. Won't touch ones you've already confirmed.")
+            }
+
+            if onReclusterWithLabels != nil, hasUserNamedSpeakers {
+                Button {
+                    onReclusterWithLabels?(filePath)
+                } label: {
+                    Label("Re-cluster", systemImage: "person.crop.circle.badge.checkmark")
+                }
+                .fixedSize()
+                .help("Use the speakers you've named as anchors and re-assign the still-unnamed bits to whichever of them they sound closest to. This meeting only — nothing you've corrected moves.")
+            }
+
+            if onRediarize != nil {
+                Divider().frame(height: 14)
+                Stepper("Count: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
+                    .font(.caption)
+                    .frame(width: 120)
+                    .help("How many speakers to detect when re-diarizing.")
+                Button {
+                    onRediarize?(filePath, rediarizeNSpeakers)
+                } label: {
+                    Label("Re-diarize", systemImage: "person.2.wave.2")
+                }
+                .help("Start over — detect the speakers again from scratch (using the count on the left). Discards the current split and any names.")
+            }
+
+            Spacer()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color.secondary.opacity(0.04))
     }
 
     // MARK: - Stats Header
@@ -1131,11 +1169,7 @@ struct TranscriptViewerView: View {
         // Typing a name IS confirming it — mark verified/user so the meeting
         // counts as reviewed and stops nagging.
         setMeta(speakerId, source: "user", verified: true, confidence: nil)
-
-        // Find a segment from this speaker to use for enrollment
-        if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
-            onEnrollSpeaker(trimmed, audioPath, segment.start, segment.end)
-        }
+        enrollConfirmed(trimmed, speakerId: speakerId)
 
         saveTranscript()
         refreshConfidence()
@@ -1151,6 +1185,16 @@ struct TranscriptViewerView: View {
 
     private func speakerMeta(for id: Int) -> SpeakerMeta? {
         transcript.speakerMeta?["\(id)"]
+    }
+
+    /// Enrol a confirmed speaker into the voice library. Prefers the diarizer's
+    /// stored centroid (robust, multi-segment) over one short audio segment.
+    private func enrollConfirmed(_ name: String, speakerId: Int) {
+        if let fromDiarized = onEnrollSpeakerFromDiarized {
+            fromDiarized(name, filePath, speakerId)
+        } else if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
+            onEnrollSpeaker(name, audioPath, segment.start, segment.end)
+        }
     }
 
     private func setMeta(_ id: Int, source: String, verified: Bool, confidence: Double?) {
@@ -1218,9 +1262,7 @@ struct TranscriptViewerView: View {
         let existingSource = speakerMeta(for: id)?.source
         setMeta(id, source: existingSource == "user" ? "user" : "auto",
                 verified: true, confidence: speakerMeta(for: id)?.confidence)
-        if let segment = transcript.segments.first(where: { $0.speakerId == id }) {
-            onEnrollSpeaker(name, audioPath, segment.start, segment.end)
-        }
+        enrollConfirmed(name, speakerId: id)
         saveTranscript()
         refreshConfidence()
         refreshLibraryNames()
@@ -1239,9 +1281,7 @@ struct TranscriptViewerView: View {
         mapSpeaker(from: merge.from, to: merge.to)   // reassigns segments + saves
         // The surviving speaker now carries a confirmed, user-set identity.
         setMeta(merge.to, source: "user", verified: true, confidence: nil)
-        if let segment = transcript.segments.first(where: { $0.speakerId == merge.to }) {
-            onEnrollSpeaker(merge.name, audioPath, segment.start, segment.end)
-        }
+        enrollConfirmed(merge.name, speakerId: merge.to)
         saveTranscript()
         refreshConfidence()
         refreshLibraryNames()

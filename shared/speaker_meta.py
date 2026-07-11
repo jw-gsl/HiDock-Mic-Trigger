@@ -123,9 +123,8 @@ def score_speakers(data: dict) -> dict:
     The margin — not the absolute score — is what tells a confident match from a
     coin-flip. Omitted for speakers with no embedding or an empty library.
     """
-    from shared.voice_library_lite import cosine_similarity, load_library
+    from shared.voice_library_lite import library_scores
 
-    lib = load_library().get("speakers", {})
     names = data.get("speaker_names", {}) or {}
     embeddings = data.get("speaker_embeddings") or {}
 
@@ -134,12 +133,7 @@ def score_speakers(data: dict) -> dict:
         emb = embeddings.get(sid)
         if emb is None:
             continue
-        sims: list[tuple[str, float]] = []
-        for lname, ldata in lib.items():
-            stored = ldata.get("embedding")
-            if not stored or len(stored) != len(emb):
-                continue   # different embedding model/dim — not comparable
-            sims.append((lname, round(float(cosine_similarity(emb, stored)), 4)))
+        sims = library_scores(emb)   # best-of-exemplars per enrolled speaker
         if not sims:
             continue
         sims.sort(key=lambda x: x[1], reverse=True)
