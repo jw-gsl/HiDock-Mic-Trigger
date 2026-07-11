@@ -4074,7 +4074,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
             if let self = self { self.configureVoiceLibraryProcess(process) }
             process.arguments = [scriptPath, "enroll-from-transcripts", "--dir", dir]
-            let out = Pipe(); process.standardOutput = out; process.standardError = Pipe()
+            let out = Pipe(); process.standardOutput = out
+            let err = Pipe(); process.standardError = err
+            // Stream PROGRESS:i/total from stderr → live percentage.
+            err.fileHandleForReading.readabilityHandler = { [weak self] h in
+                guard let line = String(data: h.availableData, encoding: .utf8) else { return }
+                for token in line.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+                    guard token.hasPrefix("PROGRESS:") else { continue }
+                    let parts = token.dropFirst("PROGRESS:".count).split(separator: "/")
+                    guard parts.count == 2, let i = Int(parts[0]), let t = Int(parts[1]), t > 0 else { continue }
+                    let pct = Int(Double(i) / Double(t) * 100)
+                    DispatchQueue.main.async {
+                        self?.viewModel.syncStatus = "Building voice library… \(pct)% (\(i)/\(t) meetings)"
+                        self?.viewModel.syncStatusLevel = .secondary
+                        self?.syncViewModelState()
+                    }
+                }
+            }
             var enrolled = 0
             do {
                 try process.run()
@@ -4085,6 +4101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             } catch {
                 self?.log("Build voice library failed: \(error)")
             }
+            err.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
                 self?.viewModel.syncStatus = "Voice library updated — \(enrolled) voice sample(s) added"
                 self?.viewModel.syncStatusLevel = .success

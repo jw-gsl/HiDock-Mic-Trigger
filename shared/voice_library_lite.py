@@ -245,15 +245,20 @@ def enroll_from_transcripts(directory: str | Path) -> dict:
     are skipped so a wrong guess doesn't poison the library. One disk write."""
     from shared.speaker_meta import is_generic_name
 
+    import sys as _sys
     d = Path(directory)
     lib = load_library()
     enrolled = 0
     per_name: dict[str, int] = {}
     files = 0
-    for f in sorted(d.glob("*_diarized.json")):
+    all_files = sorted(d.glob("*_diarized.json"))
+    total = len(all_files)
+    print(f"PROGRESS:0/{total}", file=_sys.stderr, flush=True)
+    for idx, f in enumerate(all_files, start=1):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            print(f"PROGRESS:{idx}/{total}", file=_sys.stderr, flush=True)
             continue
         files += 1
         names = data.get("speaker_names", {}) or {}
@@ -271,6 +276,7 @@ def enroll_from_transcripts(directory: str | Path) -> dict:
             _enroll_into(lib, nm, emb, len(emb), _NEURAL_MODEL_VERSION, "backfill")
             enrolled += 1
             per_name[nm] = per_name.get(nm, 0) + 1
+        print(f"PROGRESS:{idx}/{total}", file=_sys.stderr, flush=True)
     save_library(lib)
     return {"files": files, "enrolled": enrolled, "speakers": per_name}
 
