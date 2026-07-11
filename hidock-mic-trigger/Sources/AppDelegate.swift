@@ -427,8 +427,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // instead of watching the list populate device-by-device as live
         // probes resolve, then flip from "Downloaded" to "Transcribed"
         // when refreshTranscriptionState catches up.
-        loadCachedCatalogsForPaintOnLaunch()
         showSyncWindow()
+        // Paint the full list from local cache FIRST (all devices + imported at
+        // once), THEN run the live probes as enrichment — otherwise the fast H1
+        // live probe lands before the cache and devices appear one-by-one.
+        loadCachedCatalogsForPaintOnLaunch { [weak self] in
+            self?.autoConnectSyncIfPaired(startTriggerOnCompletion: true)
+        }
 
         // Show onboarding wizard on first run
         if !UserDefaults.standard.bool(forKey: hasCompletedOnboardingKey) {
@@ -448,7 +453,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // firmware. Probing first is free because the trigger hasn't
         // attached yet. startTrigger fires from the autoConnect
         // completion.
-        autoConnectSyncIfPaired(startTriggerOnCompletion: true)
+        // (autoConnect now runs AFTER the cache paint — see the
+        // loadCachedCatalogsForPaintOnLaunch completion above.)
 
         // Start the lightweight Plaud new-recording poll (no-op until a Plaud
         // account is paired). App-open already probed via autoConnect above.
@@ -1931,7 +1937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// fresh device-returned data when it completes, which is fine —
     /// preserves any new recordings that have appeared on the device
     /// since state.json was last written.
-    private func loadCachedCatalogsForPaintOnLaunch() {
+    private func loadCachedCatalogsForPaintOnLaunch(onComplete: @escaping () -> Void = {}) {
         let hidocks = syncPairedDevices.filter { $0.deviceType == .hidock }
         // Plaud accounts paint from cache too, so already-downloaded recordings
         // show instantly on launch instead of waiting for the (slow, networked)
@@ -1944,6 +1950,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncEntries = syncEntries
             refreshTranscriptionState()
             syncViewModelState()
+            onComplete()
             return
         }
         log("Paint-from-cache: \(hidocks.count) HiDock(s), \(plauds.count) Plaud account(s)")
@@ -1996,6 +2003,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.viewModel.syncEntries = self.syncEntries
             self.refreshTranscriptionState()
             self.syncViewModelState()
+            // Live probes run AFTER the full cache paint — they update rows in
+            // place instead of the fast H1 probe landing before the cache and
+            // making devices appear one-by-one.
+            onComplete()
         }
     }
 
