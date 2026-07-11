@@ -840,8 +840,9 @@ struct TranscriptViewerView: View {
                 Button {
                     onRematch?(filePath)
                 } label: {
-                    Label("Re-match", systemImage: "sparkle.magnifyingglass")
+                    Label("Rematch Speakers", systemImage: "sparkle.magnifyingglass")
                 }
+                .fixedSize()
                 .help("Fill in any unnamed speakers by matching their voice against your saved Voice Library. Won't touch ones you've already confirmed.")
             }
 
@@ -849,7 +850,7 @@ struct TranscriptViewerView: View {
                 Button {
                     onReclusterWithLabels?(filePath)
                 } label: {
-                    Label("Re-cluster", systemImage: "person.crop.circle.badge.checkmark")
+                    Label("Reassign Speakers", systemImage: "person.crop.circle.badge.checkmark")
                 }
                 .fixedSize()
                 .help("Use the speakers you've named as anchors and re-assign the still-unnamed bits to whichever of them they sound closest to. This meeting only — nothing you've corrected moves.")
@@ -860,12 +861,13 @@ struct TranscriptViewerView: View {
                 Stepper("Count: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
                     .font(.caption)
                     .frame(width: 120)
-                    .help("How many speakers to detect when re-diarizing.")
+                    .help("How many speakers to detect when re-detecting.")
                 Button {
                     onRediarize?(filePath, rediarizeNSpeakers)
                 } label: {
-                    Label("Re-diarize", systemImage: "person.2.wave.2")
+                    Label("Detect Speakers", systemImage: "person.2.wave.2")
                 }
+                .fixedSize()
                 .help("Start over — detect the speakers again from scratch (using the count on the left). Discards the current split and any names.")
             }
 
