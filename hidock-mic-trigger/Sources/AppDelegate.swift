@@ -1938,6 +1938,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard ensureExtractorReady() else { return }
         log("Paint-from-cache: \(hidocks.count) HiDock(s), \(plauds.count) Plaud account(s)")
         let group = DispatchGroup()
+        // Collect every device's cached catalog, then render them all together in
+        // one pass — the list appears at once instead of trickling in device by
+        // device as each subprocess returns.
+        var cached: [(HiDockPairedDevice, HiDockSyncStatusResponse)] = []
+        let cacheLock = NSLock()
         for device in hidocks {
             group.enter()
             runCachedExtractor(arguments: ["cached-status"], productId: device.productId) { [weak self] result in
@@ -1948,7 +1953,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Paint-from-cache: no cached data for \(device.cleanName)")
                     return
                 }
-                self.renderSyncStatus(payload, device: device)
+                cacheLock.lock(); cached.append((device, payload)); cacheLock.unlock()
             }
         }
         for device in plauds {
@@ -1965,12 +1970,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Paint-from-cache: no cached Plaud data for \(device.cleanName)")
                     return
                 }
-                self.renderSyncStatus(payload, device: device)
+                cacheLock.lock(); cached.append((device, payload)); cacheLock.unlock()
             }
         }
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
-            self.log("Paint-from-cache: cached catalogs loaded, refreshing transcription state")
+            for (device, payload) in cached { self.renderSyncStatus(payload, device: device) }
+            self.log("Paint-from-cache: \(cached.count) cached catalog(s) loaded together, refreshing transcription state")
             // Two-phase transcribed-state population: the sync disk
             // scan below lands the table on Transcribed immediately
             // (prevents Downloaded→Transcribed flash), then the async
