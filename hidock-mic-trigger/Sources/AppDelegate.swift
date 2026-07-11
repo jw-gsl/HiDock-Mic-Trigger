@@ -410,7 +410,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         if needsSave { ImportedRecordingsStore.save(importedRecordings) }
-        rebuildSyncEntries()
+        // Build imported rows into syncEntries but DON'T push to the view yet —
+        // loadCachedCatalogsForPaintOnLaunch pushes imported + device catalogs
+        // together in one pass, so imported no longer flashes up first.
+        mergeImportedIntoSyncEntries()
         let imp = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
         log("After rebuildSyncEntries: syncEntries=\(syncEntries.count) imported=\(imp.count)")
         if let first = imp.first {
@@ -1934,8 +1937,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // show instantly on launch instead of waiting for the (slow, networked)
         // live cloud probe to connect.
         let plauds = syncPairedDevices.filter { $0.deviceType == .plaud }
-        guard !hidocks.isEmpty || !plauds.isEmpty else { return }
-        guard ensureExtractorReady() else { return }
+        // No paired devices → nothing cached to load, but still paint the
+        // imported rows (which the launch path deliberately didn't push yet).
+        guard !hidocks.isEmpty || !plauds.isEmpty, ensureExtractorReady() else {
+            applyTranscribedFromDiskScan()
+            viewModel.syncEntries = syncEntries
+            refreshTranscriptionState()
+            syncViewModelState()
+            return
+        }
         log("Paint-from-cache: \(hidocks.count) HiDock(s), \(plauds.count) Plaud account(s)")
         let group = DispatchGroup()
         // Collect every device's cached catalog, then render them all together in
