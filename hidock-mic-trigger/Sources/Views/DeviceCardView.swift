@@ -6,10 +6,15 @@ import SwiftUI
 /// reconnect icon) into a single panel so every fact about a device is
 /// in one place.
 ///
-/// The card has three possible states it communicates in its title chip:
+/// The card communicates state via a compact **icon-only** title chip
+/// (tooltip holds the label — text was removed because the labels + the
+/// connecting spinner were reflowing and distracting when the detail pane
+/// was open):
 ///   - ✓ Connected (green)
-///   - 🔴 Recording (red, pulsing) — mic-trigger is streaming from a HiDock
+///   - 🔴 Recording (red) — mic-trigger is streaming from a HiDock
 ///   - ⚠ Unreachable (orange) — last status query failed, last-known data shown
+///   - ↻ Connecting (blue, spinning) — probe in flight
+///   - ⊘ Not connected (secondary)
 ///
 /// Storage is rendered as a progress bar so headroom is visible at a glance.
 /// Reconnect and Filter actions sit on the right of the card.
@@ -82,14 +87,11 @@ struct DeviceCardView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 titleRow
-                // Only show the storage row when the device is actually
-                // reachable. Stale stats from a previous connection are
-                // misleading: "0 bytes / 32 GB free" on a disconnected
-                // device just looks like a bug. When unreachable, the
-                // unreachableNote below carries the relevant info.
-                if connected, stats != nil || capacityBytes != nil {
-                    storageRow
-                }
+                // Always reserve the storage strip so disconnected cards
+                // stay the same height as connected ones. When offline we
+                // draw an empty bar + a blank caption line (no "0 GB free"
+                // lie); live stats only appear while connected.
+                storageRow
                 if unreachable, let (msg, when) = lastError {
                     unreachableNote(msg: msg, when: when)
                 }
@@ -194,8 +196,9 @@ struct DeviceCardView: View {
         return !hadSuccess && !hadFailure && viewModel.syncBusy
     }
 
-    /// One of four mutually-exclusive chips — precedence:
-    /// Unreachable > Recording > Connected > Connecting > Not connected.
+    /// One of five mutually-exclusive chips — precedence:
+    /// Sign in > Unreachable > Recording > Connected > Connecting > Not connected.
+    /// Icons only; full label lives in the tooltip so the chip never reflows.
     @ViewBuilder
     private var stateChip: some View {
         if plaudSignedOut {
@@ -205,7 +208,7 @@ struct DeviceCardView: View {
                 viewModel.onPairPlaud(plaudRegion)
             } label: {
                 chip(systemImage: "person.crop.circle.badge.exclamationmark",
-                     text: "Sign in required",
+                     help: "Sign in required — click to sign in to Plaud",
                      foreground: .orange,
                      background: Color.orange.opacity(0.15))
             }
@@ -213,42 +216,41 @@ struct DeviceCardView: View {
             .help("Sign in to Plaud")
         } else if unreachable {
             chip(systemImage: "exclamationmark.triangle.fill",
-                 text: "Unreachable",
+                 help: "Unreachable",
                  foreground: .orange,
                  background: Color.orange.opacity(0.15))
         } else if recording {
             chip(systemImage: "record.circle.fill",
-                 text: "Recording",
+                 help: "Recording",
                  foreground: .red,
                  background: Color.red.opacity(0.12))
         } else if connected {
             chip(systemImage: "checkmark.circle.fill",
-                 text: "Connected",
+                 help: "Connected",
                  foreground: .green,
                  background: Color.green.opacity(0.12))
         } else if connecting {
             AnimatedConnectingChip()
         } else {
             chip(systemImage: "circle.slash",
-                 text: "Not connected",
+                 help: "Not connected",
                  foreground: .secondary,
                  background: Color.secondary.opacity(0.12))
         }
     }
 
-    private func chip(systemImage: String, text: String, foreground: Color, background: Color) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: systemImage)
-            Text(text)
-                .lineLimit(1)
-                .fixedSize()   // never wrap "Connected" → "Con-nected"
-        }
-        .font(.caption.weight(.medium))
-        .foregroundColor(foreground)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(background, in: Capsule())
-        .fixedSize()
+    /// Compact icon-only state pill. Label is tooltip-only so different
+    /// states stay the same size and never shove neighbouring layout around.
+    private func chip(systemImage: String, help helpText: String, foreground: Color, background: Color) -> some View {
+        Image(systemName: systemImage)
+            .font(.caption.weight(.medium))
+            .foregroundColor(foreground)
+            .frame(width: 18, height: 18)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(background, in: Capsule())
+            .help(helpText)
+            .accessibilityLabel(helpText)
     }
 
     private var storageRow: some View {
@@ -259,39 +261,81 @@ struct DeviceCardView: View {
         }
         let usedGB = Double(usedBytes) / 1_073_741_824
         let capGB  = capacity.map { Double($0) / 1_073_741_824 }
+        // Live numbers only while connected — otherwise keep the same vertical
+        // footprint with an empty bar + blank caption line.
+        let showLive = connected && (progress != nil || stats != nil)
 
         return VStack(alignment: .leading, spacing: 2) {
-            if let progress = progress, let capGB = capGB {
+            if showLive, let progress = progress, let capGB = capGB {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
                     .tint(progress > 0.85 ? .orange : .accentColor)
-                HStack(spacing: 6) {
-                    Text(formatStorage(used: usedGB, capacity: capGB, truncated: stats?.truncated ?? false))
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let files = stats?.totalFiles {
-                        Text("· \(files) files")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .layoutPriority(-1)
-                    }
-                    Spacer(minLength: 0)
-                }
-            } else if let stats = stats {
+                // One tight line so three cards side-by-side still show
+                // used/cap, % full, and file count without truncating.
+                let line = formatStorage(
+                    used: usedGB,
+                    capacity: capGB,
+                    truncated: stats?.truncated ?? false,
+                    files: stats?.totalFiles
+                )
+                Text(line)
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .allowsTightening(true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(storageHelp(
+                        used: usedGB,
+                        capacity: capGB,
+                        truncated: stats?.truncated ?? false,
+                        files: stats?.totalFiles
+                    ))
+            } else if showLive, let stats = stats {
                 Text("\(String(format: "%.1f", usedGB)) GB · \(stats.totalFiles) files")
                     .font(.caption.monospacedDigit())
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+            } else {
+                // Placeholder: empty track + caption-height spacer so the card
+                // matches a connected card's height without inventing numbers.
+                ProgressView(value: 0)
+                    .progressViewStyle(.linear)
+                    .opacity(0.35)
+                Text("\u{00A0}")
+                    .font(.caption.monospacedDigit())
+                    .accessibilityHidden(true)
             }
         }
     }
 
-    private func formatStorage(used: Double, capacity: Double, truncated: Bool) -> String {
+    /// Compact single-line caption, e.g. `6.3/32 GB · 20% · 375 files`.
+    /// Percentage is how full the device is (used), not free — empty ≈ 0%.
+    private func formatStorage(used: Double, capacity: Double, truncated: Bool, files: Int?) -> String {
+        let usedFrac = capacity > 0 ? max(0, min(1, used / capacity)) : 0
+        let pct = Int((usedFrac * 100).rounded())
+        let usedPart = "\(String(format: "%.1f", used))\(truncated ? "+" : "")/\(String(format: "%.0f", capacity)) GB"
+        let fullPart = truncated ? "≤\(pct)%" : "\(pct)%"
+        if let files {
+            return "\(usedPart) · \(fullPart) · \(files) file\(files == 1 ? "" : "s")"
+        }
+        return "\(usedPart) · \(fullPart)"
+    }
+
+    /// Full prose for the tooltip (hover) — not constrained by card width.
+    private func storageHelp(used: Double, capacity: Double, truncated: Bool, files: Int?) -> String {
         let free = max(0, capacity - used)
-        let freeLabel = truncated ? "≤\(String(format: "%.0f", free)) GB free" : "\(String(format: "%.0f", free)) GB free"
-        return "\(String(format: "%.1f", used))\(truncated ? "+" : "") / \(String(format: "%.0f", capacity)) GB · \(freeLabel)"
+        let usedFrac = capacity > 0 ? max(0, min(1, used / capacity)) : 0
+        let pctFull = Int((usedFrac * 100).rounded())
+        var parts = [
+            "\(String(format: "%.1f", used))\(truncated ? "+" : "") / \(String(format: "%.0f", capacity)) GB used (\(pctFull)% full)",
+            "\(String(format: "%.0f", free)) GB free",
+        ]
+        if let files {
+            parts.append("\(files) file\(files == 1 ? "" : "s")")
+        }
+        if truncated { parts.append("used size may be under-counted") }
+        return parts.joined(separator: " · ")
     }
 
     private func unreachableNote(msg: String, when: Date) -> some View {
@@ -460,27 +504,31 @@ struct DeviceStripView: View {
     }
 }
 
-/// Small blue chip with a rotating `arrow.triangle.2.circlepath` icon
-/// shown while a HiDock probe is in flight. Distinguishes an
+/// Small blue icon-only chip with a rotating `arrow.triangle.2.circlepath`
+/// shown while a HiDock/Plaud probe is in flight. Distinguishes an
 /// in-progress connection check from a genuinely-not-connected device.
+/// Fixed frame keeps the spin from affecting surrounding layout (which was
+/// visibly bouncing the chip when the transcript detail pane was open).
 private struct AnimatedConnectingChip: View {
     @State private var spinning = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .rotationEffect(.degrees(spinning ? 360 : 0))
-                .animation(
-                    .linear(duration: 1.2).repeatForever(autoreverses: false),
-                    value: spinning
-                )
-            Text("Connecting…")
-        }
-        .font(.caption.weight(.medium))
-        .foregroundColor(.blue)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(Color.blue.opacity(0.12), in: Capsule())
-        .onAppear { spinning = true }
+        Image(systemName: "arrow.triangle.2.circlepath")
+            .font(.caption.weight(.medium))
+            .foregroundColor(.blue)
+            .rotationEffect(.degrees(spinning ? 360 : 0))
+            .animation(
+                .linear(duration: 1.2).repeatForever(autoreverses: false),
+                value: spinning
+            )
+            // Frame *after* rotation so layout size stays fixed while the
+            // glyph spins — avoids the chip "scrolling" neighbouring views.
+            .frame(width: 18, height: 18)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.blue.opacity(0.12), in: Capsule())
+            .help("Connecting…")
+            .accessibilityLabel("Connecting")
+            .onAppear { spinning = true }
     }
 }
