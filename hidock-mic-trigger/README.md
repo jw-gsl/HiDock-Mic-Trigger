@@ -35,6 +35,10 @@ xcodebuild -scheme hidock-mic-trigger -configuration Release -derivedDataPath /t
 ```
 
 The post-build script auto-deploys to `/Applications/`, re-signs, and relaunches.
+Local deployment requires a valid **Developer ID Application** certificate and
+will fail before replacing the installed app if one is not available. The
+identity is auto-detected from the keychain or can be selected with
+`HIDOCK_SIGNING_IDENTITY`.
 
 ### Debug (dev)
 
@@ -43,7 +47,8 @@ xcodegen generate
 xcodebuild -scheme hidock-mic-trigger -configuration Debug -derivedDataPath /tmp/hidock-build-dev
 ```
 
-Debug builds deploy to `~/Applications/HiDock Mic Trigger Dev.app` with an orange icon and "HiDock DEV" title, running side-by-side with production.
+Debug builds deploy to the same canonical `/Applications/HiDock Mic Trigger.app`
+location as Release builds; there is no second per-user or Dev app copy.
 
 ## CI Build (self-contained .app)
 

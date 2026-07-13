@@ -181,9 +181,10 @@ Note the index number of your HiDock audio input (e.g. `1`).
 ### 5. Install and run
 
 ```bash
-cp -R ~/Library/Developer/Xcode/DerivedData/hidock-mic-trigger-*/Build/Products/Release/hidock-mic-trigger.app \
-  ~/Applications/"HiDock Mic Trigger.app"
-open ~/Applications/"HiDock Mic Trigger.app"
+cd hidock-mic-trigger
+xcodegen generate
+xcodebuild -scheme hidock-mic-trigger -configuration Release -derivedDataPath /tmp/hidock-build
+# The post-build step signs with the local Developer ID certificate and installs it.
 ```
 
 The app opens a unified window with:
