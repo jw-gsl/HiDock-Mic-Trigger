@@ -55,3 +55,8 @@ usb-extractor/state.json.lock
 
 # Migration/one-off state backups
 usb-extractor/state.json.*-bak
+
+# Planning docs and security reviews — kept local only, not published.
+# They contain machine-specific paths and internal review detail.
+docs/PLAN-*.md
+docs/SECURITY-REVIEW-*.md
