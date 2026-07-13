@@ -15,16 +15,8 @@ struct RecordingsTableView: View {
     /// pane is open so the narrowed list fits without much horizontal scrolling.
     private var showExtraColumns: Bool { !viewModel.detailPaneVisible }
     /// Table's natural width — Transcribed(140) + Size(70) drop out when hidden.
-    private var tableContentWidth: CGFloat { showExtraColumns ? 1160 : 950 }
-
     var body: some View {
-        GeometryReader { geo in
-            let w = max(geo.size.width, tableContentWidth)
-            ScrollView(.horizontal, showsIndicators: true) {
-                tableBody(width: w)
-                    .frame(width: w, height: geo.size.height)
-            }
-        }
+        tableBody
         .overlay(
             RoundedRectangle(cornerRadius: 4)
                 .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
@@ -33,7 +25,7 @@ struct RecordingsTableView: View {
     }
 
     @ViewBuilder
-    private func tableBody(width w: CGFloat) -> some View {
+    private var tableBody: some View {
         VStack(spacing: 0) {
             // Column headers
             HStack(spacing: 0) {
