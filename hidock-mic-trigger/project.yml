@@ -51,8 +51,10 @@ targets:
     postBuildScripts:
       - name: "Deploy to Applications"
         script: |
+          set -euo pipefail
+
           # Skip deploy on CI (GitHub Actions sets CI=true)
-          if [ "$CI" = "true" ]; then
+          if [ "${CI:-}" = "true" ]; then
             echo "note: Skipping deploy on CI"
             exit 0
           fi
@@ -63,42 +65,55 @@ targets:
           BUILT_APP=$(find "$BUILT_PRODUCTS_DIR" -maxdepth 1 -name "*.app" -type d | head -1)
 
           if [ -z "$BUILT_APP" ] || [ ! -d "$BUILT_APP" ]; then
-            echo "warning: Built app not found under $BUILT_PRODUCTS_DIR"
-            exit 0
+            echo "error: Built app not found under $BUILT_PRODUCTS_DIR"
+            exit 1
           fi
 
-          # Kill running instance
+          # A stable Developer ID identity is required for local installs.
+          # Ad-hoc signing changes the designated requirement on every build,
+          # so Keychain "Always Allow" approvals cannot persist.
+          SIGN_ID="${HIDOCK_SIGNING_IDENTITY:-}"
+          if [ -z "$SIGN_ID" ]; then
+            SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+              | awk -F'"' '/Developer ID Application:/ {print $2; exit}')
+          fi
+          case "$SIGN_ID" in
+            "Developer ID Application:"*) ;;
+            *)
+              echo "error: no valid Developer ID Application identity found"
+              echo "       Install the certificate/private key or set HIDOCK_SIGNING_IDENTITY."
+              exit 1
+              ;;
+          esac
+
+          # Sign and verify a staged copy before replacing the live app. A
+          # failed signing operation must not leave an unsigned/broken install.
+          STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hidock-install.XXXXXX")
+          trap 'rm -rf "$STAGE_DIR"' EXIT
+          STAGED_APP="$STAGE_DIR/$APP_NAME"
+          cp -R "$BUILT_APP" "$STAGED_APP"
+          echo "Signing with: $SIGN_ID"
+          codesign --force --deep --sign "$SIGN_ID" "$STAGED_APP"
+          codesign --verify --deep --strict --verbose=2 "$STAGED_APP"
+
+          # Kill running instance only after the replacement has been signed.
           pkill -f "hidock-mic-trigger" 2>/dev/null || true
           sleep 1
 
-          # Remove stale copies (including the legacy Dev.app split and the
-          # old lowercase bundle name, neither of which we ship any more).
+          # Remove stale copies (including the legacy Dev.app split, the old
+          # lowercase bundle name, and the old per-user install location).
           rm -rf "$INSTALL_DIR/$APP_NAME"
           rm -rf "$INSTALL_DIR/HiDock Mic Trigger Dev.app"
           rm -rf "$INSTALL_DIR/hidock-mic-trigger.app"
           rm -rf "$HOME/Applications/$APP_NAME"
           rm -rf "$HOME/Applications/HiDock Mic Trigger Dev.app"
 
-          # Install fresh build and re-sign.
-          cp -R "$BUILT_APP" "$INSTALL_DIR/$APP_NAME"
-          # Prefer a stable Developer ID identity: ad-hoc ("-") produces a
-          # different code signature every build, so macOS treats the app as
-          # new each time and re-prompts for keychain access ("Always Allow"
-          # never sticks). A Developer ID identity has a stable designated
-          # requirement, so keychain trust persists across rebuilds.
-          # Falls back to ad-hoc when no cert is present (CI / other machines).
-          SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
-          if [ -n "$SIGN_ID" ]; then
-            echo "Signing with: $SIGN_ID"
-            codesign --force --deep --sign "$SIGN_ID" "$INSTALL_DIR/$APP_NAME"
-          else
-            echo "No Developer ID cert found — signing ad-hoc (keychain may re-prompt each build)"
-            codesign --force --deep --sign - "$INSTALL_DIR/$APP_NAME"
-          fi
+          cp -R "$STAGED_APP" "$INSTALL_DIR/$APP_NAME"
+          codesign --verify --deep --strict --verbose=2 "$INSTALL_DIR/$APP_NAME"
           /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "$INSTALL_DIR/$APP_NAME"
 
           open -a "$INSTALL_DIR/$APP_NAME"
-          echo "Deployed $APP_NAME ($CONFIGURATION) to $INSTALL_DIR"
+          echo "Deployed signed $APP_NAME ($CONFIGURATION) to $INSTALL_DIR"
         basedOnDependencyAnalysis: false
     sources:
       - Sources

@@ -159,18 +159,55 @@ final class UpdateChecker {
         // Install synchronously during quit — no relaunch
         let script = """
         #!/bin/bash
+        set -euo pipefail
         sleep 1
         mkdir -p "\(extractDir.path)"
         ditto -x -k "\(zipPath.path)" "\(extractDir.path)"
         APP=$(find "\(extractDir.path)" -maxdepth 2 -name "*.app" -type d | head -1)
-        if [ -n "$APP" ]; then
-            rm -rf "\(appPath)"
-            cp -R "$APP" "\(appPath)"
-            codesign --force --sign - "\(appPath)/Contents/MacOS/hidock-mic-trigger" 2>/dev/null
-            codesign --force --sign - "\(appPath)" 2>/dev/null
-            # Re-register with LaunchServices so Launchpad picks it up
-            /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "\(appPath)" 2>/dev/null
+        if [ -z "$APP" ]; then
+            echo "Update failed: could not find app in download."
+            exit 1
         fi
+
+        sign_and_verify() {
+            local candidate="$1"
+            # Preserve a valid Developer ID signature from a notarized release.
+            if codesign --verify --deep --strict "$candidate" >/dev/null 2>&1 \
+              && codesign -dv --verbose=4 "$candidate" 2>&1 \
+                | grep -q "Authority=Developer ID Application:"; then
+                echo "Using the existing Developer ID signature"
+            else
+                local sign_id="${HIDOCK_SIGNING_IDENTITY:-}"
+                if [ -z "$sign_id" ]; then
+                    sign_id=$(security find-identity -v -p codesigning 2>/dev/null \
+                      | awk -F'"' '/Developer ID Application:/ {print $2; exit}')
+                fi
+                case "$sign_id" in
+                    "Developer ID Application:"*) ;;
+                    *)
+                        echo "Update failed: no valid Developer ID Application identity found."
+                        exit 1
+                        ;;
+                esac
+                echo "Signing update with: $sign_id"
+                codesign --force --deep --sign "$sign_id" "$candidate"
+            fi
+            codesign --verify --deep --strict --verbose=2 "$candidate"
+        }
+
+        # Stage and verify before replacing the live app. A failed signature
+        # must leave the current working installation untouched.
+        STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hidock-update.XXXXXX")
+        trap 'rm -rf "$STAGE_DIR"' EXIT
+        STAGED_APP="$STAGE_DIR/HiDock Mic Trigger.app"
+        cp -R "$APP" "$STAGED_APP"
+        sign_and_verify "$STAGED_APP"
+
+        rm -rf "\(appPath)"
+        cp -R "$STAGED_APP" "\(appPath)"
+        codesign --verify --deep --strict --verbose=2 "\(appPath)"
+        # Re-register with LaunchServices so Launchpad picks it up
+        /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "\(appPath)" 2>/dev/null
         rm -rf "\(tempDir.path)"
         """
 
@@ -345,6 +382,7 @@ final class UpdateChecker {
         // Write an updater script that runs after the app quits
         let script = """
         #!/bin/bash
+        set -euo pipefail
         # Wait for the app to quit
         while pgrep -f "HiDock Mic Trigger" > /dev/null 2>&1; do
             sleep 0.5
@@ -362,13 +400,44 @@ final class UpdateChecker {
             exit 1
         fi
 
-        # Replace the current app
-        rm -rf "\(appPath)"
-        cp -R "$APP" "\(appPath)"
+        sign_and_verify() {
+            local candidate="$1"
+            # Preserve a valid Developer ID signature from a notarized release.
+            if codesign --verify --deep --strict "$candidate" >/dev/null 2>&1 \
+              && codesign -dv --verbose=4 "$candidate" 2>&1 \
+                | grep -q "Authority=Developer ID Application:"; then
+                echo "Using the existing Developer ID signature"
+            else
+                local sign_id="${HIDOCK_SIGNING_IDENTITY:-}"
+                if [ -z "$sign_id" ]; then
+                    sign_id=$(security find-identity -v -p codesigning 2>/dev/null \
+                      | awk -F'"' '/Developer ID Application:/ {print $2; exit}')
+                fi
+                case "$sign_id" in
+                    "Developer ID Application:"*) ;;
+                    *)
+                        osascript -e 'display dialog "Update failed: no valid Developer ID Application identity was found." buttons {"OK"}'
+                        exit 1
+                        ;;
+                esac
+                echo "Signing update with: $sign_id"
+                codesign --force --deep --sign "$sign_id" "$candidate"
+            fi
+            codesign --verify --deep --strict --verbose=2 "$candidate"
+        }
 
-        # Re-sign
-        codesign --force --sign - "\(appPath)/Contents/MacOS/hidock-mic-trigger" 2>/dev/null
-        codesign --force --sign - "\(appPath)" 2>/dev/null
+        # Stage and verify before replacing the live app. A failed signature
+        # must leave the current working installation untouched.
+        STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hidock-update.XXXXXX")
+        trap 'rm -rf "$STAGE_DIR"' EXIT
+        STAGED_APP="$STAGE_DIR/HiDock Mic Trigger.app"
+        cp -R "$APP" "$STAGED_APP"
+        sign_and_verify "$STAGED_APP"
+
+        # Replace the current app only after the staged bundle is verified.
+        rm -rf "\(appPath)"
+        cp -R "$STAGED_APP" "\(appPath)"
+        codesign --verify --deep --strict --verbose=2 "\(appPath)"
 
         # Re-register with LaunchServices so Launchpad picks it up
         /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "\(appPath)" 2>/dev/null
