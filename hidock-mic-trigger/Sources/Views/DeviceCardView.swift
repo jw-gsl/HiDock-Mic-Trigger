@@ -100,6 +100,8 @@ struct DeviceCardView: View {
             actionsColumn
         }
         .padding(10)
+        // Fill the grid column so every card is the same width.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(cardBackground)
@@ -238,12 +240,15 @@ struct DeviceCardView: View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
             Text(text)
+                .lineLimit(1)
+                .fixedSize()   // never wrap "Connected" → "Con-nected"
         }
         .font(.caption.weight(.medium))
         .foregroundColor(foreground)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(background, in: Capsule())
+        .fixedSize()
     }
 
     private var storageRow: some View {
