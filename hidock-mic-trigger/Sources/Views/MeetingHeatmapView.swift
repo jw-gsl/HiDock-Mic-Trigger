@@ -27,7 +27,10 @@ struct MeetingHeatmapView: View {
 
     private let cell: CGFloat = 11
     private let gap: CGFloat = 3
-    private let weeksBack = 52        // 52 columns back + current week = 53 columns
+    private let weeksBack = 52        // history depth (columns before the current week)
+    /// One full week ahead of "today's week" so any meeting pixel always has a
+    /// grey neighbour to its right (current-week remainder + next week).
+    private let weeksForward = 1
 
     /// Sunday-first calendar (rows read Sun→Sat, top→bottom).
     private var calendar: Calendar {
@@ -38,21 +41,26 @@ struct MeetingHeatmapView: View {
 
     // MARK: Grid model
 
-    /// Columns of weeks (oldest → newest); each week is 7 day-dates (Mon→Sun).
-    /// Days after today are nil so the current partial week renders blank cells.
+    /// Columns of weeks (oldest → newest); each week is 7 day-dates (Sun→Sat).
+    /// Always includes all 7 days of the current week *and* one full week into
+    /// the future — future days render as empty grey cells so (a) the current
+    /// column is a full 7-pixel bar rather than "hanging" past-only squares,
+    /// and (b) any meeting colour always has grey padding to its right.
     private func weekColumns(today: Date) -> [[Date?]] {
         let cal = calendar
+        // Anchor on today's week; range runs weeksBack behind → weeksForward ahead.
         let thisWeekStart = cal.dateInterval(of: .weekOfYear, for: today)?.start ?? today
         guard let firstWeekStart = cal.date(byAdding: .weekOfYear, value: -weeksBack, to: thisWeekStart) else {
             return []
         }
+        let lastCol = weeksBack + weeksForward   // e.g. 52 + 1 → col 53 is next week
         var columns: [[Date?]] = []
-        for col in 0...weeksBack {
+        for col in 0...lastCol {
             guard let weekStart = cal.date(byAdding: .weekOfYear, value: col, to: firstWeekStart) else { continue }
             var days: [Date?] = []
             for d in 0..<7 {
                 if let day = cal.date(byAdding: .day, value: d, to: weekStart) {
-                    days.append(day > today ? nil : cal.startOfDay(for: day))
+                    days.append(cal.startOfDay(for: day))
                 } else {
                     days.append(nil)
                 }
@@ -197,17 +205,38 @@ struct MeetingHeatmapView: View {
                 // visibly move or drop any pixels.
                 ledPanel(columns: columns, labels: labels, activity: activity)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    ScrollViewReader { proxy in
-                        VStack(alignment: .leading, spacing: gap) {
-                            monthLabelRow(labels)
-                            gridRow(columns: columns, activity: activity)
-                        }
-                        .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
-                    }
-                }
+                // Sticky weekday gutter + horizontally scrolling year grid.
+                // Gutter must stay outside the ScrollView so Sun–Sat don't
+                // slide off when the window is narrow / scrolled to trailing.
+                // ScrollView is width-constrained so the full year can't force
+                // the window wider than the available column.
+                heatmapGrid(columns: columns, labels: labels, activity: activity)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Static heatmap: pinned weekday labels + scrollable month labels / cells.
+    private func heatmapGrid(columns: [[Date?]], labels: [String?], activity: [Date: DayActivity]) -> some View {
+        HStack(alignment: .top, spacing: gap) {
+            VStack(alignment: .leading, spacing: gap) {
+                Color.clear.frame(width: 30, height: 11)   // align under month-label row
+                weekdayGutter
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                ScrollViewReader { proxy in
+                    VStack(alignment: .leading, spacing: gap) {
+                        monthLabelRow(labels, includeGutterPad: false)
+                        gridRow(columns: columns, activity: activity)
+                    }
+                    .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
+                }
+            }
+            // Critical: don't let the year's ideal width expand the parent —
+            // take only the space the window offers, scroll for the rest.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: LED panel
@@ -249,8 +278,10 @@ struct MeetingHeatmapView: View {
 
     /// The heatmap as LED columns — one per visible week, each with a colour per
     /// day-row: green at the day's meeting-volume intensity, or nil (off) for
-    /// empty / future days. This is the engine's resting content (and what
-    /// scrolls off/on around a message). Not dimmed — full heatmap colours.
+    /// empty days (including future days in the current week and the whole next
+    /// week, which stay grey so meeting colours always have padding to the
+    /// right). This is the engine's resting content (and what scrolls off/on
+    /// around a message). Not dimmed — full heatmap colours.
     private func ledColumns(columns: [[Date?]], activity: [Date: DayActivity]) -> [LEDColumn] {
         columns.map { week in
             LEDColumn(cells: week.map { date -> Color? in
@@ -260,16 +291,31 @@ struct MeetingHeatmapView: View {
         }
     }
 
+    /// Progressively drops the legend / title text so the row never forces the
+    /// window wider than the available column (narrow-window overflow fix).
     private var header: some View {
+        ViewThatFits(in: .horizontal) {
+            headerRow(showTitleText: true, showLegend: true)
+            headerRow(showTitleText: true, showLegend: false)
+            headerRow(showTitleText: false, showLegend: false)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func headerRow(showTitleText: Bool, showLegend: Bool) -> some View {
         HStack(spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: "calendar")
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                Text("Meeting activity")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.secondary)
+                if showTitleText {
+                    Text("Meeting activity")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
+            .help("Meeting activity")
             // Date-mode switch — Recorded (default) vs Transcribed.
             Picker("", selection: $viewModel.heatmapDateMode) {
                 ForEach(HiDockViewModel.HeatmapDateMode.allCases) { mode in
@@ -281,10 +327,12 @@ struct MeetingHeatmapView: View {
             .controlSize(.mini)
             .font(.caption)
             .fixedSize()
+            .layoutPriority(1)
             .help("Recorded = when meetings happened. Transcribed = when they were transcribed.")
-            legend
+            if showLegend { legend }
             ledControls
-            Spacer()
+                .layoutPriority(1)
+            Spacer(minLength: 0)
             // Refreshing / downloading status lives here now (shows/hides as
             // needed) instead of on its own row — less is more.
             if !viewModel.syncStatus.isEmpty {
@@ -296,7 +344,10 @@ struct MeetingHeatmapView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
+                .frame(minWidth: 0)
+                .layoutPriority(-1)
             }
         }
     }
@@ -396,11 +447,15 @@ struct MeetingHeatmapView: View {
         return "\(dateStr) — " + parts.joined(separator: " · ")
     }
 
-    private func monthLabelRow(_ labels: [String?]) -> some View {
+    private func monthLabelRow(_ labels: [String?], includeGutterPad: Bool = true) -> some View {
         // Position each month label by absolute x-offset (column pitch) rather
         // than constraining it to one cell's width — otherwise "Aug" wraps
         // vertically inside an 11px cell. Labels take their natural width and
         // sit over the (empty) columns following the month's first week.
+        // includeGutterPad: when the weekday gutter sits *beside* this row
+        // (LED panel, or the old all-in-scroll layout), pad so labels line up
+        // with the cells. Heatmap scroll mode keeps the gutter outside and
+        // passes false.
         let pitch = cell + gap
         return ZStack(alignment: .topLeading) {
             Color.clear.frame(width: CGFloat(labels.count) * pitch, height: 11)
@@ -414,12 +469,12 @@ struct MeetingHeatmapView: View {
                 }
             }
         }
-        .padding(.leading, 30 + gap)   // align with the grid's weekday gutter
+        .padding(.leading, includeGutterPad ? 30 + gap : 0)
     }
 
+    /// Week columns only — weekday gutter is rendered outside the scroll view.
     private func gridRow(columns: [[Date?]], activity: [Date: DayActivity]) -> some View {
         HStack(alignment: .top, spacing: gap) {
-            weekdayGutter
             ForEach(Array(columns.enumerated()), id: \.offset) { colIndex, week in
                 weekColumn(week: week, activity: activity).id(colIndex)
             }

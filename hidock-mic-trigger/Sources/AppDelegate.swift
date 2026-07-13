@@ -3482,7 +3482,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             #endif
             win.isReleasedWhenClosed = false
             win.delegate = self
-            win.minSize = NSSize(width: 980, height: 510)
+            // Floor matches the full recordings-table column set (~1141pt) so
+            // the user can't drag the window narrower than the content and
+            // clip the left edge. Updated live by WindowMinSizeEnforcer when
+            // the detail pane opens/closes (see MainWindowMetrics).
+            win.minSize = MainWindowMetrics.minSize(detailPaneVisible: false)
 
             let hostingView = NSHostingView(rootView: MainWindowView(viewModel: viewModel))
             win.contentView = hostingView

@@ -4,7 +4,8 @@ struct MainWindowView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
-        Group {
+        let windowMin = MainWindowMetrics.minSize(detailPaneVisible: viewModel.detailPaneVisible)
+        return Group {
             if viewModel.detailPaneVisible {
                 // Native resizable split — draggable divider, each side clipped
                 // to its own region (no overlap), both responsive.
@@ -17,10 +18,14 @@ struct MainWindowView: View {
                 }
             } else {
                 mainColumn
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(minWidth: viewModel.detailPaneVisible ? 1280 : 980, minHeight: 510)
+        // SwiftUI floor (also drives layout). AppKit floor is enforced by
+        // WindowMinSizeEnforcer — without it the user can drag under the
+        // content width and the left edge of the pane clips off.
+        .frame(minWidth: windowMin.width, minHeight: windowMin.height)
+        .background(WindowMinSizeEnforcer(minSize: windowMin))
         .sheet(isPresented: $viewModel.showOnboarding) {
             OnboardingView(viewModel: viewModel)
         }
@@ -132,7 +137,10 @@ struct MainWindowView: View {
             DownloadProgressBar(viewModel: viewModel)
             TranscriptionProgressBar(viewModel: viewModel)
             TrimProgressBar(viewModel: viewModel)
+            // minWidth 0: table must accept the column width offered by the
+            // window rather than expanding the whole pane past the window edge.
             RecordingsTableView(viewModel: viewModel)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
             // Footer
             HStack {
@@ -306,6 +314,7 @@ struct MainWindowView: View {
             .padding(.bottom, 8)
             .padding(.top, 2)
         }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
     }
 }
 
