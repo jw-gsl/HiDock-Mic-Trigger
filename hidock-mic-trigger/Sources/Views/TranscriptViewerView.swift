@@ -557,7 +557,7 @@ struct TranscriptViewerView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
-                .help("Copy All — the whole transcript (speaker names + timestamps) to the clipboard.")
+                .help("Copy All — whole transcript with timestamps. Unconfirmed speakers export as Speaker 1/2/… until you confirm their names.")
 
                 Button {
                     let mdPath = filePath.replacingOccurrences(of: "_diarized.json", with: ".md")
@@ -1391,8 +1391,9 @@ struct TranscriptViewerView: View {
         for seg in transcript.segments {
             let ts = "[\(formatTime(seconds: seg.start))]"
             if hasSpeakers {
-                let name = speakerName(for: seg.speakerId)
-                lines.append("\(ts) \(name): \(seg.text)")
+                // Until a speaker is user-confirmed, export as "Speaker N" so
+                // shaky auto-matches don't land in the clipboard / saved text.
+                lines.append("\(ts) \(copySpeakerLabel(for: seg.speakerId)): \(seg.text)")
             } else {
                 lines.append("\(ts) \(seg.text)")
             }
@@ -1400,6 +1401,16 @@ struct TranscriptViewerView: View {
         let text = lines.joined(separator: "\n\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Name used when copying the transcript. Confirmed speakers keep their
+    /// real name; everything else (auto-match, generic, unverified) becomes
+    /// "Speaker 1", "Speaker 2", … so the paste is stable until tagging is done.
+    private func copySpeakerLabel(for id: Int) -> String {
+        if speakerMeta(for: id)?.verified == true {
+            return speakerName(for: id)
+        }
+        return "Speaker \(id + 1)"
     }
 
     private func undoMerge() {

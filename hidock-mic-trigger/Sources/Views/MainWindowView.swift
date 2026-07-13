@@ -2,6 +2,8 @@ import SwiftUI
 
 struct MainWindowView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Confirmation for the tab-strip "Close All" control.
+    @State private var confirmCloseAllTabs = false
 
     var body: some View {
         let windowMin = MainWindowMetrics.minSize(detailPaneVisible: viewModel.detailPaneVisible)
@@ -45,56 +47,111 @@ struct MainWindowView: View {
     }
 
     private var detailTabStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                if viewModel.cliPaneVisible {
-                    detailTabChip(id: "cli", title: cliTabTitle, icon: "terminal") {
-                        viewModel.cliPaneVisible = false
-                        if viewModel.activeDetailTabId == "cli" {
-                            viewModel.activeDetailTabId = viewModel.detailTabs.last?.id ?? "cli"
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    if viewModel.cliPaneVisible {
+                        detailTabChip(id: "cli", title: cliTabTitle, icon: "terminal") {
+                            viewModel.cliPaneVisible = false
+                            if viewModel.activeDetailTabId == "cli" {
+                                viewModel.activeDetailTabId = viewModel.detailTabs.last?.id ?? "cli"
+                            }
+                        }
+                    }
+                    ForEach(viewModel.detailTabs) { tab in
+                        detailTabChip(id: tab.id, title: tab.title, icon: tab.icon) {
+                            viewModel.closeDetailTab(tab.id)
                         }
                     }
                 }
-                ForEach(viewModel.detailTabs) { tab in
-                    detailTabChip(id: tab.id, title: tab.title, icon: tab.icon) {
-                        viewModel.closeDetailTab(tab.id)
+                .padding(.vertical, 6)
+                .padding(.leading, 6)
+            }
+            // Close All only when 2+ tabs are open (CLI + hosted, or several
+            // hosted). One tab already has its own × — no need for Close All.
+            // Pinned outside the scroll so it stays visible on the right.
+            if openDetailTabCount >= 2 {
+                Button {
+                    confirmCloseAllTabs = true
+                } label: {
+                    Label("Close All", systemImage: "xmark.circle")
+                        .font(.caption)
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Close every open tab in this pane")
+                .padding(.trailing, 8)
+                .confirmationDialog(
+                    "Close all tabs?",
+                    isPresented: $confirmCloseAllTabs,
+                    titleVisibility: .visible
+                ) {
+                    Button("Close All", role: .destructive) {
+                        viewModel.closeAllDetailTabs()
                     }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Are you sure you want to close all open tabs?")
                 }
             }
-            .padding(6)
         }
         .background(.ultraThinMaterial)
     }
 
     private func detailTabChip(id: String, title: String, icon: String, onClose: @escaping () -> Void) -> some View {
         let active = viewModel.activeDetailTabId == id
-        return HStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 10))
-            Text(title).font(.caption).lineLimit(1)
+        // Select + close are separate Buttons. A single HStack with
+        // `.onTapGesture` + an inner close Button was unreliable on macOS
+        // (clicks often did nothing, so the side pane never switched).
+        return HStack(spacing: 2) {
+            Button {
+                viewModel.activeDetailTabId = id
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: icon).font(.system(size: 10))
+                    Text(title).font(.caption).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(title)
+
             Button(action: onClose) {
-                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundColor(.secondary)
+            .help("Close tab")
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 8)
+        .padding(.trailing, 4)
         .padding(.vertical, 4)
         .background(active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.08),
                     in: RoundedRectangle(cornerRadius: 6))
         .frame(maxWidth: 170)
-        .contentShape(Rectangle())
-        .onTapGesture { viewModel.activeDetailTabId = id }
     }
 
     @ViewBuilder private var detailContent: some View {
+        // `.id(...)` forces SwiftUI to tear down/rebuild hosted AnyView content
+        // when the active tab changes — without it, switching transcript tabs
+        // often left the previous meeting's view on screen.
         if viewModel.activeDetailTabId == "cli", viewModel.cliPaneVisible {
             cliPane
+                .id("cli")
         } else if let tab = viewModel.detailTabs.first(where: { $0.id == viewModel.activeDetailTabId }) {
             tab.content
+                .id(tab.id)
         } else if viewModel.cliPaneVisible {
             cliPane
+                .id("cli")
         } else if let first = viewModel.detailTabs.first {
             first.content
+                .id(first.id)
         } else {
             Color.clear
         }
@@ -106,6 +163,11 @@ struct MainWindowView: View {
         case .chat: return "Ask AI"
         case .terminal: return "Terminal"
         }
+    }
+
+    /// Tabs currently in the strip (CLI counts if visible).
+    private var openDetailTabCount: Int {
+        viewModel.detailTabs.count + (viewModel.cliPaneVisible ? 1 : 0)
     }
 
     /// The right-hand pane content, chosen by the current mode. Auth / template

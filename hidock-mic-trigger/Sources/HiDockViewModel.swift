@@ -106,6 +106,13 @@ final class HiDockViewModel: ObservableObject {
         }
     }
 
+    /// Close every hosted tab and the CLI tab, collapsing the right pane.
+    func closeAllDetailTabs() {
+        detailTabs.removeAll()
+        cliPaneVisible = false
+        activeDetailTabId = "cli"
+    }
+
     /// What the right-hand CLI pane currently shows.
     /// - `.summary`: live formatted readout of a summarise/reclassify run
     /// - `.chat`: conversational Ask AI (formatted, multi-turn)
