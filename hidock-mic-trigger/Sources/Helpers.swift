@@ -128,6 +128,74 @@ func hidockDeviceGlyph(_ shortName: String, deviceType: DeviceType = .hidock) ->
     }
 }
 
+// MARK: - Main window size
+
+/// Shared min sizes for the main sync window. The recordings table uses fixed
+/// column widths that sum to ~1141pt (full) / ~931pt (detail-pane, two columns
+/// hidden). The window must not go narrower than that or the left edge of the
+/// pane clips off-screen. Keep AppDelegate's initial `minSize` and
+/// `MainWindowView`'s SwiftUI min in sync via these constants + `WindowMinSizeEnforcer`.
+enum MainWindowMetrics {
+    static let minHeight: CGFloat = 510
+    /// Full table (all columns) + modest padding — no detail pane.
+    static let minWidth: CGFloat = 1200
+    /// Detail pane open: main list still needs room after column-hiding + detail min.
+    static let minWidthWithDetail: CGFloat = 1280
+
+    static func minSize(detailPaneVisible: Bool) -> NSSize {
+        NSSize(
+            width: detailPaneVisible ? minWidthWithDetail : minWidth,
+            height: minHeight
+        )
+    }
+}
+
+/// Keeps `NSWindow.minSize` aligned with SwiftUI state and grows the frame if
+/// it's currently smaller than the new minimum (e.g. after a min-width bump or
+/// when the detail pane opens). SwiftUI's `.frame(minWidth:)` alone does not
+/// reliably set the AppKit window minimum on macOS.
+struct WindowMinSizeEnforcer: NSViewRepresentable {
+    let minSize: NSSize
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            if window.minSize != minSize {
+                window.minSize = minSize
+            }
+            var frame = window.frame
+            var grew = false
+            if frame.width < minSize.width {
+                // Grow to the right so the left edge (and traffic lights) stay put.
+                frame.size.width = minSize.width
+                // If growing would push past the screen, shift left instead.
+                if let screen = window.screen ?? NSScreen.main {
+                    let maxX = screen.visibleFrame.maxX
+                    if frame.maxX > maxX {
+                        frame.origin.x = max(screen.visibleFrame.minX, maxX - frame.width)
+                    }
+                }
+                grew = true
+            }
+            if frame.height < minSize.height {
+                let maxY = frame.maxY
+                frame.size.height = minSize.height
+                frame.origin.y = maxY - minSize.height
+                grew = true
+            }
+            if grew {
+                window.setFrame(frame, display: true)
+            }
+        }
+    }
+}
+
 /// Sanitizes a HiDock device name: removes serial numbers in brackets/parentheses
 /// and replaces underscores with spaces.
 func sanitizeDeviceName(_ raw: String) -> String {
