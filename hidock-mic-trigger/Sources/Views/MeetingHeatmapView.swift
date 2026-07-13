@@ -8,20 +8,31 @@ import SwiftUI
 /// once they're populated.
 struct MeetingHeatmapView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// NOT @ObservedObject on purpose: the matrix updates ~20×/s while the
+    /// conveyor scrolls, and only the small LED Canvas (LEDMatrixView, which
+    /// observes it) should redraw — never this parent (which would re-render the
+    /// heatmap/labels and cost real CPU). We just hand it down.
+    var ledMatrix: LEDMatrix
+    @ObservedObject var ledSettings: LEDSettings
 
     /// Day the pointer is currently over — drives the always-visible detail
     /// line (more reliable + immediate than the native `.help()` tooltip on
     /// 11px cells, which it supplements).
     @State private var hoveredDate: Date? = nil
+    @State private var showLEDSettings = false
+    /// True while the LED is scrolling back home after an off-tap — the mode flag
+    /// stays true until the animation finishes, so use this to flip the button to
+    /// its "off" look immediately for feedback.
+    @State private var ledWindingDown = false
 
     private let cell: CGFloat = 11
     private let gap: CGFloat = 3
     private let weeksBack = 52        // 52 columns back + current week = 53 columns
 
-    /// Monday-first calendar (matches UK weekday convention).
+    /// Sunday-first calendar (rows read Sun→Sat, top→bottom).
     private var calendar: Calendar {
         var c = Calendar.current
-        c.firstWeekday = 2
+        c.firstWeekday = 1
         return c
     }
 
@@ -156,7 +167,7 @@ struct MeetingHeatmapView: View {
 
     // MARK: View
 
-    private let weekdayCol = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    private let weekdayCol = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
     var body: some View {
         let today = calendar.startOfDay(for: Date())
@@ -164,18 +175,88 @@ struct MeetingHeatmapView: View {
         let activity = viewModel.meetingActivityByDay
         let labels = monthLabels(columns)
 
+        // Show the LED ticker instead of the grid when the user toggled LED
+        // mode, or when an event is "taking over" the heatmap briefly.
+        // LED mode is an explicit toggle now; the conveyor runs constantly while
+        // shown, so there's no isActive/takeover to observe.
+        let showLED = ledSettings.enabled && viewModel.heatmapLEDMode
+
         return VStack(alignment: .leading, spacing: 6) {
             header
-            detailLine(activity: activity)
-            ScrollView(.horizontal, showsIndicators: false) {
-                ScrollViewReader { proxy in
-                    VStack(alignment: .leading, spacing: gap) {
-                        monthLabelRow(labels)
-                        gridRow(columns: columns, activity: activity)
+            // The detail line renders in BOTH modes: it disappearing was half
+            // of the visible "jump" when the LED view loaded (everything below
+            // shifted up by one caption row). In LED mode it still shows the
+            // locked day filter + Clear button.
+            detailLine(activity: activity, ledMode: showLED)
+            if showLED {
+                // Keep the calendar chrome — month labels on top, Mon–Sun
+                // labels down the left — and drive only the grid with the LED
+                // ticker (text in the Tue–Sat band). Geometry must mirror the
+                // heatmap exactly (same trailing weeks, same label positions,
+                // heatmap day colours as the unlit dots) so the switch doesn't
+                // visibly move or drop any pixels.
+                ledPanel(columns: columns, labels: labels, activity: activity)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    ScrollViewReader { proxy in
+                        VStack(alignment: .leading, spacing: gap) {
+                            monthLabelRow(labels)
+                            gridRow(columns: columns, activity: activity)
+                        }
+                        .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
                     }
-                    .onAppear { proxy.scrollTo(columns.count - 1, anchor: .trailing) }
                 }
             }
+        }
+    }
+
+    // MARK: LED panel
+
+    /// LED mode with heatmap-identical geometry: shows the trailing weeks that
+    /// fit (what the heatmap's scrolled-to-trailing view shows), positions the
+    /// month labels for exactly those weeks, and feeds the day colours in as
+    /// the LED grid's unlit state.
+    private func ledPanel(columns: [[Date?]], labels: [String?], activity: [Date: DayActivity]) -> some View {
+        let pitch = cell + gap
+        let gridHeight = CGFloat(7) * pitch - gap
+        let panelHeight = 11 + gap + gridHeight   // month row + spacing + grid
+        return GeometryReader { geo in
+            let ledWidth = geo.size.width - 30 - gap          // minus weekday gutter
+            let fitCols = max(8, Int((ledWidth + gap) / pitch))
+            let cols = min(labels.count, fitCols)
+            // When the full year doesn't fit, the heatmap sits scrolled to
+            // trailing (right edge flush). Right-align the LED grid the same
+            // way so the dots occupy identical positions in both modes.
+            let leadPad = cols < labels.count ? max(0, ledWidth - (CGFloat(cols) * pitch - gap)) : 0
+            let visLabels = Array(labels.suffix(cols))
+            let visColumns = Array(columns.suffix(cols))
+            VStack(alignment: .leading, spacing: gap) {
+                monthLabelRow(visLabels)
+                    .padding(.leading, leadPad)
+                HStack(alignment: .top, spacing: gap) {
+                    weekdayGutter
+                    LEDMatrixView(
+                        matrix: ledMatrix,
+                        fixedCols: cols,
+                        heatmap: ledColumns(columns: visColumns, activity: activity)
+                    )
+                    .padding(.leading, leadPad)
+                }
+            }
+        }
+        .frame(height: panelHeight)
+    }
+
+    /// The heatmap as LED columns — one per visible week, each with a colour per
+    /// day-row: green at the day's meeting-volume intensity, or nil (off) for
+    /// empty / future days. This is the engine's resting content (and what
+    /// scrolls off/on around a message). Not dimmed — full heatmap colours.
+    private func ledColumns(columns: [[Date?]], activity: [Date: DayActivity]) -> [LEDColumn] {
+        columns.map { week in
+            LEDColumn(cells: week.map { date -> Color? in
+                guard let d = date, let a = activity[d], a.count > 0 else { return nil }
+                return fill(level(a.count))
+            })
         }
     }
 
@@ -202,6 +283,7 @@ struct MeetingHeatmapView: View {
             .fixedSize()
             .help("Recorded = when meetings happened. Transcribed = when they were transcribed.")
             legend
+            ledControls
             Spacer()
             // Refreshing / downloading status lives here now (shows/hides as
             // needed) instead of on its own row — less is more.
@@ -219,11 +301,57 @@ struct MeetingHeatmapView: View {
         }
     }
 
+    /// LED ticker controls in the header: a heatmap↔LED toggle and a settings
+    /// gear (popover). The toggle persists as the default view.
+    @ViewBuilder private var ledControls: some View {
+        HStack(spacing: 6) {
+            if ledSettings.enabled {
+                let ledOn = viewModel.heatmapLEDMode && !ledWindingDown
+                Button {
+                    hoveredDate = nil   // hover is inert in LED mode; don't pin a stale day
+                    if viewModel.heatmapLEDMode && !ledWindingDown {
+                        // Turning LED off: flip the button to its "off" look now for
+                        // instant feedback, but let the conveyor scroll back to the
+                        // resting heatmap before swapping to the static grid — no jump.
+                        ledWindingDown = true
+                        ledMatrix.returnHomeThenStop {
+                            viewModel.heatmapLEDMode = false
+                            ledWindingDown = false
+                            ledSettings.defaultView = .heatmap
+                        }
+                    } else if !viewModel.heatmapLEDMode {
+                        viewModel.heatmapLEDMode = true
+                        ledWindingDown = false
+                        ledSettings.defaultView = .led
+                    }
+                } label: {
+                    Image(systemName: ledOn ? "rectangle.grid.1x2.fill" : "lightbulb")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(ledOn ? .accentColor : .secondary)
+                .help(ledOn ? "Show the heatmap" : "Show the LED ticker")
+            }
+            Button { showLEDSettings.toggle() } label: {
+                Image(systemName: "gearshape").font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+            .help("LED ticker settings")
+            .popover(isPresented: $showLEDSettings, arrowEdge: .bottom) {
+                LEDSettingsView(settings: ledSettings)
+            }
+        }
+    }
+
     /// Always-visible readout that updates as the pointer moves over the grid.
     /// Shows the exact date for every day, including zero-meeting days.
-    private func detailLine(activity: [Date: DayActivity]) -> some View {
+    private func detailLine(activity: [Date: DayActivity], ledMode: Bool = false) -> some View {
         // Hover gives a transient preview; a clicked day stays locked. Show the
-        // hovered day if hovering, else the locked day, else a hint.
+        // hovered day if hovering, else the locked day, else a hint. In LED
+        // mode hover/click are inactive, so the hint is dropped — but the row
+        // itself always renders (fixed caption height) so toggling modes never
+        // shifts the grid below it.
         let activeDay = hoveredDate ?? viewModel.heatmapSelectedDay
         let locked = viewModel.heatmapSelectedDay
         return HStack(spacing: 8) {
@@ -234,7 +362,7 @@ struct MeetingHeatmapView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             } else {
-                Text("Hover a day for details · click to filter the list")
+                Text(ledMode ? " " : "Hover a day for details · click to filter the list")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

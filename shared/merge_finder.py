@@ -31,7 +31,9 @@ Two persistent state files cooperate:
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -73,8 +75,10 @@ _STOP = set("the a an and or but of to in on at for is are was were be been bein
 # Phrases that signal a call IS ending — sometimes without terminal
 # punctuation. Without these, "see you monday then cheers" would look
 # like a continuation just because the speaker didn't end with "."/"!"/"?".
+# Matched on word boundaries (not raw substrings — "hey" must never
+# match inside "they").
 _FAREWELL_PHRASES = (
-    "bye", "cheers", "thanks", "thank you", "see you", "see ya",
+    "bye", "bye bye", "cheers", "thanks", "thank you", "see you", "see ya",
     "talk later", "talk soon", "speak soon", "speak to you",
     "talk to you", "have a good", "have a great", "have a nice",
     "take care", "catch you later", "goodbye",
@@ -83,12 +87,26 @@ _FAREWELL_PHRASES = (
 # Phrases that signal a NEW call is starting — typically the next
 # transcript opens with a greeting. Mirror image of farewells.
 _GREETING_PHRASES = (
-    "hello", "hi,", "hi ", "hi.", "hey,", "hey ", "hey.",
+    "hello", "hi", "hey",
     "good morning", "good afternoon", "good evening",
     "morning everyone", "afternoon everyone",
     "hi everyone", "hello everyone", "hi guys", "hi all",
     "can you hear me",
 )
+
+
+def _phrase_regex(phrases: tuple[str, ...]) -> re.Pattern:
+    """Compile a word-boundary alternation for a phrase list. Longest
+    phrases first so "bye bye" wins over "bye" (harmless either way,
+    but keeps matches intuitive)."""
+    alternation = "|".join(
+        re.escape(p) for p in sorted(phrases, key=len, reverse=True)
+    )
+    return re.compile(rf"\b(?:{alternation})\b")
+
+
+_FAREWELL_RE = _phrase_regex(_FAREWELL_PHRASES)
+_GREETING_RE = _phrase_regex(_GREETING_PHRASES)
 
 
 def _ends_with_farewell(text: str) -> bool:
@@ -97,7 +115,7 @@ def _ends_with_farewell(text: str) -> bool:
     fired on things like "see you monday then cheers" purely because
     the speaker didn't end with terminal punctuation."""
     tail = " ".join(_last_words(text, 12)).lower()
-    return any(p in tail for p in _FAREWELL_PHRASES)
+    return _FAREWELL_RE.search(tail) is not None
 
 
 def _starts_with_greeting(text: str) -> bool:
@@ -105,7 +123,7 @@ def _starts_with_greeting(text: str) -> bool:
     greeting — strong evidence the recording is a new conversation,
     not a continuation."""
     head = " ".join(_first_words(text, 10)).lower()
-    return any(p in head for p in _GREETING_PHRASES)
+    return _GREETING_RE.search(head) is not None
 
 
 def _read_transcript(mp3_name: str) -> str | None:
@@ -251,9 +269,23 @@ def _load_merge_state() -> dict:
 
 
 def _save_merge_state(state: dict) -> None:
+    """Save atomically (temp file + os.replace) so a crash mid-write can't
+    leave a truncated sidecar that wipes dismissed_pairs on next load."""
     MERGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MERGE_STATE_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False),
-                                encoding="utf-8")
+    content = json.dumps(state, indent=2, ensure_ascii=False)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=MERGE_STATE_PATH.parent, prefix=MERGE_STATE_PATH.name, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, MERGE_STATE_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _pair_key(name_a: str, name_b: str) -> str:

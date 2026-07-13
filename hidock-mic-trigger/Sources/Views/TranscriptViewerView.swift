@@ -6,45 +6,207 @@ import AVFoundation
 
 class SegmentAudioPlayer: ObservableObject {
     @Published var playingSegmentId: String?
+    /// Index of the word currently being spoken in the playing segment (for the
+    /// karaoke highlight). Approximated from elapsed/duration since the diarized
+    /// segments carry no per-word timing. Only re-published when it changes, so
+    /// it doesn't re-render the transcript on every timer tick.
+    @Published var playingWordIndex: Int = 0
     private var player: AVAudioPlayer?
     private var stopTimer: Timer?
+    private var progressTimer: Timer?
+    private var playBaseline: Double = 0   // player.currentTime at the segment's start
+    private var playDuration: Double = 1
+    private var playWordCount: Int = 0
+    private var decodeProcess: Process?
+    private var tempURL: URL?
+    /// Bumped on every play()/stop() so a slow ffmpeg decode that finishes after
+    /// the user moved on doesn't start playing the wrong clip.
+    private var generation = 0
 
-    func play(audioPath: String, start: Double, end: Double, segmentId: String) {
+    /// ffmpeg locations, in preference order. Plaud recordings are Opus muxed in
+    /// Ogg but named ".mp3", which Core Audio (AVAudioPlayer) cannot decode — we
+    /// fall back to ffmpeg to extract the segment.
+    private static let ffmpegCandidates = [
+        "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg",
+    ]
+    private static var ffmpegPath: String? {
+        ffmpegCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    func play(audioPath: String, start: Double, end: Double, segmentId: String, wordCount: Int = 0) {
         stop()
-        guard let url = URL(string: "file://\(audioPath)"),
-              let player = try? AVAudioPlayer(contentsOf: url) else { return }
-        self.player = player
-        player.currentTime = start
-        player.play()
-        playingSegmentId = segmentId
-        let duration = end - start
-        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+        guard FileManager.default.fileExists(atPath: audioPath) else {
+            NSLog("SegmentAudioPlayer: audio file not found at \(audioPath)")
+            NSSound.beep()
+            return
+        }
+
+        // Fast path: real mp3/wav/m4a open directly and seek cleanly.
+        // fileURLWithPath, not URL(string: "file://…") — the latter returns nil
+        // for any path containing a space, silently breaking playback.
+        let url = URL(fileURLWithPath: audioPath)
+        if let player = try? AVAudioPlayer(contentsOf: url) {
+            self.player = player
+            player.prepareToPlay()      // without this the first play() can no-op
+            player.currentTime = max(0, start)
+            player.play()
+            playingSegmentId = segmentId
+            // Direct path plays from `start`, so the segment's t=0 is at currentTime `start`.
+            startProgressTracking(baseline: max(0, start), duration: end - start, wordCount: wordCount)
+            armStopTimer(after: end - start)
+            return
+        }
+
+        // Fallback: Core Audio couldn't open it (e.g. Opus). Use ffmpeg to
+        // decode just this segment to a temp WAV, then play that from 0.
+        decodeAndPlayViaFFmpeg(audioPath: audioPath, start: start, end: end, segmentId: segmentId, wordCount: wordCount)
+    }
+
+    /// Drive the karaoke word cursor from playback position. Publishes
+    /// `playingWordIndex` only when the word changes (a few Hz at most).
+    private func startProgressTracking(baseline: Double, duration: Double, wordCount: Int) {
+        progressTimer?.invalidate()
+        playBaseline = baseline
+        playDuration = max(0.001, duration)
+        playWordCount = wordCount
+        playingWordIndex = 0
+        guard wordCount > 0 else { return }
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self = self, let p = self.player else { return }
+            let frac = min(max((p.currentTime - self.playBaseline) / self.playDuration, 0), 1)
+            let idx = min(self.playWordCount - 1, Int(frac * Double(self.playWordCount)))
+            if idx != self.playingWordIndex { self.playingWordIndex = idx }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        progressTimer = t
+    }
+
+    private func decodeAndPlayViaFFmpeg(audioPath: String, start: Double, end: Double, segmentId: String, wordCount: Int = 0) {
+        guard let ffmpeg = Self.ffmpegPath else {
+            NSLog("SegmentAudioPlayer: cannot decode \(audioPath) and no ffmpeg found")
+            NSSound.beep()
+            return
+        }
+        let duration = max(0.1, end - start)
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hidock-seg-\(UUID().uuidString).wav")
+        tempURL = out
+
+        generation += 1
+        let gen = generation
+        playingSegmentId = segmentId   // optimistic — shows the stop icon while decoding
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ffmpeg)
+        // -ss/-t before -i = fast input seek; downmix to 16k mono (voice preview).
+        proc.arguments = [
+            "-y", "-nostdin",
+            "-ss", String(format: "%.3f", max(0, start)),
+            "-t", String(format: "%.3f", duration),
+            "-i", audioPath,
+            "-ar", "16000", "-ac", "1",
+            out.path,
+        ]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                guard let self = self, gen == self.generation else {
+                    try? FileManager.default.removeItem(at: out)   // stale — clean up
+                    return
+                }
+                self.decodeProcess = nil
+                guard p.terminationStatus == 0,
+                      let player = try? AVAudioPlayer(contentsOf: out) else {
+                    NSLog("SegmentAudioPlayer: ffmpeg decode failed for \(audioPath)")
+                    self.playingSegmentId = nil
+                    NSSound.beep()
+                    return
+                }
+                self.player = player
+                player.prepareToPlay()
+                player.play()
+                // Temp WAV holds just this segment, so it plays from t=0.
+                self.startProgressTracking(baseline: 0, duration: duration, wordCount: wordCount)
+                self.armStopTimer(after: duration)
+            }
+        }
+        do {
+            try proc.run()
+            decodeProcess = proc
+        } catch {
+            NSLog("SegmentAudioPlayer: failed to launch ffmpeg: \(error)")
+            playingSegmentId = nil
+            NSSound.beep()
+        }
+    }
+
+    private func armStopTimer(after duration: Double) {
+        stopTimer = Timer.scheduledTimer(withTimeInterval: max(0.1, duration), repeats: false) { [weak self] _ in
             self?.stop()
         }
     }
 
     func stop() {
+        generation += 1               // invalidate any in-flight decode
         player?.stop()
         player = nil
         stopTimer?.invalidate()
         stopTimer = nil
+        progressTimer?.invalidate()
+        progressTimer = nil
+        if let proc = decodeProcess, proc.isRunning { proc.terminate() }
+        decodeProcess = nil
+        if let t = tempURL { try? FileManager.default.removeItem(at: t); tempURL = nil }
         playingSegmentId = nil
+        playingWordIndex = 0
     }
 }
 
 // MARK: - Data Models
+
+/// Per-speaker provenance + review state, mirrored from the Python sidecar
+/// (`speaker_meta`). See PLAN-speaker-tagging-loop.md.
+struct SpeakerMeta: Codable {
+    /// "auto" (voice-library match) | "user" (typed/confirmed) | "unknown"
+    /// (acknowledged guest) | "generic" (untouched "Speaker N").
+    var source: String
+    var confidence: Double?
+    var verified: Bool
+}
+
+/// Margin-based voice-match result for one speaker (from the `speaker-confidence`
+/// CLI). The margin — how clearly the assigned name beats the next-best enrolled
+/// voice — is the real signal; a raw cosine looks high even when wrong.
+struct SpeakerScore: Codable {
+    var assigned: String?
+    var score: Double?          // cosine to the assigned voice (nil if not enrolled)
+    var best: String?           // closest enrolled voice overall
+    var bestScore: Double?
+    var runnerUp: String?       // best enrolled voice other than the assigned name
+    var runnerUpScore: Double?
+    var margin: Double?         // score - runnerUpScore (negative ⇒ another voice fits better)
+}
 
 struct DiarizedTranscript: Codable {
     var version: Int
     var audioFile: String
     var segments: [DiarizedSegment]
     var speakerNames: [String: String]
+    /// Provenance/review state per speaker id. Optional — legacy sidecars omit it.
+    var speakerMeta: [String: SpeakerMeta]?
+    /// Per-speaker embeddings the diarizer stored for cheap re-matching. The
+    /// viewer never reads these, but they MUST survive a save round-trip (an
+    /// explicit CodingKeys list would otherwise drop them and break `rematch`).
+    var speakerEmbeddings: [String: [Double]]?
 
     enum CodingKeys: String, CodingKey {
         case version
         case audioFile = "audio_file"
         case segments
         case speakerNames = "speaker_names"
+        case speakerMeta = "speaker_meta"
+        case speakerEmbeddings = "speaker_embeddings"
     }
 }
 
@@ -173,6 +335,8 @@ private struct WordFramesKey: PreferenceKey {
 private struct WordTokensView: View {
     let words: [String]
     let activeRange: ClosedRange<Int>?
+    /// Word currently being spoken (karaoke highlight), or nil when not playing.
+    var playingWord: Int? = nil
     let onRangeChange: (ClosedRange<Int>) -> Void
 
     @State private var wordFrames: [Int: CGRect] = [:]
@@ -187,10 +351,15 @@ private struct WordTokensView: View {
         FlowLayout(spacing: 0, lineSpacing: 1) {
             ForEach(Array(words.enumerated()), id: \.offset) { i, w in
                 let inRange = activeRange.map { $0.contains(i) } ?? false
+                let isPlaying = (i == playingWord)
                 let display = (i == words.count - 1) ? w : "\(w) "
                 Text(display)
                     .font(.body)
-                    .background(inRange ? Color.blue.opacity(0.28) : Color.clear)
+                    .foregroundColor(isPlaying ? .primary : nil)
+                    .background(
+                        inRange ? Color.blue.opacity(0.28)
+                            : (isPlaying ? Color.yellow.opacity(0.45) : Color.clear)
+                    )
                     .background(
                         GeometryReader { proxy in
                             Color.clear.preference(
@@ -231,6 +400,33 @@ struct TranscriptViewerView: View {
     @State var transcript: DiarizedTranscript
     @State var editingSpeakerId: Int? = nil
     @State var editingName: String = ""
+    /// Which pill location owns the active edit ("legend" / "verify"), so the
+    /// TextField only appears where you clicked, not on every pill for that id.
+    @State private var editingContext: String = "legend"
+    /// Tracks focus of the inline name field so clicking anywhere else in the
+    /// window commits the edit and deselects it (the field otherwise stays
+    /// active with no way to dismiss it).
+    @FocusState private var nameFieldFocused: Bool
+    /// Live per-speaker confidence (id-string → 0–1) from the background CLI:
+    /// how well each speaker's voice matches the enrolled voice of its name.
+    @State private var liveConfidence: [String: SpeakerScore] = [:]
+    /// A rename that collided with another speaker's name — pending the user's
+    /// choice to merge the two speakers or cancel.
+    @State private var pendingMerge: PendingMerge?
+    /// When set, the segment list is narrowed to just this speaker so you can
+    /// listen through their turns and check the voice is really theirs.
+    @State private var speakerFilter: Int?
+    /// Enrolled voice-library names, for the rename autocomplete. Picking one
+    /// maps the speaker to that exact enrolled voice (so confirming reinforces
+    /// the same centroid instead of fragmenting into near-duplicate names).
+    @State private var libraryNames: [String] = []
+
+    struct PendingMerge: Identifiable {
+        let id = UUID()
+        let from: Int      // the speaker just renamed
+        let to: Int        // the existing speaker that already has this name
+        let name: String
+    }
     @State var rediarizeNSpeakers: Int = 2
     @State var transcriptHistory: [DiarizedTranscript] = []
     /// Layer 1 v2 — currently active mid-segment word-range selection.
@@ -247,6 +443,20 @@ struct TranscriptViewerView: View {
     /// a user-edited speaker name as an anchor centroid. Optional so
     /// older call-sites (rediarize-only flow) keep compiling.
     var onReclusterWithLabels: ((String) -> Void)?
+    /// Re-match still-generic speakers in THIS transcript against the voice
+    /// library (`rematch` verb). Optional so older call-sites keep compiling.
+    var onRematch: ((String) -> Void)?
+    /// Enrol a speaker from the diarized sidecar's stored centroid (name,
+    /// jsonPath, speakerId) — a far better voiceprint than one short segment.
+    /// Falls back to onEnrollSpeaker (audio) when nil.
+    var onEnrollSpeakerFromDiarized: ((String, String, Int) -> Void)?
+    /// Score each speaker's voice against its assigned name in the library
+    /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
+    /// so older call-sites keep compiling.
+    var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
+    /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
+    /// autocomplete). Optional so older call-sites keep compiling.
+    var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -324,6 +534,8 @@ struct TranscriptViewerView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
+                // Document-level actions only. Speaker tools live in their own
+                // strip below so this bar doesn't get clunky.
                 if !transcriptHistory.isEmpty {
                     Button {
                         undoMerge()
@@ -333,62 +545,41 @@ struct TranscriptViewerView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .keyboardShortcut("z", modifiers: .command)
+                    .help("Undo the last speaker change (merge / re-assign).")
                 }
 
-                if onRediarize != nil {
-                    Stepper("Speakers: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
-                        .font(.caption)
-                        .frame(width: 140)
-
-                    Button {
-                        onRediarize?(filePath, rediarizeNSpeakers)
-                    } label: {
-                        Label("Re-diarize", systemImage: "person.2.wave.2")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                // Layer 2 — re-cluster the rest of the transcript using
-                // the segments the user has already named as anchors.
-                // Only useful when at least one speaker has been
-                // renamed away from the default "Speaker N", so we
-                // hide the button otherwise.
-                if onReclusterWithLabels != nil, hasUserNamedSpeakers {
-                    Button {
-                        onReclusterWithLabels?(filePath)
-                    } label: {
-                        Label("Re-cluster from my labels", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Use the speakers you've named as anchors and re-assign every other segment to its closest match. The pieces of the conversation you've already corrected stay put.")
-                }
-
+                // Icon-only so they always fit the (narrow) pane.
                 Button {
                     copyAllToClipboard()
                 } label: {
-                    Label("Copy All", systemImage: "doc.on.doc")
+                    Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
+                .help("Copy All — the whole transcript (speaker names + timestamps) to the clipboard.")
 
                 Button {
-                    // Reveal the markdown transcript file in Finder
                     let mdPath = filePath.replacingOccurrences(of: "_diarized.json", with: ".md")
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: mdPath)])
                 } label: {
-                    Label("Show File", systemImage: "folder")
+                    Image(systemName: "folder")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Show File — reveal the transcript's markdown file in Finder.")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background(.ultraThinMaterial)
 
             Divider()
+
+            // Speaker tools — grouped so the top bar stays clean.
+            if hasSpeakers {
+                speakerToolsBar
+                Divider()
+            }
 
             // Stats header
             if hasSpeakers && !speakerStats.isEmpty {
@@ -403,7 +594,11 @@ struct TranscriptViewerView: View {
                         ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
                             speakerPill(speakerId: speakerId, interactive: true)
                                 .contextMenu {
+                                    Button(speakerFilter == speakerId ? "Show all speakers" : "Show only this speaker") {
+                                        speakerFilter = (speakerFilter == speakerId) ? nil : speakerId
+                                    }
                                     if uniqueSpeakerIds.count > 1 {
+                                        Divider()
                                         ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
                                             Button("Merge into \(speakerName(for: targetId))") {
                                                 mapSpeaker(from: speakerId, to: targetId)
@@ -420,18 +615,72 @@ struct TranscriptViewerView: View {
                 Divider()
             }
 
-            // Segments list
+            // Verify speakers — auto-matched voices to confirm/correct so the
+            // meeting counts as reviewed and the voice library keeps improving.
+            if needsVerification {
+                speakerVerifyPanel
+                Divider()
+            }
+
+            // "Listening to one speaker" banner — click Show all to clear.
+            if let f = speakerFilter {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.circle.fill")
+                        .foregroundColor(colorForSpeaker(f))
+                    Text("Showing only \(speakerName(for: f)) — play through to check the voice")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Show all") { speakerFilter = nil }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(colorForSpeaker(f).opacity(0.08))
+                Divider()
+            }
+
+            // Segments list (narrowed to one speaker when a filter is active).
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
-                        segmentRow(segmentIndex: idx, segment: segment)
+                        if speakerFilter == nil || segment.speakerId == speakerFilter {
+                            segmentRow(segmentIndex: idx, segment: segment)
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
             }
         }
-        .frame(minWidth: 600, minHeight: 400)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
+        .onChange(of: nameFieldFocused) { focused in
+            // Clicking anywhere else in the window resigns the field's focus —
+            // commit the pending edit so it doesn't stay stuck in edit mode.
+            // Deferred so a click on an autocomplete suggestion (which also
+            // resigns focus) can commit ITS name first and clear editing — the
+            // deferred block then sees editing cleared and no-ops, instead of
+            // committing the half-typed prefix.
+            if !focused {
+                let id = editingSpeakerId
+                DispatchQueue.main.async {
+                    if let id = id, editingSpeakerId == id {
+                        commitRename(speakerId: id)
+                    }
+                }
+            }
+        }
+        .onAppear { refreshConfidence(); refreshLibraryNames() }
+        .confirmationDialog(
+            "Merge speakers?",
+            isPresented: Binding(get: { pendingMerge != nil }, set: { if !$0 { pendingMerge = nil } }),
+            presenting: pendingMerge
+        ) { merge in
+            Button("Merge into one speaker") { confirmMerge(merge); pendingMerge = nil }
+            Button("Cancel", role: .cancel) { pendingMerge = nil }
+        } message: { merge in
+            Text("“\(merge.name)” is already assigned to \(speakerName(for: merge.to)). Two speakers can't share a name — merge them into one person? This reassigns \(speakerName(for: merge.from))'s segments to \(merge.name).")
+        }
     }
 
     // MARK: - Inline word-range split (Layer 1 v2)
@@ -521,9 +770,12 @@ struct TranscriptViewerView: View {
         guard idx >= 0, idx < transcript.segments.count else { return }
         let segment = transcript.segments[idx]
         let words = segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        let startWord = wordRange.lowerBound
-        let endWord = wordRange.upperBound
-        guard startWord >= 0, endWord < words.count, startWord <= endWord else { return }
+        guard !words.isEmpty else { return }
+        // Clamp to valid indices rather than bailing — a selection that runs to
+        // the very end of a block could produce an out-of-range upper bound,
+        // which silently did nothing when the user clicked a speaker.
+        let startWord = max(0, min(wordRange.lowerBound, words.count - 1))
+        let endWord = max(startWord, min(wordRange.upperBound, words.count - 1))
 
         transcriptHistory.append(transcript)
 
@@ -575,41 +827,95 @@ struct TranscriptViewerView: View {
         saveTranscript()
     }
 
+    // MARK: - Speaker tools
+
+    /// Secondary strip grouping the speaker-fixing actions, each shown only when
+    /// it applies, with plain-language tooltips.
+    private var speakerToolsBar: some View {
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(spacing: 8) {
+            Text("Speakers")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+
+            if onRematch != nil {
+                Button {
+                    onRematch?(filePath)
+                } label: {
+                    Label("Rematch Speakers", systemImage: "sparkle.magnifyingglass")
+                }
+                .fixedSize()
+                .help("Fill in any unnamed speakers by matching their voice against your saved Voice Library. Won't touch ones you've already confirmed.")
+            }
+
+            if onReclusterWithLabels != nil, hasUserNamedSpeakers {
+                Button {
+                    onReclusterWithLabels?(filePath)
+                } label: {
+                    Label("Reassign Speakers", systemImage: "person.crop.circle.badge.checkmark")
+                }
+                .fixedSize()
+                .help("Use the speakers you've named as anchors and re-assign the still-unnamed bits to whichever of them they sound closest to. This meeting only — nothing you've corrected moves.")
+            }
+
+            if onRediarize != nil {
+                Divider().frame(height: 14)
+                Stepper("Count: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
+                    .font(.caption)
+                    .frame(width: 120)
+                    .help("How many speakers to detect when re-detecting.")
+                Button {
+                    onRediarize?(filePath, rediarizeNSpeakers)
+                } label: {
+                    Label("Detect Speakers", systemImage: "person.2.wave.2")
+                }
+                .fixedSize()
+                .help("Start over — detect the speakers again from scratch (using the count on the left). Discards the current split and any names.")
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Color.secondary.opacity(0.04))
+    }
+
     // MARK: - Stats Header
 
     private var statsHeader: some View {
-        HStack(spacing: 12) {
+        // Compact: duration + a full-width talk-time proportion bar + speaker
+        // count. (The old per-speaker "dot + name %/wpm" list overflowed into a
+        // meaningless row of dots when a meeting had many detected speakers.)
+        let totalTalk = speakerStats.reduce(0.0) { $0 + $1.talkTime }
+        // Duration + speaker count take their intrinsic width FIRST (fixedSize),
+        // then the proportion bar fills whatever's left — GeometryReader is
+        // greedy, so if it came first it swallowed the row and the count
+        // overlapped it.
+        return HStack(spacing: 10) {
             Text(formatTime(seconds: totalDuration))
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
+                .fixedSize()
 
-            // Talk time split per speaker — visual bars
-            let totalTalk = speakerStats.reduce(0.0) { $0 + $1.talkTime }
-            ForEach(speakerStats, id: \.speakerId) { stat in
-                let pct = totalTalk > 0 ? stat.talkTime / totalTalk * 100 : 0
-                let color = colorForSpeaker(stat.speakerId)
-                let wpm = stat.talkTime > 0 ? Int(Double(stat.wordCount) / (stat.talkTime / 60)) : 0
-                HStack(spacing: 4) {
-                    Circle().fill(color).frame(width: 6, height: 6)
-                    Text("\(speakerName(for: stat.speakerId)) \(String(format: "%.0f%%", pct))  \(wpm)wpm")
-                        .font(.caption)
-                }
-            }
+            Text("\(speakerStats.count) speaker\(speakerStats.count == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize()
 
-            // Stacked bar showing the split visually
             GeometryReader { geo in
                 HStack(spacing: 1) {
                     ForEach(speakerStats, id: \.speakerId) { stat in
                         let frac = totalTalk > 0 ? stat.talkTime / totalTalk : 0
                         RoundedRectangle(cornerRadius: 2)
-                            .fill(colorForSpeaker(stat.speakerId).opacity(0.7))
-                            .frame(width: max(2, geo.size.width * CGFloat(frac)))
+                            .fill(colorForSpeaker(stat.speakerId).opacity(0.75))
+                            .frame(width: max(1, geo.size.width * CGFloat(frac)))
                     }
                 }
             }
-            .frame(width: 120, height: 10)
-
-            Spacer()
+            .frame(height: 8)
+            .help("Talk-time split by speaker")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
@@ -617,12 +923,129 @@ struct TranscriptViewerView: View {
 
     // MARK: - Subviews
 
+    private var speakerVerifyPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.seal")
+                    .foregroundColor(.blue)
+                Text("Verify speakers")
+                    .font(.caption.weight(.semibold))
+                Text("Confirm each voice to lock it in — this also teaches your voice library.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            // Bound the height and scroll — with many speakers this used to grow
+            // unbounded and push the transcript off-screen.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(uniqueSpeakerIds, id: \.self) { id in
+                        speakerVerifyRow(id: id)
+                    }
+                }
+            }
+            .frame(maxHeight: uniqueSpeakerIds.count > 4 ? 170 : .infinity)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.blue.opacity(0.04))
+    }
+
     @ViewBuilder
-    private func speakerPill(speakerId: Int, interactive: Bool) -> some View {
+    private func speakerVerifyRow(id: Int) -> some View {
+        let name = speakerName(for: id)
+        let prov = provenance(for: id)
+        let verified = speakerMeta(for: id)?.verified ?? false
+
+        VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 8) {
+            speakerPill(speakerId: id, interactive: true, context: "verify")   // tap to rename/correct
+
+            Text(prov.text)
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(prov.color.opacity(0.15), in: Capsule())
+                .foregroundColor(prov.color)
+
+            // Live voice-match confidence against the enrolled voice of this name.
+            if let badge = confidenceBadge(for: id) {
+                Text(badge.text)
+                    .font(.caption2.weight(.medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(badge.color.opacity(0.15), in: Capsule())
+                    .foregroundColor(badge.color)
+                    .help("How closely this speaker's voice matches the enrolled voice for \(speakerName(for: id)).")
+            }
+
+            Spacer()
+
+            // Listen to just this speaker to check the voice is really theirs.
+            Button {
+                speakerFilter = (speakerFilter == id) ? nil : id
+            } label: {
+                Image(systemName: speakerFilter == id ? "waveform.circle.fill" : "waveform.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(speakerFilter == id ? .accentColor : .secondary)
+            .help("Show only \(speakerName(for: id))'s segments so you can play through and check the voice.")
+
+            if let partner = duplicatePartner(for: id) {
+                // Same name as an earlier speaker — offer to merge them into one.
+                Button {
+                    pendingMerge = PendingMerge(from: id, to: partner, name: speakerName(for: id))
+                } label: {
+                    Label("Merge duplicate", systemImage: "arrow.triangle.merge")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.orange)
+                .help("This name is assigned to two speakers — merge them into one person.")
+            } else if verified {
+                Label("Verified", systemImage: "checkmark.seal.fill")
+                    .font(.caption2)
+                    .foregroundColor(.green)
+            } else {
+                if !isGenericName(name) {
+                    Button {
+                        confirmSpeaker(id)
+                    } label: {
+                        Label("Confirm", systemImage: "checkmark")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("Accept this name, lock it in, and reinforce it in your voice library.")
+                }
+                Button {
+                    markUnknown(id)
+                } label: {
+                    Text("Mark unknown")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Acknowledge an unknown/guest speaker — counts as reviewed, not added to your voice library. Rename via the pill if you know who it is.")
+            }
+        }
+
+        // Autocomplete: while renaming this speaker, offer existing enrolled
+        // voices to map onto (keeps names canonical → better matching).
+        if editingSpeakerId == id && editingContext == "verify" {
+            nameSuggestions(for: id)
+        }
+        }
+    }
+
+    @ViewBuilder
+    private func speakerPill(speakerId: Int, interactive: Bool, context: String = "legend") -> some View {
         let name = speakerName(for: speakerId)
         let color = colorForSpeaker(speakerId)
 
-        if editingSpeakerId == speakerId {
+        // Only the pill in the SAME place you clicked shows the editor — without
+        // the context check, editingSpeakerId matched every pill for that
+        // speaker (legend + each transcript row), so the field appeared down in
+        // the transcript instead of where you tapped.
+        if editingSpeakerId == speakerId && editingContext == context {
             HStack(spacing: 4) {
                 Circle()
                     .fill(color)
@@ -633,6 +1056,8 @@ struct TranscriptViewerView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 120)
                 .controlSize(.small)
+                .focused($nameFieldFocused)
+                .onAppear { nameFieldFocused = true }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -642,7 +1067,9 @@ struct TranscriptViewerView: View {
             Button {
                 if interactive {
                     editingSpeakerId = speakerId
+                    editingContext = context
                     editingName = speakerName(for: speakerId)
+                    nameFieldFocused = true
                 }
             } label: {
                 HStack(spacing: 4) {
@@ -674,7 +1101,7 @@ struct TranscriptViewerView: View {
                     if audioPlayer.playingSegmentId == segment.id {
                         audioPlayer.stop()
                     } else {
-                        audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id)
+                        audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id, wordCount: words.count)
                     }
                 } label: {
                     Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
@@ -689,12 +1116,15 @@ struct TranscriptViewerView: View {
                     .frame(width: 50, alignment: .leading)
 
                 if hasSpeakers {
-                    speakerPill(speakerId: segment.speakerId, interactive: true)
+                    // Editable here too — a unique per-row context means the
+                    // editor opens on THIS pill, not the legend or another row.
+                    speakerPill(speakerId: segment.speakerId, interactive: true, context: "segment-\(idx)")
                 }
 
                 WordTokensView(
                     words: words,
                     activeRange: activeRange,
+                    playingWord: audioPlayer.playingSegmentId == segment.id ? audioPlayer.playingWordIndex : nil,
                     onRangeChange: { newRange in
                         selection = SegmentSelection(segmentIndex: idx, range: newRange)
                     }
@@ -714,20 +1144,232 @@ struct TranscriptViewerView: View {
 
     private func commitRename(speakerId: Int) {
         let trimmed = editingName.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
+        // Empty, or unchanged from the current name → just close the editor
+        // (no save/enroll). Unchanged matters because clicking off to deselect
+        // routes through here and shouldn't re-enroll the same voice.
+        guard !trimmed.isEmpty, trimmed != speakerName(for: speakerId) else {
             editingSpeakerId = nil
+            nameFieldFocused = false
+            return
+        }
+
+        // Two speakers can't share a name — that's almost always one person
+        // split into two clusters. If the typed name already belongs to another
+        // speaker, offer to merge them instead of creating a duplicate.
+        if let otherId = uniqueSpeakerIds.first(where: {
+            $0 != speakerId && speakerName(for: $0).caseInsensitiveCompare(trimmed) == .orderedSame
+        }) {
+            editingSpeakerId = nil
+            nameFieldFocused = false
+            pendingMerge = PendingMerge(from: speakerId, to: otherId, name: trimmed)
             return
         }
 
         transcript.speakerNames["\(speakerId)"] = trimmed
         editingSpeakerId = nil
+        nameFieldFocused = false
 
-        // Find a segment from this speaker to use for enrollment
-        if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
-            onEnrollSpeaker(trimmed, audioPath, segment.start, segment.end)
-        }
+        // Typing a name IS confirming it — mark verified/user so the meeting
+        // counts as reviewed and stops nagging.
+        setMeta(speakerId, source: "user", verified: true, confidence: nil)
+        enrollConfirmed(trimmed, speakerId: speakerId)
 
         saveTranscript()
+        refreshConfidence()
+        refreshLibraryNames()
+    }
+
+    // MARK: - Speaker verification (provenance + confirm loop)
+
+    /// True for an untouched "Speaker N" label.
+    private func isGenericName(_ name: String) -> Bool {
+        name.range(of: #"^Speaker \d+$"#, options: .regularExpression) != nil
+    }
+
+    private func speakerMeta(for id: Int) -> SpeakerMeta? {
+        transcript.speakerMeta?["\(id)"]
+    }
+
+    /// Enrol a confirmed speaker into the voice library. Prefers the diarizer's
+    /// stored centroid (robust, multi-segment) over one short audio segment.
+    private func enrollConfirmed(_ name: String, speakerId: Int) {
+        if let fromDiarized = onEnrollSpeakerFromDiarized {
+            fromDiarized(name, filePath, speakerId)
+        } else if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
+            onEnrollSpeaker(name, audioPath, segment.start, segment.end)
+        }
+    }
+
+    private func setMeta(_ id: Int, source: String, verified: Bool, confidence: Double?) {
+        var m = transcript.speakerMeta ?? [:]
+        m["\(id)"] = SpeakerMeta(source: source, confidence: confidence, verified: verified)
+        transcript.speakerMeta = m
+    }
+
+    /// The provenance chip shown next to each speaker in the verify panel.
+    private func provenance(for id: Int) -> (text: String, color: Color) {
+        let name = speakerName(for: id)
+        let m = speakerMeta(for: id)
+        let verified = m?.verified ?? false
+        // Legacy sidecars have no meta — infer from the name.
+        let source = m?.source ?? (isGenericName(name) ? "generic" : "auto")
+
+        // Source word only — the numeric confidence lives in the separate
+        // "match NN%" badge, so we don't show the same percentage twice.
+        if verified {
+            return source == "unknown" ? ("unknown", .secondary) : ("confirmed", .green)
+        }
+        switch source {
+        case "auto":
+            return ("auto", .blue)
+        case "unknown":
+            return ("unknown", .secondary)
+        default:
+            return isGenericName(name) ? ("unnamed", .orange) : ("auto", .blue)
+        }
+    }
+
+    /// Any multi-speaker meeting with an unverified speaker still to review, or
+    /// one where two speakers share a name (a duplicate to merge).
+    private var needsVerification: Bool {
+        guard uniqueSpeakerIds.count > 1 else { return false }
+        if hasDuplicateNames { return true }
+        return uniqueSpeakerIds.contains { !(speakerMeta(for: $0)?.verified ?? false) }
+    }
+
+    /// True when a real (non-generic) name is assigned to more than one speaker —
+    /// e.g. the auto-matcher mapped one person's two clusters to the same voice.
+    private var hasDuplicateNames: Bool {
+        let named = uniqueSpeakerIds
+            .map { speakerName(for: $0).lowercased() }
+            .filter { !isGenericName($0) }
+        return Set(named).count != named.count
+    }
+
+    /// The earliest OTHER speaker that shares this speaker's (non-generic) name,
+    /// if any. Returned only for the later of the pair so a "merge" affordance
+    /// shows once, and the merge folds the later speaker into the earlier one.
+    private func duplicatePartner(for id: Int) -> Int? {
+        let name = speakerName(for: id)
+        guard !isGenericName(name) else { return nil }
+        return uniqueSpeakerIds.first {
+            $0 < id && speakerName(for: $0).caseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    /// Confirm the current (auto/typed) name — lock it in and reinforce the
+    /// voice library so future meetings match this voice better.
+    private func confirmSpeaker(_ id: Int) {
+        let name = speakerName(for: id)
+        guard !isGenericName(name) else { return }   // nothing to confirm without a name
+        let existingSource = speakerMeta(for: id)?.source
+        setMeta(id, source: existingSource == "user" ? "user" : "auto",
+                verified: true, confidence: speakerMeta(for: id)?.confidence)
+        enrollConfirmed(name, speakerId: id)
+        saveTranscript()
+        refreshConfidence()
+        refreshLibraryNames()
+    }
+
+    /// Acknowledge a speaker the user genuinely can't name — counts as reviewed
+    /// but is NOT enrolled into the voice library.
+    private func markUnknown(_ id: Int) {
+        setMeta(id, source: "unknown", verified: true, confidence: nil)
+        saveTranscript()
+    }
+
+    /// Merge the just-renamed speaker into the existing speaker that already has
+    /// that name (they're the same person split across two clusters).
+    private func confirmMerge(_ merge: PendingMerge) {
+        mapSpeaker(from: merge.from, to: merge.to)   // reassigns segments + saves
+        // The surviving speaker now carries a confirmed, user-set identity.
+        setMeta(merge.to, source: "user", verified: true, confidence: nil)
+        enrollConfirmed(merge.name, speakerId: merge.to)
+        saveTranscript()
+        refreshConfidence()
+        refreshLibraryNames()
+    }
+
+    /// Ask the background CLI to score each speaker's voice against its assigned
+    /// name in the voice library, and cache the result for the verify chips.
+    private func refreshConfidence() {
+        onScoreSpeakers?(filePath) { scores in
+            self.liveConfidence = scores
+        }
+    }
+
+    /// Load the enrolled voice names for the rename autocomplete.
+    private func refreshLibraryNames() {
+        onListVoiceNames?() { names in self.libraryNames = names }
+    }
+
+    /// Autocomplete suggestions for the speaker currently being renamed: enrolled
+    /// voices matching what's typed. Picking one maps to that exact voice.
+    @ViewBuilder
+    private func nameSuggestions(for id: Int) -> some View {
+        let q = editingName.trimmingCharacters(in: .whitespaces).lowercased()
+        let current = speakerName(for: id).lowercased()
+        let matches = libraryNames
+            .filter { q.isEmpty || $0.lowercased().contains(q) }
+            .filter { $0.lowercased() != current }
+            .prefix(6)
+        if !matches.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Map to an existing voice")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                ForEach(Array(matches), id: \.self) { name in
+                    Button {
+                        editingName = name
+                        commitRename(speakerId: id)   // synchronous → maps to this exact voice
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "person.crop.circle.fill.badge.checkmark")
+                                .foregroundColor(.accentColor)
+                            Text(name).font(.caption)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 2)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+            .padding(.leading, 20)
+            .frame(maxWidth: 280, alignment: .leading)
+        }
+    }
+
+    /// A voice-match badge based on the MARGIN over other enrolled voices, not a
+    /// raw cosine (which looks high even when the match is wrong). Flags the case
+    /// the user hit — another enrolled voice fits better than the assigned name.
+    private func confidenceBadge(for id: Int) -> (text: String, color: Color)? {
+        guard let s = liveConfidence["\(id)"] else { return nil }
+        // Assigned name isn't enrolled yet — hint at the closest known voice.
+        guard let assignedScore = s.score else {
+            if let best = s.best { return ("sounds like \(best)", .secondary) }
+            return nil
+        }
+        // Another enrolled voice matches better than the assigned name → suspect.
+        if let best = s.best, best != s.assigned,
+           let bestScore = s.bestScore, bestScore > assignedScore + 0.02 {
+            return ("looks more like \(best)", .red)
+        }
+        // Assigned IS the closest — how clearly does it beat the runner-up?
+        guard let margin = s.margin else {
+            return ("only voice enrolled", .secondary)   // nothing to compare against
+        }
+        if margin >= 0.08 { return ("clear match", .green) }
+        if let ru = s.runnerUp {
+            return margin >= 0.03 ? ("close vs \(ru)", .orange) : ("ambiguous vs \(ru)", .red)
+        }
+        return ("weak match", .orange)
     }
 
     private func copyAllToClipboard() {
@@ -766,19 +1408,11 @@ struct TranscriptViewerView: View {
         // Remove the old speaker name
         transcript.speakerNames.removeValue(forKey: "\(sourceId)")
 
-        // Re-merge consecutive same-speaker segments
-        var merged: [DiarizedSegment] = []
-        for seg in transcript.segments {
-            if let last = merged.last, last.speakerId == seg.speakerId {
-                var updated = merged.removeLast()
-                updated.text += " " + seg.text
-                // Can't mutate end directly on the struct — rebuild
-                merged.append(DiarizedSegment(start: updated.start, end: seg.end, speakerId: updated.speakerId, text: updated.text))
-            } else {
-                merged.append(seg)
-            }
-        }
-        transcript.segments = merged
+        // NOTE: deliberately DON'T concatenate consecutive same-speaker segments
+        // here. The old re-merge glued every adjacent turn into one unbounded
+        // block (the diarizer caps block length; this didn't), which turned a
+        // clean transcript into a wall of text and broke word-range selection.
+        // Leaving the segments as-is keeps the readable per-turn blocks.
 
         saveTranscript()
     }

@@ -1,6 +1,10 @@
 import SwiftUI
 import Combine
 
+/// Whether the people filter requires a meeting to contain ANY or ALL of the
+/// selected people.
+enum PeopleFilterMode: String { case any, all }
+
 final class HiDockViewModel: ObservableObject {
     // MARK: - Mic Trigger State
     @Published var triggerRunning = false
@@ -23,6 +27,11 @@ final class HiDockViewModel: ObservableObject {
     /// replug cycle did in fact bounce the trigger — useful when
     /// notifications get coalesced or missed by macOS.
     @Published var triggerLastStartedAt: Date?
+    /// When the HiDock became connected (uptime anchor). The Mic Trigger row
+    /// ticks its own uptime label from this via a local TimelineView, so the
+    /// per-second update never touches shared view-model state (which would
+    /// re-render the whole window). Changes only on connect/disconnect.
+    @Published var triggerConnectedSince: Date?
     @Published var selectedMicName: String?
     @Published var autoStartOnLaunch = true
     @Published var availableMics: [String] = []
@@ -43,20 +52,89 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncStatusLevel: StatusLevel = .secondary
     @Published var syncOutputFolder: String?
     @Published var syncTranscriptFolder: String?
-    @Published var syncEntries: [HiDockSyncRecordingEntry] = []
+    @Published var syncEntries: [HiDockSyncRecordingEntry] = [] { didSet { markDerivedDirty() } }
     @Published var syncCheckedRecordings: Set<String> = []
     @Published var syncAutoDownload = false
     @Published var syncAutoTranscribe = false
     @Published var syncAutoSummarise = false
+    /// How often to poll paired Plaud accounts for new recordings (seconds).
+    /// 0 = off. Plaud is an API, so this is the only thing that surfaces new
+    /// recordings on it. Changed via the device manager; applied by AppDelegate.
+    @Published var plaudPollIntervalSeconds: Double = 120
+    var onSetPlaudPollInterval: (Double) -> Void = { _ in }
+    /// True when at least one paired device is a Plaud account (gates the
+    /// poll-interval control).
+    var hasPlaudAccount: Bool { syncPairedDevices.contains { $0.deviceType == .plaud } }
     /// Whether the right-hand embedded CLI pane is shown. Toggled by the
     /// bottom-bar "CLI" button; auto-set true when an Ask Claude Code or a
     /// summarise run starts so the user sees the activity.
-    @Published var cliPaneVisible = false
+    @Published var cliPaneVisible = false { didSet { if cliPaneVisible { activeDetailTabId = "cli" } } }
     /// Shared embedded-terminal controller — the SwiftUI pane displays it,
-    /// AppDelegate drives it (runs Ask Claude Code, feeds summarise activity).
+    /// AppDelegate drives it (interactive auth + template authoring).
     let terminalController = TerminalPaneController()
-    @Published var mergeGroups: [MergeGroup] = []
-    @Published var expandedMergeGroups: Set<String> = []
+
+    // MARK: - Right-hand detail pane tabs
+    // Views that used to be separate windows (transcripts, summaries, Voice
+    // Library, Device Manager, …) are hosted here as tabs alongside the CLI, so
+    // several meetings can be open at once. AppDelegate builds the content.
+    struct DetailTab: Identifiable {
+        let id: String        // stable per subject → re-opening focuses the same tab
+        var title: String
+        let icon: String
+        let content: AnyView
+    }
+    @Published var detailTabs: [DetailTab] = []
+    /// Active tab id, or "cli" for the CLI pane.
+    @Published var activeDetailTabId: String = "cli"
+    /// The right pane is shown when the CLI or any hosted tab is present.
+    var detailPaneVisible: Bool { cliPaneVisible || !detailTabs.isEmpty }
+
+    /// Open (or focus, if already open) a hosted tab.
+    func showDetailTab(_ tab: DetailTab) {
+        if let i = detailTabs.firstIndex(where: { $0.id == tab.id }) {
+            detailTabs[i] = tab   // refresh content/title
+        } else {
+            detailTabs.append(tab)
+        }
+        activeDetailTabId = tab.id
+    }
+
+    func closeDetailTab(_ id: String) {
+        detailTabs.removeAll { $0.id == id }
+        if activeDetailTabId == id {
+            activeDetailTabId = detailTabs.last?.id ?? "cli"
+        }
+    }
+
+    /// What the right-hand CLI pane currently shows.
+    /// - `.summary`: live formatted readout of a summarise/reclassify run
+    /// - `.chat`: conversational Ask AI (formatted, multi-turn)
+    /// - `.terminal`: raw SwiftTerm shell (auth, template authoring, power use)
+    enum CLIPaneMode { case summary, chat, terminal }
+    @Published var cliPaneMode: CLIPaneMode = .terminal
+    /// Formatted readout for the auto/selected/reclassify summarise flow.
+    let summaryTranscript = AgentTranscript()
+    /// Formatted conversation for Ask AI.
+    let chatTranscript = AgentTranscript()
+    /// Title shown above the chat pane (e.g. the recording name).
+    @Published var chatTitle: String = "Ask AI"
+    /// True while a chat turn is in flight (disables the input box / Send).
+    @Published var chatRunning = false
+    /// User submitted a chat follow-up — AppDelegate runs the next turn.
+    var onSendChat: (String) -> Void = { _ in }
+    /// Open the raw terminal pane (for `claude auth login` / power use).
+    var onOpenRawTerminal: () -> Void = { }
+
+    // MARK: LED ticker
+    /// Persisted LED-ticker settings (shared with the settings popover).
+    let ledSettings = LEDSettings()
+    /// The LED matrix engine — driven by app events, rendered over the heatmap.
+    lazy var ledMatrix = LEDMatrix(settings: ledSettings)
+    /// Runtime heatmap ↔ LED toggle (seeded from the persisted default view).
+    @Published var heatmapLEDMode: Bool =
+        (UserDefaults.standard.string(forKey: "led.defaultView") == "led")
+    @Published var mergeGroups: [MergeGroup] = [] { didSet { markDerivedDirty() } }
+    @Published var expandedMergeGroups: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var syncBusy = false
     @Published var syncDownloading = false
     @Published var syncDownloadProgress: String?
@@ -66,15 +144,40 @@ final class HiDockViewModel: ObservableObject {
     /// recordings table can paint that one row "Downloading" (yellow)
     /// while the rest of the pending batch stays "On device".
     @Published var currentlyDownloadingName: String?
-    @Published var syncSortKey: String = "created"
-    @Published var syncSortAscending: Bool = false
-    @Published var syncFilterDeviceId: String?
+    @Published var syncSortKey: String = "created" { didSet { markDerivedDirty() } }
+    @Published var syncSortAscending: Bool = false { didSet { markDerivedDirty() } }
+    @Published var syncFilterDeviceId: String? { didSet { markDerivedDirty() } }
     /// Pipeline-stage filter for the recordings table. Defaults to
     /// `.all`. Combined with `syncFilterDeviceId` (AND) and the
     /// user's sort key inside `visibleEntries`.
     /// Multi-select status filter (stackable, like the Hide menu). Empty = show
     /// all. Entries matching ANY selected status pass (OR semantics).
-    @Published var statusFilters: Set<SyncStatusFilter> = []
+    @Published var statusFilters: Set<SyncStatusFilter> = [] { didSet { markDerivedDirty() } }
+
+    /// recording name → the named people in that meeting (from the diarized
+    /// sidecars, refreshed alongside transcription state). Drives the people
+    /// filter + the Voice Library "# meetings" count.
+    /// True during the initial launch load (cache read) so the list can show a
+    /// spinner instead of a blank table until the first combined paint lands.
+    @Published var recordingsLoading = false
+    @Published var meetingPeople: [String: Set<String>] = [:] { didSet { markDerivedDirty() } }
+    /// Active people filter (empty = off). Combined AND with device/status/day.
+    @Published var syncFilterPeople: Set<String> = [] { didSet { markDerivedDirty() } }
+    /// Whether a meeting must contain ANY or ALL of the filtered people.
+    @Published var syncPeopleFilterMode: PeopleFilterMode = .any { didSet { markDerivedDirty() } }
+
+    /// Every named person seen across meetings, sorted — for the filter menu.
+    var allPeople: [String] {
+        Array(Set(meetingPeople.values.flatMap { $0 })).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+    /// person name → number of meetings they appear in.
+    var personMeetingCounts: [String: Int] {
+        var counts: [String: Int] = [:]
+        for people in meetingPeople.values {
+            for p in people { counts[p, default: 0] += 1 }
+        }
+        return counts
+    }
 
     /// Whether an entry matches a given status filter.
     func matchesStatusFilter(_ e: HiDockSyncRecordingEntry, _ f: SyncStatusFilter) -> Bool {
@@ -102,14 +205,17 @@ final class HiDockViewModel: ObservableObject {
     }
     /// Optional filter by summary classification type (e.g. "Brainstorming").
     /// nil = all types. AND-ed with the status + device filters.
-    @Published var summaryTypeFilter: String? = nil
+    @Published var summaryTypeFilter: String? = nil { didSet { markDerivedDirty() } }
     /// Statuses the user has chosen to hide via the multiselect "Hide" menu.
     /// Values are statusText strings (see `hideableStatuses`). Sticky across
     /// launches. A hidden status is still shown if the user explicitly picks it
     /// in the Filter dropdown (they clearly want to see it then).
     @Published var hiddenStatuses: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "hidockHiddenStatuses") ?? []) {
-        didSet { UserDefaults.standard.set(Array(hiddenStatuses), forKey: "hidockHiddenStatuses") }
+        didSet {
+            UserDefaults.standard.set(Array(hiddenStatuses), forKey: "hidockHiddenStatuses")
+            markDerivedDirty()
+        }
     }
 
     /// The statuses the "Hide" menu offers — the user-driven "already actioned"
@@ -146,8 +252,8 @@ final class HiDockViewModel: ObservableObject {
     /// Chains the extractor flagged as likely-one-conversation. High
     /// confidence ones are styled stronger; the rest sit behind a
     /// "show all" toggle in the merge candidates sheet.
-    @Published var mergeCandidates: [MergeCandidate] = []
-    @Published var mergeCandidatesShowAll = false
+    @Published var mergeCandidates: [MergeCandidate] = [] { didSet { markDerivedDirty() } }
+    @Published var mergeCandidatesShowAll = false { didSet { markDerivedDirty() } }
     /// User-visible "Merge candidates (N)" count — hidden when zero.
     var mergeCandidateCountForBadge: Int {
         let pool = effectiveMergeCandidates
@@ -159,7 +265,10 @@ final class HiDockViewModel: ObservableObject {
     /// candidate. Used by the recordings table to draw the subtle
     /// blue left-border accent on those rows.
     var mergeCandidatePaths: Set<String> {
-        let pool = effectiveMergeCandidates
+        ensureDerived(); return _mergeCandidatePaths
+    }
+
+    private func computeMergeCandidatePaths(_ pool: [MergeCandidate]) -> Set<String> {
         let visible = mergeCandidatesShowAll
             ? pool
             : pool.filter(\.high_confidence)
@@ -186,6 +295,10 @@ final class HiDockViewModel: ObservableObject {
     /// otherwise surface (row tint, tick toggle, toolbar count,
     /// scroll target, right-click menu).
     var effectiveMergeCandidates: [MergeCandidate] {
+        ensureDerived(); return _effectiveMergeCandidates
+    }
+
+    private func computeEffectiveMergeCandidates() -> [MergeCandidate] {
         let mergedStems = Set(mergeGroups.flatMap(\.childNames)
             .map { ($0 as NSString).deletingPathExtension })
         return mergeCandidates.filter { cand in
@@ -246,8 +359,12 @@ final class HiDockViewModel: ObservableObject {
     /// `needsTaggingCount` surface merge-rediarize results correctly.
     /// Populated by refreshTranscriptionState after each Python `status`
     /// query — same source of truth as the per-row state.
-    @Published var mergedFileTranscribed: Set<String> = []
+    @Published var mergedFileTranscribed: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var mergedFileTagged: Set<String> = []
+    /// Merged files where the voice library auto-matched ≥1 speaker but none is
+    /// confirmed yet — the "confirm me" state (blue question mark). Mirrors the
+    /// per-row `speakersAutoMatched`. Excluded from the "needs tagging" nag.
+    @Published var mergedFileAutoMatched: Set<String> = []
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
     /// Merged file mp3 name → its transcript mtime (when it was transcribed).
     /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
@@ -256,7 +373,7 @@ final class HiDockViewModel: ObservableObject {
     /// Per-recording speaker / action-item counts (mp3 name → counts) parsed
     /// from transcript frontmatter via `transcribe.py activity-stats`, fetched
     /// once on load. Feeds the heatmap Tier-2 tooltip (shown when present).
-    @Published var meetingExtraStats: [String: (speakers: Int, actionItems: Int)] = [:]
+    @Published var meetingExtraStats: [String: (speakers: Int, actionItems: Int)] = [:] { didSet { markDerivedDirty() } }
 
     // MARK: - Computed
 
@@ -299,11 +416,81 @@ final class HiDockViewModel: ObservableObject {
     /// BEFORE the heatmap day-filter and sort. The heatmap is built from this
     /// (so selecting a day doesn't collapse the grid to that one day), while
     /// `visibleEntries` additionally applies the selected-day filter.
+    // MARK: - Derived-list cache
+    // These lists are O(n log n) over `syncEntries` (now ~1700+ after the
+    // HiNotes migration) and were previously recomputed on *every* SwiftUI
+    // render — `filteredEntriesNoDay` ran twice per render (visibleEntries +
+    // meetingActivityByDay), each a full sort. That pegged the main thread and
+    // made the app beachball. Now they're memoised: computed once when an input
+    // changes (derivedDirty set by the inputs' didSet) and cached for reads.
+    private var _filteredEntriesNoDay: [HiDockSyncRecordingEntry] = []
+    private var _visibleEntries: [HiDockSyncRecordingEntry] = []
+    private var _displayRows: [DisplayRow] = []
+    private var _meetingActivityByDay: [Date: DayActivity] = [:]
+    private var _effectiveMergeCandidates: [MergeCandidate] = []
+    private var _mergeCandidatePaths: Set<String> = []
+    private var _mergeCandidatesByPath: [String: [MergeCandidate]] = [:]
+    private var derivedDirty = true
+
+    /// Recompute the derived lists once if any input changed. Synchronous, so
+    /// reads are always fresh; the dirty flag makes it a no-op between changes.
+    private func ensureDerived() {
+        guard derivedDirty else { return }
+        derivedDirty = false
+        let filtered = computeFilteredEntriesNoDay()
+        let visible = computeVisibleEntries(filtered)
+        _filteredEntriesNoDay = filtered
+        _visibleEntries = visible
+        _displayRows = computeDisplayRows(visible)
+        _meetingActivityByDay = computeMeetingActivity(filtered)
+        let eff = computeEffectiveMergeCandidates()
+        _effectiveMergeCandidates = eff
+        _mergeCandidatePaths = computeMergeCandidatePaths(eff)
+        _mergeCandidatesByPath = computeMergeCandidatesByPath(eff)
+    }
+
+    /// The visible candidates that include each mp3 path — so the per-row
+    /// context menu is an O(1) lookup instead of an O(candidates) filter.
+    private func computeMergeCandidatesByPath(_ pool: [MergeCandidate]) -> [String: [MergeCandidate]] {
+        let visible = mergeCandidatesShowAll ? pool : pool.filter(\.high_confidence)
+        var map: [String: [MergeCandidate]] = [:]
+        for cand in visible {
+            for piece in cand.pieces {
+                map[piece.mp3_path, default: []].append(cand)
+            }
+        }
+        return map
+    }
+
+    /// Visible merge candidates that include `path` (cached; O(1)).
+    func mergeCandidates(forPath path: String) -> [MergeCandidate] {
+        ensureDerived(); return _mergeCandidatesByPath[path] ?? []
+    }
+
+    /// Mark the derived lists stale. Cheap (a bool); the recompute is deferred
+    /// to the next read. Called from the inputs' `didSet`.
+    func markDerivedDirty() { derivedDirty = true }
+
     private var filteredEntriesNoDay: [HiDockSyncRecordingEntry] {
+        ensureDerived(); return _filteredEntriesNoDay
+    }
+
+    private func computeFilteredEntriesNoDay() -> [HiDockSyncRecordingEntry] {
         var entries = syncEntries
         if let filterDeviceId = syncFilterDeviceId {
             entries = entries.filter {
                 $0.deviceId == filterDeviceId
+            }
+        }
+        // People filter (AND-ed with the others). ANY = meeting includes at least
+        // one of the selected people; ALL = includes every selected person.
+        if !syncFilterPeople.isEmpty {
+            entries = entries.filter { e in
+                let people = meetingPeople[e.recording.name] ?? []
+                switch syncPeopleFilterMode {
+                case .any: return !people.isDisjoint(with: syncFilterPeople)
+                case .all: return syncFilterPeople.isSubset(of: people)
+                }
             }
         }
         // (Hide Downloaded toggle removed in 2026-04-26 cleanup —
@@ -338,47 +525,76 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var visibleEntries: [HiDockSyncRecordingEntry] {
-        var entries = filteredEntriesNoDay
+        ensureDerived(); return _visibleEntries
+    }
+
+    private func computeVisibleEntries(_ filtered: [HiDockSyncRecordingEntry]) -> [HiDockSyncRecordingEntry] {
+        var entries = filtered
         // Heatmap day-filter: when a day square is locked, the table narrows to
         // that day (the heatmap grid itself keeps using filteredEntriesNoDay).
         if let day = heatmapSelectedDay {
             entries = entries.filter { recordingDay($0.recording) == day }
         }
-        entries.sort { a, b in
+        entries.sort { lhs, rhs in
+            // Descending order swaps the operands instead of negating the
+            // ascending result — `!result` returns true for BOTH (a,b) and
+            // (b,a) when keys compare equal (very common for Status), which
+            // violates sort's strict-weak-ordering requirement (undefined
+            // behavior / unstable row order).
+            let a = syncSortAscending ? lhs : rhs
+            let b = syncSortAscending ? rhs : lhs
             let ar = a.recording, br = b.recording
-            let result: Bool
             switch syncSortKey {
             case "status":
-                result = a.statusText.localizedCaseInsensitiveCompare(b.statusText) == .orderedAscending
+                return a.statusText.localizedCaseInsensitiveCompare(b.statusText) == .orderedAscending
             case "name":
-                result = ar.outputName.localizedCaseInsensitiveCompare(br.outputName) == .orderedAscending
+                return ar.outputName.localizedCaseInsensitiveCompare(br.outputName) == .orderedAscending
             case "created":
-                let aKey = "\(ar.createDate) \(ar.createTime)"
-                let bKey = "\(br.createDate) \(br.createTime)"
-                result = aKey < bKey
+                return Self.createdSortKey(ar) < Self.createdSortKey(br)
             case "transcribed":
                 // Untranscribed (nil) sort to the bottom in the default
                 // (descending) order via distantPast.
-                result = (a.transcribedDate ?? .distantPast) < (b.transcribedDate ?? .distantPast)
+                return (a.transcribedDate ?? .distantPast) < (b.transcribedDate ?? .distantPast)
             case "duration":
-                result = ar.duration < br.duration
+                return ar.duration < br.duration
             case "size":
-                result = ar.length < br.length
+                return ar.length < br.length
             case "path":
-                result = ar.outputPath.localizedCaseInsensitiveCompare(br.outputPath) == .orderedAscending
+                return ar.outputPath.localizedCaseInsensitiveCompare(br.outputPath) == .orderedAscending
             case "device":
-                result = a.deviceName.localizedCaseInsensitiveCompare(b.deviceName) == .orderedAscending
+                return a.deviceName.localizedCaseInsensitiveCompare(b.deviceName) == .orderedAscending
             default:
-                result = ar.createDate < br.createDate
+                return Self.createdSortKey(ar) < Self.createdSortKey(br)
             }
-            return syncSortAscending ? result : !result
         }
         return entries
     }
 
+    /// A chronologically-comparable key for the "created" sort, robust to a
+    /// missing `createDate`. HiDock/Plaud/volume all emit createDate as
+    /// "yyyy/MM/dd" + createTime "HH:MM:SS" → digits "yyyymmddhhmmss". When
+    /// createDate is empty (e.g. a Plaud cached-status paint), fall back to the
+    /// leading "yyyy-MM-dd HH-mm-ss" timestamp in the filename — otherwise those
+    /// rows sorted to the bottom and newer Plaud meetings dropped below older
+    /// HiDock ones on launch.
+    private static func createdSortKey(_ rec: HiDockSyncRecording) -> String {
+        let cd = rec.createDate.trimmingCharacters(in: .whitespaces)
+        if !cd.isEmpty {
+            return (cd + rec.createTime).filter { $0.isNumber }
+        }
+        let candidate = rec.outputName.isEmpty ? rec.name : rec.outputName
+        let digits = candidate.prefix(19).filter { $0.isNumber }
+        // Pad so a partial fallback still orders sensibly against full keys.
+        return digits.isEmpty ? "" : String(digits)
+    }
+
     /// Build the display list with merge groups expanded/collapsed
     var displayRows: [DisplayRow] {
-        let entries = visibleEntries
+        ensureDerived(); return _displayRows
+    }
+
+    private func computeDisplayRows(_ visible: [HiDockSyncRecordingEntry]) -> [DisplayRow] {
+        let entries = visible
         // Collect all child names across all merge groups
         let allChildNames = Set(mergeGroups.flatMap(\.childNames))
 
@@ -423,12 +639,17 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var needsTaggingCount: Int {
-        let perRow = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
-        // Add merged-file rows that are transcribed-but-not-tagged.
-        // These don't live in syncEntries, so without this they'd
-        // never show up in the count even when the rediarize step
-        // produced a fresh transcript that needs speaker labelling.
-        let perMerge = mergedFileTranscribed.subtracting(mergedFileTagged).count
+        // Only true "needs tagging" rows nag: transcribed, multi-speaker, and
+        // neither confirmed (tagged) nor auto-matched. Auto-matched meetings
+        // ("confirm me") are surfaced by the blue question-mark icon, not the pill.
+        let perRow = syncEntries.filter {
+            $0.transcribed && !$0.speakersTagged && !$0.speakersAutoMatched
+        }.count
+        // Same for merged-file rows (they don't live in syncEntries).
+        let perMerge = mergedFileTranscribed
+            .subtracting(mergedFileTagged)
+            .subtracting(mergedFileAutoMatched)
+            .count
         return perRow + perMerge
     }
 
@@ -500,7 +721,7 @@ final class HiDockViewModel: ObservableObject {
     /// filters.
     /// Day locked by clicking a heatmap square — filters the recordings table
     /// to that day (and locks the heatmap detail readout). nil = no day filter.
-    @Published var heatmapSelectedDay: Date? = nil
+    @Published var heatmapSelectedDay: Date? = nil { didSet { markDerivedDirty() } }
 
     /// Which date the heatmap buckets by. Default Recorded ("when the meeting
     /// happened" — the common case); Transcribed = "when I processed it".
@@ -509,7 +730,7 @@ final class HiDockViewModel: ObservableObject {
         var id: String { rawValue }
         var label: String { self == .recorded ? "Recorded" : "Transcribed" }
     }
-    @Published var heatmapDateMode: HeatmapDateMode = .recorded
+    @Published var heatmapDateMode: HeatmapDateMode = .recorded { didSet { markDerivedDirty() } }
 
     /// Click handler for a heatmap square: toggle the day filter on/off.
     func toggleHeatmapDay(_ day: Date) {
@@ -544,10 +765,14 @@ final class HiDockViewModel: ObservableObject {
     }
 
     var meetingActivityByDay: [Date: DayActivity] {
+        ensureDerived(); return _meetingActivityByDay
+    }
+
+    private func computeMeetingActivity(_ filtered: [HiDockSyncRecordingEntry]) -> [Date: DayActivity] {
         let childNames = Set(mergeGroups.flatMap(\.childNames))
         var out: [Date: DayActivity] = [:]
         var countedGroups = Set<String>()
-        for entry in filteredEntriesNoDay {
+        for entry in filtered {
             // A merged recording is ONE meeting: collapse its children into a
             // single count on the group's day (per date-mode) with the merged
             // total duration, rather than counting each piece separately.

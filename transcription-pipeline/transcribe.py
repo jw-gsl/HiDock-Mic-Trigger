@@ -169,6 +169,8 @@ def transcribe_file(
     _IN_FLIGHT = {"key": entry_key}
 
     start_time = time.monotonic()
+    strip_map = None            # stripped→original time map (set when silence stripped)
+    tmp_strip_path: str | None = None  # temp WAV holding the stripped audio
     try:
         _log(_ET("TRANSCRIPTION_STARTED"), file_path=str(mp3_path),
              metadata={"model": config.WHISPER_MODEL})
@@ -200,16 +202,19 @@ def transcribe_file(
         transcribe_path = str(mp3_path)
         if asr_backend == "whisper":
             try:
-                from shared.diarize_lite import _replace_silence_with_padding
+                from shared.diarize_lite import strip_silence_with_map
                 from shared.audio_utils import load_audio
                 import soundfile as sf
                 import tempfile
                 raw_audio = load_audio(str(mp3_path), sr=16000)
-                processed = _replace_silence_with_padding(raw_audio, sr=16000)
+                processed, candidate_map = strip_silence_with_map(raw_audio, sr=16000)
                 if len(processed) < len(raw_audio) * 0.95:  # Only use if >5% was stripped
                     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    tmp.close()
                     sf.write(tmp.name, processed, 16000)
+                    tmp_strip_path = tmp.name
                     transcribe_path = tmp.name
+                    strip_map = candidate_map
                     print(f"Silence stripped: {len(raw_audio)/16000:.0f}s → {len(processed)/16000:.0f}s", file=sys.stderr)
             except Exception as e:
                 print(f"Silence stripping skipped: {e}", file=sys.stderr)
@@ -254,12 +259,22 @@ def transcribe_file(
             active_model_name = config.WHISPER_MODEL
         progress(85)
 
-        # Clean up temp file
-        if transcribe_path != str(mp3_path):
+        # Clean up temp file (finally block also covers failure paths)
+        if tmp_strip_path is not None:
             try:
-                Path(transcribe_path).unlink()
+                Path(tmp_strip_path).unlink()
             except OSError:
                 pass
+            tmp_strip_path = None
+
+        # If we transcribed a silence-stripped temp WAV, the ASR timestamps
+        # are on the compressed timeline. Remap them back to the original
+        # audio NOW — diarization runs on the original file and the
+        # .srt/_whisper.json/_diarized.json sidecars reference it, so
+        # un-remapped timestamps would drift early by the stripped amount.
+        if strip_map is not None:
+            from shared.diarize_lite import remap_segments
+            remap_segments(result.get("segments", []), strip_map)
 
         text = result["text"].strip()
 
@@ -364,10 +379,14 @@ def transcribe_file(
         # a no-op if there are no timings at all.
         try:
             from shared.srt_writer import srt_path_for, write_srt
+            # Gate on actual diarized SEGMENTS (like the .md writer does) —
+            # a truthy dict with empty segments would otherwise suppress the
+            # whisper-segment fallback and skip the SRT entirely.
+            _has_diarized = bool(diarized_result and diarized_result.get("segments"))
             write_srt(
                 srt_path_for(transcript_path),
-                diarized_result=diarized_result,
-                whisper_segments=result.get("segments", []) if not diarized_result else None,
+                diarized_result=diarized_result if _has_diarized else None,
+                whisper_segments=None if _has_diarized else result.get("segments", []),
             )
         except Exception as e:
             # SRT is a best-effort sidecar; never let it break the main transcript.
@@ -491,6 +510,15 @@ def transcribe_file(
             "transcribed": False,
             "error": str(e),
         }
+
+    finally:
+        # Never leak the stripped temp WAV (~115 MB/hour of audio) —
+        # failed runs previously left it behind in the temp dir.
+        if tmp_strip_path is not None:
+            try:
+                Path(tmp_strip_path).unlink()
+            except OSError:
+                pass
 
 
 def acquire_lock():
@@ -643,12 +671,42 @@ def cmd_summarize(args):
     dev (transcribe.py) and bundled (transcribe_cpp.py) pipelines behave the
     same."""
     from shared.typed_summarize import summarise_typed
+    events = None
+    if getattr(args, "events", False):
+        from shared.agent_events import EventEmitter
+        events = EventEmitter()   # normalized NDJSON on stderr for the desktop app
     res = summarise_typed(
         Path(args.transcript_path).expanduser(),
         engine_name=args.summarize_engine,
         force_template=getattr(args, "template", None),
+        events=events,
     )
     print(json.dumps(res))
+
+
+def cmd_ask(args):
+    """One conversational turn for the desktop chat view. Reads the prompt from
+    stdin, streams normalized events (NDJSON on stderr), and prints a JSON
+    result {ok, session_id, text} on stdout. Multi-turn = re-invoke with
+    --resume <session_id>. Mirrors transcribe_cpp.cmd_ask."""
+    import sys as _sys
+    from shared.agent_events import EventEmitter
+    from shared.llm_cli import chat_streaming, get_engine
+    prompt = _sys.stdin.read()
+    em = EventEmitter()
+    allowed = None
+    if getattr(args, "allowed_tools", None):
+        allowed = [t.strip() for t in args.allowed_tools.split(",") if t.strip()]
+    text, session_id = chat_streaming(
+        prompt,
+        engine=get_engine(args.engine or "auto"),
+        cwd=getattr(args, "cwd", None),
+        resume=getattr(args, "resume", None),
+        allowed_tools=allowed,
+        on_event=em,
+    )
+    em.done(ok=text is not None, session_id=session_id)
+    print(json.dumps({"ok": text is not None, "session_id": session_id, "text": text}))
 
 
 def cmd_status(_args):
@@ -831,6 +889,67 @@ def cmd_recluster_with_anchors(args):
     print(_json.dumps(summary))
 
 
+def cmd_rematch(args):
+    """Re-match still-generic speakers in an existing transcript against the
+    current voice library (used after enrolling new voices). Never overwrites a
+    user-confirmed name. Re-derives per-speaker embeddings from audio when the
+    sidecar predates embedding storage (unless --no-audio)."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    progress(5)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import rematch_diarized
+    progress(10)
+    summary = rematch_diarized(data, audio_fallback=not getattr(args, "no_audio", False))
+    progress(90)
+
+    json_path.write_text(
+        _json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # Regenerate the .md only when a name actually changed.
+    if summary.get("rematched", 0) > 0:
+        try:
+            from shared.transcript_writer import write_transcript
+            md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+            body_text = " ".join(
+                seg.get("text", "").strip()
+                for seg in data.get("segments", [])
+                if seg.get("text")
+            )
+            write_transcript(
+                md_path,
+                body_text,
+                source_path=Path(data.get("audio_file", "")),
+                model="rematch",
+                diarized_result=data,
+            )
+        except Exception as exc:
+            print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+
+    progress(100)
+    print(_json.dumps({"status": "completed", **summary}))
+
+
+def cmd_speaker_confidence(args):
+    """Report per-speaker confidence that each assigned name is correct
+    (cosine similarity of the speaker's stored embedding to the enrolled voice
+    of that name). JSON: {"confidence": {speaker_id: 0..1}}. Fast — no audio,
+    no model load; just reads the sidecar + the voice library."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import score_speakers
+    print(_json.dumps({"status": "completed", "confidence": score_speakers(data)}))
+
+
 def cmd_merge_rediarize(args):
     """Build a merged transcript from existing per-piece transcripts.
 
@@ -968,10 +1087,13 @@ def cmd_merge_rediarize(args):
     )
     try:
         from shared.srt_writer import srt_path_for, write_srt
+        # Same gating as transcribe_file: only treat diarization as usable
+        # when it actually produced segments, else fall back to stitched.
+        _has_diarized = bool(diarized_result and diarized_result.get("segments"))
         write_srt(
             srt_path_for(merged_md),
-            diarized_result=diarized_result,
-            whisper_segments=stitched_segments if not diarized_result else None,
+            diarized_result=diarized_result if _has_diarized else None,
+            whisper_segments=None if _has_diarized else stitched_segments,
         )
     except Exception as exc:
         print(f"SRT export failed (non-fatal): {exc}", file=sys.stderr)
@@ -1046,6 +1168,25 @@ def main():
     )
     p_recluster.set_defaults(func=cmd_recluster_with_anchors)
 
+    p_rematch = sub.add_parser(
+        "rematch",
+        help="Re-match still-generic speakers against the current voice library (after enrolling new voices)",
+    )
+    p_rematch.add_argument("json_path", help="Path to _diarized.json file")
+    p_rematch.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
+    )
+    p_rematch.set_defaults(func=cmd_rematch)
+
+    p_confidence = sub.add_parser(
+        "speaker-confidence",
+        help="Per-speaker confidence that each assigned name matches the enrolled voice (JSON)",
+    )
+    p_confidence.add_argument("json_path", help="Path to _diarized.json file")
+    p_confidence.set_defaults(func=cmd_speaker_confidence)
+
     p_merge = sub.add_parser(
         "merge-rediarize",
         help="Build merged transcript from per-piece whisper.json + re-run diarization (no Whisper pass)",
@@ -1063,7 +1204,15 @@ def main():
     p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")
     p_summarize.add_argument("--summarize-engine", default=None, help="LLM engine (e.g. claude). Default: config [summarization].engine / auto.")
     p_summarize.add_argument("--template", default=None, help="Force a specific template by name (skip auto-classification).")
+    p_summarize.add_argument("--events", action="store_true", help="Emit normalized agent events (NDJSON on stderr) for the desktop app's formatted view.")
     p_summarize.set_defaults(func=cmd_summarize)
+
+    p_ask = sub.add_parser("ask", help="One conversational turn (prompt on stdin) for the desktop chat view; streams normalized events.")
+    p_ask.add_argument("--engine", default=None, help="LLM engine (default: config [summarization].engine / auto).")
+    p_ask.add_argument("--cwd", default=None, help="Working directory for the engine (e.g. the transcript's folder).")
+    p_ask.add_argument("--resume", default=None, help="Resume a prior claude session id for multi-turn chat.")
+    p_ask.add_argument("--allowed-tools", default=None, help="Comma-separated claude tool allow-list (e.g. Read,Grep,Glob).")
+    p_ask.set_defaults(func=cmd_ask)
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
     p_detect.set_defaults(func=cmd_detect_engine)

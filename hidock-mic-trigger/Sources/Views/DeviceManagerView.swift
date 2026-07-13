@@ -61,6 +61,29 @@ struct DeviceManagerView: View {
                 .frame(width: 180)
 
                 Spacer()
+
+                // Plaud is an API (not USB), so a background poll is the only
+                // thing that surfaces new Plaud recordings. Let the user set how
+                // often (or turn it off). Shown only when a Plaud account exists.
+                if viewModel.hasPlaudAccount {
+                    Divider().frame(height: 16)
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundColor(.secondary)
+                    Text("Check Plaud:").font(.caption.weight(.medium))
+                    Picker("", selection: Binding(
+                        get: { viewModel.plaudPollIntervalSeconds },
+                        set: { viewModel.onSetPlaudPollInterval($0) }
+                    )) {
+                        Text("Off").tag(0.0)
+                        Text("1 min").tag(60.0)
+                        Text("2 min").tag(120.0)
+                        Text("5 min").tag(300.0)
+                        Text("15 min").tag(900.0)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 90)
+                    .help("How often to check your Plaud account for new recordings in the background.")
+                }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 8)

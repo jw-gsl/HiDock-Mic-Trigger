@@ -15,7 +15,13 @@ transcription stack trace.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+# The pipeline directory is hyphenated ("transcription-pipeline"), so its
+# config module can't be imported as a package — path-insert the directory
+# and `import config`, the same way transcribe.py's siblings do.
+_PIPELINE_DIR = Path(__file__).resolve().parent.parent / "transcription-pipeline"
 
 
 def _active(stage: str, default: str) -> str:
@@ -61,7 +67,9 @@ def transcribe_audio(audio_path: str | Path, language: str | None = None) -> dic
     # Whisper is the historical default. Import inline to avoid pulling
     # torch at module import time when Parakeet is active.
     import whisper
-    from transcription_pipeline import config  # transcribe.py's config
+    if str(_PIPELINE_DIR) not in sys.path:
+        sys.path.insert(0, str(_PIPELINE_DIR))
+    import config  # transcribe.py's config (transcription-pipeline/config.py)
     model = whisper.load_model(config.WHISPER_MODEL, device=config.WHISPER_DEVICE)
     return model.transcribe(str(audio_path), language=language or config.WHISPER_LANGUAGE, verbose=False)
 

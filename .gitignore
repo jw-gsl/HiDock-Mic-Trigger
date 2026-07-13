@@ -50,6 +50,12 @@ Windows-App/core/feedback_token.py
 # SourceKit-LSP build context (machine-specific, absolute paths)
 buildServer.json
 
+.compound-engineering/*.local.yaml
+usb-extractor/state.json.lock
+
+# Migration/one-off state backups
+usb-extractor/state.json.*-bak
+
 # Planning docs and security reviews — kept local only, not published.
 # They contain machine-specific paths and internal review detail.
 docs/PLAN-*.md

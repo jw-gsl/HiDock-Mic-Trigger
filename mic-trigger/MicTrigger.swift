@@ -310,8 +310,15 @@ sigtermSource.setEventHandler(handler: shutdownHandler)
 sigintSource.resume()
 sigtermSource.resume()
 
-// Poll on a timer so the main run loop stays free for signal handling
-let pollTimer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+// Poll on a timer. The timer runs on the MAIN queue deliberately: the
+// SIGINT/SIGTERM sources above also fire on .main, so all FFmpegHolder
+// access (start/stop/isRunning) is serialised on one queue. The previous
+// .global(qos: .userInitiated) queue raced the signal handler — shutdown
+// could stop ffmpeg while a poll tick was mid start/reconcile, leaking a
+// holder process past exit. The per-tick work (a couple of CoreAudio
+// property reads) is light, so the main queue absorbs it easily and stays
+// free for signal handling between ticks.
+let pollTimer = DispatchSource.makeTimerSource(queue: .main)
 pollTimer.schedule(deadline: .now(), repeating: pollInterval)
 pollTimer.setEventHandler {
     guard let current = readDeviceRunningSomewhere(usbID) else {

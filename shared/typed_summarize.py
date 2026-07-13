@@ -18,7 +18,9 @@ import re
 import sys
 from pathlib import Path
 
+from shared.agent_events import NULL_EMITTER
 from shared.llm_cli import get_engine, query_json, query_streaming
+from shared.summarize import _SYSTEM_INSTRUCTION
 
 
 def _emit(msg: str) -> None:
@@ -76,14 +78,19 @@ def _recording_dt_from_stem(stem: str) -> str:
 
 
 class _StreamBodyFilter:
-    """Forwards only the human-readable summary body to stderr (the CLI pane):
-    skips the AREA/TITLE/'---' metadata header and any '> **Extraction
-    guidance**' lines, so the streamed output reads cleanly instead of showing
-    the machine header and template instructions."""
+    """Forwards only the human-readable summary body for live display: skips the
+    AREA/TITLE/'---' metadata header and any '> **Extraction guidance**' lines,
+    so the streamed output reads cleanly instead of showing the machine header
+    and template instructions.
 
-    def __init__(self):
+    When an ``events`` emitter is given, each cleaned line is emitted as a
+    normalized ``text`` event (the desktop app's formatted view). Otherwise the
+    cleaned body is written to stderr (legacy CLI-pane display)."""
+
+    def __init__(self, events=None):
         self._buf = ""
         self._in_body = False
+        self._events = events
 
     def __call__(self, delta: str) -> None:
         self._buf += delta
@@ -108,8 +115,11 @@ class _StreamBodyFilter:
             self._in_body = True
         if line.lstrip().startswith("> **Extraction guidance"):
             return
-        sys.stderr.write(line + "\n")
-        sys.stderr.flush()
+        if self._events is not None:
+            self._events.text(line + "\n")
+        else:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
 
 HIDOCK = Path.home() / "HiDock"
 RAW_DIR = HIDOCK / "Raw Transcripts"
@@ -181,6 +191,7 @@ def classify(text: str, engine, names: list[str]) -> tuple[str, str]:
     Returns (template_name, one_line_reason)."""
     menu = "\n".join(f"- {n}: {TYPE_HINTS.get(n, 'custom template')}" for n in names)
     prompt = (
+        f"{_SYSTEM_INSTRUCTION}\n\n"
         "Classify this transcript by choosing the single best-matching template "
         "name from the list (consider participants, topics, tone, structure).\n\n"
         f"Templates:\n{menu}\n\n"
@@ -198,13 +209,23 @@ def classify(text: str, engine, names: list[str]) -> tuple[str, str]:
     return fallback, (reason or "No clear match; used the general template.")
 
 
-def _delete_prior_summaries(stem: str) -> None:
+def _delete_prior_summaries(stem: str, keep: Path | None = None) -> None:
     """Remove any existing summaries for this source recording so a
     re-summarise / reclassify REPLACES rather than piling up duplicates.
-    Summary files are named '<stem> - <Type> - <Area> - <Desc>.md'."""
+    Summary files are named '<stem> - <Type> - <Area> - <Desc>.md'.
+
+    Matches by filename prefix rather than glob — recording stems can
+    contain glob metacharacters ('[', ']', '*') which would make a glob
+    pattern silently never match. ``keep`` (the freshly written summary)
+    is never deleted."""
     if not SUMMARIES_DIR.exists():
         return
-    for p in SUMMARIES_DIR.glob(f"{stem} - *.md"):
+    prefix = f"{stem} - "
+    for p in SUMMARIES_DIR.iterdir():
+        if not (p.is_file() and p.suffix == ".md" and p.name.startswith(prefix)):
+            continue
+        if keep is not None and p == keep:
+            continue
         try:
             p.unlink()
         except OSError:
@@ -227,6 +248,7 @@ def summarise_typed(
     engine_name: str | None = None,
     stream: bool = True,
     force_template: str | None = None,
+    events=None,
 ) -> dict:
     """Classify + template-summarise a transcript, write the typed summary file.
 
@@ -240,27 +262,36 @@ def summarise_typed(
 
     Returns a JSON-able dict; never raises for the common 'no LLM' / 'no text'
     cases (returns {"summarized": False, "error": ...})."""
+    ev = events or NULL_EMITTER
     transcript_path = Path(transcript_path)
     text = _read_transcript_text(transcript_path)
     if not text.strip():
+        ev.error("No transcript text found")
         return {"summarized": False, "error": "No transcript text found"}
 
     engine = get_engine(engine_name or "auto")
     if engine is None:
-        return {"summarized": False, "error": "No LLM engine available (is the `claude` CLI installed and signed in?)"}
+        msg = "No LLM engine available (is the `claude` CLI installed and signed in?)"
+        ev.error(msg)
+        return {"summarized": False, "error": msg}
 
     templates = available_templates()
     if not templates:
-        return {"summarized": False, "error": f"No templates in {TEMPLATES_DIR}"}
+        msg = f"No templates in {TEMPLATES_DIR}"
+        ev.error(msg)
+        return {"summarized": False, "error": msg}
 
     if force_template and force_template in templates:
         tname = force_template
         reason = f"Manually set to “{tname}”."
         _emit(f"STAGE: Reclassified to {tname} — summarising…")
+        ev.stage(f"Reclassifying as {tname}…")
     else:
         _emit("STAGE: Classifying transcript…")
+        ev.stage("Classifying transcript…")
         tname, reason = classify(text, engine, list(templates.keys()))
         _emit(f"STAGE: Classified as {tname} — summarising…")
+        ev.stage(f"Classified as {tname} — summarising…")
     tcontent = templates[tname].read_text(encoding="utf-8")
 
     # Recording date/time recovered from the filename so the summary can fill a
@@ -270,7 +301,10 @@ def summarise_typed(
 
     # Headered text (not JSON) so the streamed output is human-readable in the
     # CLI pane; we still recover the structured Area/Title from the header.
+    # The prompt-injection guard (shared with summarize.py) is prepended so
+    # instructions embedded in the transcript text aren't followed.
     prompt = (
+        f"{_SYSTEM_INSTRUCTION}\n\n"
         f"Summarise the transcript by completing this '{tname}' template, applying ALL "
         "the 'Extraction guidance' notes inside it and keeping its section structure. "
         "Use only information present in the transcript. "
@@ -288,33 +322,40 @@ def summarise_typed(
     )
 
     if stream:
-        # Filter the streamed view so the CLI pane shows clean body text (no
+        # Filter the streamed view so the display shows clean body text (no
         # AREA/TITLE/--- header, no guidance lines). The full text is still
-        # captured by query_streaming for parsing/saving.
-        sink = _StreamBodyFilter()
-        full = query_streaming(prompt, engine=engine, timeout=240, on_text=sink)
+        # captured by query_streaming for parsing/saving. The filter routes
+        # cleaned text to the events emitter when present, else to stderr.
+        sink = _StreamBodyFilter(events=events)
+        # emit_text=False: structured events (tool/usage/meta) still flow via
+        # `events`, but raw text deltas are filtered by the sink, not emitted
+        # raw — so the header never reaches the formatted view.
+        full = query_streaming(
+            prompt, engine=engine, timeout=240,
+            on_text=sink, on_event=ev, emit_text=False,
+        )
         sink.flush()
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+        if events is None:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
     else:
         from shared.llm_cli import query
         full = query(prompt, engine=engine, timeout=240)
 
     if not full or not full.strip():
+        ev.error("Summarisation produced no content")
         return {"summarized": False, "error": "Summarisation produced no content"}
 
     area_raw, title_raw, md = _parse_headered(full)
     if not md.strip():
+        ev.error("Summarisation produced no content")
         return {"summarized": False, "error": "Summarisation produced no content"}
 
     _emit("STAGE: Writing summary…")
+    ev.stage("Writing summary…")
     area = _sanitize(area_raw or "Other", 40)
     desc = _sanitize(title_raw or transcript_path.stem, 50)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Replace any prior summaries for this recording (re-summarise / reclassify
-    # should not pile up duplicate files).
-    _delete_prior_summaries(transcript_path.stem)
 
     front = _frontmatter({
         "type": tname,
@@ -326,6 +367,15 @@ def summarise_typed(
     })
     out = SUMMARIES_DIR / f"{transcript_path.stem} - {tname} - {area} - {desc}.md"
     out.write_text(front + "\n\n" + md.rstrip() + "\n", encoding="utf-8")
+
+    # Replace any prior summaries for this recording (re-summarise / reclassify
+    # should not pile up duplicate files). Deleting only AFTER the new file is
+    # written means a failed write can't lose both the old and new summary.
+    _delete_prior_summaries(transcript_path.stem, keep=out)
+    ev.done(
+        ok=True, summary_path=str(out),
+        type=tname, area=area, title=desc,
+    )
     return {
         "summarized": True, "summary_path": str(out),
         "type": tname, "area": area, "title": desc, "classified": reason,

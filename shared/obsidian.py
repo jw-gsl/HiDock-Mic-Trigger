@@ -148,9 +148,12 @@ class VaultSync:
         if not isinstance(speakers, list) or not speakers:
             return content
 
-        # Replace speaker names in body with wikilinks
+        # Replace speaker names in body with wikilinks. Longest names first,
+        # so "James" doesn't rewrite inside "James Whiting" before the longer
+        # name gets its turn.
         modified_body = body
-        for name in speakers:
+        for name in sorted(speakers, key=lambda n: len(n) if isinstance(n, str) else 0,
+                           reverse=True):
             if not name or not isinstance(name, str):
                 continue
             # Skip generic speaker labels

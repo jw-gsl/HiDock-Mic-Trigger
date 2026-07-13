@@ -25,7 +25,9 @@ Output format:
 """
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,11 +53,56 @@ def _yaml_escape(value: str) -> str:
     """Escape a string for YAML output (quote if it contains special chars)."""
     if not value:
         return '""'
-    needs_quoting = any(c in value for c in ':{}[]&*?|>!%@`#,\'') or value.startswith(('-', ' '))
-    if needs_quoting or '\n' in value:
+    # The frontmatter block is line-based — a literal newline in a value
+    # would terminate the entry and corrupt the block. Collapse to a space.
+    value = re.sub(r"[\r\n]+", " ", value)
+    needs_quoting = any(c in value for c in ':{}[]&*?|>!%@`#,\'"') or value.startswith(('-', ' '))
+    if needs_quoting:
         escaped = value.replace('\\', '\\\\').replace('"', '\\"')
         return f'"{escaped}"'
     return value
+
+
+def _yaml_unquote(value: str) -> str:
+    """Reverse of _yaml_escape for a single scalar: strip surrounding quotes
+    (only a matched pair — never embedded ones) and unescape \\" and \\\\."""
+    v = value.strip()
+    if len(v) >= 2 and v.startswith('"') and v.endswith('"'):
+        inner = v[1:-1]
+        # Unescape in one pass so '\\\\' doesn't create a fake '\\"'.
+        return inner.replace('\\\\', '\x00').replace('\\"', '"').replace('\x00', '\\')
+    return v
+
+
+def _split_inline_list(inner: str) -> list[str]:
+    """Split the inside of an inline YAML list on commas, quote-aware —
+    a quoted item like "Whiting, James" must stay one item."""
+    items: list[str] = []
+    buf: list[str] = []
+    in_quotes = False
+    i = 0
+    while i < len(inner):
+        c = inner[i]
+        if in_quotes:
+            if c == "\\" and i + 1 < len(inner):
+                buf.append(c)
+                buf.append(inner[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_quotes = False
+            buf.append(c)
+        elif c == '"':
+            in_quotes = True
+            buf.append(c)
+        elif c == ",":
+            items.append("".join(buf))
+            buf = []
+        else:
+            buf.append(c)
+        i += 1
+    items.append("".join(buf))
+    return [_yaml_unquote(item) for item in items if item.strip()]
 
 
 def _yaml_list(items: list[str], indent: int = 0) -> str:
@@ -330,7 +377,21 @@ def write_transcript(
         content += f"\n## Summary\n\n{summary['summary_text']}\n"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(content, encoding="utf-8")
+    # Atomic write: a crash mid-write must not leave a truncated .md that
+    # downstream consumers treat as a completed transcript.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=output_path.parent, prefix=output_path.name, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return output_path
 
 
@@ -375,7 +436,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         if indent >= 4 and current_dict is not None and ":" in stripped and not stripped.startswith("-"):
             colon_idx = stripped.index(":")
             k = stripped[:colon_idx].strip()
-            v = stripped[colon_idx + 1:].strip().strip('"')
+            v = _yaml_unquote(stripped[colon_idx + 1:])
             current_dict[k] = v
             continue
 
@@ -387,16 +448,18 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 
             item_text = stripped[2:].strip()
 
-            # Check if it's a dict item (e.g. "- task: Do something")
-            if ":" in item_text:
+            # Check if it's a dict item (e.g. "- task: Do something").
+            # A quoted item ('- "Budget: Q3 plan"') is a plain scalar whose
+            # value happens to contain a colon — the writer quotes those.
+            if ":" in item_text and not item_text.startswith('"'):
                 colon_idx = item_text.index(":")
                 k = item_text[:colon_idx].strip()
-                v = item_text[colon_idx + 1:].strip().strip('"')
+                v = _yaml_unquote(item_text[colon_idx + 1:])
                 current_dict = {k: v}
                 current_list.append(current_dict)
             else:
                 current_dict = None
-                current_list.append(item_text.strip('"'))
+                current_list.append(_yaml_unquote(item_text))
             continue
 
         # Top-level key: value pair
@@ -409,28 +472,27 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
             current_list = None
             current_dict = None
 
-            # Inline list: [a, b, c]
+            # Inline list: [a, b, c] — quote-aware, so an item like
+            # "Whiting, James" is not split on its embedded comma.
             if value.startswith("[") and value.endswith("]"):
                 inner = value[1:-1]
                 if inner.strip():
-                    items = [v.strip().strip('"') for v in inner.split(",")]
-                    meta[key] = items
+                    meta[key] = _split_inline_list(inner)
                 else:
                     meta[key] = []
             elif value == "":
                 # Value will come on next lines (block list)
                 meta[key] = ""
-            elif value.strip('"'):
-                clean = value.strip('"')
+            else:
+                quoted = len(value) >= 2 and value.startswith('"') and value.endswith('"')
+                clean = _yaml_unquote(value)
                 # Only parse as number if the original value was NOT quoted
-                if not (value.startswith('"') and value.endswith('"')):
+                if clean and not quoted:
                     try:
                         meta[key] = float(clean) if "." in clean else int(clean)
                     except ValueError:
                         meta[key] = clean
                 else:
                     meta[key] = clean
-            else:
-                meta[key] = ""
 
     return meta, body

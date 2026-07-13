@@ -88,8 +88,10 @@ def test_save_load_roundtrip(tmp_path):
         save_library(lib)
         loaded = load_library()
 
-    assert loaded["speakers"]["Alice"]["embedding"] == [0.1, 0.2, 0.3]
-    assert loaded["speakers"]["Alice"]["sample_count"] == 1
+    entry = loaded["speakers"]["Alice"]
+    assert entry["samples"][0]["embedding"] == [0.1, 0.2, 0.3]
+    assert len(entry["samples"]) == 1
+    assert "embedding" not in entry
 
 
 # ── enroll_speaker ──────────────────────────────────────────────────────────
@@ -108,26 +110,33 @@ def test_enroll_speaker_creates_entry(mock_load_audio, mock_session, tmp_path):
          patch("shared.voice_library_lite.EMBEDDINGS_FILE", fake_file):
         result = enroll_speaker("Alice", "/fake/audio.wav")
 
-    assert result["sample_count"] == 1
-    assert "embedding" in result
+    assert len(result["samples"]) == 1
+    assert "embedding" not in result
     assert result["model"] == "mfcc-v1"
 
 
 @patch("shared.voice_library_lite._get_speaker_embed_session", return_value=None)
 @patch("shared.voice_library_lite.load_audio")
 def test_enroll_speaker_second_time_increases_count(mock_load_audio, mock_session, tmp_path):
-    """Re-enrolling should increment sample_count via running average."""
+    """Re-enrolling should append a second exemplar."""
     mock_load_audio.return_value = np.random.randn(16000).astype(np.float32)
 
     fake_file = tmp_path / "embeddings.json"
     fake_dir = tmp_path
 
     with patch("shared.voice_library_lite.VOICE_LIBRARY_DIR", fake_dir), \
-         patch("shared.voice_library_lite.EMBEDDINGS_FILE", fake_file):
+         patch("shared.voice_library_lite.EMBEDDINGS_FILE", fake_file), \
+         patch(
+             "shared.voice_library_lite.extract_embedding",
+             side_effect=[
+                 np.array([1.0, 0.0], dtype=np.float32),
+                 np.array([0.0, 1.0], dtype=np.float32),
+             ],
+         ):
         enroll_speaker("Alice", "/fake/audio.wav")
         result = enroll_speaker("Alice", "/fake/audio2.wav")
 
-    assert result["sample_count"] == 2
+    assert len(result["samples"]) == 2
 
 
 # ── identify_speaker ────────────────────────────────────────────────────────

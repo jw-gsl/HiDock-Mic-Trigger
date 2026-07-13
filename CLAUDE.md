@@ -60,10 +60,16 @@ Plans in `docs/` are the project's memory. They persist across sessions and ensu
 3. Push and create a PR: `gh pr create`
 4. The user reviews and merges when ready
 
-### BOTH PLATFORMS — ALWAYS
-**Every UI or feature change must be applied to BOTH the macOS app AND the Windows app at the same time.** Do not make changes to one platform without updating the other. The Windows app (`Windows-App/`) should always match the macOS app in layout, features, and behavior.
+### Platform focus — macOS is primary
+**macOS (`hidock-mic-trigger/`) is the primary, actively-developed app.** New
+features do NOT need to be mirrored to the Windows app — Windows parity is no
+longer a requirement. Build for macOS first and don't block work on a Windows
+port.
 
-**After any feature change, update `PARITY.md`** — the cross-platform feature checklist. This is the source of truth for what exists on each platform. The PR template includes a parity checkbox as a reminder.
+If cross-platform parity ever becomes a goal again, treat it as its own
+deliberate project (and revive `PARITY.md` as its checklist) rather than a
+per-change gate. Until then, don't auto-add "update the Windows app" or
+"update PARITY.md" steps to feature work.
 
 ### For testing on Mac:
 - Build with **Debug** configuration — deploys to `/Applications/HiDock Mic Trigger.app` (same location as Release)

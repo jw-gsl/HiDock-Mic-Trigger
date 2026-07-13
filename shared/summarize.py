@@ -29,18 +29,18 @@ _SUMMARIZE_PROMPT = _SYSTEM_INSTRUCTION + """
 Extract structured information from this meeting transcript and respond with ONLY a JSON object (no markdown fences, no other text).
 
 The JSON must have exactly these keys:
-{{
+{
   "title": "A concise 3-8 word title for this meeting/recording",
   "action_items": [
-    {{"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open", "confidence": "high"}}
+    {"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open", "confidence": "high"}
   ],
   "decisions": [
-    {{"text": "what was decided", "topic": "topic area or empty string", "confidence": "high"}}
+    {"text": "what was decided", "topic": "topic area or empty string", "confidence": "high"}
   ],
-  "key_points": [{{"text": "important point", "confidence": "high"}}],
+  "key_points": [{"text": "important point", "confidence": "high"}],
   "tags": ["topic1", "topic2"],
   "summary_text": "A 2-4 sentence summary of the meeting/recording"
-}}
+}
 
 Rules:
 - title: Short, descriptive, no quotes needed
@@ -61,17 +61,17 @@ _CHUNK_PROMPT = _SYSTEM_INSTRUCTION + """
 Extract structured information from this SECTION of a longer meeting transcript. This is chunk {chunk_num} of {total_chunks}. Respond with ONLY a JSON object.
 
 The JSON must have these keys:
-{{
+{
   "action_items": [
-    {{"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open", "confidence": "high"}}
+    {"task": "what needs to be done", "assignee": "person name or empty string", "due": "date or empty string", "status": "open", "confidence": "high"}
   ],
   "decisions": [
-    {{"text": "what was decided", "topic": "topic area or empty string", "confidence": "high"}}
+    {"text": "what was decided", "topic": "topic area or empty string", "confidence": "high"}
   ],
-  "key_points": [{{"text": "important point from this section", "confidence": "high"}}],
+  "key_points": [{"text": "important point from this section", "confidence": "high"}],
   "tags": ["topic1"],
   "summary_text": "2-3 sentence summary of THIS section"
-}}
+}
 
 confidence: "high" = explicitly stated, "medium" = clearly implied, "low" = inferred/ambiguous.
 Only extract items clearly present in this section. Respond with ONLY the JSON object.
@@ -84,14 +84,14 @@ _SYNTHESIS_PROMPT = _SYSTEM_INSTRUCTION + """
 You are synthesizing summaries from {total_chunks} sections of a meeting transcript. Combine them into a single coherent summary. Respond with ONLY a JSON object.
 
 The JSON must have exactly these keys:
-{{
+{
   "title": "A concise 3-8 word title for the full meeting",
   "action_items": [combined and deduplicated action items from all sections, preserving confidence levels],
   "decisions": [combined and deduplicated decisions from all sections, preserving confidence levels],
-  "key_points": [combined key points as {{"text": "...", "confidence": "high/medium/low"}}],
+  "key_points": [combined key points as {"text": "...", "confidence": "high/medium/low"}],
   "tags": ["2-5 topic tags covering the full meeting"],
   "summary_text": "A 2-4 sentence summary of the full meeting"
-}}
+}
 
 Rules:
 - Deduplicate: if the same action item or decision appears in multiple sections, include it once.

@@ -13,7 +13,9 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +23,22 @@ from shared.transcript_writer import (
     auto_title,
     build_frontmatter,
 )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write atomically (temp file + os.replace) so a crash mid-rewrite
+    can't truncate an existing transcript."""
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def find_transcripts_without_frontmatter(transcripts_dir: Path) -> list[Path]:
@@ -128,7 +146,7 @@ def add_frontmatter_to_file(
         new_content = f"{frontmatter}\n\n## Transcript\n\n{text}"
 
     if not dry_run:
-        md_path.write_text(new_content, encoding="utf-8")
+        _atomic_write_text(md_path, new_content)
 
     return {
         "file": str(md_path),

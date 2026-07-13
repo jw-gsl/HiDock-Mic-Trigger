@@ -29,7 +29,9 @@ subcommand.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -79,7 +81,14 @@ def _embed_segment(
     chunk = audio[s:e]
     if len(chunk) == 0:
         return None
-    return extract_embedding(chunk, sr=_SAMPLE_RATE, onnx_session=onnx_session)
+    try:
+        return extract_embedding(chunk, sr=_SAMPLE_RATE, onnx_session=onnx_session)
+    except Exception as e:
+        # Embedding failure (extract_embedding raises rather than silently
+        # falling back to a wrong-dimension MFCC vector) — skip this segment.
+        print(f"recluster: embedding failed for [{start_s:.1f}-{end_s:.1f}]: {e}",
+              file=sys.stderr)
+        return None
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -216,6 +225,7 @@ def recluster_with_anchors(
         new_id = name_to_id.get(best_name, int(seg.get("speaker_id", 0)))
         if int(seg.get("speaker_id", 0)) != new_id:
             seg["speaker_id"] = new_id
+            seg["speaker"] = best_name
             reassigned += 1
         else:
             kept += 1
@@ -236,12 +246,34 @@ def recluster_with_anchors(
             cleaned_names[sid] = names[sid]
     data["speaker_names"] = cleaned_names
 
+    # Keep every segment's display name in sync with its (possibly new)
+    # speaker_id — the .md renderer resolves via seg["speaker"], and doing
+    # this before the merge means adjacent same-id segments carry the same
+    # name into _merge_consecutive_same_speaker.
+    for seg in segments:
+        sid = str(int(seg.get("speaker_id", 0)))
+        if sid in cleaned_names:
+            seg["speaker"] = cleaned_names[sid]
+
     # Final consecutive-same-speaker merge for clean reading.
     data["segments"] = _merge_consecutive_same_speaker(segments)
 
-    diarized_json_path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    # Atomic write: a crash mid-write must not leave a truncated
+    # _diarized.json (same temp+os.replace pattern as corrections.py).
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=diarized_json_path.parent, prefix=diarized_json_path.name, suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, diarized_json_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
     return {
         "audio_file": audio_path,

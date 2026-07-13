@@ -38,8 +38,12 @@ struct SyncHeaderSection: View {
             // the day's stats. Shown once there are recordings to plot. Its
             // header now also hosts the refreshing/downloading status.
             if !viewModel.syncEntries.isEmpty {
-                MeetingHeatmapView(viewModel: viewModel)
-                    .padding(.top, 2)
+                MeetingHeatmapView(
+                    viewModel: viewModel,
+                    ledMatrix: viewModel.ledMatrix,
+                    ledSettings: viewModel.ledSettings
+                )
+                .padding(.top, 2)
             }
 
             // Status fallback ONLY when the heatmap is hidden (no recordings) —

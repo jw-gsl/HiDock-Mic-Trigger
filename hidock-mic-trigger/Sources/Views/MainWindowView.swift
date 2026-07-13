@@ -4,21 +4,123 @@ struct MainWindowView: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            mainColumn
-            if viewModel.cliPaneVisible {
-                Divider()
-                EmbeddedTerminalPane(
-                    controller: viewModel.terminalController,
-                    onClose: { viewModel.cliPaneVisible = false }
-                )
-                .frame(minWidth: 340, idealWidth: 420, maxWidth: 560)
-                .transition(.move(edge: .trailing))
+        Group {
+            if viewModel.detailPaneVisible {
+                // Native resizable split — draggable divider, each side clipped
+                // to its own region (no overlap), both responsive.
+                HSplitView {
+                    mainColumn
+                        .frame(minWidth: 560, maxWidth: .infinity)
+                        .layoutPriority(1)
+                    detailPane
+                        .frame(minWidth: 480, idealWidth: 640, maxWidth: .infinity)
+                }
+            } else {
+                mainColumn
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(minWidth: viewModel.cliPaneVisible ? 1320 : 980, minHeight: 510)
+        .frame(minWidth: viewModel.detailPaneVisible ? 1280 : 980, minHeight: 510)
         .sheet(isPresented: $viewModel.showOnboarding) {
             OnboardingView(viewModel: viewModel)
+        }
+    }
+
+    /// The right-hand pane: a tab strip over the CLI + any hosted windows
+    /// (transcripts, summaries, tool views).
+    private var detailPane: some View {
+        VStack(spacing: 0) {
+            detailTabStrip
+            Divider()
+            detailContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    private var detailTabStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                if viewModel.cliPaneVisible {
+                    detailTabChip(id: "cli", title: cliTabTitle, icon: "terminal") {
+                        viewModel.cliPaneVisible = false
+                        if viewModel.activeDetailTabId == "cli" {
+                            viewModel.activeDetailTabId = viewModel.detailTabs.last?.id ?? "cli"
+                        }
+                    }
+                }
+                ForEach(viewModel.detailTabs) { tab in
+                    detailTabChip(id: tab.id, title: tab.title, icon: tab.icon) {
+                        viewModel.closeDetailTab(tab.id)
+                    }
+                }
+            }
+            .padding(6)
+        }
+        .background(.ultraThinMaterial)
+    }
+
+    private func detailTabChip(id: String, title: String, icon: String, onClose: @escaping () -> Void) -> some View {
+        let active = viewModel.activeDetailTabId == id
+        return HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 10))
+            Text(title).font(.caption).lineLimit(1)
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: 170)
+        .contentShape(Rectangle())
+        .onTapGesture { viewModel.activeDetailTabId = id }
+    }
+
+    @ViewBuilder private var detailContent: some View {
+        if viewModel.activeDetailTabId == "cli", viewModel.cliPaneVisible {
+            cliPane
+        } else if let tab = viewModel.detailTabs.first(where: { $0.id == viewModel.activeDetailTabId }) {
+            tab.content
+        } else if viewModel.cliPaneVisible {
+            cliPane
+        } else if let first = viewModel.detailTabs.first {
+            first.content
+        } else {
+            Color.clear
+        }
+    }
+
+    private var cliTabTitle: String {
+        switch viewModel.cliPaneMode {
+        case .summary: return "Summary"
+        case .chat: return "Ask AI"
+        case .terminal: return "Terminal"
+        }
+    }
+
+    /// The right-hand pane content, chosen by the current mode. Auth / template
+    /// authoring use the raw terminal; summarise and Ask AI use the formatted
+    /// views.
+    @ViewBuilder private var cliPane: some View {
+        switch viewModel.cliPaneMode {
+        case .summary:
+            SummaryReadoutPane(
+                transcript: viewModel.summaryTranscript,
+                onOpenRawTerminal: { viewModel.onOpenRawTerminal() },
+                onClose: { viewModel.cliPaneVisible = false }
+            )
+        case .chat:
+            AgentChatView(viewModel: viewModel, onClose: { viewModel.cliPaneVisible = false })
+        case .terminal:
+            EmbeddedTerminalPane(
+                controller: viewModel.terminalController,
+                onClose: { viewModel.cliPaneVisible = false }
+            )
         }
     }
 
@@ -45,9 +147,10 @@ struct MainWindowView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                         .font(.caption)
                 }
+                .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .disabled(viewModel.syncBusy)
-                .help("Probe paired devices for fresh status.")
+                .help("Refresh — probe paired devices for fresh status.")
 
                 if !viewModel.updateStatusText.isEmpty {
                     Label {

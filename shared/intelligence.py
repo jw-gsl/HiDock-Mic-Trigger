@@ -69,11 +69,16 @@ class MeetingIntelligence:
             meeting_count = person["meeting_count"]
             last_meeting = person["last_meeting"] or ""
 
-            # Calculate days since last meeting
+            # Calculate days since last meeting (None = date unknown)
             days_since = self._days_since(last_meeting, now)
 
-            # Recency weight: decays over 30 days
-            recency_weight = 1.0 / (1.0 + days_since / 30.0)
+            # Recency weight: decays over 30 days. Unknown dates get a
+            # neutral 30-day-equivalent weight rather than being scored
+            # as maximally stale.
+            if days_since is not None:
+                recency_weight = 1.0 / (1.0 + days_since / 30.0)
+            else:
+                recency_weight = 0.5
 
             # Topic depth: how many distinct topics discussed
             topics = conn.execute("""
@@ -90,8 +95,14 @@ class MeetingIntelligence:
             # Final score
             score = round(meeting_count * recency_weight * topic_depth, 2)
 
-            # Losing touch: 3+ meetings but absent > threshold days
-            losing_touch = meeting_count >= 3 and days_since > self.losing_touch_days
+            # Losing touch: 3+ meetings but absent > threshold days.
+            # Unknown last-meeting dates are excluded — we can't claim
+            # someone is "losing touch" without knowing when we last met.
+            losing_touch = (
+                days_since is not None
+                and meeting_count >= 3
+                and days_since > self.losing_touch_days
+            )
 
             # Open action items for this person
             open_actions = conn.execute("""
@@ -129,13 +140,16 @@ class MeetingIntelligence:
         threshold = now - timedelta(days=self.stale_action_days)
         threshold_str = threshold.isoformat()
 
-        # Find stale action items
+        # Find stale action items. Meetings with an empty date are
+        # excluded — '' sorts before every ISO date, so without the
+        # filter every undated meeting's items would classify as stale.
         stale_actions = conn.execute("""
             SELECT a.id, a.task, a.assignee, a.due, a.status, a.confidence,
                    m.title as meeting_title, m.date as meeting_date, m.file_path
             FROM action_items a
             JOIN meetings m ON m.id = a.meeting_id
-            WHERE a.status = 'open' AND m.date < ?
+            WHERE a.status = 'open' AND m.date != '' AND m.date IS NOT NULL
+                  AND m.date < ?
             ORDER BY m.date ASC
         """, (threshold_str,)).fetchall()
         stale_list = [dict(r) for r in stale_actions]
@@ -208,8 +222,13 @@ class MeetingIntelligence:
         results = []
         for row in rows:
             days_since = self._days_since(row["last_seen"], now)
-            # "Trending" if seen in the last 7 days with 2+ mentions
-            trending = days_since < 7 and row["meeting_count"] >= 2
+            # "Trending" if seen in the last 7 days with 2+ mentions.
+            # Unknown dates (None) can't be trending.
+            trending = (
+                days_since is not None
+                and days_since < 7
+                and row["meeting_count"] >= 2
+            )
             results.append({
                 "tag": row["tag"],
                 "meeting_count": row["meeting_count"],
@@ -344,10 +363,14 @@ class MeetingIntelligence:
     # ── Helpers ─────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _days_since(date_str: str, now: datetime) -> float:
-        """Calculate days between a date string and now."""
+    def _days_since(date_str: str, now: datetime) -> float | None:
+        """Calculate days between a date string and now.
+
+        Returns None when the date is empty or unparseable — an unknown
+        date must not masquerade as "ages ago" (the old 999-day sentinel
+        made every meeting with a missing date look maximally stale)."""
         if not date_str:
-            return 999.0
+            return None
         try:
             # Handle ISO format with or without timezone
             if "T" in date_str:
@@ -357,7 +380,7 @@ class MeetingIntelligence:
             delta = now - dt
             return max(0.0, delta.total_seconds() / 86400)
         except (ValueError, TypeError):
-            return 999.0
+            return None
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

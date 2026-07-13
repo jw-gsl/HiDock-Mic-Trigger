@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
@@ -65,6 +65,11 @@ def _is_user_named(speaker_id: int, names: dict) -> bool:
 class TranscriptViewerDialog(QDialog):
     """Dialog showing a diarized transcript with speaker rename and enrollment."""
 
+    # Re-diarize / re-cluster run in worker threads; widgets must only be
+    # touched on the GUI thread, so completion is marshalled through this
+    # signal (same pattern as TerminalPane._output_ready).
+    _reprocess_done = pyqtSignal(bool, str)  # (success, failure_title)
+
     def __init__(self, json_path: str, audio_path: str, parent=None):
         super().__init__(parent)
         self.json_path = json_path
@@ -84,6 +89,8 @@ class TranscriptViewerDialog(QDialog):
         self.setWindowTitle(f"Transcript — {self.transcript.get('audio_file', '')}")
         self.setMinimumSize(700, 500)
         self.resize(800, 600)
+
+        self._reprocess_done.connect(self._on_reprocess_done)
 
         self._init_ui()
 
@@ -668,6 +675,8 @@ class TranscriptViewerDialog(QDialog):
             import threading
 
             def _run():
+                # Worker thread: run the subprocess only. All widget/state
+                # updates happen in _on_reprocess_done on the GUI thread.
                 try:
                     cmd = [
                         sys.executable, str(script),
@@ -675,20 +684,27 @@ class TranscriptViewerDialog(QDialog):
                         "--n-speakers", str(n_speakers),
                     ]
                     subprocess.run(cmd, capture_output=True, check=True)
-                    # Reload and refresh
-                    self._load_transcript()
-                    self._speaker_ids = sorted(set(
-                        s.get("speaker_id", 0) for s in self.transcript.get("segments", [])
-                    ))
-                    self._refresh_ui()
-                    self.setWindowTitle(f"Transcript — {self.transcript.get('audio_file', '')}")
+                    self._reprocess_done.emit(True, "")
                 except Exception as e:
                     print(f"Re-diarize failed: {e}")
-                    self.setWindowTitle("Re-diarize failed")
+                    self._reprocess_done.emit(False, "Re-diarize failed")
 
             threading.Thread(target=_run, daemon=True).start()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Re-diarize failed:\n{e}")
+
+    @pyqtSlot(bool, str)
+    def _on_reprocess_done(self, success: bool, failure_title: str):
+        """GUI-thread completion for re-diarize / re-cluster workers."""
+        if not success:
+            self.setWindowTitle(failure_title or "Reprocess failed")
+            return
+        self._load_transcript()
+        self._speaker_ids = sorted(set(
+            s.get("speaker_id", 0) for s in self.transcript.get("segments", [])
+        ))
+        self._refresh_ui()
+        self.setWindowTitle(f"Transcript — {self.transcript.get('audio_file', '')}")
 
     def _recluster(self):
         """Re-cluster the transcript using user-named segments as anchors
@@ -716,22 +732,18 @@ class TranscriptViewerDialog(QDialog):
             import threading
 
             def _run():
+                # Worker thread: run the subprocess only. All widget/state
+                # updates happen in _on_reprocess_done on the GUI thread.
                 try:
                     cmd = [
                         sys.executable, str(script),
                         "recluster-with-anchors", self.json_path,
                     ]
                     subprocess.run(cmd, capture_output=True, check=True)
-                    # Reload and refresh
-                    self._load_transcript()
-                    self._speaker_ids = sorted(set(
-                        s.get("speaker_id", 0) for s in self.transcript.get("segments", [])
-                    ))
-                    self._refresh_ui()
-                    self.setWindowTitle(f"Transcript — {self.transcript.get('audio_file', '')}")
+                    self._reprocess_done.emit(True, "")
                 except Exception as e:
                     print(f"Re-cluster failed: {e}")
-                    self.setWindowTitle("Re-cluster failed")
+                    self._reprocess_done.emit(False, "Re-cluster failed")
 
             threading.Thread(target=_run, daemon=True).start()
         except Exception as e:

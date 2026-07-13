@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,9 +26,53 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import config  # noqa: E402
-from state import load_state, save_state  # noqa: E402
+from state import load_state, save_state, update_state  # noqa: E402
 
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
+
+# Tracks the currently in-flight transcription so the SIGTERM handler can
+# flip its state from "in_progress" to "failed" before the process exits.
+# Without this, a timeout kill leaves state stuck in "in_progress" and the
+# app can never re-queue the recording. Set by transcribe_file, cleared on
+# completion. (Mirrors transcribe.py.)
+_IN_FLIGHT: dict[str, str] | None = None
+
+
+def _sigterm_handler(signum, frame):
+    """Mark the in-flight transcription as failed before exiting.
+
+    Called when the parent process (Swift app) terminates us due to timeout.
+    Updating the state here means a re-queue from the UI will actually run,
+    instead of seeing stale 'in_progress' and either skipping or deadlocking.
+    """
+    global _IN_FLIGHT
+    try:
+        if _IN_FLIGHT is not None:
+            key = _IN_FLIGHT["key"]
+
+            def _mark_failed(state: dict) -> None:
+                existing = state.setdefault("transcriptions", {}).get(key, {})
+                state["transcriptions"][key] = {
+                    **existing,
+                    "status": "failed",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "last_error": f"Terminated by signal {signum} (likely timeout)",
+                }
+
+            # Prefer the locked read-modify-write; if the lock is busy fall
+            # back to an unlocked write — a possibly-racy "failed" beats a
+            # permanently stuck "in_progress".
+            if not update_state(_mark_failed, timeout=1.0):
+                state = load_state()
+                _mark_failed(state)
+                save_state(state)
+    except Exception:
+        pass
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT, _sigterm_handler)
 
 # whisper.cpp GGML model settings
 GGML_MODEL_FILENAME = "ggml-large-v3-turbo-q5_0.bin"
@@ -139,6 +184,11 @@ def transcribe_file(
         "last_error": None,
     }
     save_state(state)
+
+    # Register with the SIGTERM handler so state flips to "failed" instead of
+    # staying stuck at "in_progress" if the parent app kills us via timeout.
+    global _IN_FLIGHT
+    _IN_FLIGHT = {"key": entry_key}
 
     start_time = time.monotonic()
     try:
@@ -259,6 +309,7 @@ def transcribe_file(
 
         progress(100)
 
+        _IN_FLIGHT = None
         return {
             "file": str(mp3_path),
             "transcript_path": str(transcript_path),
@@ -283,6 +334,7 @@ def transcribe_file(
         }
         save_state(state)
 
+        _IN_FLIGHT = None
         return {
             "file": str(mp3_path),
             "transcript_path": None,
@@ -379,16 +431,106 @@ def cmd_transcribe_batch(args):
     }))
 
 
+def cmd_rematch(args):
+    """Re-match still-generic speakers in an existing transcript against the
+    current voice library (used after enrolling new voices). Never overwrites a
+    user-confirmed name. Re-derives per-speaker embeddings from audio when the
+    sidecar predates embedding storage (unless --no-audio). Mirrors
+    transcribe.py's cmd_rematch."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    progress(5)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import rematch_diarized
+    progress(10)
+    summary = rematch_diarized(data, audio_fallback=not getattr(args, "no_audio", False))
+    progress(90)
+
+    json_path.write_text(
+        _json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    if summary.get("rematched", 0) > 0:
+        try:
+            from shared.transcript_writer import write_transcript
+            md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+            body_text = " ".join(
+                seg.get("text", "").strip()
+                for seg in data.get("segments", [])
+                if seg.get("text")
+            )
+            write_transcript(
+                md_path,
+                body_text,
+                source_path=Path(data.get("audio_file", "")),
+                model="rematch",
+                diarized_result=data,
+            )
+        except Exception as exc:
+            print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+
+    progress(100)
+    print(_json.dumps({"status": "completed", **summary}))
+
+
+def cmd_speaker_confidence(args):
+    """Per-speaker confidence that each assigned name is correct (cosine
+    similarity of the speaker's stored embedding to the enrolled voice of that
+    name). Mirrors transcribe.py. Fast — no audio, no model load."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import score_speakers
+    print(_json.dumps({"status": "completed", "confidence": score_speakers(data)}))
+
+
 def cmd_summarize(args):
     """Type-aware, template-driven summary of an existing transcript via Claude
     Code -> ~/HiDock/Summaries/. No-ops cleanly if no LLM/templates available."""
     from shared.typed_summarize import summarise_typed
+    events = None
+    if getattr(args, "events", False):
+        from shared.agent_events import EventEmitter
+        events = EventEmitter()   # normalized NDJSON on stderr for the desktop app
     res = summarise_typed(
         Path(args.transcript_path).expanduser(),
         engine_name=args.summarize_engine,
         force_template=getattr(args, "template", None),
+        events=events,
     )
     print(json.dumps(res))
+
+
+def cmd_ask(args):
+    """One conversational turn for the desktop chat view. Reads the prompt from
+    stdin, streams normalized events (NDJSON on stderr), and prints a JSON
+    result {ok, session_id, text} on stdout. Multi-turn = re-invoke with
+    --resume <session_id>. Mirrors transcribe.cmd_ask."""
+    import sys as _sys
+    from shared.agent_events import EventEmitter
+    from shared.llm_cli import chat_streaming, get_engine
+    prompt = _sys.stdin.read()
+    em = EventEmitter()
+    allowed = None
+    if getattr(args, "allowed_tools", None):
+        allowed = [t.strip() for t in args.allowed_tools.split(",") if t.strip()]
+    text, session_id = chat_streaming(
+        prompt,
+        engine=get_engine(args.engine or "auto"),
+        cwd=getattr(args, "cwd", None),
+        resume=getattr(args, "resume", None),
+        allowed_tools=allowed,
+        on_event=em,
+    )
+    em.done(ok=text is not None, session_id=session_id)
+    print(json.dumps({"ok": text is not None, "session_id": session_id, "text": text}))
 
 
 def cmd_notes(args):
@@ -453,15 +595,56 @@ def cmd_status(_args):
     transcripts_dir = config.RAW_TRANSCRIPTS_DIR
     recordings_dir = config.RECORDINGS_DIR
 
+    # Build lookup: mp3 filename -> transcription info.
+    # Verify the transcript file still exists on disk before reporting
+    # `transcribed: True`. Without this check, removing a recording in
+    # the Mac app deletes the .md/.srt/.json files but leaves this
+    # state.json entry stuck at status="completed", so the desktop UI
+    # keeps flipping the row back to "Transcribed" — overriding the
+    # "Removed" status the user just set. This guard reports the row
+    # as not-transcribed once the artifact's gone. (Mirrors transcribe.py.)
     lookup = {}
+    stale_keys: list[str] = []
     for key, info in state.get("transcriptions", {}).items():
+        completed = info.get("status") == "completed"
+        transcript_path = info.get("transcript_path")
+        path_present = bool(transcript_path) and Path(transcript_path).exists()
+        is_transcribed = completed and path_present
+        if completed and not path_present:
+            stale_keys.append(key)
         lookup[key] = {
             "status": info.get("status", "unknown"),
-            "transcript_path": info.get("transcript_path"),
-            "transcribed": info.get("status") == "completed",
+            "transcript_path": transcript_path,
+            "transcribed": is_transcribed,
             "duration_s": info.get("duration_s"),
             "model": info.get("model"),
         }
+
+    # Opportunistically prune state entries whose transcript files have
+    # been deleted out-of-band (most often by the Mac app's Remove
+    # action). Uses the locked read-modify-write so a concurrent
+    # transcription's completion save can't be clobbered (and vice
+    # versa); each entry is re-verified under the lock in case it was
+    # re-transcribed since the scan above. Best-effort — on lock timeout
+    # we skip the prune rather than blocking status; the in-memory
+    # `lookup` already reflects truth for this call.
+    if stale_keys:
+        def _prune(s: dict) -> None:
+            transcriptions = s.get("transcriptions", {})
+            for k in stale_keys:
+                info = transcriptions.get(k)
+                if not info or info.get("status") != "completed":
+                    continue  # changed since scan (e.g. re-queued) — keep
+                tp = info.get("transcript_path")
+                if tp and Path(tp).exists():
+                    continue  # transcript reappeared — keep
+                transcriptions.pop(k, None)
+
+        if not update_state(_prune):
+            print(
+                f"WARN: state lock busy; skipped pruning {len(stale_keys)} stale entries",
+                file=sys.stderr,
+            )
 
     if recordings_dir.exists() and transcripts_dir.exists():
         for mp3 in recordings_dir.iterdir():
@@ -501,11 +684,38 @@ def main():
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)
 
+    p_rematch = sub.add_parser(
+        "rematch",
+        help="Re-match still-generic speakers against the current voice library (after enrolling new voices)",
+    )
+    p_rematch.add_argument("json_path", help="Path to _diarized.json file")
+    p_rematch.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
+    )
+    p_rematch.set_defaults(func=cmd_rematch)
+
+    p_confidence = sub.add_parser(
+        "speaker-confidence",
+        help="Per-speaker confidence that each assigned name matches the enrolled voice (JSON)",
+    )
+    p_confidence.add_argument("json_path", help="Path to _diarized.json file")
+    p_confidence.set_defaults(func=cmd_speaker_confidence)
+
     p_summarize = sub.add_parser("summarize", help="Type-aware template summary of an existing transcript -> ~/HiDock/Summaries/")
     p_summarize.add_argument("transcript_path", help="Path to the transcript .md (basename locates the _whisper.json)")
     p_summarize.add_argument("--summarize-engine", default=None, help="LLM engine (e.g. claude). Default: config [summarization].engine / auto.")
     p_summarize.add_argument("--template", default=None, help="Force a specific template by name (skip auto-classification).")
+    p_summarize.add_argument("--events", action="store_true", help="Emit normalized agent events (NDJSON on stderr) for the desktop app's formatted view.")
     p_summarize.set_defaults(func=cmd_summarize)
+
+    p_ask = sub.add_parser("ask", help="One conversational turn (prompt on stdin) for the desktop chat view; streams normalized events.")
+    p_ask.add_argument("--engine", default=None, help="LLM engine (default: config [summarization].engine / auto).")
+    p_ask.add_argument("--cwd", default=None, help="Working directory for the engine (e.g. the transcript's folder).")
+    p_ask.add_argument("--resume", default=None, help="Resume a prior claude session id for multi-turn chat.")
+    p_ask.add_argument("--allowed-tools", default=None, help="Comma-separated claude tool allow-list (e.g. Read,Grep,Glob).")
+    p_ask.set_defaults(func=cmd_ask)
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
     p_detect.set_defaults(func=cmd_detect_engine)

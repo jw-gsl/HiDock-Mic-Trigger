@@ -189,6 +189,19 @@ class KnowledgeGraph:
         Returns:
             The meeting ID, or None if the file couldn't be parsed.
         """
+        conn = self._get_conn()
+        try:
+            meeting_id = self._index_transcript_no_commit(file_path)
+            conn.commit()
+            return meeting_id
+        except BaseException:
+            conn.rollback()
+            raise
+
+    def _index_transcript_no_commit(self, file_path: Path) -> int | None:
+        """Index a single transcript without committing — used directly by
+        rebuild() so the whole rebuild is one transaction (rollback on
+        failure leaves the previous index intact)."""
         file_path = file_path.resolve()
         try:
             text = file_path.read_text(encoding="utf-8")
@@ -288,13 +301,15 @@ class KnowledgeGraph:
                 )
 
         # Full-text search entry
-        speakers_text = ", ".join(speakers) if isinstance(speakers, list) else ""
+        speakers_text = (
+            ", ".join(s for s in speakers if isinstance(s, str))
+            if isinstance(speakers, list) else ""
+        )
         conn.execute(
             "INSERT INTO transcript_fts (file_path, title, content, speakers) VALUES (?, ?, ?, ?)",
             (str(file_path), meta.get("title", ""), body, speakers_text),
         )
 
-        conn.commit()
         return meeting_id
 
     def rebuild(self) -> int:
@@ -303,28 +318,34 @@ class KnowledgeGraph:
         Scans ``transcripts_dir`` for .md files, parses each, and rebuilds
         the full index. This is idempotent and safe to run at any time.
 
+        The whole rebuild (clear + re-index) runs in a single transaction:
+        if anything fails mid-way it is rolled back, so a failed rebuild
+        leaves the previous index intact instead of a wiped/partial one.
+
         Returns:
             Number of transcripts indexed.
         """
         conn = self._get_conn()
 
-        # Clear all data
-        conn.executescript("""
-            DELETE FROM meeting_people;
-            DELETE FROM action_items;
-            DELETE FROM decisions;
-            DELETE FROM key_points;
-            DELETE FROM tags;
-            DELETE FROM meetings;
-            DELETE FROM transcript_fts;
-        """)
-        conn.commit()
+        try:
+            # Clear all data — plain execute()s (not executescript, which
+            # would force an implicit commit) so the deletes stay inside
+            # the same transaction as the re-indexing below.
+            for table in (
+                "meeting_people", "action_items", "decisions",
+                "key_points", "tags", "meetings", "transcript_fts",
+            ):
+                conn.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed table names
 
-        count = 0
-        if self.transcripts_dir.exists():
-            for md_file in sorted(self.transcripts_dir.glob("*.md")):
-                if self.index_transcript(md_file) is not None:
-                    count += 1
+            count = 0
+            if self.transcripts_dir.exists():
+                for md_file in sorted(self.transcripts_dir.glob("*.md")):
+                    if self._index_transcript_no_commit(md_file) is not None:
+                        count += 1
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
         return count
 

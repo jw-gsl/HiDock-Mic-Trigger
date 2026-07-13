@@ -88,9 +88,10 @@ def test_get_model_status_not_installed():
         if info.get("built_in"):
             assert status["installed"] is True, f"{key}: built-in should always be installed"
             assert status["file_size_bytes"] == 0
-        elif info.get("pip_package"):
-            # Pip-installable entries (NeMo Sortformer, TEN VAD): skip —
-            # installed state depends on whether the pip module is
+        elif info.get("pip_package") or info.get("managed_externally"):
+            # Pip-installable entries (NeMo Sortformer, TEN VAD) and
+            # managed-externally entries (Parakeet via parakeet-mlx): skip —
+            # installed state depends on whether the managing module is
             # importable in the test venv, which is orthogonal to
             # MODELS_DIR (the test is mocking MODELS_DIR only).
             continue
@@ -165,3 +166,84 @@ def test_ensure_speaker_embed_calls_download():
 def test_ensure_speaker_embedding_model_is_alias():
     """The old name should still work as a backward-compatible alias."""
     assert ensure_speaker_embedding_model is ensure_speaker_embed
+
+
+# ── download_model_if_needed integrity ──────────────────────────────────────
+
+
+class _FakeResponse:
+    """Minimal urlopen response: declares Content-Length but delivers less."""
+
+    def __init__(self, body: bytes, content_length: int):
+        self._body = body
+        self.headers = {"Content-Length": str(content_length)}
+        self._served = False
+
+    def read(self, _size):
+        if self._served:
+            return b""
+        self._served = True
+        return self._body
+
+
+def test_incomplete_download_raises_and_cleans_up(tmp_path):
+    """A short body (dropped connection) must raise — not rename a partial
+    file into place where it would pass the size>1000 'installed' check."""
+    import pytest
+    from shared.models import download_model_if_needed
+
+    body = b"x" * 50
+    with patch("shared.models.MODELS_DIR", tmp_path), \
+         patch("urllib.request.urlopen", return_value=_FakeResponse(body, 100)):
+        with pytest.raises(OSError, match="Incomplete download"):
+            download_model_if_needed("https://example.com/model.onnx", "model.onnx")
+
+    assert not (tmp_path / "model.onnx").exists()
+    assert not (tmp_path / "model.downloading").exists()
+
+
+def test_complete_download_succeeds(tmp_path):
+    from shared.models import download_model_if_needed
+
+    body = b"x" * 100
+    with patch("shared.models.MODELS_DIR", tmp_path), \
+         patch("urllib.request.urlopen", return_value=_FakeResponse(body, 100)):
+        dest = download_model_if_needed("https://example.com/model.onnx", "model.onnx")
+
+    assert dest == tmp_path / "model.onnx"
+    assert dest.read_bytes() == body
+
+
+# ── managed_externally entries (Parakeet) ───────────────────────────────────
+
+
+def test_managed_externally_status_uses_module_check():
+    """Parakeet's 'installed' state must come from the parakeet_mlx module,
+    not from a file in MODELS_DIR (its url is an HTML page, not a model)."""
+    with patch("shared.models.MODELS_DIR", Path("/nonexistent/path")), \
+         patch("shared.models._python_module_available", return_value=True) as mock_avail:
+        statuses = get_model_status()
+
+    assert statuses["parakeet"]["installed"] is True
+    assert statuses["parakeet"]["url"] is None
+    mock_avail.assert_any_call("parakeet_mlx")
+
+
+def test_managed_externally_download_refused(capsys):
+    """`models.py download parakeet` must refuse instead of writing the
+    HuggingFace HTML page into MODELS_DIR."""
+    import json as _json
+    import sys as _sys
+
+    import pytest
+    from shared.models import _cli
+
+    with patch.object(_sys, "argv", ["models.py", "download", "parakeet"]):
+        with pytest.raises(SystemExit) as exc:
+            _cli()
+
+    assert exc.value.code == 1
+    out = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["ok"] is False
+    assert out.get("managed_externally") is True
+    assert "managed externally" in out["error"]

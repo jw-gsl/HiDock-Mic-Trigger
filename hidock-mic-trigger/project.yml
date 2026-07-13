@@ -10,6 +10,9 @@ packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
     from: 1.13.0
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: 2.4.0
 schemes:
   hidock-mic-trigger:
     build:
@@ -27,6 +30,8 @@ targets:
     platform: macOS
     dependencies:
       - package: SwiftTerm
+      - package: MarkdownUI
+        product: MarkdownUI
     preBuildScripts:
       - name: "Run Python Tests"
         script: |

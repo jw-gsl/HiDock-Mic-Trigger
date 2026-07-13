@@ -56,17 +56,20 @@ def transcript_stats(transcripts_dir: Path | None = None) -> dict:
             out[source]["speakers"] = len(speakers) if isinstance(speakers, list) else 0
 
     # Action items — from curated summaries only (checkbox count), mapped to the
-    # recording via the summary's transcript stem.
+    # recording via the summary's transcript stem. Recordings aren't always
+    # .mp3 (volume imports can be .wav etc.), so match an existing key by
+    # stem first and only fall back to "<stem>.mp3" for new entries.
+    by_stem = {Path(key).stem: key for key in out}
     try:
         from shared import summaries_index as si
         for summary in si.all_summaries():
             stem = _summary_recording_stem(summary)
             if not stem:
                 continue
-            mp3 = stem + ".mp3"
+            key = by_stem.get(stem, stem + ".mp3")
             count = len(_CHECKBOX_RE.findall(summary.get("body", "")))
-            out.setdefault(mp3, {"speakers": 0, "action_items": 0})
-            out[mp3]["action_items"] = count
+            out.setdefault(key, {"speakers": 0, "action_items": 0})
+            out[key]["action_items"] = count
     except Exception:
         pass
 

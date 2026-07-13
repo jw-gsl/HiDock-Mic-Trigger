@@ -7,7 +7,9 @@ misrecognitions (e.g. "volaris" → "VOLARIS", "hyde oates" → "HiDock").
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 CORRECTIONS_PATH = Path.home() / "HiDock" / "corrections.json"
@@ -25,12 +27,23 @@ def load_corrections() -> dict[str, str]:
 
 
 def save_corrections(corrections: dict[str, str]) -> None:
-    """Save the corrections dictionary."""
+    """Save the corrections dictionary (atomically, so a crash mid-write
+    can't leave a truncated file that wipes the dictionary on next load)."""
     CORRECTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CORRECTIONS_PATH.write_text(
-        json.dumps({"corrections": corrections}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    content = json.dumps({"corrections": corrections}, indent=2, ensure_ascii=False)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=CORRECTIONS_PATH.parent, prefix=CORRECTIONS_PATH.name, suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, CORRECTIONS_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def add_correction(wrong: str, right: str) -> dict[str, str]:
@@ -61,8 +74,13 @@ def apply_corrections(text: str, corrections: dict[str, str] | None = None) -> s
         return text
 
     for wrong, right in corrections.items():
-        # Case-insensitive replacement preserving word boundaries
-        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        # Case-insensitive replacement preserving word boundaries. \b only
+        # matches next to a word character, so anchor each end only when the
+        # key starts/ends with one (e.g. "c++" keeps a bare trailing edge).
+        escaped = re.escape(wrong)
+        prefix = r"\b" if re.match(r"\w", wrong) else ""
+        suffix = r"\b" if re.search(r"\w$", wrong) else ""
+        pattern = re.compile(f"{prefix}{escaped}{suffix}", re.IGNORECASE)
         text = pattern.sub(right, text)
 
     return text

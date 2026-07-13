@@ -64,6 +64,13 @@ class MainWindow(QMainWindow):
     _txq_update_signal = pyqtSignal()                   # transcription queue changed
     _plaud_signal = pyqtSignal(object, object)          # (entries, error) from a Plaud cloud query
     _merge_candidates_signal = pyqtSignal(object)       # set[str] of candidate mp3 paths
+    # Worker-thread marshalling: statusBar/QSettings/dialogs must only be
+    # touched on the GUI thread, so background threads emit these instead.
+    _status_signal = pyqtSignal(str, int)               # statusBar().showMessage(msg, ms)
+    _refresh_request_signal = pyqtSignal()              # run _refresh_status on GUI thread
+    _plaud_tokens_signal = pyqtSignal(str, object)      # (account_id, refreshedTokens dict)
+    _update_check_signal = pyqtSignal(object, bool)     # (release | None, manual check?)
+    _update_downloaded_signal = pyqtSignal(object, bool)  # (exe Path | None, restart now?)
 
     def __init__(self, tray_icon: QSystemTrayIcon | None = None):
         super().__init__()
@@ -82,6 +89,7 @@ class MainWindow(QMainWindow):
         self._paired_devices: list = []  # list[PairedDevice] loaded lazily
         # Transcription queue model (drives the pop-out queue dialog)
         self._transcription_cancelled = False
+        self._txq_running = False          # a batch worker is active
         self._txq_items: list[dict] = []   # [{filename, path, status, progress}]
         self._txq_paused = False
         self._txq_remove: set[str] = set()  # paths the user removed while queued
@@ -695,10 +703,11 @@ class MainWindow(QMainWindow):
             menu.exec(self.table_view.viewport().mapToGlobal(pos))
 
     def _ctx_download(self, entry: SyncRecordingEntry):
-        if entry.device_id.startswith("plaud:"):
-            self._plaud_download(entry)
-            return
-        self._run_download(["download", entry.recording.name])
+        # Branch by device type (volume-import vs download vs Plaud) exactly
+        # like the toolbar Download Selected path.
+        commands = self._build_download_commands([entry])
+        if commands:
+            self._run_download_commands(commands)
 
     def _plaud_download(self, entry: SyncRecordingEntry):
         """Download one Plaud cloud recording in a background thread."""
@@ -719,7 +728,8 @@ class MainWindow(QMainWindow):
                     env=env, timeout=300,
                 )
                 if data and data.get("refreshedTokens"):
-                    plaud.apply_refreshed_tokens(account_id, data["refreshedTokens"], self.settings)
+                    # Persist on the GUI thread — QSettings is not thread-safe.
+                    self._plaud_tokens_signal.emit(account_id, data["refreshedTokens"])
             except Exception as e:
                 err = str(e)
             # Re-query Plaud so the row flips to downloaded; hide progress.
@@ -731,8 +741,18 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _ctx_mark_downloaded(self, entry: SyncRecordingEntry):
+        # Branch by device type like the toolbar Skip path: volume devices
+        # need --volume-name (their state keys are "vol:<name>/<file>"),
+        # HiDock devices need the product id.
+        from core.models import load_paired_devices
+        device = {d.device_id: d for d in load_paired_devices(self.settings)}.get(entry.device_id)
         try:
-            run_extractor(["mark-downloaded", entry.recording.name])
+            if entry.device_id.startswith("volume:"):
+                vol = (device.volume_name if device else None) or entry.device_id.split(":", 1)[1]
+                run_extractor(["mark-downloaded", "--volume-name", vol, entry.recording.name])
+            else:
+                pid = (device.product_id if device else None) or entry.device_product_id or None
+                run_extractor(["mark-downloaded", entry.recording.name], product_id=pid)
             self._refresh_status()
         except Exception as e:
             self.statusBar().showMessage(f"Error: {e}", 5000)
@@ -871,13 +891,20 @@ class MainWindow(QMainWindow):
             return
         from core import plaud
 
+        # Load accounts on the GUI thread — QSettings is not thread-safe, so
+        # the worker must not call plaud.get_account(self.settings) itself.
+        accounts = []
+        for dev in devices:
+            acct = plaud.get_account(dev.plaud_account_id, self.settings)
+            if acct is not None:
+                accounts.append(acct)
+        if not accounts:
+            return
+
         def _worker():
             all_entries = []
             err = None
-            for dev in devices:
-                acct = plaud.get_account(dev.plaud_account_id, self.settings)
-                if acct is None:
-                    continue
+            for acct in accounts:
                 env = plaud.plaud_env(acct)
                 cmd = "plaud-status" if live else "plaud-cached-status"
                 try:
@@ -890,10 +917,11 @@ class MainWindow(QMainWindow):
                     data = None
                 if not data:
                     continue
-                # Persist rotated tokens so the next query keeps working.
+                # Persist rotated tokens so the next query keeps working —
+                # marshalled to the GUI thread (QSettings write).
                 if data.get("refreshedTokens"):
-                    plaud.apply_refreshed_tokens(
-                        acct.account_id, data["refreshedTokens"], self.settings
+                    self._plaud_tokens_signal.emit(
+                        acct.account_id, data["refreshedTokens"]
                     )
                 device_id = f"plaud:{acct.account_id}"
                 name = acct.display_name or acct.email or "Plaud"
@@ -1042,7 +1070,9 @@ class MainWindow(QMainWindow):
     # ── Keyboard shortcuts ──────────────────────────────────────────────
 
     def _init_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self._refresh_status)
+        # NOTE: no Ctrl+R QShortcut here — the Actions→Refresh menu action
+        # already binds Ctrl+R. Binding both made the shortcut ambiguous, so
+        # Qt fired neither.
         QShortcut(QKeySequence("F5"), self).activated.connect(self._refresh_status)
         QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(self._download_selected)
         QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(self._transcribe_selected)
@@ -1080,6 +1110,25 @@ class MainWindow(QMainWindow):
         self._txq_update_signal.connect(self._on_txq_update)
         self._plaud_signal.connect(self._on_plaud_merged)
         self._merge_candidates_signal.connect(self._on_merge_candidates)
+        self._status_signal.connect(self._on_status_message)
+        self._refresh_request_signal.connect(self._refresh_status)
+        self._plaud_tokens_signal.connect(self._on_plaud_tokens_refreshed)
+        self._update_check_signal.connect(self._on_update_check_done)
+        self._update_downloaded_signal.connect(self._on_update_downloaded)
+
+    @pyqtSlot(str, int)
+    def _on_status_message(self, msg: str, timeout_ms: int):
+        self.statusBar().showMessage(msg, timeout_ms)
+
+    @pyqtSlot(str, object)
+    def _on_plaud_tokens_refreshed(self, account_id: str, refreshed):
+        """Persist rotated Plaud tokens on the GUI thread (QSettings is not
+        thread-safe — workers emit _plaud_tokens_signal instead of writing)."""
+        from core import plaud
+        try:
+            plaud.apply_refreshed_tokens(account_id, refreshed, self.settings)
+        except Exception as e:
+            self._log_signal.emit(f"Failed to persist refreshed Plaud tokens: {e}")
 
     # ── Settings ────────────────────────────────────────────────────────
 
@@ -1217,8 +1266,8 @@ class MainWindow(QMainWindow):
     def _update_tray_tooltip(self):
         if self._tray_icon:
             parts = ["HiDock Tools"]
-            if self.mic_trigger.is_running():
-                parts.append("Trigger: Active" if self.mic_trigger.is_holding() else "Trigger: Waiting")
+            if self.mic_trigger.is_running:
+                parts.append("Trigger: Active" if self.mic_trigger.is_holding else "Trigger: Waiting")
             else:
                 parts.append("Trigger: Stopped")
             total = len(self._entries)
@@ -1306,6 +1355,9 @@ class MainWindow(QMainWindow):
             return
         if data and isinstance(data, dict) and data.get("_summarization_done"):
             self._on_summarization_done(data, error)
+            return
+        if data and isinstance(data, dict) and data.get("_download_done"):
+            self._on_download_done(data)
             return
         if error:
             self.sync_status_label.setText(str(error))
@@ -1665,22 +1717,21 @@ class MainWindow(QMainWindow):
             self.settings.setValue("transcriptFolder", folder)
             self.transcript_folder_label.setText(f"Transcripts: {folder}")
 
-    @pyqtSlot()
-    def _download_selected(self):
-        indices = self.table_view.selectionModel().selectedRows()
-        if not indices:
-            self.statusBar().showMessage("No rows selected", 3000)
-            return
-        visible = self.table_model.entries()
-        selected = [visible[i.row()] for i in indices]
+    def _build_download_commands(
+        self, entries: list[SyncRecordingEntry]
+    ) -> list[tuple[list[str], int | None]]:
+        """Per-device extractor download commands for these entries.
 
-        # Group by device for proper command routing
+        Volume entries get `volume-import`, HiDock entries get `download`
+        (+product id). Plaud entries need env tokens, so they are routed
+        through the dedicated env-aware path here and excluded from the
+        returned batch. Must be called on the GUI thread (QSettings).
+        """
         from core.models import DeviceType, load_paired_devices
         devices = {d.device_id: d for d in load_paired_devices(self.settings)}
 
-        # Build per-device download commands
         commands: list[tuple[list[str], int | None]] = []
-        for entry in selected:
+        for entry in entries:
             # Plaud cloud recordings need env tokens — route them through the
             # dedicated env-aware path instead of the generic command batch.
             if entry.device_id.startswith("plaud:"):
@@ -1694,7 +1745,18 @@ class MainWindow(QMainWindow):
                 commands.append((args, None))
             else:
                 commands.append((["download", entry.recording.name, "--length", str(entry.recording.length)], entry.device_product_id or None))
+        return commands
 
+    @pyqtSlot()
+    def _download_selected(self):
+        indices = self.table_view.selectionModel().selectedRows()
+        if not indices:
+            self.statusBar().showMessage("No rows selected", 3000)
+            return
+        visible = self.table_model.entries()
+        selected = [visible[i.row()] for i in indices]
+
+        commands = self._build_download_commands(selected)
         if commands:
             self._run_download_commands(commands)
 
@@ -1740,7 +1802,8 @@ class MainWindow(QMainWindow):
                     env=env, timeout=600,
                 )
                 if data and data.get("refreshedTokens"):
-                    plaud.apply_refreshed_tokens(account_id, data["refreshedTokens"], self.settings)
+                    # Persist on the GUI thread — QSettings is not thread-safe.
+                    self._plaud_tokens_signal.emit(account_id, data["refreshedTokens"])
             except Exception as e:
                 err = str(e)
             self._progress_signal.emit(-1, -1, "")
@@ -1761,20 +1824,40 @@ class MainWindow(QMainWindow):
         self._downloaded_before = sum(1 for e in self._entries if e.recording.downloaded)
 
         def _run():
-            last_data = None
+            succeeded = 0
             last_error = None
             for args, pid in commands:
                 try:
-                    last_data = run_extractor(args, product_id=pid, timeout=300)
+                    run_extractor(args, product_id=pid, timeout=300)
+                    succeeded += 1
                 except Exception as e:
                     last_error = str(e)
-            if last_error and last_data is None:
-                self._sync_complete_signal.emit(None, last_error)
-            else:
-                self._sync_complete_signal.emit(last_data or {}, None)
             self._progress_signal.emit(-1, -1, "")  # hide progress
+            # Download payloads carry no "recordings" key, so they must NOT be
+            # fed into the status handler (it would wipe the table). Signal
+            # completion instead; the GUI thread kicks off a status refresh,
+            # whose result also drives _transcribe_after_download and the
+            # download-complete toast.
+            self._sync_complete_signal.emit(
+                {"_download_done": True, "succeeded": succeeded, "error": last_error},
+                None,
+            )
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _on_download_done(self, data: dict):
+        """Download batch finished (routed through _on_sync_complete)."""
+        err = data.get("error")
+        succeeded = data.get("succeeded", 0)
+        if err:
+            self.statusBar().showMessage(f"Download error: {err}", 5000)
+        if not succeeded and err:
+            # Nothing landed — don't auto-transcribe or toast off stale state.
+            self._transcribe_after_download = False
+            self._notify_download_on_complete = False
+        # Pull the real recordings list. Its arrival in _on_sync_complete also
+        # runs the armed download-complete toast and _transcribe_after_download.
+        self._refresh_status()
 
     @pyqtSlot()
     def _mark_downloaded(self):
@@ -1819,18 +1902,25 @@ class MainWindow(QMainWindow):
             if entry.recording.downloaded and entry.recording.output_path:
                 ready.append(Path(entry.recording.output_path))
             elif not entry.recording.downloaded:
-                needs_download.append(entry.recording.name)
+                needs_download.append(entry)
 
         if not ready and not needs_download:
             self.statusBar().showMessage("No recordings selected", 3000)
             return
 
         if needs_download:
-            self._transcribe_after_download = True
-            self.statusBar().showMessage(
-                f"Downloading {len(needs_download)} recording(s) before transcription..."
-            )
-            self._run_download(["download"] + needs_download)
+            # One extractor command per recording, routed per device type —
+            # `download` accepts a single filename, so batching several names
+            # into one invocation is an argparse error (exit 2).
+            commands = self._build_download_commands(needs_download)
+            if commands:
+                self._transcribe_after_download = True
+                self.statusBar().showMessage(
+                    f"Downloading {len(commands)} recording(s) before transcription..."
+                )
+                self._run_download_commands(commands)
+            elif ready:
+                self._run_transcription(ready)
         elif ready:
             self._run_transcription(ready)
 
@@ -1907,8 +1997,9 @@ class MainWindow(QMainWindow):
                     None,
                 )
                 if bad is not None:
-                    self.statusBar().showMessage(
-                        f"Merge aborted — refusing to pass a path with quote/newline/NUL/backslash to ffmpeg: {bad}"
+                    self._status_signal.emit(
+                        f"Merge aborted — refusing to pass a path with quote/newline/NUL/backslash to ffmpeg: {bad}",
+                        0,
                     )
                     return
 
@@ -1923,10 +2014,12 @@ class MainWindow(QMainWindow):
                 self._record_merge_group(
                     str(out_path), [str(e.recording.output_path) for e in ready]
                 )
-                self.statusBar().showMessage(f"Merged {len(ready)} recordings → {out_path.name}")
-                self._refresh_status()
+                # Worker thread: statusBar/_refresh_status are GUI-thread-only,
+                # so marshal both through signals.
+                self._status_signal.emit(f"Merged {len(ready)} recordings → {out_path.name}", 0)
+                self._refresh_request_signal.emit()
             except Exception as e:
-                self.statusBar().showMessage(f"Merge failed: {e}")
+                self._status_signal.emit(f"Merge failed: {e}", 0)
 
         threading.Thread(target=_do_merge, daemon=True).start()
 
@@ -1972,10 +2065,11 @@ class MainWindow(QMainWindow):
                 if not save_as_copy:
                     src.unlink()
                     out_path.rename(src)
-                self.statusBar().showMessage(f"Trimmed {src.name}")
-                self._refresh_status()
+                # Worker thread — marshal UI updates through signals.
+                self._status_signal.emit(f"Trimmed {src.name}", 0)
+                self._refresh_request_signal.emit()
             except Exception as e:
-                self.statusBar().showMessage(f"Trim failed: {e}")
+                self._status_signal.emit(f"Trim failed: {e}", 0)
 
         threading.Thread(target=_do_trim, daemon=True).start()
 
@@ -1992,8 +2086,18 @@ class MainWindow(QMainWindow):
                 "Click 'Download Model' to get started."
             )
             return
+        # Refuse a second concurrent batch: the running worker indexes
+        # self._txq_items, and replacing the list mid-batch would desync the
+        # indices (IndexError / stuck UI).
+        if self._txq_running:
+            self.statusBar().showMessage(
+                "A transcription batch is already running — wait for it to finish or cancel it",
+                5000,
+            )
+            return
         from core.transcription import transcribe_file
 
+        self._txq_running = True
         self._transcription_cancelled = False
         self._txq_paused = False
         self._txq_remove = set()
@@ -2119,6 +2223,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object, object)
     def _on_transcription_done(self, data, error):
         """Handle transcription batch completion (routed through _on_sync_complete)."""
+        self._txq_running = False
         self.transcribe_selected_btn.setEnabled(True)
         self.transcribe_all_btn.setEnabled(True)
         self.cancel_transcription_btn.setVisible(False)
@@ -2355,21 +2460,12 @@ class MainWindow(QMainWindow):
 
     def _check_for_updates_auto(self):
         """Auto-check on startup — only show dialog if update available."""
-        def _worker():
-            from core.update_checker import check_for_update
-            return check_for_update()
-
-        def _done(release):
-            if release:
-                self._show_update_dialog(release)
-
+        # NOTE: QTimer.singleShot from a plain threading.Thread never fires —
+        # the thread has no Qt event loop — so results are delivered via
+        # _update_check_signal to the GUI thread instead.
         def _run():
-            release = _worker()
-            if release:
-                from PyQt6.QtCore import QTimer
-                # Must show dialog on main thread
-                self._pending_release = release
-                QTimer.singleShot(0, lambda: self._show_update_dialog(self._pending_release))
+            from core.update_checker import check_for_update
+            self._update_check_signal.emit(check_for_update(), False)
 
         self._pending_release = None
         threading.Thread(target=_run, daemon=True).start()
@@ -2380,12 +2476,18 @@ class MainWindow(QMainWindow):
 
         def _run():
             from core.update_checker import check_for_update
-            release = check_for_update()
-            self._pending_release = release
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, self._show_manual_update_result)
+            self._update_check_signal.emit(check_for_update(), True)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    @pyqtSlot(object, bool)
+    def _on_update_check_done(self, release, manual: bool):
+        """GUI-thread handler for both auto and manual update checks."""
+        self._pending_release = release
+        if manual:
+            self._show_manual_update_result()
+        elif release:
+            self._show_update_dialog(release)
 
     def _show_manual_update_result(self):
         if self._pending_release:
@@ -2419,7 +2521,7 @@ class MainWindow(QMainWindow):
             self._download_and_install(release, restart=False)
 
     def _download_and_install(self, release, restart: bool):
-        from core.update_checker import find_windows_asset, download_update, install_and_restart, install_on_quit
+        from core.update_checker import find_windows_asset, download_update
 
         asset = find_windows_asset(release)
         if not asset:
@@ -2429,25 +2531,39 @@ class MainWindow(QMainWindow):
         asset_name, download_url = asset
         self.statusBar().showMessage(f"Downloading {asset_name}...")
 
-        def _worker():
+        def _run():
             def _progress(dl, total):
                 if total > 0:
                     mb = dl / (1024 * 1024)
                     mb_total = total / (1024 * 1024)
                     self._log_signal.emit(f"Downloading update: {mb:.0f}/{mb_total:.0f} MB")
 
-            return download_update(download_url, on_progress=_progress)
-
-        def _run():
-            exe_path = _worker()
-            if exe_path:
-                if restart:
-                    install_and_restart(exe_path)
-                else:
-                    install_on_quit(exe_path)
-                    self._log_signal.emit("Update downloaded — will install when you quit")
+            exe_path = download_update(download_url, on_progress=_progress)
+            # Install must run on the GUI thread: install_and_restart quits
+            # the Qt app so the whole process exits inside the update.bat copy
+            # window. sys.exit(0) on this worker thread would only kill the
+            # thread, leaving the exe locked while the bat tries to copy.
+            self._update_downloaded_signal.emit(exe_path, restart)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    @pyqtSlot(object, bool)
+    def _on_update_downloaded(self, exe_path, restart: bool):
+        """GUI-thread install step after the update exe has downloaded."""
+        from core.update_checker import install_and_restart, install_on_quit
+
+        if not exe_path:
+            self.statusBar().showMessage("Update download failed", 5000)
+            return
+        if restart:
+            if not install_and_restart(exe_path):
+                # Not a frozen exe (dev run) — installing would clobber python.exe.
+                self.statusBar().showMessage(
+                    "Update install skipped — not running from the packaged .exe", 5000
+                )
+        else:
+            install_on_quit(exe_path)
+            self._log_signal.emit("Update downloaded — will install when you quit")
 
     # ── Window events ───────────────────────────────────────────────────
 
@@ -2659,7 +2775,8 @@ class MainWindow(QMainWindow):
         def _run():
             if _worker():
                 self._log_signal.emit("Feedback submitted")
-                self.statusBar().showMessage("Feedback sent — thank you!", 3000)
+                # Worker thread — statusBar is GUI-thread-only.
+                self._status_signal.emit("Feedback sent — thank you!", 3000)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -3125,8 +3242,26 @@ class MainWindow(QMainWindow):
             self._refresh_device_strip()
             self._refresh_device_filter_combo()
 
+        def _on_plaud_paired(account):
+            # Persist the paired Plaud device (the dialog saved the account
+            # tokens; without this the device list in QSettings never gains
+            # the Plaud entry and Plaud sync never runs).
+            device = PairedDevice.plaud(
+                account_id=account.account_id,
+                display_name=account.display_name or "Plaud",
+                email=account.email,
+                region=account.region or "us",
+            )
+            self._paired_devices = [
+                d for d in self._paired_devices if d.device_id != device.device_id
+            ]
+            self._paired_devices.append(device)
+            save_paired_devices(self.settings, self._paired_devices)
+            dlg.set_devices(self._paired_devices)
+
         dlg.deviceForgotten.connect(_on_forget)
         dlg.volumePaired.connect(_on_pair_volume)
+        dlg.plaudPaired.connect(_on_plaud_paired)
         dlg.plaudSignedOut.connect(_on_plaud_signed_out)
         dlg.pair_widget.scanRequested.connect(_on_scan_volumes)
         try:

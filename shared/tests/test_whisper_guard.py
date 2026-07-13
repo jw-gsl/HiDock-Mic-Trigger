@@ -215,3 +215,48 @@ class TestCleanTranscript:
         cleaned, stats = clean_transcript("")
         assert stats.is_likely_hallucination
         assert stats.final_word_count == 0
+
+
+class TestCleanTranscriptSingleLine:
+    """Whisper's result["text"] has no newlines — the guard must still fire
+    by splitting on sentence boundaries, and must not introduce newlines."""
+
+    def test_dedup_fires_on_single_line_text(self):
+        text = "Hello world. Hello world. Hello world. Real content here."
+        cleaned, stats = clean_transcript(text)
+        assert cleaned.count("Hello world.") == 1
+        assert "Real content here." in cleaned
+        assert "consecutive_dedup" in stats.filters_triggered
+        assert "\n" not in cleaned
+
+    def test_trailing_hallucination_removed_single_line(self):
+        text = "Real meeting content happened today. Thank you for watching."
+        cleaned, stats = clean_transcript(text)
+        assert "Thank you for watching" not in cleaned
+        assert "Real meeting content happened today." in cleaned
+        assert "trailing_noise" in stats.filters_triggered
+
+    def test_high_repetition_flagged_single_line(self):
+        text = " ".join(["Same sentence again."] * 20 + ["Unique ending."])
+        cleaned, stats = clean_transcript(text)
+        assert stats.is_likely_hallucination
+        assert "high_repetition" in stats.filters_triggered
+        assert "\n" not in cleaned
+
+    def test_segments_kwarg_used_for_filtering(self):
+        segs = [
+            {"text": " Hello world."},
+            {"text": " Hello world."},
+            {"text": " Hello world."},
+            {"text": " Real content here."},
+        ]
+        text = "Hello world. Hello world. Hello world. Real content here."
+        cleaned, stats = clean_transcript(text, segments=segs)
+        assert cleaned.count("Hello world.") == 1
+        assert "consecutive_dedup" in stats.filters_triggered
+        assert "\n" not in cleaned
+
+    def test_multiline_input_keeps_newlines(self):
+        text = "Line one.\nLine two.\nLine three."
+        cleaned, _ = clean_transcript(text)
+        assert cleaned == text

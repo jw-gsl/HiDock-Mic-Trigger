@@ -34,7 +34,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var syncOutputFolder: String?
     private var syncTranscriptFolder: String?
-    private var syncEntries: [HiDockSyncRecordingEntry] = []
+    private var syncEntries: [HiDockSyncRecordingEntry] = [] {
+        didSet { syncEntriesVersion &+= 1 }
+    }
+    /// Bumped on every `syncEntries` mutation (incl. element edits, since it's a
+    /// value-type array). Lets syncViewModelState skip pushing an unchanged
+    /// array to the view model (see #4).
+    private var syncEntriesVersion = 0
+    private var lastPushedSyncEntriesVersion = -1
+    /// While true, syncViewModelState won't push the entries array — used during
+    /// launch so the imported-only list doesn't paint before the cache load.
+    private var suppressSyncEntriesPush = false
+    /// CoreAudio mic-name cache + last-enumeration time, so syncViewModelState
+    /// doesn't re-enumerate devices on every call (see #3).
+    private var cachedMicNames: [String] = []
+    private var lastMicEnumeration: Date = .distantPast
     private var syncCheckedRecordings: Set<String> = []
     private var syncAutoDownload = false
     private var syncAutoTranscribe = false
@@ -47,6 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // fan out N concurrent CLI processes.
     private var summariseQueue: [HiDockSyncRecordingEntry] = []
     private var summariseBusy = false
+    // Reclassify requests (summary viewer dropdown) waiting behind a
+    // running summarise — same one-at-a-time gate as summariseQueue, so a
+    // reclassify never runs concurrently with an auto/manual summarise
+    // and interleaves output into the shared summaryTranscript.
+    private var pendingReclassifies: [(transcriptPath: String, template: String)] = []
     // mp3 outputNames that finished transcribing this session and are
     // waiting for their transcriptPath to be populated by the next
     // refreshTranscriptionState, at which point auto-summarise queues them.
@@ -72,6 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncRefreshStartDate: Date?
     private var syncRefreshTimer: Timer?
     private var syncAutoDownloadTimer: Timer?
+    /// Lightweight periodic check for new Plaud recordings. Plaud is an API, not
+    /// a USB device, so nothing else surfaces new recordings on it — this poll
+    /// does. It only runs the expensive refresh/auto-download when the Plaud
+    /// catalog actually changed (see pollPlaudForChanges).
+    private var plaudPollTimer: Timer?
     private var syncExtractorProcess: Process?
     private let syncExtractorQueue = DispatchQueue(label: "hidock.extractor", qos: .userInitiated)
     // Concurrent queue used ONLY for launch cache-paint reads (cached-status /
@@ -389,7 +413,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         if needsSave { ImportedRecordingsStore.save(importedRecordings) }
-        rebuildSyncEntries()
+        // Build imported rows into syncEntries but DON'T push to the view yet —
+        // loadCachedCatalogsForPaintOnLaunch pushes imported + device catalogs
+        // together in one pass, so imported no longer flashes up first. The
+        // suppress flag stops any intervening syncViewModelState (e.g. from
+        // showSyncWindow) pushing the imported-only list first.
+        suppressSyncEntriesPush = true
+        viewModel.recordingsLoading = true
+        mergeImportedIntoSyncEntries()
         let imp = syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
         log("After rebuildSyncEntries: syncEntries=\(syncEntries.count) imported=\(imp.count)")
         if let first = imp.first {
@@ -403,8 +434,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // instead of watching the list populate device-by-device as live
         // probes resolve, then flip from "Downloaded" to "Transcribed"
         // when refreshTranscriptionState catches up.
-        loadCachedCatalogsForPaintOnLaunch()
         showSyncWindow()
+        // Paint the full list from local cache FIRST (all devices + imported at
+        // once), THEN run the live probes as enrichment — otherwise the fast H1
+        // live probe lands before the cache and devices appear one-by-one.
+        loadCachedCatalogsForPaintOnLaunch { [weak self] in
+            self?.autoConnectSyncIfPaired(startTriggerOnCompletion: true)
+        }
 
         // Show onboarding wizard on first run
         if !UserDefaults.standard.bool(forKey: hasCompletedOnboardingKey) {
@@ -424,7 +460,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // firmware. Probing first is free because the trigger hasn't
         // attached yet. startTrigger fires from the autoConnect
         // completion.
-        autoConnectSyncIfPaired(startTriggerOnCompletion: true)
+        // (autoConnect now runs AFTER the cache paint — see the
+        // loadCachedCatalogsForPaintOnLaunch completion above.)
+
+        // Start the lightweight Plaud new-recording poll (no-op until a Plaud
+        // account is paired). App-open already probed via autoConnect above.
+        startPlaudPollTimer()
 
         // Wire update status to the footer bar
         UpdateChecker.onStatusUpdate = { [weak self] (text: String) in
@@ -549,11 +590,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func wireViewModel() {
         viewModel.autoStartOnLaunch = autoStartOnLaunch
         viewModel.selectedMicName = selectedMicName
-        viewModel.availableMics = getInputDeviceNames()
+        refreshMicNamesNow()
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
+        viewModel.plaudPollIntervalSeconds = plaudPollInterval
         viewModel.syncAutoTranscribe = UserDefaults.standard.bool(forKey: syncAutoTranscribeKey)
         syncAutoTranscribe = viewModel.syncAutoTranscribe
         viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
@@ -607,6 +649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleAutoDownload = { [weak self] in self?.toggleAutoDownload() }
         viewModel.onToggleAutoTranscribe = { [weak self] in self?.toggleAutoTranscribe() }
         viewModel.onToggleAutoSummarise = { [weak self] in self?.toggleAutoSummarise() }
+        viewModel.onSetPlaudPollInterval = { [weak self] seconds in self?.setPlaudPollInterval(seconds) }
         viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onSummariseSelected = { [weak self] in self?.summariseSelectedRecordings() }
@@ -625,6 +668,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         viewModel.onSummariseRecording = { [weak self] entry in self?.summariseRecording(entry) }
         viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
+        viewModel.onSendChat = { [weak self] text in self?.runChatTurn(text) }
+        viewModel.onOpenRawTerminal = { [weak self] in self?.openRawTerminalPane() }
+        // LED idle ticker — supply live stats on demand.
+        viewModel.ledMatrix.idleProvider = { [weak self] content in
+            guard let self = self else { return nil }
+            let cal = Calendar.current
+            switch content {
+            case .clock:
+                let f = DateFormatter(); f.dateFormat = "HH:mm"
+                return f.string(from: Date())
+            case .meetingsToday:
+                let today = cal.startOfDay(for: Date())
+                let n = self.viewModel.meetingActivityByDay[today]?.count ?? 0
+                return n > 0 ? "\(n) TODAY" : nil
+            case .streak:
+                let s = self.meetingStreak()
+                return s > 1 ? "\(s) DAY STREAK" : nil
+            case .queue:
+                let tq = self.viewModel.transcriptionQueue.filter { $0.status == .queued }.count
+                let q = tq + self.summariseQueue.count
+                return q > 0 ? "Q:\(q)" : nil
+            }
+        }
+        // NB: don't start the LED matrix here — the LEDMatrixView starts it in
+        // onAppear when it's actually shown, and events (notify/setRecording)
+        // start it on demand for takeover. Starting at launch would spin the
+        // idle ticker off-screen.
         viewModel.onViewSummary = { [weak self] path in
             self?.openSummaryViewer(summaryMdPath: path)
         }
@@ -728,13 +798,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let running = process != nil
         viewModel.triggerRunning = running
         viewModel.triggerPID = process?.processIdentifier
-        viewModel.triggerUptime = formatUptime() ?? ""
+        let uptimeStr = formatUptime() ?? ""
+        if viewModel.triggerUptime != uptimeStr { viewModel.triggerUptime = uptimeStr }
+        // Anchor for the Mic Trigger row's self-ticking uptime label (changes
+        // only on connect/disconnect, so this guarded write is rare).
+        if viewModel.triggerConnectedSince != triggerConnectedSince {
+            viewModel.triggerConnectedSince = triggerConnectedSince
+        }
         viewModel.autoStartOnLaunch = autoStartOnLaunch
         viewModel.selectedMicName = selectedMicName
-        viewModel.availableMics = getInputDeviceNames()
+        // #3: don't enumerate CoreAudio devices on every state sync (this is
+        // called from ~90 sites). The mic list only changes on a device-change
+        // event, which updates it directly; throttle any stray refresh here.
+        viewModel.availableMics = throttledMicNames()
         viewModel.syncBusy = syncBusy
         viewModel.syncDownloading = syncDownloading
-        viewModel.syncEntries = syncEntries
+        // #4: only push the (now ~1700-element) entries array when it actually
+        // changed — an unchanged reassignment still fires @Published and marks
+        // the derived-list cache dirty for nothing.
+        // During launch, hold the entries push until the cache paint is ready so
+        // the imported-only list doesn't flash up before the devices. Everything
+        // else in this method still syncs normally.
+        if syncEntriesVersion != lastPushedSyncEntriesVersion, !suppressSyncEntriesPush {
+            viewModel.syncEntries = syncEntries
+            lastPushedSyncEntriesVersion = syncEntriesVersion
+        }
         viewModel.syncCheckedRecordings = syncCheckedRecordings
         viewModel.syncAutoDownload = syncAutoDownload
         viewModel.syncAutoTranscribe = syncAutoTranscribe
@@ -896,12 +984,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 postNotification(title: "HiDock Recording Started", body: "USB mic is in use — HiDock input held open.")
                 DispatchQueue.main.async {
                     self.viewModel.hidockRecordingActive = true
+                    self.viewModel.ledMatrix.setRecording(true)
                 }
             } else if line.contains("NOT IN USE") && line.contains("releasing HiDock") {
                 log("Trigger: USB mic idle, HiDock recording stopped")
                 postNotification(title: "HiDock Recording Stopped", body: "USB mic went idle — HiDock input released.")
                 DispatchQueue.main.async {
                     self.viewModel.hidockRecordingActive = false
+                    self.viewModel.ledMatrix.setRecording(false)
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                     guard let self = self, self.syncPaired, !self.syncBusy else { return }
@@ -914,6 +1004,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     // MARK: - CoreAudio device enumeration
+
+    /// Re-enumerate mics now and refresh the cache — call on device-change /
+    /// setup where the list genuinely may have changed.
+    private func refreshMicNamesNow() {
+        cachedMicNames = getInputDeviceNames()
+        lastMicEnumeration = Date()
+        viewModel.availableMics = cachedMicNames
+    }
+
+    /// Cached mic names, re-enumerated at most every 5s. Used on the hot
+    /// syncViewModelState() path so we don't hit CoreAudio on every call.
+    private func throttledMicNames() -> [String] {
+        if cachedMicNames.isEmpty || Date().timeIntervalSince(lastMicEnumeration) > 5 {
+            cachedMicNames = getInputDeviceNames()
+            lastMicEnumeration = Date()
+        }
+        return cachedMicNames
+    }
 
     private func getInputDeviceNames() -> [String] {
         var propsize: UInt32 = 0
@@ -1036,10 +1144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !disappeared.isEmpty { log("Devices disappeared: \(disappeared)") }
 
         if !appeared.isEmpty || !disappeared.isEmpty {
-            viewModel.availableMics = getInputDeviceNames()
+            refreshMicNamesNow()
             if syncPaired && !syncBusy {
                 log("USB device change detected, refreshing sync status")
-                autoConnectSyncIfPaired()
+                autoConnectSyncIfPaired(usbTriggered: true)
             }
         }
 
@@ -1052,7 +1160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let oldMic = selectedMicName
             selectedMicName = preferred
             viewModel.selectedMicName = preferred
-            viewModel.availableMics = getInputDeviceNames()
+            refreshMicNamesNow()
             updateMenuState()
             if process == nil {
                 // Same recovery as selectMic: if the trigger died on a
@@ -1083,7 +1191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let fallback = fallback {
                 selectedMicName = fallback
                 viewModel.selectedMicName = fallback
-                viewModel.availableMics = getInputDeviceNames()
+                refreshMicNamesNow()
                 updateMenuState()
                 if process != nil { restartTrigger() }
                 postMicChangeNotification(
@@ -1218,6 +1326,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let voiceTrainingItem = NSMenuItem(title: "Voice Training...", action: #selector(openVoiceTrainingMenu), keyEquivalent: "")
         voiceTrainingItem.target = self
         menu.addItem(voiceTrainingItem)
+        let buildLibraryItem = NSMenuItem(title: "Build Voice Library from Tagged Meetings", action: #selector(buildVoiceLibraryMenu), keyEquivalent: "")
+        buildLibraryItem.target = self
+        menu.addItem(buildLibraryItem)
+        let rematchAllItem = NSMenuItem(title: "Re-match Untagged Meetings", action: #selector(rematchUntaggedMenu), keyEquivalent: "")
+        rematchAllItem.target = self
+        menu.addItem(rematchAllItem)
         let modelManagerItem = NSMenuItem(title: "Models...", action: #selector(openModelManagerMenu), keyEquivalent: "")
         modelManagerItem.target = self
         menu.addItem(modelManagerItem)
@@ -1591,7 +1705,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard uptimeTimer == nil else { return }
         uptimeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.viewModel.triggerUptime = self.formatUptime() ?? ""
+            // Menu-bar item only (AppKit, no SwiftUI). The Mic Trigger row's
+            // uptime is now driven by a local TimelineView off
+            // viewModel.triggerConnectedSince, so we deliberately do NOT write
+            // any @Published state here — that used to re-render the whole
+            // window (incl. the 1700-row table) once a second.
             self.updateMenuUptime()
         }
     }
@@ -1659,11 +1777,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         p.standardOutput = outPipe
         p.standardError = Pipe()
 
+        // Line-buffer the CLI's stdout across chunks — availableData can
+        // split a line mid-marker ("Using HiDock audio device: …",
+        // "IN USE … holding HiDock"), and a missed marker leaves sticky
+        // wrong state (e.g. hidockRecordingActive stuck true, which then
+        // suppresses every HiDock probe). Same pattern as the extractor
+        // runners' lineBuffer. Buffer is mutated on the main queue only.
+        var lineBuffer = ""
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             DispatchQueue.main.async {
-                self?.handleCLIOutput(text)
+                lineBuffer += text
+                var lines: [String] = []
+                while let range = lineBuffer.range(of: "\n") {
+                    lines.append(String(lineBuffer[lineBuffer.startIndex..<range.lowerBound]))
+                    lineBuffer = String(lineBuffer[range.upperBound...])
+                }
+                if !lines.isEmpty {
+                    self?.handleCLIOutput(lines.joined(separator: "\n"))
+                }
             }
         }
 
@@ -1674,6 +1807,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.log("Process terminated with status \(status)")
 
                 outPipe.fileHandleForReading.readabilityHandler = nil
+
+                // Only mutate shared trigger state if this handler still
+                // owns self.process. stopTrigger/restartTrigger race this
+                // block via their own waitUntilExit continuations (both
+                // dispatch async to main with no ordering guarantee): if
+                // the continuation ran first it has already nil'd process
+                // — and restartTrigger may have started a NEW child.
+                // Without this guard, the stale handler would orphan that
+                // new process from the app's tracking, and (because the
+                // continuation also cleared stoppingIntentionally) treat
+                // a user-requested stop as a crash and auto-restart it.
+                guard proc === self.process else { return }
 
                 self.process = nil
                 self.processStartDate = nil
@@ -1746,6 +1891,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.stopUptimeTimer()
                 // Trigger child gone → no ffmpeg → HiDock not being held.
                 self?.viewModel.hidockRecordingActive = false
+                self?.viewModel.ledMatrix.setRecording(false)
                 self?.viewModel.hidockRecordingDeviceName = nil
                 self?.updateMenuState()
             }
@@ -1801,16 +1947,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// fresh device-returned data when it completes, which is fine —
     /// preserves any new recordings that have appeared on the device
     /// since state.json was last written.
-    private func loadCachedCatalogsForPaintOnLaunch() {
+    private func loadCachedCatalogsForPaintOnLaunch(onComplete: @escaping () -> Void = {}) {
         let hidocks = syncPairedDevices.filter { $0.deviceType == .hidock }
         // Plaud accounts paint from cache too, so already-downloaded recordings
         // show instantly on launch instead of waiting for the (slow, networked)
         // live cloud probe to connect.
         let plauds = syncPairedDevices.filter { $0.deviceType == .plaud }
-        guard !hidocks.isEmpty || !plauds.isEmpty else { return }
-        guard ensureExtractorReady() else { return }
+        // No paired devices → nothing cached to load, but still paint the
+        // imported rows (which the launch path deliberately didn't push yet).
+        guard !hidocks.isEmpty || !plauds.isEmpty, ensureExtractorReady() else {
+            suppressSyncEntriesPush = false
+            viewModel.recordingsLoading = false
+            applyTranscribedFromDiskScan()
+            viewModel.syncEntries = syncEntries
+            refreshTranscriptionState()
+            syncViewModelState()
+            onComplete()
+            return
+        }
         log("Paint-from-cache: \(hidocks.count) HiDock(s), \(plauds.count) Plaud account(s)")
         let group = DispatchGroup()
+        // Collect every device's cached catalog, then render them all together in
+        // one pass — the list appears at once instead of trickling in device by
+        // device as each subprocess returns.
+        var cached: [(HiDockPairedDevice, HiDockSyncStatusResponse)] = []
+        let cacheLock = NSLock()
         for device in hidocks {
             group.enter()
             runCachedExtractor(arguments: ["cached-status"], productId: device.productId) { [weak self] result in
@@ -1821,7 +1982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Paint-from-cache: no cached data for \(device.cleanName)")
                     return
                 }
-                self.renderSyncStatus(payload, device: device)
+                cacheLock.lock(); cached.append((device, payload)); cacheLock.unlock()
             }
         }
         for device in plauds {
@@ -1838,12 +1999,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Paint-from-cache: no cached Plaud data for \(device.cleanName)")
                     return
                 }
-                self.renderSyncStatus(payload, device: device)
+                cacheLock.lock(); cached.append((device, payload)); cacheLock.unlock()
             }
         }
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
-            self.log("Paint-from-cache: cached catalogs loaded, refreshing transcription state")
+            // Keep the push suppressed THROUGH the render loop (renderSyncStatus
+            // may sync internally) so no device paints alone; release it just
+            // before the single combined push below.
+            for (device, payload) in cached { self.renderSyncStatus(payload, device: device) }
+            self.suppressSyncEntriesPush = false
+            self.viewModel.recordingsLoading = false
+            self.log("Paint-from-cache: \(cached.count) cached catalog(s) loaded together, refreshing transcription state")
             // Two-phase transcribed-state population: the sync disk
             // scan below lands the table on Transcribed immediately
             // (prevents Downloaded→Transcribed flash), then the async
@@ -1853,10 +2020,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.viewModel.syncEntries = self.syncEntries
             self.refreshTranscriptionState()
             self.syncViewModelState()
+            // Live probes run AFTER the full cache paint — they update rows in
+            // place instead of the fast H1 probe landing before the cache and
+            // making devices appear one-by-one.
+            onComplete()
         }
     }
 
-    private func autoConnectSyncIfPaired(startTriggerOnCompletion: Bool = false) {
+    /// - Parameter usbTriggered: true when called from a USB/CoreAudio
+    ///   device-change event. Plaud is an API account, not a physical USB
+    ///   device, so a USB change tells us nothing about it — we skip re-probing
+    ///   Plaud in that case (it's refreshed on app open and manual refresh).
+    ///   This also stops a USB audio blip from needlessly re-fetching the Plaud
+    ///   catalog and rebuilding its rows.
+    private func autoConnectSyncIfPaired(startTriggerOnCompletion: Bool = false, usbTriggered: Bool = false) {
         // If we were asked to start the trigger on completion but we
         // short-circuit (busy, extractor missing), still honour the
         // promise — otherwise the app launches with no trigger running.
@@ -1949,6 +2126,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // idle to pick up new recordings.
             let recording = self.viewModel.hidockRecordingActive
             let probeDevices = devices.filter { device in
+                // Plaud is an API, not a USB device — a USB/audio device change
+                // is irrelevant to it, so don't re-probe it on USB churn.
+                if usbTriggered && device.deviceType == .plaud {
+                    self.log("Auto-connect: skipping Plaud \(device.cleanName) — USB-change trigger doesn't affect an API account")
+                    return false
+                }
                 if device.deviceType == .volume || device.deviceType == .plaud { return true }
                 if !recording { return true }
                 self.log("Auto-connect: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
@@ -2849,6 +3032,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             transcriptPath: existing.transcriptPath,
             transcribedDate: existing.transcribedDate,
             speakersTagged: existing.speakersTagged,
+            speakersAutoMatched: existing.speakersAutoMatched,
             summaryPath: existing.summaryPath,
             transcriptionSkipped: existing.transcriptionSkipped
         )
@@ -2942,15 +3126,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if !tail.isEmpty { errQueue.sync { stderrData.append(tail) } }
             let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
 
-            // If replacing original, swap files
+            // If replacing original, swap files. replaceItemAt is the
+            // failure-safe primitive: it renames the trimmed file into
+            // place and only discards the original once the swap has
+            // succeeded. The earlier remove-then-move sequence could
+            // delete the original and then fail the move, leaving the
+            // recording surviving only as a hidden temp dotfile — and
+            // `try?` swallowed both errors.
+            var swapError: Error?
             if !saveAsCopy && process.terminationStatus == 0 {
-                try? FileManager.default.removeItem(atPath: path)
-                try? FileManager.default.moveItem(atPath: outputPath, toPath: path)
+                do {
+                    _ = try FileManager.default.replaceItemAt(
+                        URL(fileURLWithPath: path),
+                        withItemAt: URL(fileURLWithPath: outputPath)
+                    )
+                } catch {
+                    swapError = error
+                    // The original is untouched — just drop the orphaned temp.
+                    try? FileManager.default.removeItem(atPath: outputPath)
+                }
             }
 
             DispatchQueue.main.async {
                 self.viewModel.trimBusy = false
-                if process.terminationStatus == 0 {
+                if let swapError = swapError {
+                    self.viewModel.syncStatus = "Trim failed"
+                    self.viewModel.syncStatusLevel = .error
+                    self.log("Trim swap failed for \(path): \(swapError.localizedDescription)")
+                    self.showError("Trim finished but the original couldn't be replaced (it is unchanged):\n\(swapError.localizedDescription)")
+                } else if process.terminationStatus == 0 {
                     let name = URL(fileURLWithPath: path).lastPathComponent
                     self.log("Trimmed \(name) (\(start)s–\(end)s)")
                     self.viewModel.syncStatus = "Trimmed \(name)"
@@ -3048,6 +3252,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Background voice-match scoring for the transcript viewer's verify panel.
+    /// Runs the fast `speaker-confidence` verb (no audio/model load) and returns
+    /// {speaker-id-string: confidence 0–1}. Best-effort — empty map on any error.
+    private func scoreSpeakers(jsonPath: String, completion: @escaping ([String: SpeakerScore]) -> Void) {
+        guard ensureTranscriptionReady() else { completion([:]); return }
+        runTranscription(arguments: ["speaker-confidence", jsonPath]) { result in
+            var map: [String: SpeakerScore] = [:]
+            if case .success(let data) = result,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let conf = obj["confidence"],
+               let confData = try? JSONSerialization.data(withJSONObject: conf),
+               let decoded = try? JSONDecoder().decode([String: SpeakerScore].self, from: confData) {
+                map = decoded
+            }
+            DispatchQueue.main.async { completion(map) }
+        }
+    }
+
     private func rediarizeTranscript(jsonPath: String, nSpeakers: Int?) {
         guard ensureTranscriptionReady() else { return }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
@@ -3080,6 +3302,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             self.syncViewModelState()
         }
+    }
+
+    /// Batch "close the loop": after enrolling new voices, sweep every
+    /// transcribed-but-unconfirmed meeting and re-match its still-generic
+    /// speakers against the current voice library. Runs the meetings
+    /// sequentially — rematch re-embeds audio for legacy sidecars, which is
+    /// CPU-heavy, so we deliberately don't fan them out against the
+    /// transcription queue. New matches surface as the blue "confirm me" state.
+    private func rematchUntaggedMeetings() {
+        guard ensureTranscriptionReady() else { return }
+
+        func diarizedPath(fromTranscript mdPath: String) -> String? {
+            let url = URL(fileURLWithPath: mdPath)
+            let base = url.deletingPathExtension().lastPathComponent
+            let dir = url.deletingLastPathComponent()
+            let p = dir.appendingPathComponent(base + "_diarized.json").path
+            return FileManager.default.fileExists(atPath: p) ? p : nil
+        }
+
+        // Every transcribed meeting that isn't confirmed yet (needsTagging or
+        // autoMatched) is a rematch candidate — including merged files.
+        var paths: [String] = []
+        for entry in syncEntries where entry.transcribed && !entry.speakersTagged {
+            if let md = entry.transcriptPath, let jp = diarizedPath(fromTranscript: md) { paths.append(jp) }
+        }
+        for name in viewModel.mergedFileTranscribed.subtracting(viewModel.mergedFileTagged) {
+            if let md = viewModel.mergedFileTranscriptPaths[name], let jp = diarizedPath(fromTranscript: md) { paths.append(jp) }
+        }
+        let jsonPaths = Array(Set(paths))
+
+        guard !jsonPaths.isEmpty else {
+            viewModel.syncStatus = "No unconfirmed meetings to re-match"
+            viewModel.syncStatusLevel = .secondary
+            syncViewModelState()
+            return
+        }
+
+        log("Re-matching \(jsonPaths.count) unconfirmed meeting(s) against the voice library")
+        var remaining = jsonPaths
+        var totalRematched = 0
+
+        func runNext() {
+            guard let jp = remaining.first else {
+                self.viewModel.syncStatus = totalRematched > 0
+                    ? "Re-match complete — \(totalRematched) speaker(s) newly matched, confirm them"
+                    : "Re-match complete — no new matches"
+                self.viewModel.syncStatusLevel = .success
+                self.syncViewModelState()
+                self.refreshTranscriptionState()   // repaint the tag-column icons
+                return
+            }
+            remaining.removeFirst()
+            let done = jsonPaths.count - remaining.count
+            self.viewModel.syncStatus = "Re-matching meeting \(done)/\(jsonPaths.count)…"
+            self.viewModel.syncStatusLevel = .secondary
+            self.syncViewModelState()
+
+            self.runTranscription(arguments: ["rematch", jp]) { [weak self] result in
+                guard let self = self else { return }
+                if case .success(let data) = result,
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let n = obj["rematched"] as? Int {
+                    totalRematched += n
+                }
+                runNext()
+            }
+        }
+        runNext()
     }
 
     // MARK: - Feedback History
@@ -3140,23 +3430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             )
         }
 
-        if feedbackHistoryWindow == nil {
-            let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
-                styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                backing: .buffered, defer: false
-            )
-            win.center()
-            win.title = "My Feedback"
-            win.isReleasedWhenClosed = false
-            win.minSize = NSSize(width: 500, height: 300)
-            feedbackHistoryWindow = win
-        }
-
-        let hostingView = NSHostingView(rootView: FeedbackHistoryView(items: items))
-        feedbackHistoryWindow?.contentView = hostingView
-        feedbackHistoryWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "feedback", title: "My Feedback", icon: "bubble.left.and.text.bubble.right", view: FeedbackHistoryView(items: items))
     }
 
     @objc private func showSyncWindow() {
@@ -3281,23 +3555,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onReclusterWithLabels: { [weak self] jsonPath in
                 self?.reclusterTranscriptWithLabels(jsonPath: jsonPath)
+            },
+            onRematch: { [weak self] jsonPath in
+                self?.rematchTranscript(jsonPath: jsonPath)
+            },
+            onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
+                self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)
+            },
+            onScoreSpeakers: { [weak self] jsonPath, completion in
+                self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
+            },
+            onListVoiceNames: { [weak self] completion in
+                self?.listVoiceLibraryNames(completion: completion)
             }
         )
 
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Transcript — \(transcript.audioFile)"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 600, height: 400)
-        win.contentView = NSHostingView(rootView: viewer)
+        // Host as a tab in the right pane (one per transcript — re-opening the
+        // same meeting focuses its existing tab).
+        let title = (transcript.audioFile as NSString).lastPathComponent
+        showDetailTab(id: "transcript:\(diarizedPath)", title: title, icon: "waveform", view: viewer)
+    }
 
-        transcriptViewerWindow = win
-        win.makeKeyAndOrderFront(nil)
+    /// Open (or focus) a view as a tab in the right-hand detail pane, and bring
+    /// the main window forward. Replaces the old per-view NSWindow.
+    private func showDetailTab(id: String, title: String, icon: String, view: some View) {
+        viewModel.showDetailTab(HiDockViewModel.DetailTab(id: id, title: title, icon: icon, content: AnyView(view)))
+        syncWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -3335,55 +3618,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.reclassifySummary(transcriptPath: transcriptPath, template: template)
             }
         )
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Summary — \((summaryMdPath as NSString).lastPathComponent)"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 460, height: 360)
-        win.contentView = NSHostingView(rootView: viewer)
-        summaryViewerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        let title = (summaryMdPath as NSString).lastPathComponent
+        showDetailTab(id: "summary:\(summaryMdPath)", title: title, icon: "doc.text", view: viewer)
     }
 
     /// Re-run the AI summary for a recording against a user-chosen template
     /// (from the viewer's Reclassify dropdown). Streams into the CLI pane,
     /// replaces the old summary file, and reopens the viewer on the new one.
+    /// Routed through the same serial gate as the summarise queue — if a
+    /// summarise (auto or manual) is in flight, the reclassify waits its
+    /// turn instead of spawning a second concurrent CLI process.
     private func reclassifySummary(transcriptPath: String, template: String) {
         guard !transcriptPath.isEmpty else { return }
-        if showCLIWhileSummarising { viewModel.cliPaneVisible = true }
-        viewModel.terminalController.appendActivity("")
-        viewModel.terminalController.appendActivity("──── Reclassifying as \(template) ────")
-        var args = ["summarize", transcriptPath, "--template", template]
+        guard !summariseBusy else {
+            pendingReclassifies.append((transcriptPath, template))
+            log("Reclassify queued behind running summarise: \((transcriptPath as NSString).lastPathComponent) -> \(template)")
+            return
+        }
+        runReclassify(transcriptPath: transcriptPath, template: template)
+    }
+
+    /// Actually run a reclassify. Callers must hold the serial summarise
+    /// gate (summariseBusy == false); this sets it for the duration and
+    /// pumps processNextSummary on completion.
+    private func runReclassify(transcriptPath: String, template: String) {
+        summariseBusy = true
+        viewModel.chatTitle = "Reclassifying as \(template)"
+        if showCLIWhileSummarising {
+            viewModel.cliPaneMode = .summary
+            viewModel.cliPaneVisible = true
+        }
+        viewModel.summaryTranscript.reset()
+        var args = ["summarize", transcriptPath, "--template", template, "--events"]
         if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
         runTranscription(arguments: args, timeout: 300, onLine: { [weak self] line in
-            guard let self = self else { return }
-            if line.hasPrefix("STAGE:") {
-                let label = String(line.dropFirst("STAGE:".count)).trimmingCharacters(in: .whitespaces)
-                self.viewModel.terminalController.appendActivity("  › " + label)
-            } else if !line.isEmpty {
-                self.viewModel.terminalController.appendActivity(line)
-            }
+            self?.viewModel.summaryTranscript.ingest(line: line)
         }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.summariseBusy = false
+                self.viewModel.summaryTranscript.running = false
                 if case .success(let data) = result,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    (json["summarized"] as? Bool) == true,
                    let path = json["summary_path"] as? String {
-                    self.viewModel.terminalController.appendActivity("──── Saved ✓ \((path as NSString).lastPathComponent) ────")
-                    self.viewModel.terminalController.appendActivity("")
                     self.refreshTranscriptionState()   // updates the Summary tick / entry path
                     self.openSummaryViewer(summaryMdPath: path)
                 } else {
                     self.log("Reclassify failed for \(transcriptPath) -> \(template)")
+                    if self.viewModel.summaryTranscript.errorMessage == nil {
+                        self.viewModel.summaryTranscript.errorMessage = "Reclassify failed."
+                    }
                     self.showError("Reclassify failed — see the CLI pane for details.")
                 }
+                self.processNextSummary()
             }
         }
     }
@@ -3393,11 +3681,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Voice Training
 
     private func showVoiceTraining() {
-        if let existing = voiceTrainingWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
         let view = VoiceTrainingView(
             onEnroll: { [weak self] name, audioPath, start, end in
                 self?.enrollSpeakerInVoiceLibrary(name: name, audioPath: audioPath, start: start, end: end)
@@ -3406,21 +3689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.loadVoiceTrainingData(completion: completion)
             }
         )
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 550),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Voice Training"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 600, height: 400)
-        win.contentView = NSHostingView(rootView: view)
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        voiceTrainingWindow = win
+        showDetailTab(id: "voiceTraining", title: "Voice Training", icon: "waveform.badge.mic", view: view)
     }
 
     private func loadVoiceTrainingData(completion: @escaping ([VoiceClusterData]) -> Void) {
@@ -3447,13 +3716,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                process.waitUntilExit()
             } catch {
                 DispatchQueue.main.async { completion([]) }
                 return
             }
 
+            // Drain stdout BEFORE waitUntilExit — the clusters JSON can
+            // exceed the ~64 KB pipe buffer, and read-after-wait deadlocks
+            // (child blocks on write, we block in waitUntilExit). Same
+            // order as refreshMeetingExtraStats.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             guard process.terminationStatus == 0,
                   let clusters = try? JSONDecoder().decode([VoiceClusterData].self, from: data) else {
                 self.log("Voice training: failed to decode clusters (\(data.count) bytes)")
@@ -3471,6 +3744,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func openVoiceTrainingMenu() {
         showVoiceTraining()
+    }
+
+    @objc private func buildVoiceLibraryMenu() {
+        buildVoiceLibraryFromTranscripts()
+    }
+
+    @objc private func rematchUntaggedMenu() {
+        rematchUntaggedMeetings()
+    }
+
+    /// Group the secondary tool windows into one macOS tabbed window
+    /// ("tabs, not separate windows"). Windows sharing this identifier with
+    /// tabbingMode .preferred are merged into a tab group by AppKit.
+    private func applyPanelTabbing(_ win: NSWindow) {
+        win.tabbingMode = .preferred
+        win.tabbingIdentifier = NSWindow.TabbingIdentifier("com.hidock.tools.panels")
     }
 
     private func openVoiceLibrary() {
@@ -3497,14 +3786,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if FileManager.default.fileExists(atPath: scriptPath) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
+            configureVoiceLibraryProcess(process)
             process.arguments = [scriptPath, "list"]
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = Pipe()
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Read before waitUntilExit — read-after-wait deadlocks once
+                // the child's output exceeds the pipe buffer (see
+                // refreshMeetingExtraStats for the canonical ordering).
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
                 if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                     speakers = parsed.compactMap { dict in
                         guard let name = dict["name"] as? String else { return nil }
@@ -3528,24 +3821,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onRename: { [weak self] oldName, newName in
                 self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
+            },
+            meetingCounts: viewModel.personMeetingCounts,
+            onFilterToPerson: { [weak self] name in
+                guard let self = self else { return }
+                self.viewModel.syncFilterPeople = [name]
+                self.viewModel.syncPeopleFilterMode = .any
+                self.syncWindow?.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
             }
         )
 
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Voice Library"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 400, height: 300)
-        win.contentView = NSHostingView(rootView: libraryView)
+        showDetailTab(id: "voiceLibrary", title: "Voice Library", icon: "person.2.wave.2", view: libraryView)
+    }
 
-        voiceLibraryWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    /// List enrolled voice-library names (for the transcript viewer's
+    /// map-to-existing-speaker autocomplete). Best-effort — empty on error.
+    private func listVoiceLibraryNames(completion: @escaping ([String]) -> Void) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { completion([]); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.voiceLibraryPythonPath())
+            self.configureVoiceLibraryProcess(process)
+            process.arguments = [scriptPath, "list"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            var names: [String] = []
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    names = parsed.compactMap { $0["name"] as? String }
+                }
+            } catch {
+                self.log("listVoiceLibraryNames failed: \(error.localizedDescription)")
+            }
+            DispatchQueue.main.async { completion(names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }) }
+        }
     }
 
     private func voiceLibraryPythonPath() -> String {
@@ -3646,6 +3961,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return "\(sharedDir)/voice_library_lite.py"
     }
 
+    /// Configure a `voice_library_lite.py` subprocess so its top-level
+    /// `from shared...` imports resolve: put the repo root on PYTHONPATH and use
+    /// it as cwd (mirrors loadVoiceTrainingData). Without this the process exits
+    /// non-zero with empty output and the UI shows "No voices enrolled".
+    private func configureVoiceLibraryProcess(_ process: Process) {
+        let root = bundledResourcesRoot ?? repoRoot
+        process.currentDirectoryURL = URL(fileURLWithPath: root)
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = NSHomeDirectory()
+        env["PYTHONPATH"] = root
+        process.environment = env
+    }
+
     private func enrollSpeakerInVoiceLibrary(name: String, audioPath: String, start: Double, end: Double) {
         let scriptPath = voiceLibraryScriptPath()
         guard FileManager.default.fileExists(atPath: scriptPath) else { return }
@@ -3653,6 +3981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            if let self = self { self.configureVoiceLibraryProcess(process) }
             process.arguments = [
                 scriptPath, "enroll",
                 "--name", name,
@@ -3676,12 +4005,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Enrol a speaker from the diarizer's stored centroid (name + sidecar path +
+    /// speaker id) — a far more robust voiceprint than a single audio segment,
+    /// and no audio decode (works for Opus/Plaud too).
+    private func enrollSpeakerFromDiarized(name: String, diarizedPath: String, speakerId: Int) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            if let self = self { self.configureVoiceLibraryProcess(process) }
+            process.arguments = [
+                scriptPath, "enroll-diarized",
+                "--name", name, "--json", diarizedPath, "--id", "\(speakerId)",
+            ]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run(); process.waitUntilExit()
+                DispatchQueue.main.async { self?.log("Enrolled '\(name)' (centroid) in voice library") }
+            } catch {
+                DispatchQueue.main.async { self?.log("Failed to enroll '\(name)' from diarized: \(error)") }
+            }
+        }
+    }
+
+    /// Build the voice library from the tagged backlog — enrol every trustworthy
+    /// named speaker across all transcripts (excludes unverified auto-matches).
+    private func buildVoiceLibraryFromTranscripts() {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        viewModel.syncStatus = "Building voice library from tagged meetings…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
+            if let self = self { self.configureVoiceLibraryProcess(process) }
+            process.arguments = [scriptPath, "enroll-from-transcripts", "--dir", dir]
+            let out = Pipe(); process.standardOutput = out
+            let err = Pipe(); process.standardError = err
+            // Stream PROGRESS:i/total from stderr → live percentage.
+            err.fileHandleForReading.readabilityHandler = { [weak self] h in
+                guard let line = String(data: h.availableData, encoding: .utf8) else { return }
+                for token in line.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+                    guard token.hasPrefix("PROGRESS:") else { continue }
+                    let parts = token.dropFirst("PROGRESS:".count).split(separator: "/")
+                    guard parts.count == 2, let i = Int(parts[0]), let t = Int(parts[1]), t > 0 else { continue }
+                    let pct = Int(Double(i) / Double(t) * 100)
+                    DispatchQueue.main.async {
+                        self?.viewModel.syncStatus = "Building voice library… \(pct)% (\(i)/\(t) meetings)"
+                        self?.viewModel.syncStatusLevel = .secondary
+                        self?.syncViewModelState()
+                    }
+                }
+            }
+            var enrolled = 0
+            do {
+                try process.run()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let n = obj["enrolled"] as? Int { enrolled = n }
+            } catch {
+                self?.log("Build voice library failed: \(error)")
+            }
+            err.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                self?.viewModel.syncStatus = "Voice library updated — \(enrolled) voice sample(s) added"
+                self?.viewModel.syncStatusLevel = .success
+                self?.syncViewModelState()
+            }
+        }
+    }
+
+    /// Re-match a single transcript's still-generic speakers against the library.
+    private func rematchTranscript(jsonPath: String) {
+        guard ensureTranscriptionReady() else { return }
+        viewModel.syncStatus = "Re-matching speakers…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        runTranscription(arguments: ["rematch", jsonPath]) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                self.viewModel.syncStatus = "Re-match complete — reopen to see changes"
+                self.viewModel.syncStatusLevel = .success
+                self.transcriptViewerWindow?.close()
+                self.transcriptViewerWindow = nil
+                let mdPath = jsonPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self.openTranscriptViewer(transcriptMdPath: mdPath)
+                }
+                self.refreshTranscriptionState()
+            case .failure(let error):
+                self.viewModel.syncStatus = "Re-match failed"
+                self.viewModel.syncStatusLevel = .error
+                self.log("Re-match failed: \(error.localizedDescription)")
+            }
+            self.syncViewModelState()
+        }
+    }
+
     private func deleteVoiceLibrarySpeaker(name: String) {
         let scriptPath = voiceLibraryScriptPath()
         guard FileManager.default.fileExists(atPath: scriptPath) else { return }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        configureVoiceLibraryProcess(process)
         process.arguments = [scriptPath, "delete", "--name", name]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
@@ -3700,6 +4133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        configureVoiceLibraryProcess(process)
         process.arguments = [scriptPath, "rename", "--old", oldName, "--new", newName]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
@@ -3757,6 +4191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
         win.center()
         win.title = "Terminal"
+        applyPanelTabbing(win)
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 600, height: 320)
         win.contentView = NSHostingView(rootView: view)
@@ -3827,7 +4262,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func processNextSummary() {
-        guard !summariseBusy, !summariseQueue.isEmpty else { return }
+        guard !summariseBusy else { return }
+        // Reclassify requests queued while a summarise was running take
+        // the gate first — they're user-initiated and there's at most a
+        // handful of them.
+        if !pendingReclassifies.isEmpty {
+            let next = pendingReclassifies.removeFirst()
+            runReclassify(transcriptPath: next.transcriptPath, template: next.template)
+            return
+        }
+        guard !summariseQueue.isEmpty else { return }
         let entry = summariseQueue.removeFirst()
         let name = entry.recording.outputName
         guard let transcript = entry.transcriptPath, !transcript.isEmpty else {
@@ -3835,32 +4279,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         summariseBusy = true
         viewModel.summarisingNames.insert(name)
-        // Surface the activity in the CLI pane: auto-open it and print a
-        // start marker so the user sees what's happening (both auto- and
-        // manual summarise flow through here). The authoritative run is the
-        // managed subprocess below; the pane shows event-level activity.
-        if showCLIWhileSummarising { viewModel.cliPaneVisible = true }
-        viewModel.terminalController.appendActivity("")
-        viewModel.terminalController.appendActivity("──── Summarising \(name) ────")
+        // Surface the activity in the CLI pane as a live formatted readout: the
+        // pipeline streams normalized events (--events), which we ingest into
+        // the summary transcript. Both auto- and manual summarise flow here.
+        if showCLIWhileSummarising {
+            viewModel.cliPaneMode = .summary
+            viewModel.cliPaneVisible = true
+        }
+        viewModel.summaryTranscript.reset()
+        viewModel.ledMatrix.notify(LEDEvent(kind: .summarise, text: "SUMMARISING \(name)"))
         syncViewModelState()
 
-        var args = ["summarize", transcript]
+        var args = ["summarize", transcript, "--events"]
         if summarizeEngine != "auto" { args.append(contentsOf: ["--summarize-engine", summarizeEngine]) }
-        // Stream the summarise subprocess's stderr (Claude's live output +
-        // STAGE: markers) into the CLI pane so the user watches it progress.
+        // Feed the subprocess's stderr event stream into the formatted readout.
         runTranscription(arguments: args, timeout: 300, onLine: { [weak self] line in
-            guard let self = self else { return }
-            if line.hasPrefix("STAGE:") {
-                let label = String(line.dropFirst("STAGE:".count)).trimmingCharacters(in: .whitespaces)
-                self.viewModel.terminalController.appendActivity("  › " + label)
-            } else if !line.isEmpty {
-                self.viewModel.terminalController.appendActivity(line)
-            }
+            self?.viewModel.summaryTranscript.ingest(line: line)
         }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.viewModel.summarisingNames.remove(name)
                 self.summariseBusy = false
+                self.viewModel.summaryTranscript.running = false
                 if case .success(let data) = result,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    (json["summarized"] as? Bool) == true,
@@ -3869,11 +4309,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].summaryPath = path
                     }
                     self.log("Summarised \(name) -> \(path)")
-                    self.viewModel.terminalController.appendActivity("──── Saved ✓ \((path as NSString).lastPathComponent) — click the Summary tick to read it formatted ────")
-                    self.viewModel.terminalController.appendActivity("")
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .summarise, text: "\(LEDFont.check) SUMMARY \(name)"))
                 } else {
                     self.log("Summarise: no summary produced for \(name)")
-                    self.viewModel.terminalController.appendActivity("──── ✗ \(name): no summary produced ────")
+                    if self.viewModel.summaryTranscript.errorMessage == nil {
+                        self.viewModel.summaryTranscript.errorMessage = "No summary produced for \(name)."
+                    }
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .error, text: "\(LEDFont.cross) SUMMARISE FAILED"))
                 }
                 self.syncViewModelState()
                 self.processNextSummary()
@@ -3892,9 +4334,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let dir = (transcript as NSString).deletingLastPathComponent
         let file = (transcript as NSString).lastPathComponent
-        let cmd = "cd \"\(dir)\" && \(aiCliBinary) \"Read the transcript '\(file)' and help me summarise it and answer questions about it.\""
+        // Start a fresh formatted Ask-AI conversation. Read-only tools so the
+        // engine can read the transcript and answer without write access.
+        chatWorkingDir = dir
+        chatSessionId = nil
+        viewModel.chatTitle = "Ask AI — \(entry.recording.outputName)"
+        viewModel.chatTranscript.reset()
+        viewModel.chatTranscript.running = false   // set true by runChatTurn
+        viewModel.cliPaneMode = .chat
         viewModel.cliPaneVisible = true
-        viewModel.terminalController.runCommand(cmd)
+        runChatTurn("Read the transcript '\(file)' and help me summarise it and answer questions about it.")
+    }
+
+    /// Working directory + session for the active Ask-AI conversation. The
+    /// session id (from claude's `meta` event) lets follow-ups resume context.
+    private var chatWorkingDir: String?
+    private var chatSessionId: String?
+
+    /// Run one Ask-AI turn via the pipeline's `ask` subcommand, streaming
+    /// normalized events into the chat transcript. Multi-turn resumes the
+    /// prior claude session.
+    private func runChatTurn(_ prompt: String) {
+        guard !viewModel.chatRunning else { return }
+        viewModel.chatRunning = true
+        viewModel.chatTranscript.addUserMessage(prompt)
+        viewModel.chatTranscript.running = true
+
+        var args = ["ask", "--allowed-tools", "Read,Grep,Glob"]
+        if let dir = chatWorkingDir { args += ["--cwd", dir] }
+        if let sid = chatSessionId { args += ["--resume", sid] }
+        if summarizeEngine != "auto" { args += ["--engine", summarizeEngine] }
+        runTranscription(arguments: args, timeout: 600, stdin: prompt, onLine: { [weak self] line in
+            self?.viewModel.chatTranscript.ingest(line: line)
+        }) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.viewModel.chatRunning = false
+                self.viewModel.chatTranscript.running = false
+                if case .success(let data) = result,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let sid = json["session_id"] as? String, !sid.isEmpty {
+                    self.chatSessionId = sid
+                }
+            }
+        }
+    }
+
+    /// Show the raw SwiftTerm shell pane — kept for `claude auth login` and
+    /// power use now that the AI flows use the formatted views.
+    private func openRawTerminalPane() {
+        viewModel.cliPaneMode = .terminal
+        viewModel.cliPaneVisible = true
+        viewModel.terminalController.ensureStarted()
+    }
+
+    /// Consecutive days (ending today or yesterday) that have ≥1 meeting — for
+    /// the LED idle ticker's "N DAY STREAK".
+    private func meetingStreak() -> Int {
+        let cal = Calendar.current
+        let activity = viewModel.meetingActivityByDay
+        var day = cal.startOfDay(for: Date())
+        // Allow the streak to count even if today has no meeting yet.
+        if (activity[day]?.count ?? 0) == 0 {
+            day = cal.date(byAdding: .day, value: -1, to: day) ?? day
+        }
+        var streak = 0
+        while (activity[day]?.count ?? 0) > 0 {
+            streak += 1
+            guard let prev = cal.date(byAdding: .day, value: -1, to: day) else { break }
+            day = prev
+        }
+        return streak
     }
 
     // MARK: - Firmware
@@ -3941,29 +4451,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         let recordingsURL = URL(fileURLWithPath: recordingsFolder)
-        try? FileManager.default.createDirectory(
-            at: recordingsURL, withIntermediateDirectories: true
-        )
+        let sources = panel.urls
 
-        var added = 0
-        for source in panel.urls {
-            if let entry = importSingleFile(source, into: recordingsURL) {
-                importedRecordings.append(entry)
-                added += 1
+        // Copy + probe on a background queue — large or network-mounted
+        // files can take seconds and would beachball the UI if done on
+        // the main thread. State mutation + UI updates hop back to main.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            try? FileManager.default.createDirectory(
+                at: recordingsURL, withIntermediateDirectories: true
+            )
+            var entries: [ImportedRecordingEntry] = []
+            for source in sources {
+                if let entry = self.importSingleFile(source, into: recordingsURL) {
+                    entries.append(entry)
+                }
             }
-        }
-        if added > 0 {
-            ImportedRecordingsStore.save(importedRecordings)
-            rebuildSyncEntries()
-            viewModel.syncStatus = "Imported \(added) file\(added == 1 ? "" : "s")"
-            viewModel.syncStatusLevel = .success
-            syncViewModelState()
-            refreshTranscriptionState()
+            guard !entries.isEmpty else { return }
+            DispatchQueue.main.async {
+                self.importedRecordings.append(contentsOf: entries)
+                ImportedRecordingsStore.save(self.importedRecordings)
+                self.rebuildSyncEntries()
+                let added = entries.count
+                self.viewModel.syncStatus = "Imported \(added) file\(added == 1 ? "" : "s")"
+                self.viewModel.syncStatusLevel = .success
+                self.syncViewModelState()
+                self.refreshTranscriptionState()
+            }
         }
     }
 
     /// Copy a single source file into the recordings folder, gather its
     /// basic metadata, and return a persistable ImportedRecordingEntry.
+    /// Runs on a background queue (see importAudioFile) — the copy and
+    /// duration probe can take seconds for large/network files.
     private func importSingleFile(
         _ source: URL, into recordingsURL: URL,
     ) -> ImportedRecordingEntry? {
@@ -4019,15 +4540,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func mergeImportedIntoSyncEntries() {
         // Remove any existing imported entries, then append fresh ones from
         // the persisted list. This keeps device-reported entries untouched.
+        // Carry transcription/tagging state forward across the rebuild (by name)
+        // so a reconnect/refresh doesn't blank an imported row's icon.
+        let previousByName = Dictionary(
+            syncEntries.filter { $0.deviceId == IMPORTED_DEVICE_ID }
+                .map { ($0.recording.name, $0) },
+            uniquingKeysWith: { a, _ in a }
+        )
         syncEntries.removeAll { $0.deviceId == IMPORTED_DEVICE_ID }
         let stableImportedPid = Int(truncatingIfNeeded: IMPORTED_DEVICE_ID.hashValue)
         for entry in importedRecordings {
             let rec = ImportedRecordingsStore.asSyncRecording(entry)
+            let prev = previousByName[rec.name]
             let sync = HiDockSyncRecordingEntry(
                 recording: rec,
                 deviceProductId: stableImportedPid,
                 deviceId: IMPORTED_DEVICE_ID,
-                deviceName: IMPORTED_DEVICE_NAME
+                deviceName: IMPORTED_DEVICE_NAME,
+                transcribed: prev?.transcribed ?? false,
+                transcriptPath: prev?.transcriptPath,
+                transcribedDate: prev?.transcribedDate,
+                speakersTagged: prev?.speakersTagged ?? false,
+                speakersAutoMatched: prev?.speakersAutoMatched ?? false,
+                summaryPath: prev?.summaryPath,
+                transcriptionSkipped: prev?.transcriptionSkipped ?? false
             )
             syncEntries.append(sync)
         }
@@ -4375,11 +4911,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        // Summaries are matched by `contains(stem)` — same lookup
-        // findSummaryPath uses — because summary filenames sometimes
-        // have a date prefix or suffix from the prompt template.
+        // Summaries are matched by the "<stem> - <Type> - …" prefix — same
+        // lookup findSummaryPath uses. A `contains(stem)` sweep was
+        // dangerous: a merged file's summary name ("Merged-<childStem>-to-…")
+        // contains its children's stems, so removing a child recording
+        // deleted the merged recording's summary too.
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) {
-            for entry in entries where entry.contains(stem) {
+            for entry in entries where entry.hasPrefix(stem + " - ") {
                 try? FileManager.default.removeItem(atPath: "\(summariesDir)/\(entry)")
             }
         }
@@ -4405,29 +4943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Device Manager
 
     private func openDeviceManager() {
-        if let existing = deviceManagerWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let managerView = DeviceManagerView(viewModel: viewModel)
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 480),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Device Manager"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 560, height: 400)
-        win.contentView = NSHostingView(rootView: managerView)
-
-        deviceManagerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "deviceManager", title: "Device Manager", icon: "externaldrive.connected.to.line.below", view: DeviceManagerView(viewModel: viewModel))
     }
 
     private func forgetDevice(_ device: HiDockPairedDevice) {
@@ -4554,25 +5070,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openModelManager() {
+        // Single-instance: focus the existing window instead of spawning a duplicate.
         refreshModelStatuses()
-
-        let managerView = ModelManagerView(viewModel: viewModel)
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Models"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 480, height: 300)
-        win.contentView = NSHostingView(rootView: managerView)
-
-        modelManagerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "models", title: "Models", icon: "shippingbox", view: ModelManagerView(viewModel: viewModel))
     }
 
     // MARK: - Summary Templates Manager
@@ -4618,26 +5118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openTemplatesManager() {
-        if let existing = templatesManagerWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let view = TemplatesManagerView(viewModel: viewModel)
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Summary Templates"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 460, height: 360)
-        win.contentView = NSHostingView(rootView: view)
-        templatesManagerWindow = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showDetailTab(id: "templates", title: "Summary Templates", icon: "doc.badge.gearshape", view: TemplatesManagerView(viewModel: viewModel))
     }
 
     /// Open Claude Code in the embedded CLI pane, cd'd into the templates
@@ -4648,6 +5129,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let file = url.lastPathComponent
         ensureTemplatesApprovalHook()
         showSyncWindow()
+        // Template authoring stays on the raw interactive terminal: it writes
+        // files with human-in-the-loop approval, which needs claude's
+        // interactive permission prompts (the formatted chat is read-only).
+        viewModel.cliPaneMode = .terminal
         viewModel.cliPaneVisible = true
         // Human-in-the-loop: the AI must PROPOSE and wait for approval before
         // writing — template files are user-curated, so we never let it edit
@@ -4662,6 +5147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let dir = templatesDir()
         ensureTemplatesApprovalHook()
         showSyncWindow()
+        // Template authoring stays on the raw interactive terminal (see
+        // iterateTemplate): writing files needs claude's interactive approval.
+        viewModel.cliPaneMode = .terminal
         viewModel.cliPaneVisible = true
         // Human-in-the-loop: propose the full file and wait for approval
         // before writing anything.
@@ -4703,8 +5191,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Read before waitUntilExit — read-after-wait deadlocks once
+                // the status JSON exceeds the pipe buffer (see
+                // refreshMeetingExtraStats for the canonical ordering).
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
                 if let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
                     DispatchQueue.main.async {
                         guard let self = self else { return }
@@ -5218,6 +5709,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncOutputFolder = status.outputDir
         UserDefaults.standard.set(status.outputDir, forKey: syncOutputFolderKey)
         if !isCached {
+            // LED ticker: announce real connect/disconnect transitions.
+            if status.connected != wasConnected {
+                let verb = status.connected ? "CONNECTED" : "DISCONNECTED"
+                viewModel.ledMatrix.notify(LEDEvent(kind: .deviceConnect, text: "\(device.shortName) \(verb)"))
+            }
             syncDeviceConnected[device.deviceId] = status.connected
         }
         if status.connected {
@@ -5267,6 +5763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     transcriptPath: prev?.transcriptPath,
                     transcribedDate: prev?.transcribedDate,
                     speakersTagged: prev?.speakersTagged ?? false,
+                    speakersAutoMatched: prev?.speakersAutoMatched ?? false,
                     summaryPath: prev?.summaryPath,
                     transcriptionSkipped: prev?.transcriptionSkipped ?? false
                 ))
@@ -5471,7 +5968,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
-    private func scheduleAutoDownloadNewRecordings() {
+    private func scheduleAutoDownloadNewRecordings(attempt: Int = 0) {
         // No !syncBusy guard at the entry: the 2s debounce timer is the
         // correct deferral point. Triggers #2 and #3 fire from inside a
         // probe batch where syncBusy is true; we still want to schedule,
@@ -5479,9 +5976,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard syncAutoDownload, syncPaired else { return }
         syncAutoDownloadTimer?.invalidate()
         syncAutoDownloadTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-            guard let self = self, self.syncAutoDownload, self.syncPaired, !self.syncBusy else { return }
+            guard let self = self, self.syncAutoDownload, self.syncPaired else { return }
+            // If the probe batch hasn't settled yet, DON'T drop the request —
+            // a batch can easily run longer than the 2s debounce (status +
+            // P1 + Plaud + transcription-state refresh). Re-arm and retry
+            // until syncBusy clears, bounded so we can't spin forever.
+            if self.syncBusy {
+                if attempt < 15 {
+                    self.scheduleAutoDownloadNewRecordings(attempt: attempt + 1)
+                } else {
+                    self.log("Auto-download: still busy after \(attempt) retries — giving up; next trigger will retry")
+                }
+                return
+            }
             self.downloadNewSyncRecordings()
         }
+    }
+
+    /// Poll interval for the Plaud new-recording check. Defaults to 2 minutes;
+    /// override with the `plaudPollIntervalSeconds` user default (0 disables).
+    private var plaudPollInterval: TimeInterval {
+        let v = UserDefaults.standard.double(forKey: "plaudPollIntervalSeconds")
+        return v > 0 ? v : 120
+    }
+
+    /// Persist a new Plaud poll cadence (seconds; 0 = off) and restart the timer.
+    private func setPlaudPollInterval(_ seconds: Double) {
+        UserDefaults.standard.set(seconds, forKey: "plaudPollIntervalSeconds")
+        viewModel.plaudPollIntervalSeconds = seconds
+        startPlaudPollTimer()   // re-reads the interval; stops the timer if 0
+        log("Plaud poll interval set to \(Int(seconds))s")
+    }
+
+    private func startPlaudPollTimer() {
+        plaudPollTimer?.invalidate()
+        let interval = plaudPollInterval
+        guard interval > 0 else { log("Plaud poll disabled (interval 0)"); return }
+        // Always-on timer; the tick itself no-ops when no Plaud account is
+        // paired, so we don't need to start/stop it on pairing changes.
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.pollPlaudForChanges()
+        }
+        t.tolerance = min(15, interval * 0.2)   // let the OS coalesce it — saves power
+        plaudPollTimer = t
+        log("Plaud poll timer started (every \(Int(interval))s)")
+    }
+
+    /// Lightweight steady-state check: hit the Plaud API for each paired Plaud
+    /// account and, ONLY when its catalog actually changed vs what's displayed,
+    /// route through the normal render path (which rebuilds the rows, fires
+    /// auto-download, and refreshes transcription state). When nothing changed
+    /// we just keep the connection dot fresh — no row rebuild, no library
+    /// rescan, no extra subprocesses. Plaud never touches USB, so this can't
+    /// interfere with the mic trigger / HiDock.
+    private func pollPlaudForChanges() {
+        guard !syncBusy else { return }   // don't stack on a live refresh
+        let plauds = syncPairedDevices.filter { $0.deviceType == .plaud }
+        guard !plauds.isEmpty else { return }
+        guard ensureExtractorReady() else { return }
+
+        for device in plauds {
+            let args = plaudExtractorArguments("plaud-status", device: device)
+            runExtractor(arguments: args, productId: nil, environment: plaudEnvironment(for: device)) { [weak self] result in
+                guard let self = self else { return }
+                guard case .success(let data) = result,
+                      let payload = try? JSONDecoder().decode(HiDockSyncStatusResponse.self, from: data) else { return }
+                DispatchQueue.main.async {
+                    let polled = Set(payload.recordings.map { $0.name })
+                    let current = Set(
+                        self.syncEntries.filter { $0.deviceId == device.deviceId }.map { $0.recording.name }
+                    )
+                    // Non-empty + differs from what's shown → something changed.
+                    // (Empty = signed-out / transient error — don't wipe rows.)
+                    if !payload.recordings.isEmpty, polled != current {
+                        self.log("Plaud poll: \(device.cleanName) catalog changed (\(current.count)→\(polled.count)) — refreshing")
+                        self.renderSyncStatus(payload, device: device)   // rebuild + auto-download + disk scan
+                        self.refreshTranscriptionState()
+                        self.syncViewModelState()
+                    } else {
+                        // Unchanged — just keep the card's connection state fresh.
+                        if payload.connected { self.syncDeviceLastOK[device.deviceId] = Date() }
+                        self.syncDeviceConnected[device.deviceId] = payload.connected
+                        self.syncViewModelState()
+                    }
+                    // Sweep any pending (undownloaded) Plaud recordings. The
+                    // renderSyncStatus auto-download triggers only fire on a
+                    // count-rise or a fresh connect, so a static backlog of
+                    // "On device" cloud recordings never downloaded on its own.
+                    // With auto-download on, the poll is the natural place to
+                    // pull them.
+                    self.autoDownloadPendingPlaud(device, payload: payload)
+                }
+            }
+        }
+    }
+
+    /// When auto-download is on, pull any undownloaded Plaud cloud recordings.
+    /// Plaud has no count-rise/fresh-connect event for an existing backlog, so
+    /// this poll-driven sweep is what actually fetches "On device" items.
+    /// Guarded on syncBusy/syncDownloading so it never stacks; the poll cadence
+    /// (default 2 min) doubles as the retry interval for any that failed.
+    private func autoDownloadPendingPlaud(_ device: HiDockPairedDevice, payload: HiDockSyncStatusResponse) {
+        guard viewModel.syncAutoDownload, !syncBusy, !syncDownloading, payload.connected else { return }
+        let hasPending = payload.recordings.contains { !$0.downloaded && !($0.removed ?? false) }
+        guard hasPending else { return }
+        log("Plaud poll: auto-downloading pending recordings for \(device.cleanName)")
+        syncBusy = true
+        syncViewModelState()
+        downloadNewFromDevices([device], totalDownloaded: 0, freshDownloads: [])
     }
 
     private func refreshSyncStatus(manual: Bool = false) {
@@ -6075,6 +6677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncDownloadTimer = nil
         syncDownloadStartDate = nil
         viewModel.syncDownloadProgress = nil
+        viewModel.ledMatrix.setStatus(nil)
     }
 
     private func downloadSelectedSyncRecording() {
@@ -6172,6 +6775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
             self.viewModel.syncStatus = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
             self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }) { [weak self] result in
             guard self != nil else { return }
             switch result {
@@ -6244,6 +6848,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 postSyncDownloadNotification(title: "✅ Downloads Complete", body: body)
                 viewModel.syncStatus = "Downloaded \(totalDownloaded) new recordings"
                 viewModel.syncStatusLevel = .success
+                viewModel.ledMatrix.notify(LEDEvent(kind: .syncComplete, text: "\(LEDFont.check) SYNC \(totalDownloaded) NEW"))
+            }
+            // Flip the just-downloaded rows to "Downloaded" immediately, keyed by
+            // filename, rather than waiting for the async status re-probe below
+            // (which can lag ~15s and made rows linger on "On device" — and even
+            // jump to "Transcribing" — before showing "Downloaded").
+            if !freshDownloads.isEmpty {
+                let byName = Dictionary(freshDownloads.map { ($0.filename, $0.outputPath) },
+                                        uniquingKeysWith: { a, _ in a })
+                for i in syncEntries.indices {
+                    if let path = byName[syncEntries[i].recording.name],
+                       !syncEntries[i].recording.localExists {
+                        syncEntries[i].recording = syncEntries[i].recording.markedDownloaded(outputPath: path)
+                    }
+                }
+                syncViewModelState()
             }
             // When nothing was downloaded (the common no-op auto-sweep), leave
             // the status line quiet — refreshSyncStatus restores the normal
@@ -6260,10 +6880,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             //      how Rec59 got missed: auto-transcribe fired ~14s
             //      before the status probe returned with the new file.)
             //
-            //   2. Backlog (`visibleEntries`) — rows that WERE already in
+            //   2. Backlog (`syncEntries`) — rows that WERE already in
             //      the table before this download run but remained
             //      untranscribed (e.g. user toggled auto-transcribe off
-            //      previously, or a prior transcription failed).
+            //      previously, or a prior transcription failed). Read
+            //      from syncEntries (ALL entries), not visibleEntries —
+            //      an active device / heatmap-day / status filter would
+            //      silently shrink the sweep to whatever the user
+            //      happens to be looking at.
             //
             // Fresh paths come first so the newest recordings jump the
             // queue — matches the default newest-first table sort.
@@ -6271,7 +6895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // lists isn't enqueued twice.
             if self.syncAutoTranscribe, ensureTranscriptionReady() {
                 let freshPaths = freshDownloads.map(\.outputPath)
-                let backlogPaths = self.viewModel.visibleEntries
+                let backlogPaths = self.syncEntries
                     .filter { $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
                     .map(\.recording.outputPath)
                 var seen = Set<String>()
@@ -6311,6 +6935,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
             self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
             self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }, onFile: { [weak self] name, started in
             guard let self = self else { return }
             if started { self.beginDownloadProgressIfNeeded() }
@@ -6533,7 +7158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, onLine: ((String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    private func runTranscription(arguments: [String], timeout: TimeInterval = 600, stdin: String? = nil, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, onLine: ((String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         // Single chokepoint for the summarisation provider: when a run asks to
         // summarise and the user picked a specific engine, pass it through.
         // "auto" omits the flag so the pipeline keeps its config/auto default.
@@ -6570,6 +7195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let errPipe = Pipe()
             process.standardOutput = outPipe
             process.standardError = errPipe
+
+            // Optional stdin (e.g. the `ask` subcommand reads its prompt from
+            // stdin to avoid arg-escaping issues with long/multiline prompts).
+            let inPipe: Pipe? = stdin != nil ? Pipe() : nil
+            if let inPipe = inPipe { process.standardInput = inPipe }
 
             var outData = Data()
             let outQueue = DispatchQueue(label: "hidock.transcription.stdout")
@@ -6623,15 +7253,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 DispatchQueue.main.async { self.transcriptionSubprocess = process }
                 NSLog("runTranscription: process started (pid %d)", process.processIdentifier)
 
+                // Feed stdin then close so the child sees EOF and proceeds.
+                if let inPipe = inPipe, let stdin = stdin {
+                    let handle = inPipe.fileHandleForWriting
+                    if let data = stdin.data(using: .utf8) { handle.write(data) }
+                    try? handle.close()
+                }
+
                 let deadline = Date().addingTimeInterval(timeout)
                 while process.isRunning && Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.5)
                 }
+                // Track whether WE killed the process (timeout) — same
+                // weKilledIt flag runExtractor uses. terminationReason
+                // alone can't tell a timeout kill from a genuine signal
+                // crash (SIGSEGV), and Python may trap SIGTERM and exit
+                // "normally" with 143.
+                var weKilledIt = false
                 if process.isRunning {
                     NSLog("runTranscription: killing hung process (pid %d) after %ds", process.processIdentifier, Int(timeout))
+                    weKilledIt = true
                     process.terminate()
                     Thread.sleep(forTimeInterval: 1)
                     if process.isRunning { process.interrupt() }
+                    // Escalate to SIGKILL after a short grace period —
+                    // mirrors cancelTranscription: the pipeline can be deep
+                    // inside a non-interruptible native call (MPS matmul,
+                    // torch model load) where SIGTERM/SIGINT never land,
+                    // and without SIGKILL the waitUntilExit below would
+                    // block this serial queue forever, wedging the whole
+                    // transcription queue.
+                    if process.isRunning {
+                        Thread.sleep(forTimeInterval: 2)
+                        if process.isRunning {
+                            NSLog("runTranscription: SIGKILL pid %d (didn't respond to SIGTERM/SIGINT)", process.processIdentifier)
+                            kill(process.processIdentifier, SIGKILL)
+                        }
+                    }
                     process.waitUntilExit()
                 } else {
                     NSLog("runTranscription: process exited with status %d", process.terminationStatus)
@@ -6652,7 +7310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 if process.terminationStatus == 0 {
                     DispatchQueue.main.async { completion(.success(finalOut)) }
-                } else if process.terminationReason == .uncaughtSignal {
+                } else if weKilledIt {
                     let error = NSError(domain: "HiDockTranscription", code: -1, userInfo: [
                         NSLocalizedDescriptionKey: "Transcription timed out after \(Int(timeout))s"
                     ])
@@ -6876,20 +7534,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func enqueueTranscriptions(_ paths: [String]) {
-        // Items that have previously failed or been cancelled still live
-        // in `pendingTranscriptionQueue` so the Queue window can show
-        // their final state. Without resetting their status here, a user
+        // Items that have previously failed, been cancelled, or completed
+        // still live in `pendingTranscriptionQueue` so the Queue window can
+        // show their final state. Without resetting their status here, a user
         // who re-selects those rows and hits Transcribe Selected sees
         // nothing happen: the existing item isn't `.queued`, so
         // processNextInQueue skips it, and the duplicate guard below
         // stops us appending a fresh entry. Retry by flipping the
         // terminal status back to `.queued` and clearing progress so
-        // the retry shows a clean 0%.
+        // the retry shows a clean 0%. `.completed` is included so the
+        // "Already Transcribed → Re-transcribe?" flow actually re-runs
+        // in the same session instead of silently no-op'ing.
         transcriptionCancelled = false
         for path in paths {
             if let idx = pendingTranscriptionQueue.firstIndex(where: { $0.path == path }) {
                 let st = pendingTranscriptionQueue[idx].status
-                if st == .failed || st == .cancelled {
+                if st == .failed || st == .cancelled || st == .completed {
                     pendingTranscriptionQueue[idx].status = .queued
                     pendingTranscriptionQueue[idx].progress = 0
                     pendingTranscriptionQueue[idx].errorMessage = nil
@@ -7004,6 +7664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.applyTranscriptionProgress(syntheticPct, itemPath: item.path, filename: filename, position: position, total: total)
         }
 
+        viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "TRANSCRIBING \(filename)"))
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
         args.append("--summarize")  // see transcribeFileDirect for rationale
@@ -7045,17 +7706,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.transcriptionProgress = 0
             self.viewModel.transcriptionStatus = ""
 
-            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }) {
+            // Don't overwrite a user cancellation: cancelTranscription has
+            // already marked the item .cancelled (with its own message)
+            // before killing the subprocess — the failure completion for
+            // the killed process would otherwise flip it to .failed with
+            // a misleading error.
+            if let idx = self.pendingTranscriptionQueue.firstIndex(where: { $0.path == item.path }),
+               self.pendingTranscriptionQueue[idx].status != .cancelled {
                 switch result {
                 case .success:
                     self.pendingTranscriptionQueue[idx].status = .completed
                     self.pendingTranscriptionQueue[idx].errorMessage = nil
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "\(LEDFont.check) \(filename)"))
                     // Flag for auto-summarise; refreshTranscriptionState
                     // (called just below) populates transcriptPath, then
                     // queues the typed summary for these names.
                     if self.syncAutoSummarise { self.pendingAutoSummariseNames.insert(filename) }
                 case .failure(let err):
                     self.pendingTranscriptionQueue[idx].status = .failed
+                    self.viewModel.ledMatrix.notify(LEDEvent(kind: .error, text: "\(LEDFont.cross) TRANSCRIBE FAILED"))
                     // The NSError carries the trimmed stderr text
                     // assembled by `runTranscription` — exactly what we
                     // want shown when the user clicks the red X icon.
@@ -7148,25 +7817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func showTranscriptionQueueWindow() {
-        if let existing = transcriptionQueueWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-        let queueView = TranscriptionQueueView(viewModel: viewModel)
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 450, height: 400),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        win.center()
-        win.title = "Transcription Queue"
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 350, height: 250)
-        win.contentView = NSHostingView(rootView: queueView)
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        transcriptionQueueWindow = win
+        showDetailTab(id: "queue", title: "Transcription Queue", icon: "list.bullet.rectangle", view: TranscriptionQueueView(viewModel: viewModel))
     }
 
     /// Synchronous, filesystem-only pass that marks entries as
@@ -7207,6 +7858,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     syncEntries[i].transcriptPath = (transcriptDir as NSString).appendingPathComponent(base + ".md")
                 }
                 syncEntries[i].transcribedDate = transcriptModificationDate(syncEntries[i].transcriptPath)
+                // Compute the tagging state here too. Without it the row shows a
+                // transient "needs tagging" (orange) until the async status
+                // refresh computes the real state — which flickered against the
+                // auto-matched (blue ?) state on load.
+                let review = speakerReviewState(transcriptPath: syncEntries[i].transcriptPath)
+                syncEntries[i].speakersTagged = review.tagged
+                syncEntries[i].speakersAutoMatched = review.autoMatched
                 flipped += 1
             }
         }
@@ -7338,7 +7996,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             DispatchQueue.main.async {
                 self.log("refreshTranscriptionState: got \(lookup.count) entries from status")
+                // Build the summary index ONCE (stem → path). Previously
+                // findSummaryPath listed the entire ~1400-file Summaries dir per
+                // entry — ~1700 full directory scans per refresh, on the main
+                // thread → beachball. Now it's one listing + O(1) lookups.
+                let summaryIndex = self.buildSummaryIndex()
                 var matched = 0
+                // recording name → the named people in that meeting (people filter).
+                var meetingPeople: [String: Set<String>] = [:]
                 for i in self.syncEntries.indices {
                     let mp3Name = self.syncEntries[i].recording.outputName
                     if let info = lookup[mp3Name] {
@@ -7346,15 +8011,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         self.syncEntries[i].transcriptPath = info["transcript_path"] as? String
                         self.syncEntries[i].transcribedDate = self.transcriptModificationDate(info["transcript_path"] as? String)
                         // Check speaker tagging state from diarized JSON
-                        self.syncEntries[i].speakersTagged = self.checkSpeakersTagged(transcriptPath: info["transcript_path"] as? String)
-                        // Check if summary exists
-                        self.syncEntries[i].summaryPath = self.findSummaryPath(for: mp3Name)
+                        let review = self.speakerReviewState(transcriptPath: info["transcript_path"] as? String)
+                        self.syncEntries[i].speakersTagged = review.tagged
+                        self.syncEntries[i].speakersAutoMatched = review.autoMatched
+                        if !review.people.isEmpty {
+                            meetingPeople[self.syncEntries[i].recording.name] = Set(review.people)
+                        }
+                        // Check if summary exists (O(1) via the prebuilt index)
+                        self.syncEntries[i].summaryPath = summaryIndex[(mp3Name as NSString).deletingPathExtension]
                         if self.syncEntries[i].transcribed { matched += 1 }
                     } else {
                         self.syncEntries[i].transcribed = false
                         self.syncEntries[i].transcriptPath = nil
                         self.syncEntries[i].transcribedDate = nil
                         self.syncEntries[i].speakersTagged = false
+                        self.syncEntries[i].speakersAutoMatched = false
                         self.syncEntries[i].summaryPath = nil
                     }
                     // Apply the transcription-skip flag from the user's
@@ -7373,6 +8044,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 // include it. We mirror exactly the per-row logic.
                 var mergedTranscribed: Set<String> = []
                 var mergedTagged: Set<String> = []
+                var mergedAutoMatched: Set<String> = []
                 var mergedPaths: [String: String] = [:]
                 var mergedDates: [String: Date] = [:]
                 for group in self.mergeGroups {
@@ -7383,14 +8055,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     let path = info["transcript_path"] as? String
                     if let path = path { mergedPaths[mergedMp3Name] = path }
                     if let d = self.transcriptModificationDate(path) { mergedDates[mergedMp3Name] = d }
-                    if self.checkSpeakersTagged(transcriptPath: path) {
-                        mergedTagged.insert(mergedMp3Name)
-                    }
+                    let review = self.speakerReviewState(transcriptPath: path)
+                    if review.tagged { mergedTagged.insert(mergedMp3Name) }
+                    if review.autoMatched { mergedAutoMatched.insert(mergedMp3Name) }
+                    if !review.people.isEmpty { meetingPeople[mergedMp3Name] = Set(review.people) }
                 }
                 self.viewModel.mergedFileTranscribed = mergedTranscribed
                 self.viewModel.mergedFileTagged = mergedTagged
+                self.viewModel.mergedFileAutoMatched = mergedAutoMatched
                 self.viewModel.mergedFileTranscriptPaths = mergedPaths
                 self.viewModel.mergedFileTranscribedDates = mergedDates
+                self.viewModel.meetingPeople = meetingPeople
                 if !mergedTranscribed.isEmpty {
                     self.log("refreshTranscriptionState: \(mergedTranscribed.count) merged file(s) transcribed, \(mergedTranscribed.count - mergedTagged.count) need tagging")
                 }
@@ -7451,7 +8126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard ensureTranscriptionReady() else { return }
         didRunLaunchAutoTranscribe = true
 
-        let untranscribed = viewModel.visibleEntries
+        // Sweep ALL entries, not visibleEntries — active device / day /
+        // status filters must not shrink the launch backlog.
+        let untranscribed = syncEntries
             .filter { $0.recording.localExists && !$0.transcribed && !$0.transcriptionSkipped }
             .map(\.recording.outputPath)
         guard !untranscribed.isEmpty else { return }
@@ -7461,8 +8138,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Speaker Tagging & Summary Helpers
 
-    private func checkSpeakersTagged(transcriptPath: String?) -> Bool {
-        guard let mdPath = transcriptPath else { return false }
+    /// Tri-state speaker-review outcome for a transcript (see
+    /// PLAN-speaker-tagging-loop.md). Read from the `_diarized.json` sidecar's
+    /// `speaker_names` + `speaker_meta`:
+    ///   - `tagged`      = a multi-speaker meeting with ≥1 user-confirmed speaker
+    ///                     (or a single-speaker meeting — nothing to disambiguate).
+    ///   - `autoMatched` = the voice library matched ≥1 speaker but none is
+    ///                     confirmed yet ("confirm me"). Never true when tagged.
+    ///   - neither       = needs tagging (multi-speaker, nothing named/matched) —
+    ///                     the only state that feeds the "N need tagging" nag.
+    /// Legacy sidecars without `speaker_meta`: a non-generic name is inferred as
+    /// an unverified auto-match, so previously auto-tagged meetings surface for
+    /// verification rather than silently reading as confirmed.
+    private func speakerReviewState(transcriptPath: String?) -> (tagged: Bool, autoMatched: Bool, people: [String]) {
+        guard let mdPath = transcriptPath else { return (false, false, []) }
         let mdURL = URL(fileURLWithPath: mdPath)
         let baseName = mdURL.deletingPathExtension().lastPathComponent
         let dirURL = mdURL.deletingLastPathComponent()
@@ -7471,60 +8160,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard FileManager.default.fileExists(atPath: diarizedPath),
               let data = FileManager.default.contents(atPath: diarizedPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let speakerNames = json["speaker_names"] as? [String: String] else {
-            return false
+              let speakerNames = json["speaker_names"] as? [String: String],
+              !speakerNames.isEmpty else {
+            return (false, false, [])
         }
 
-        if speakerNames.isEmpty { return false }
-        let untaggedPattern = try? NSRegularExpression(pattern: "^Speaker \\d+$")
-        for (_, name) in speakerNames {
+        let genericPattern = try? NSRegularExpression(pattern: "^Speaker \\d+$")
+        func isGeneric(_ name: String) -> Bool {
             let range = NSRange(name.startIndex..., in: name)
-            if untaggedPattern?.firstMatch(in: name, range: range) != nil {
-                return false
-            }
+            return genericPattern?.firstMatch(in: name, range: range) != nil
         }
-        return true
+
+        // Named (non-generic) people in this meeting — the people-filter source.
+        let people = Array(Set(speakerNames.values.filter { !isGeneric($0) }))
+
+        // Single-speaker meetings are never flagged — nothing to disambiguate.
+        if speakerNames.count <= 1 { return (true, false, people) }
+
+        let meta = json["speaker_meta"] as? [String: [String: Any]] ?? [:]
+        var anyVerified = false
+        var anyNamed = false   // a real (non-generic) name — auto or user
+        for (id, name) in speakerNames {
+            if (meta[id]?["verified"] as? Bool) == true { anyVerified = true }
+            if !isGeneric(name) { anyNamed = true }
+        }
+
+        if anyVerified { return (true, false, people) }      // ≥1 confirmed → tagged
+        if anyNamed { return (false, true, people) }         // matched but unconfirmed → confirm me
+        return (false, false, people)                        // nothing → needs tagging
     }
 
-    private func findSummaryPath(for mp3Name: String) -> String? {
+    /// Build a `stem → summary-path` index by listing the Summaries directory
+    /// ONCE. Summary files are named "<stem> - <Type> - <Area> - <Title>.md",
+    /// so the key is the component before the first " - " (the same prefix the
+    /// old per-entry `findSummaryPath` matched on — avoids a merged file's
+    /// summary, which contains child stems, falsely matching children).
+    /// Replaces ~1700 per-entry directory scans with one listing + O(1) lookups.
+    private func buildSummaryIndex() -> [String: String] {
         let summariesDir = (NSHomeDirectory() as NSString).appendingPathComponent("HiDock/Summaries")
-        let baseName = (mp3Name as NSString).deletingPathExtension
-        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) else { return nil }
-        // Match summary files that contain the recording base name
-        if let match = contents.first(where: { $0.hasSuffix(".md") && $0.contains(baseName) }) {
-            return (summariesDir as NSString).appendingPathComponent(match)
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: summariesDir) else { return [:] }
+        var index: [String: String] = [:]
+        for name in contents where name.hasSuffix(".md") {
+            guard let sep = name.range(of: " - ") else { continue }
+            let stem = String(name[..<sep.lowerBound])
+            if index[stem] == nil {
+                index[stem] = (summariesDir as NSString).appendingPathComponent(name)
+            }
         }
-        return nil
+        return index
     }
 
     // MARK: - Logging
 
+    /// Serialises file writes from log(). log() is called from the main
+    /// thread, syncExtractorQueue, and transcriptionDispatchQueue — each
+    /// call used to open its own FileHandle, interleaving/corrupting
+    /// lines and racing the rotation. One serial queue keeps appends and
+    /// rotation atomic with respect to each other.
+    private let logWriteQueue = DispatchQueue(label: "hidock.log-write")
+
     private func log(_ message: String) {
         let line = "[\(Date())] \(message)\n"
-        NSLog("%@", message)
+        NSLog("%@", message)   // immediate, thread-safe
         guard let data = line.data(using: .utf8) else { return }
 
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
-           let size = attrs[.size] as? UInt64, size > 5 * 1024 * 1024 {
-            let oldPath = logPath + ".old"
-            try? FileManager.default.removeItem(atPath: oldPath)
-            try? FileManager.default.moveItem(atPath: logPath, toPath: oldPath)
-        }
-
-        do {
-            let logURL = URL(fileURLWithPath: logPath)
-            if FileManager.default.fileExists(atPath: logPath) {
-                let handle = try FileHandle(forWritingTo: logURL)
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try handle.close()
-            } else {
-                let logDir = (logPath as NSString).deletingLastPathComponent
-                try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
-                try data.write(to: logURL)
+        let logPath = self.logPath
+        logWriteQueue.async {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
+               let size = attrs[.size] as? UInt64, size > 5 * 1024 * 1024 {
+                let oldPath = logPath + ".old"
+                try? FileManager.default.removeItem(atPath: oldPath)
+                try? FileManager.default.moveItem(atPath: logPath, toPath: oldPath)
             }
-        } catch {
-            NSLog("Failed to write log: %@", error.localizedDescription)
+
+            do {
+                let logURL = URL(fileURLWithPath: logPath)
+                if FileManager.default.fileExists(atPath: logPath) {
+                    let handle = try FileHandle(forWritingTo: logURL)
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try handle.close()
+                } else {
+                    let logDir = (logPath as NSString).deletingLastPathComponent
+                    try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+                    try data.write(to: logURL)
+                }
+            } catch {
+                NSLog("Failed to write log: %@", error.localizedDescription)
+            }
         }
     }
 
@@ -7557,14 +8280,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         do {
             try p.run()
-            p.waitUntilExit()
         } catch {
             log("Build process failed to launch: \(error)")
             return false
         }
 
+        // Drain stderr BEFORE waitUntilExit — swiftc can emit >64 KB of
+        // errors, and read-after-wait deadlocks on a full pipe buffer
+        // (see refreshMeetingExtraStats for the canonical ordering).
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+
         if p.terminationStatus != 0 {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
                 log("Build failed:\n\(errStr)")
             }

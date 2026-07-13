@@ -11,6 +11,7 @@ Techniques inspired by silverstein/minutes:
 """
 from __future__ import annotations
 
+import bisect
 import sys
 from pathlib import Path
 
@@ -84,14 +85,23 @@ def _normalize_peak(audio: np.ndarray, target_peak: float = 0.5) -> np.ndarray:
     return np.clip(audio * gain, -1.0, 1.0).astype(np.float32)
 
 
-def _replace_silence_with_padding(
+def strip_silence_with_map(
     audio: np.ndarray, sr: int = 16000,
     silence_threshold_s: float = 0.5, padding_s: float = 0.3,
-) -> np.ndarray:
-    """Replace long silence with short padding to prevent Whisper hallucination loops.
+) -> tuple[np.ndarray, list[tuple[float, float]]]:
+    """Replace long silence with short padding and return a time map.
 
     From minutes: silence >500ms is replaced with 300ms of zeros, giving
     Whisper a natural segment boundary without triggering repetitive output.
+
+    Returns:
+        Tuple of (processed_audio, time_map). ``time_map`` is a list of
+        ``(stripped_time_s, original_time_s)`` knots for piecewise-linear
+        interpolation from the stripped (compressed) timeline back to the
+        original audio timeline — feed it to :func:`remap_time` /
+        :func:`remap_segments`. Kept audio maps with slope 1; each padding
+        block stretches linearly across the silence it replaced. When
+        nothing is stripped the map is the identity.
     """
     chunk_size = int(0.05 * sr)  # 50ms chunks
     padding_samples = int(padding_s * sr)
@@ -103,31 +113,122 @@ def _replace_silence_with_padding(
         rms_values.append(rms)
 
     if not rms_values:
-        return audio
+        duration_s = len(audio) / sr
+        return audio, [(0.0, 0.0), (duration_s, duration_s)]
 
     # Adaptive noise floor from quietest 20% (minutes approach)
     sorted_rms = sorted(rms_values)
     noise_floor = sorted_rms[len(sorted_rms) // 5] * 4
 
     result_chunks = []
+    knots: list[tuple[float, float]] = [(0.0, 0.0)]  # (stripped_s, original_s)
+    comp_samples = 0   # samples emitted so far on the stripped timeline
     silence_count = 0
+    in_skip = False    # inside a silence run that was replaced by padding
     for i, rms in enumerate(rms_values):
         start = i * chunk_size
         end = start + chunk_size
         if rms < noise_floor:
             silence_count += 1
             if silence_count == silence_chunks_needed:
-                # Replace accumulated silence with short padding
+                # Replace accumulated silence with short padding. The padding
+                # block stands in for everything skipped from here until the
+                # next non-silent chunk, so open a stretch region in the map.
+                knots.append((comp_samples / sr, start / sr))
                 result_chunks.append(np.zeros(padding_samples, dtype=np.float32))
+                comp_samples += padding_samples
+                in_skip = True
             elif silence_count > silence_chunks_needed:
-                continue  # Skip additional silence
+                continue  # Skip additional silence (covered by the padding)
             else:
                 result_chunks.append(audio[start:end])
+                comp_samples += chunk_size
         else:
+            if in_skip:
+                # Close the stretch region: the padding block maps onto the
+                # whole skipped silence, ending where speech resumes.
+                knots.append((comp_samples / sr, start / sr))
+                in_skip = False
             silence_count = 0
             result_chunks.append(audio[start:end])
+            comp_samples += chunk_size
 
-    return np.concatenate(result_chunks) if result_chunks else audio
+    # Final knot at the end of the processed extent (a tail shorter than one
+    # chunk is dropped by the chunking loop, same as before).
+    knots.append((comp_samples / sr, len(rms_values) * chunk_size / sr))
+
+    processed = np.concatenate(result_chunks) if result_chunks else audio
+    return processed, knots
+
+
+def _replace_silence_with_padding(
+    audio: np.ndarray, sr: int = 16000,
+    silence_threshold_s: float = 0.5, padding_s: float = 0.3,
+) -> np.ndarray:
+    """Replace long silence with short padding (no time map).
+
+    Thin wrapper over :func:`strip_silence_with_map` for callers that don't
+    need to remap timestamps afterwards.
+    """
+    processed, _ = strip_silence_with_map(
+        audio, sr=sr, silence_threshold_s=silence_threshold_s, padding_s=padding_s,
+    )
+    return processed
+
+
+def remap_time(t: float, time_map: list[tuple[float, float]]) -> float:
+    """Map a timestamp on the stripped timeline back to the original timeline.
+
+    ``time_map`` is the knot list returned by :func:`strip_silence_with_map`.
+    Times beyond either end of the map extrapolate with slope 1 (ASR
+    timestamps can slightly exceed the processed extent).
+    """
+    if not time_map:
+        return float(t)
+    comps = [k[0] for k in time_map]
+    return _remap_with_comps(float(t), time_map, comps)
+
+
+def _remap_with_comps(
+    t: float, time_map: list[tuple[float, float]], comps: list[float],
+) -> float:
+    if t <= time_map[0][0]:
+        return time_map[0][1] + (t - time_map[0][0])
+    if t >= time_map[-1][0]:
+        return time_map[-1][1] + (t - time_map[-1][0])
+    idx = bisect.bisect_right(comps, t) - 1
+    c0, o0 = time_map[idx]
+    c1, o1 = time_map[idx + 1]
+    if c1 <= c0:  # degenerate knot (e.g. zero-length padding)
+        return o1
+    frac = (t - c0) / (c1 - c0)
+    return o0 + frac * (o1 - o0)
+
+
+def remap_segments(
+    segments: list[dict], time_map: list[tuple[float, float]],
+) -> list[dict]:
+    """Remap ASR segment (and word) timestamps back to the original timeline.
+
+    Use immediately after transcribing a silence-stripped temp file, BEFORE
+    diarization or sidecar writing — those run against the original audio,
+    so stripped-timeline timestamps would drift early by the stripped amount.
+    Mutates the segment dicts in place and returns the list for convenience.
+    """
+    if not time_map or not segments:
+        return segments
+    comps = [k[0] for k in time_map]
+    for seg in segments:
+        if seg.get("start") is not None:
+            seg["start"] = _remap_with_comps(float(seg["start"]), time_map, comps)
+        if seg.get("end") is not None:
+            seg["end"] = _remap_with_comps(float(seg["end"]), time_map, comps)
+        for word in seg.get("words") or []:
+            if word.get("start") is not None:
+                word["start"] = _remap_with_comps(float(word["start"]), time_map, comps)
+            if word.get("end") is not None:
+                word["end"] = _remap_with_comps(float(word["end"]), time_map, comps)
+    return segments
 
 
 # ── VAD ─────────────────────────────────────────────────────────────────────
@@ -842,11 +943,9 @@ def diarize(
             print(f"  VAD pass 2 (peak norm): {len(speech_segments)} segs, {total_speech:.0f}s, {vad_per_min:.1f}/min", file=sys.stderr)
 
     # Step 4: Whisper boundary fallback
-    use_whisper_boundaries = False
     if len(whisper_segments) > 5 and vad_per_min < _MIN_VAD_SEGMENTS_PER_MINUTE:
         print("  VAD insufficient, using Whisper boundaries", file=sys.stderr)
         speech_segments = _whisper_segments_as_speech(whisper_segments)
-        use_whisper_boundaries = True
 
     if not speech_segments:
         return _build_single_speaker_result(audio_path, whisper_segments)
@@ -883,24 +982,19 @@ def diarize(
     n_detected = len(set(speaker_labels))
     print(f"  Speakers: {n_detected} (after post-merge)", file=sys.stderr)
 
-    # Step 8: Assign speakers to whisper segments
-    if use_whisper_boundaries:
-        # 1:1 mapping — but need to handle valid_indices
-        ws_speakers = [0] * len(whisper_segments)
-        for vi, label in zip(valid_indices, speaker_labels):
-            if vi < len(ws_speakers):
-                ws_speakers[vi] = label
-        # Fill gaps
-        last = 0
-        for i in range(len(ws_speakers)):
-            if i in valid_indices:
-                idx = valid_indices.index(i)
-                last = speaker_labels[idx]
-            ws_speakers[i] = last
-    else:
-        ws_speakers = _assign_speakers_to_whisper_segments(
-            whisper_segments, speech_segments, speaker_labels, valid_indices
-        )
+    # Step 8: Assign speakers to whisper segments.
+    #
+    # Always use the overlap-based assignment — it works for VAD-derived
+    # speech segments AND for the Whisper-boundary fallback. The fallback
+    # previously assumed a 1:1 whisper↔speech index mapping, but
+    # _whisper_segments_as_speech filters degenerate (end <= start)
+    # segments and _merge_adjacent_speech coalesces neighbours, so
+    # valid_indices refer to the merged speech list, not whisper segments.
+    # Indexing whisper_segments with them landed labels on the wrong
+    # segments and forward-fill then mislabelled everything after.
+    ws_speakers = _assign_speakers_to_whisper_segments(
+        whisper_segments, speech_segments, speaker_labels, valid_indices
+    )
 
     # Step 9: Renumber contiguously
     seen = []
@@ -913,12 +1007,18 @@ def diarize(
     print(f"  Final speakers: {n_final}", file=sys.stderr)
 
     # Step 10: Auto-match against voice library (from minutes v0.10.0)
+    # Also record provenance (speaker_meta) + the per-speaker centroid
+    # (speaker_embeddings) so the app can flag auto-matches for verification and
+    # a later `rematch` can re-identify without touching the audio.
     speaker_names = {}
+    speaker_meta = {}
+    speaker_embeddings = {}
     for spk_id in range(n_final):
         # Compute centroid for this speaker
         spk_indices = [i for i, s in enumerate(ws_speakers) if s == spk_id]
         if not spk_indices:
             speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+            speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
             continue
 
         # Get embeddings for this speaker's whisper segments via speech segments
@@ -945,16 +1045,28 @@ def diarize(
             norm = np.linalg.norm(centroid)
             if norm > 1e-10:
                 centroid = centroid / norm
+            speaker_embeddings[str(spk_id)] = [float(x) for x in centroid]
 
             # Check voice library
-            matched_name, confidence = identify_speaker(centroid, threshold=0.55)
+            matched_name, confidence = identify_speaker(centroid, threshold=0.65)
             if matched_name:
                 speaker_names[str(spk_id)] = matched_name
+                speaker_meta[str(spk_id)] = {"source": "auto", "confidence": float(confidence), "verified": False}
                 print(f"  Auto-matched speaker {spk_id} → {matched_name} ({confidence:.0%})", file=sys.stderr)
             else:
                 speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+                speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
         else:
             speaker_names[str(spk_id)] = f"Speaker {spk_id + 1}"
+            speaker_meta[str(spk_id)] = {"source": "generic", "confidence": None, "verified": False}
+
+    # Don't let two speakers auto-match the same enrolled voice (over-clustering
+    # splitting one person). Keep the best; revert the rest to generic.
+    try:
+        from shared.speaker_meta import resolve_name_collisions
+        resolve_name_collisions(speaker_names, speaker_meta)
+    except Exception as e:  # noqa: BLE001 - best effort, never break diarization
+        print(f"  Name-collision resolve skipped ({e})", file=sys.stderr)
 
     # Step 11: Build output, merge same-speaker, split long segments
     raw_segments = []
@@ -991,6 +1103,8 @@ def diarize(
         "audio_file": str(audio_path),
         "segments": segments_out,
         "speaker_names": speaker_names,
+        "speaker_meta": speaker_meta,
+        "speaker_embeddings": speaker_embeddings,
     }
 
 
@@ -1013,4 +1127,6 @@ def _build_single_speaker_result(audio_path, whisper_segments):
     return {
         "version": 1, "audio_file": str(audio_path),
         "segments": segments_out, "speaker_names": {"0": "Speaker 1"},
+        "speaker_meta": {"0": {"source": "generic", "confidence": None, "verified": False}},
+        "speaker_embeddings": {},
     }

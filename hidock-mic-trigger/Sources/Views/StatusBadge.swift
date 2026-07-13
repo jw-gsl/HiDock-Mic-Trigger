@@ -99,6 +99,21 @@ struct TranscriptionIndicator: View {
             }
             .buttonStyle(.plain)
             .help("Transcript ready — show in Finder")
+        } else if entry.transcribed && entry.speakersAutoMatched {
+            // Auto-matched from the voice library but not yet confirmed —
+            // blue question mark. Click opens the viewer to verify/correct.
+            Button {
+                if let path = entry.transcriptPath, let handler = onOpenTranscriptViewer {
+                    handler(path)
+                } else if let path = entry.transcriptPath {
+                    onRevealTranscript(path)
+                }
+            } label: {
+                Image(systemName: "questionmark.circle.fill")
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(.plain)
+            .help("Auto-tagged from your voice library — click to verify the speakers")
         } else if entry.transcribed && !entry.speakersTagged {
             // Transcribed but speakers need tagging — orange tag
             Button {
