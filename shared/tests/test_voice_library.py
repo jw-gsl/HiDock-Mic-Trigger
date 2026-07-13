@@ -1,6 +1,5 @@
 """Tests for the multi-exemplar voice library."""
 import json
-from pathlib import Path
 
 import pytest
 
