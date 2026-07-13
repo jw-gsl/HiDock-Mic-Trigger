@@ -354,6 +354,13 @@ struct SyncToolbarSection: View {
     private var peopleFilterMenu: some View {
         let selected = viewModel.syncFilterPeople
         return Menu {
+            // Clear first so it's always one click away even with a long people list.
+            if !selected.isEmpty {
+                Button("Clear people filter", role: .destructive) {
+                    viewModel.syncFilterPeople = []
+                }
+                Divider()
+            }
             Picker("Match", selection: Binding(
                 get: { viewModel.syncPeopleFilterMode },
                 set: { viewModel.syncPeopleFilterMode = $0 }
@@ -370,12 +377,6 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("\(person)  (\(count))",
                           systemImage: selected.contains(person) ? "checkmark.circle.fill" : "circle")
-                }
-            }
-            if !selected.isEmpty {
-                Divider()
-                Button("Clear people filter", role: .destructive) {
-                    viewModel.syncFilterPeople = []
                 }
             }
         } label: {
