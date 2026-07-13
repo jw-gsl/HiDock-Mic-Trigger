@@ -30,6 +30,9 @@ struct VoiceLibraryView: View {
     @State private var editingName: String = ""
     @State private var search = ""
     @State private var sortKey: VoiceSortKey = .name
+    /// When set, show a picker to merge this speaker into another library name.
+    @State private var mergingFrom: VoiceLibrarySpeaker? = nil
+    @State private var mergeTargetName: String = ""
     let onDelete: (String) -> Void
     let onRename: (String, String) -> Void
     /// person name → number of meetings they appear in (for display + sort).
@@ -163,6 +166,17 @@ struct VoiceLibraryView: View {
                             .foregroundColor(.secondary)
                     }
 
+                    if speakers.count > 1 {
+                        Button {
+                            mergingFrom = speaker
+                            mergeTargetName = speakers.first(where: { $0.id != speaker.id })?.name ?? ""
+                        } label: {
+                            Image(systemName: "arrow.triangle.merge")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Merge into another speaker — keep one name, combine voice samples")
+                    }
+
                     Button(role: .destructive) {
                         deleteSpeaker(speaker)
                     } label: {
@@ -175,6 +189,75 @@ struct VoiceLibraryView: View {
                 .padding(.vertical, 2)
             }
         }
+        .sheet(item: $mergingFrom) { source in
+            mergeSheet(source: source)
+        }
+    }
+
+    // MARK: - Merge
+
+    private func mergeSheet(source: VoiceLibrarySpeaker) -> some View {
+        let targets = speakers
+            .filter { $0.id != source.id }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Merge speakers")
+                .font(.headline)
+            Text("Move all voice samples from “\(source.name)” into another library name, then remove “\(source.name)”. Use this for typos (e.g. Wildmsith → Wildsmith).")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Merge into", selection: $mergeTargetName) {
+                ForEach(targets) { t in
+                    Text(t.name).tag(t.name)
+                }
+            }
+            .labelsHidden()
+            // Ensure a valid default if the sheet opened before target was set.
+            .onAppear {
+                if mergeTargetName.isEmpty || mergeTargetName == source.name {
+                    mergeTargetName = targets.first?.name ?? ""
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { mergingFrom = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Merge") {
+                    commitMerge(from: source, into: mergeTargetName)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(mergeTargetName.isEmpty || mergeTargetName == source.name)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 360)
+    }
+
+    private func commitMerge(from source: VoiceLibrarySpeaker, into targetName: String) {
+        guard !targetName.isEmpty, targetName != source.name else {
+            mergingFrom = nil
+            return
+        }
+        // Backend rename-to-existing merges exemplars and deletes the source key.
+        onRename(source.name, targetName)
+        if let ti = speakers.firstIndex(where: { $0.name == targetName }),
+           let si = speakers.firstIndex(where: { $0.id == source.id }) {
+            let target = speakers[ti]
+            speakers[ti] = VoiceLibrarySpeaker(
+                id: target.id,
+                name: target.name,
+                sampleCount: target.sampleCount + source.sampleCount,
+                lastUpdated: target.lastUpdated
+            )
+            speakers.remove(at: si)
+        } else {
+            speakers.removeAll { $0.id == source.id }
+        }
+        mergingFrom = nil
     }
 
     // MARK: - Actions
@@ -186,8 +269,17 @@ struct VoiceLibraryView: View {
             return
         }
         onRename(speaker.name, trimmed)
-        // Update local state
-        if let index = speakers.firstIndex(where: { $0.id == speaker.id }) {
+        // Update local state — if the new name already exists, this was a merge.
+        if let existing = speakers.firstIndex(where: { $0.name == trimmed && $0.id != speaker.id }) {
+            let kept = speakers[existing]
+            speakers[existing] = VoiceLibrarySpeaker(
+                id: kept.id,
+                name: kept.name,
+                sampleCount: kept.sampleCount + speaker.sampleCount,
+                lastUpdated: kept.lastUpdated
+            )
+            speakers.removeAll { $0.id == speaker.id }
+        } else if let index = speakers.firstIndex(where: { $0.id == speaker.id }) {
             speakers[index] = VoiceLibrarySpeaker(
                 id: trimmed,
                 name: trimmed,
