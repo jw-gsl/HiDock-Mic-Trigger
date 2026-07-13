@@ -140,6 +140,20 @@ def save_library(lib: dict) -> None:
         raise
 
 
+def _canonical_speaker_name(lib: dict, name: str) -> str:
+    """Strip/collapse whitespace and, if a case-insensitive match already exists
+    in the library, reuse that key so we don't create 'Leslie Mcneely' next to
+    'Leslie McNeely'. Typos (Wildmsith vs Wildsmith) still need an explicit merge."""
+    cleaned = " ".join((name or "").strip().split())
+    if not cleaned:
+        return cleaned
+    folded = cleaned.casefold()
+    for existing in lib.get("speakers", {}):
+        if existing.casefold() == folded:
+            return existing
+    return cleaned
+
+
 def _enroll_into(lib: dict, name: str, embedding: np.ndarray | list,
                  embed_dim: int, model: str, source: str) -> dict:
     """Append `embedding` as an exemplar of `name` in `lib` (no disk write).
@@ -151,6 +165,10 @@ def _enroll_into(lib: dict, name: str, embedding: np.ndarray | list,
     if norm > 1e-10:
         emb = emb / norm
     now = _now()
+
+    name = _canonical_speaker_name(lib, name)
+    if not name:
+        raise ValueError("speaker name is empty")
 
     entry = lib["speakers"].get(name)
     if entry is None:
@@ -358,10 +376,22 @@ def delete_speaker(name: str) -> bool:
 
 
 def rename_speaker(old_name: str, new_name: str) -> bool:
-    """Rename a speaker (merges exemplars if the new name already exists)."""
+    """Rename a speaker (merges exemplars if the new name already exists).
+
+    This is also the merge primitive: rename A → B when B exists folds A's
+    exemplars into B and deletes A.
+    """
     lib = load_library()
     if old_name not in lib["speakers"]:
         return False
+    new_name = " ".join((new_name or "").strip().split())
+    if not new_name:
+        return False
+    # Prefer an existing case-insensitive target so rename "leslie" → "Leslie"
+    # lands on the canonical key when present.
+    new_name = _canonical_speaker_name(lib, new_name)
+    if new_name == old_name:
+        return True
     if new_name in lib["speakers"] and new_name != old_name:
         # Merge exemplars into the existing target rather than erroring.
         target = lib["speakers"][new_name]
@@ -376,6 +406,20 @@ def rename_speaker(old_name: str, new_name: str) -> bool:
         lib["speakers"][new_name]["last_updated"] = _now()
     save_library(lib)
     return True
+
+
+def merge_speakers(source_name: str, target_name: str) -> bool:
+    """Merge `source_name` into `target_name` (exemplars + delete source).
+
+    Requires both names to exist. Prefer this over rename when the UI intent is
+    explicitly "merge these two people".
+    """
+    lib = load_library()
+    if source_name not in lib["speakers"] or target_name not in lib["speakers"]:
+        return False
+    if source_name == target_name:
+        return True
+    return rename_speaker(source_name, target_name)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -407,9 +451,13 @@ def _cli():
     delete_p = sub.add_parser("delete", help="Delete a speaker")
     delete_p.add_argument("--name", required=True)
 
-    rename_p = sub.add_parser("rename", help="Rename a speaker")
+    rename_p = sub.add_parser("rename", help="Rename a speaker (merges if --new already exists)")
     rename_p.add_argument("--old", required=True)
     rename_p.add_argument("--new", required=True)
+
+    merge_p = sub.add_parser("merge", help="Merge one speaker into another (keep target name)")
+    merge_p.add_argument("--from", dest="source", required=True, help="Speaker to absorb and delete")
+    merge_p.add_argument("--into", dest="target", required=True, help="Speaker that keeps the name")
 
     args = parser.parse_args()
 
@@ -455,6 +503,24 @@ def _cli():
                 print(json.dumps({"ok": False, "error": f"Speaker '{args.old}' not found"}), file=sys.stderr)
                 sys.exit(1)
         except ValueError as e:
+            print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "merge":
+        try:
+            ok = merge_speakers(args.source, args.target)
+            if ok:
+                print(json.dumps({"ok": True}))
+            else:
+                print(
+                    json.dumps({
+                        "ok": False,
+                        "error": f"Cannot merge '{args.source}' into '{args.target}' (missing name?)",
+                    }),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
             sys.exit(1)
 

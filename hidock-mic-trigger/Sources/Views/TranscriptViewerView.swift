@@ -1027,12 +1027,6 @@ struct TranscriptViewerView: View {
                 .help("Acknowledge an unknown/guest speaker — counts as reviewed, not added to your voice library. Rename via the pill if you know who it is.")
             }
         }
-
-        // Autocomplete: while renaming this speaker, offer existing enrolled
-        // voices to map onto (keeps names canonical → better matching).
-        if editingSpeakerId == id && editingContext == "verify" {
-            nameSuggestions(for: id)
-        }
         }
     }
 
@@ -1046,23 +1040,29 @@ struct TranscriptViewerView: View {
         // speaker (legend + each transcript row), so the field appeared down in
         // the transcript instead of where you tapped.
         if editingSpeakerId == speakerId && editingContext == context {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 8, height: 8)
-                TextField("Name", text: $editingName, onCommit: {
-                    commitRename(speakerId: speakerId)
-                })
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 120)
-                .controlSize(.small)
-                .focused($nameFieldFocused)
-                .onAppear { nameFieldFocused = true }
+            // Text field + voice-library autocomplete under it (verify panel,
+            // legend, and in-transcript pills all share this path).
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 8, height: 8)
+                    TextField("Name", text: $editingName, onCommit: {
+                        commitRename(speakerId: speakerId)
+                    })
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 140)
+                    .controlSize(.small)
+                    .focused($nameFieldFocused)
+                    .onAppear { nameFieldFocused = true }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(color.opacity(0.15))
+                .cornerRadius(12)
+
+                nameSuggestions(for: speakerId)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(color.opacity(0.15))
-            .cornerRadius(12)
         } else {
             Button {
                 if interactive {
@@ -1070,6 +1070,9 @@ struct TranscriptViewerView: View {
                     editingContext = context
                     editingName = speakerName(for: speakerId)
                     nameFieldFocused = true
+                    // Refresh enrolled names when opening the editor so the
+                    // dropdown is current (library may have grown since appear).
+                    refreshLibraryNames()
                 }
             } label: {
                 HStack(spacing: 4) {
@@ -1305,14 +1308,19 @@ struct TranscriptViewerView: View {
 
     /// Autocomplete suggestions for the speaker currently being renamed: enrolled
     /// voices matching what's typed. Picking one maps to that exact voice.
+    /// Shown under the pill in every edit context (verify / legend / segment).
     @ViewBuilder
     private func nameSuggestions(for id: Int) -> some View {
-        let q = editingName.trimmingCharacters(in: .whitespaces).lowercased()
+        let typed = editingName.trimmingCharacters(in: .whitespaces)
+        let q = typed.lowercased()
         let current = speakerName(for: id).lowercased()
+        // Browse the full library while the field is empty or still the generic
+        // "Speaker N" — otherwise filter as the user types a real query.
+        let browse = typed.isEmpty || isGenericName(typed)
         let matches = libraryNames
-            .filter { q.isEmpty || $0.lowercased().contains(q) }
+            .filter { browse || $0.lowercased().contains(q) }
             .filter { $0.lowercased() != current }
-            .prefix(6)
+            .prefix(8)
         if !matches.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Map to an existing voice")
@@ -1341,8 +1349,14 @@ struct TranscriptViewerView: View {
             .padding(.vertical, 2)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-            .padding(.leading, 20)
             .frame(maxWidth: 280, alignment: .leading)
+            .zIndex(1)
+        } else if libraryNames.isEmpty {
+            Text("No voices in library yet")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
         }
     }
 
