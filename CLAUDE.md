@@ -111,9 +111,10 @@ Deploy is **automatic** — the target's "Deploy to Applications" post-build scr
 1. Kills running `hidock-mic-trigger` processes
 2. Removes stale copies (`/Applications/HiDock Mic Trigger.app`, legacy `HiDock Mic Trigger Dev.app`, old lowercase `hidock-mic-trigger.app`, and any `~/Applications/` duplicates)
 3. Copies the fresh build to `/Applications/HiDock Mic Trigger.app`
-4. Re-signs with `codesign --force --deep --sign -`
-5. Registers with LaunchServices (`lsregister`)
-6. Relaunches via `open`
+4. Requires a valid Developer ID Application identity (auto-detected from the keychain or supplied via `HIDOCK_SIGNING_IDENTITY`)
+5. Stages, signs, verifies, then replaces the installed app
+6. Registers with LaunchServices (`lsregister`)
+7. Relaunches via `open`
 
 **IMPORTANT:** The canonical install location is `/Applications/HiDock Mic Trigger.app`. Debug and Release share the same bundle id (`com.hidock.tools.hidock-mic-trigger`), same app icon, and same install location — there is no separate Dev.app. The LaunchAgent (`~/Library/LaunchAgents/com.hidock.tools.mic-trigger.plist`) is configured to launch from `/Applications/` at login.
 
