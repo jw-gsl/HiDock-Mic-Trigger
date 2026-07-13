@@ -336,6 +336,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var previousDeviceNames: Set<String> = []
     private var deviceChangeDebounceTimer: Timer?
+    /// Timestamps of recent USB audio device-list changes — used to detect a
+    /// "flap storm" (the bus re-enumerating repeatedly under contention). While
+    /// flapping, we back off HiDock USB probing so the app stops fighting the
+    /// mic trigger / other holders for the interface.
+    private var recentDeviceChanges: [Date] = []
+    private var usbFlapBackoffUntil: Date = .distantPast
+    private var inUsbFlapBackoff: Bool { Date() < usbFlapBackoffUntil }
     private var syncPaired: Bool {
         !syncPairedDevices.isEmpty
     }
@@ -1144,6 +1151,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !disappeared.isEmpty { log("Devices disappeared: \(disappeared)") }
 
         if !appeared.isEmpty || !disappeared.isEmpty {
+            // Flap-storm detection: if the device list changed ≥3 times in the
+            // last 30s, the USB audio bus is re-enumerating under contention.
+            // Back off HiDock probing for 25s so we stop piling status probes
+            // onto the contended interface (which fights the mic trigger).
+            let now = Date()
+            recentDeviceChanges.append(now)
+            recentDeviceChanges.removeAll { now.timeIntervalSince($0) > 30 }
+            if recentDeviceChanges.count >= 3 {
+                if !inUsbFlapBackoff {
+                    log("USB flap storm detected (\(recentDeviceChanges.count) changes/30s) — backing off HiDock probes for 25s")
+                }
+                usbFlapBackoffUntil = now.addingTimeInterval(25)
+            }
+
             refreshMicNamesNow()
             if syncPaired && !syncBusy {
                 log("USB device change detected, refreshing sync status")
@@ -2125,6 +2146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // rely on refreshSyncStatus firing 8s after the mic goes
             // idle to pick up new recordings.
             let recording = self.viewModel.hidockRecordingActive
+            let flapBackoff = usbTriggered && self.inUsbFlapBackoff
             let probeDevices = devices.filter { device in
                 // Plaud is an API, not a USB device — a USB/audio device change
                 // is irrelevant to it, so don't re-probe it on USB churn.
@@ -2132,7 +2154,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.log("Auto-connect: skipping Plaud \(device.cleanName) — USB-change trigger doesn't affect an API account")
                     return false
                 }
-                if device.deviceType == .volume || device.deviceType == .plaud { return true }
+                if device.deviceType == .volume { return true }   // separate interface, always safe
+                // During a USB flap storm, don't probe HiDock over USB — the bus
+                // is re-enumerating under contention and another status probe
+                // just fights the mic trigger and prolongs the churn.
+                if flapBackoff, device.deviceType == .hidock {
+                    self.log("Auto-connect: skipping \(device.cleanName) — USB flap back-off active")
+                    return false
+                }
+                if device.deviceType == .plaud { return true }
                 if !recording { return true }
                 self.log("Auto-connect: skipping \(device.cleanName) — ffmpeg is currently recording, keeping last-known state")
                 return false
