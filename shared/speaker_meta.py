@@ -36,6 +36,82 @@ def is_generic_name(name: str | None) -> bool:
     return bool(_GENERIC_RE.match(name.strip()))
 
 
+def segment_speaker_key(seg: dict) -> str:
+    """Stable speaker key for a segment — prefers numeric speaker_id."""
+    if seg.get("speaker_id") is not None:
+        return str(seg["speaker_id"])
+    spk = seg.get("speaker")
+    return "" if spk is None else str(spk)
+
+
+def _raw_name_for_segment(data: dict, seg: dict) -> str:
+    """Lookup the working name (may be an unconfirmed auto-match)."""
+    names = data.get("speaker_names") or {}
+    key = segment_speaker_key(seg)
+    if key in names:
+        return str(names[key])
+    # Legacy maps sometimes key by the segment's speaker string.
+    spk = seg.get("speaker")
+    if spk is not None and str(spk) in names:
+        return str(names[str(spk)])
+    if spk is not None:
+        return str(spk)
+    if key:
+        try:
+            return f"Speaker {int(key) + 1}"
+        except ValueError:
+            return f"Speaker {key}"
+    return "Speaker"
+
+
+def is_confirmed_for_export(meta_entry: dict | None, name: str | None) -> bool:
+    """True when this name may appear in .md / clipboard as a real person.
+
+    Confirmed = verified flag, or source ``user`` (typed name). Auto-matches
+    and generics are not exportable until the user confirms.
+    """
+    if is_generic_name(name):
+        return False
+    if not meta_entry:
+        return False
+    if meta_entry.get("verified"):
+        return True
+    if meta_entry.get("source") == "user":
+        return True
+    return False
+
+
+def export_speaker_label(data: dict, seg: dict) -> str:
+    """Label for .md / publishable export.
+
+    * Sidecars **with** a ``speaker_meta`` block (new pipeline): only confirmed
+      names; everyone else is ``Speaker N``.
+    * Sidecars **without** ``speaker_meta`` (historic): keep names as stored so
+      we never strip good labels from old meetings when something rewrites .md.
+    """
+    raw = _raw_name_for_segment(data, seg)
+    meta_block = data.get("speaker_meta")
+    if not isinstance(meta_block, dict):
+        return raw
+
+    key = segment_speaker_key(seg)
+    meta_entry = meta_block.get(key) if key else None
+    if is_confirmed_for_export(meta_entry, raw):
+        return raw
+
+    # Unconfirmed → stable Speaker N from id when possible.
+    if key:
+        try:
+            return f"Speaker {int(key) + 1}"
+        except ValueError:
+            m = _GENERIC_RE.match(key.strip()) if isinstance(key, str) else None
+            if m:
+                return key
+    if is_generic_name(raw):
+        return raw
+    return "Speaker"
+
+
 def infer_source(name: str | None) -> str:
     """Best-effort provenance for a sidecar with no speaker_meta (legacy).
     A generic label is "generic"; anything else is treated as an unverified
