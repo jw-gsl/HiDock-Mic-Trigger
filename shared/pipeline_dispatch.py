@@ -77,7 +77,12 @@ def transcribe_audio(audio_path: str | Path, language: str | None = None) -> dic
 # ── Diarization ─────────────────────────────────────────────────────────────
 
 
-def diarize(audio_path: str | Path, whisper_segments: list[dict], n_speakers: int | None = None) -> dict:
+def diarize(
+    audio_path: str | Path,
+    whisper_segments: list[dict],
+    n_speakers: int | None = None,
+    calendar_context=None,
+) -> dict:
     """Dispatch to the user-selected diarization backend.
 
     Returns the same shape regardless of backend:
@@ -86,9 +91,19 @@ def diarize(audio_path: str | Path, whisper_segments: list[dict], n_speakers: in
     backend = _active("diarization", "lite")
     if backend == "sortformer":
         from shared.diarize_sortformer import diarize as sortformer_diarize
-        return sortformer_diarize(audio_path, whisper_segments, n_speakers=n_speakers)
+        return sortformer_diarize(
+            audio_path,
+            whisper_segments,
+            n_speakers=n_speakers,
+            calendar_context=calendar_context,
+        )
     from shared.diarize_lite import diarize as lite_diarize
-    return lite_diarize(audio_path, whisper_segments, n_speakers=n_speakers)
+    return lite_diarize(
+        audio_path,
+        whisper_segments,
+        n_speakers=n_speakers,
+        calendar_context=calendar_context,
+    )
 
 
 # ── Self-describing for eval / debugging ───────────────────────────────────

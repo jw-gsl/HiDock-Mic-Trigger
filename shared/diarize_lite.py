@@ -876,6 +876,7 @@ def diarize(
     audio_path: str | Path,
     whisper_segments: list[dict],
     n_speakers: int | None = None,
+    calendar_context=None,
 ) -> dict:
     """Run full diarization pipeline."""
     audio_path = Path(audio_path)
@@ -1048,7 +1049,12 @@ def diarize(
             speaker_embeddings[str(spk_id)] = [float(x) for x in centroid]
 
             # Check voice library
-            matched_name, confidence = identify_speaker(centroid, threshold=0.65)
+            allowed_names = getattr(calendar_context, "candidate_names", None)
+            matched_name, confidence = identify_speaker(
+                centroid,
+                threshold=0.65,
+                allowed_names=allowed_names,
+            )
             if matched_name:
                 speaker_names[str(spk_id)] = matched_name
                 speaker_meta[str(spk_id)] = {"source": "auto", "confidence": float(confidence), "verified": False}
