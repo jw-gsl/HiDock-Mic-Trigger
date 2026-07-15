@@ -849,52 +849,58 @@ struct TranscriptViewerView: View {
     /// Secondary strip grouping the speaker-fixing actions, each shown only when
     /// it applies, with plain-language tooltips.
     private var speakerToolsBar: some View {
-      ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 8) {
-            Text("Speakers")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.secondary)
+      VStack(alignment: .leading, spacing: 6) {
+        Text("Speakers")
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 16)
 
-            if onRematch != nil {
-                Button {
-                    onRematch?(filePath)
-                } label: {
-                    Label("Rematch Speakers", systemImage: "sparkle.magnifyingglass")
-                }
-                .fixedSize()
-                .help("Fill in any unnamed speakers by matching their voice against your saved Voice Library. Won't touch ones you've already confirmed.")
-            }
+        // Keep the heading separate from the controls so the actions remain
+        // visible in the narrow transcript pane. The numeric stepper is first
+        // because it is the input to the redetection action.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if onRediarize != nil {
+                    Stepper("\(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
+                        .font(.caption)
+                        .frame(width: 70)
+                        .help("The current transcript detected \(uniqueSpeakerIds.count) speakers. Change this to the number you expect before redetecting.")
 
-            if onReclusterWithLabels != nil, hasUserNamedSpeakers {
-                Button {
-                    onReclusterWithLabels?(filePath)
-                } label: {
-                    Label("Reassign Speakers", systemImage: "person.crop.circle.badge.checkmark")
+                    Button {
+                        onRediarize?(filePath, rediarizeNSpeakers)
+                    } label: {
+                        Label("Redetect", systemImage: "person.2.wave.2")
+                    }
+                    .fixedSize()
+                    .help("Start over and detect speakers again using the selected count. Discards the current split and any names.")
                 }
-                .fixedSize()
-                .help("Use the speakers you've named as anchors and re-assign the still-unnamed bits to whichever of them they sound closest to. This meeting only — nothing you've corrected moves.")
-            }
 
-            if onRediarize != nil {
-                Divider().frame(height: 14)
-                Stepper("Speakers: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
-                    .font(.caption)
-                    .frame(width: 120)
-                    .help("The current transcript detected \(uniqueSpeakerIds.count) speakers. Change this to the number you expect before re-detecting.")
-                Button {
-                    onRediarize?(filePath, rediarizeNSpeakers)
-                } label: {
-                    Label("Re-detect Speakers", systemImage: "person.2.wave.2")
+                if onRematch != nil {
+                    Button {
+                        onRematch?(filePath)
+                    } label: {
+                        Label("Rematch", systemImage: "sparkle.magnifyingglass")
+                    }
+                    .fixedSize()
+                    .help("Fill in unnamed speakers by matching their voices against your saved Voice Library. Confirmed names are left unchanged.")
                 }
-                .fixedSize()
-                .help("Start over and detect speakers again using the selected count. Discards the current split and any names.")
+
+                if onReclusterWithLabels != nil, hasUserNamedSpeakers {
+                    Button {
+                        onReclusterWithLabels?(filePath)
+                    } label: {
+                        Label("Reassign", systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    .fixedSize()
+                    .help("Use the speakers you've named as anchors and reassign the remaining unnamed segments to the closest anchor. This meeting only.")
+                }
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.horizontal, 16)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
       }
+      .padding(.vertical, 6)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(Color.secondary.opacity(0.04))
     }
