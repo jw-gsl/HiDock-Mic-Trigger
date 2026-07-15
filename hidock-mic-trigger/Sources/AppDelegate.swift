@@ -3596,6 +3596,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
                 self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)
             },
+            onRenameVoiceLibrary: { [weak self] oldName, newName in
+                self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
+            },
             onScoreSpeakers: { [weak self] jsonPath, completion in
                 self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
             },
@@ -4053,11 +4056,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 scriptPath, "enroll-diarized",
                 "--name", name, "--json", diarizedPath, "--id", "\(speakerId)",
             ]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+            let output = Pipe()
+            let errors = Pipe()
+            process.standardOutput = output
+            process.standardError = errors
             do {
-                try process.run(); process.waitUntilExit()
-                DispatchQueue.main.async { self?.log("Enrolled '\(name)' (centroid) in voice library") }
+                try process.run()
+                // Drain the pipes before waiting: a full pipe can otherwise
+                // leave the child blocked while waitUntilExit() is waiting.
+                _ = output.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = errors.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let stderr = String(
+                    data: stderrData,
+                    encoding: .utf8
+                ) ?? ""
+                if process.terminationStatus == 0 {
+                    DispatchQueue.main.async { self?.log("Enrolled '\(name)' in voice library") }
+                } else {
+                    DispatchQueue.main.async {
+                        self?.log("Failed to enroll '\(name)' from diarized: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+                    }
+                }
             } catch {
                 DispatchQueue.main.async { self?.log("Failed to enroll '\(name)' from diarized: \(error)") }
             }
@@ -4169,12 +4189,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
         configureVoiceLibraryProcess(process)
         process.arguments = [scriptPath, "rename", "--old", oldName, "--new", newName]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
         do {
             try process.run()
+            // Drain the pipes before waiting: a full pipe can otherwise leave
+            // the child blocked while waitUntilExit() is waiting.
+            _ = output.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = errors.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            log("Renamed speaker '\(oldName)' to '\(newName)' in voice library")
+            let stderr = String(
+                data: stderrData,
+                encoding: .utf8
+            ) ?? ""
+            if process.terminationStatus == 0 {
+                log("Renamed speaker '\(oldName)' to '\(newName)' in voice library")
+            } else {
+                log("Voice library rename skipped/failed for '\(oldName)' → '\(newName)': \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
         } catch {
             log("Failed to rename speaker '\(oldName)': \(error)")
         }

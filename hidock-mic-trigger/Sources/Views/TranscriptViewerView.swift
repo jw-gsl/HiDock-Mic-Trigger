@@ -454,6 +454,11 @@ struct TranscriptViewerView: View {
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
     var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
+    /// Update an existing library identity when a user deliberately renames it.
+    /// The callback is only used when the new name is not already enrolled;
+    /// mapping to an existing library name should add a sample to that target,
+    /// not rename the old identity.
+    var onRenameVoiceLibrary: ((String, String) -> Void)? = nil
     /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
     /// autocomplete). Optional so older call-sites keep compiling.
     var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
@@ -1206,6 +1211,7 @@ struct TranscriptViewerView: View {
     // MARK: - Actions
 
     private func commitRename(speakerId: Int) {
+        let previousName = speakerName(for: speakerId)
         let trimmed = editingName.trimmingCharacters(in: .whitespaces)
         // Empty, or unchanged from the current name → just close the editor
         // (no save/enroll). Unchanged matters because clicking off to deselect
@@ -1235,7 +1241,7 @@ struct TranscriptViewerView: View {
         // Typing a name IS confirming it — mark verified/user so the meeting
         // counts as reviewed and stops nagging.
         setMeta(speakerId, source: "user", verified: true, confidence: nil)
-        enrollConfirmed(trimmed, speakerId: speakerId)
+        enrollConfirmed(trimmed, speakerId: speakerId, previousName: previousName)
 
         saveTranscript()
         refreshConfidence()
@@ -1255,7 +1261,20 @@ struct TranscriptViewerView: View {
 
     /// Enrol a confirmed speaker into the voice library. Prefers the diarizer's
     /// stored centroid (robust, multi-segment) over one short audio segment.
-    private func enrollConfirmed(_ name: String, speakerId: Int) {
+    private func enrollConfirmed(_ name: String, speakerId: Int, previousName: String? = nil) {
+        // A deliberate rename of an enrolled identity should keep the existing
+        // voice samples under the new name. If the target is already in the
+        // library, treat this as a remap and only add the current sample there.
+        let targetAlreadyEnrolled = libraryNames.contains {
+            $0.caseInsensitiveCompare(name) == .orderedSame
+        }
+        if let previousName,
+           !isGenericName(previousName),
+           previousName.caseInsensitiveCompare(name) != .orderedSame,
+           !targetAlreadyEnrolled {
+            onRenameVoiceLibrary?(previousName, name)
+        }
+
         if let fromDiarized = onEnrollSpeakerFromDiarized {
             fromDiarized(name, filePath, speakerId)
         } else if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
@@ -1344,10 +1363,11 @@ struct TranscriptViewerView: View {
     /// Merge the just-renamed speaker into the existing speaker that already has
     /// that name (they're the same person split across two clusters).
     private func confirmMerge(_ merge: PendingMerge) {
+        let previousName = speakerName(for: merge.from)
         mapSpeaker(from: merge.from, to: merge.to)   // reassigns segments + saves
         // The surviving speaker now carries a confirmed, user-set identity.
         setMeta(merge.to, source: "user", verified: true, confidence: nil)
-        enrollConfirmed(merge.name, speakerId: merge.to)
+        enrollConfirmed(merge.name, speakerId: merge.to, previousName: previousName)
         saveTranscript()
         refreshConfidence()
         refreshLibraryNames()

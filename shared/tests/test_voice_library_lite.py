@@ -10,6 +10,7 @@ from shared.voice_library_lite import (
     cosine_similarity,
     delete_speaker,
     enroll_speaker,
+    enroll_from_diarized,
     identify_speaker,
     list_speakers,
     load_library,
@@ -137,6 +138,34 @@ def test_enroll_speaker_second_time_increases_count(mock_load_audio, mock_sessio
         result = enroll_speaker("Alice", "/fake/audio2.wav")
 
     assert len(result["samples"]) == 2
+
+
+def test_enroll_from_diarized_falls_back_to_longest_audio_segment(tmp_path):
+    """Legacy sidecars without speaker_embeddings still teach the library."""
+    import json
+
+    audio_path = tmp_path / "meeting.mp3"
+    audio_path.write_bytes(b"audio placeholder")
+    sidecar = tmp_path / "meeting_diarized.json"
+    sidecar.write_text(json.dumps({
+        "audio_file": audio_path.name,
+        "segments": [
+            {"speaker_id": 1, "start": 0.0, "end": 1.0},
+            {"speaker_id": 1, "start": 2.0, "end": 5.5},
+            {"speaker_id": 0, "start": 6.0, "end": 9.0},
+        ],
+    }))
+
+    with patch(
+        "shared.voice_library_lite.enroll_speaker",
+        return_value={"name": "Emma Thorn"},
+    ) as enroll:
+        result = enroll_from_diarized("Emma Thorn", sidecar, 1)
+
+    assert result["name"] == "Emma Thorn"
+    enroll.assert_called_once_with(
+        "Emma Thorn", audio_path, segment_start=2.0, segment_end=5.5
+    )
 
 
 # ── identify_speaker ────────────────────────────────────────────────────────

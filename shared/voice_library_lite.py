@@ -245,14 +245,48 @@ def enroll_speaker(
 def enroll_from_diarized(name: str, diarized_path: str | Path, speaker_id) -> dict:
     """Enroll the stored per-speaker centroid (`speaker_embeddings[id]`) from a
     diarized sidecar. This is the robust, multi-segment voiceprint the diarizer
-    already computed — no audio re-decode (works even for Opus/Plaud)."""
-    data = json.loads(Path(diarized_path).read_text(encoding="utf-8"))
+    already computed — no audio re-decode (works even for Opus/Plaud).
+
+    Legacy sidecars may not contain stored speaker embeddings. In that case,
+    fall back to enrolling the longest available audio segment for the speaker
+    so editing or confirming a name still teaches the Voice Library."""
+    sidecar_path = Path(diarized_path)
+    data = json.loads(sidecar_path.read_text(encoding="utf-8"))
     embs = data.get("speaker_embeddings") or {}
     emb = embs.get(str(speaker_id))
-    if emb is None:
-        raise ValueError(f"no stored embedding for speaker {speaker_id} in {diarized_path}")
-    return enroll_embedding(name, emb, embed_dim=len(emb),
-                            model=_NEURAL_MODEL_VERSION, source="confirm")
+    if emb is not None:
+        return enroll_embedding(name, emb, embed_dim=len(emb),
+                                model=_NEURAL_MODEL_VERSION, source="confirm")
+
+    audio_ref = data.get("audio_file")
+    if not audio_ref:
+        raise ValueError(
+            f"no stored embedding or audio file for speaker {speaker_id} in {diarized_path}"
+        )
+    audio_path = Path(str(audio_ref))
+    if not audio_path.is_absolute():
+        audio_path = sidecar_path.resolve().parent / audio_path
+    if not audio_path.exists():
+        raise ValueError(f"audio file not found for speaker {speaker_id}: {audio_path}")
+
+    candidates = []
+    for segment in data.get("segments", []):
+        try:
+            if int(segment.get("speaker_id")) != int(speaker_id):
+                continue
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            candidates.append((end - start, start, end))
+    if not candidates:
+        raise ValueError(
+            f"no audio segments found for speaker {speaker_id} in {diarized_path}"
+        )
+
+    _, start, end = max(candidates)
+    return enroll_speaker(name, audio_path, segment_start=start, segment_end=end)
 
 
 def enroll_from_transcripts(directory: str | Path) -> dict:
