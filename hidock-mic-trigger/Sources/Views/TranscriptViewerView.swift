@@ -650,42 +650,26 @@ struct TranscriptViewerView: View {
                 Divider()
             }
 
-            // Verify speakers — auto-matched voices to confirm/correct so the
-            // meeting counts as reviewed and the voice library keeps improving.
+            // Keep speaker verification and the transcript in separate panes.
+            // VSplitView supplies a draggable divider so the review area can be
+            // expanded when needed without pushing the transcript off-screen.
             if needsVerification {
-                speakerVerifyPanel
-                Divider()
-            }
+                VSplitView {
+                    speakerVerifyPanel
+                        .frame(
+                            minHeight: 96,
+                            idealHeight: speakerVerifyPanelIdealHeight,
+                            maxHeight: 320
+                        )
+                        .layoutPriority(0)
 
-            // "Listening to one speaker" banner — click Show all to clear.
-            if let f = speakerFilter {
-                HStack(spacing: 8) {
-                    Image(systemName: "waveform.circle.fill")
-                        .foregroundColor(colorForSpeaker(f))
-                    Text("Showing only \(speakerName(for: f)) — play through to check the voice")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button("Show all") { speakerFilter = nil }
-                        .controlSize(.small)
+                    transcriptContent
+                        .frame(minHeight: 160, maxHeight: .infinity)
+                        .layoutPriority(1)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(colorForSpeaker(f).opacity(0.08))
-                Divider()
-            }
-
-            // Segments list (narrowed to one speaker when a filter is active).
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
-                        if speakerFilter == nil || segment.speakerId == speakerFilter {
-                            segmentRow(segmentIndex: idx, segment: segment)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                transcriptContent
             }
         }
         .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
@@ -982,8 +966,8 @@ struct TranscriptViewerView: View {
                     .foregroundColor(.secondary)
                 Spacer()
             }
-            // Bound the height and scroll — with many speakers this used to grow
-            // unbounded and push the transcript off-screen.
+            // The surrounding VSplitView controls the panel's height. Keep the
+            // rows scrollable within that user-sized pane for larger meetings.
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(uniqueSpeakerIds, id: \.self) { id in
@@ -991,11 +975,53 @@ struct TranscriptViewerView: View {
                     }
                 }
             }
-            .frame(maxHeight: uniqueSpeakerIds.count > 4 ? 170 : .infinity)
+            .frame(maxHeight: .infinity)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color.blue.opacity(0.04))
+    }
+
+    /// A compact default that still fits the header and the common two- or
+    /// three-speaker review case. The divider lets the user grow it as needed.
+    private var speakerVerifyPanelIdealHeight: CGFloat {
+        min(220, max(128, CGFloat(uniqueSpeakerIds.count) * 34 + 54))
+    }
+
+    @ViewBuilder
+    private var transcriptContent: some View {
+        VStack(spacing: 0) {
+            // "Listening to one speaker" banner — click Show all to clear.
+            if let f = speakerFilter {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.circle.fill")
+                        .foregroundColor(colorForSpeaker(f))
+                    Text("Showing only \(speakerName(for: f)) — play through to check the voice")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Show all") { speakerFilter = nil }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(colorForSpeaker(f).opacity(0.08))
+                Divider()
+            }
+
+            // Segments list (narrowed to one speaker when a filter is active).
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
+                        if speakerFilter == nil || segment.speakerId == speakerFilter {
+                            segmentRow(segmentIndex: idx, segment: segment)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+        }
     }
 
     @ViewBuilder
