@@ -1082,8 +1082,10 @@ struct TranscriptViewerView: View {
         // speaker (legend + each transcript row), so the field appeared down in
         // the transcript instead of where you tapped.
         if editingSpeakerId == speakerId && editingContext == context {
-            // Text field + voice-library autocomplete under it (verify panel,
-            // legend, and in-transcript pills all share this path).
+            // Keep the editor at the place where the user clicked. The
+            // suggestions themselves live in a popover so they float above
+            // the transcript rather than consuming space inside its scroll
+            // view (especially important for speaker pills in segment rows).
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Circle()
@@ -1102,8 +1104,24 @@ struct TranscriptViewerView: View {
                 .padding(.vertical, 4)
                 .background(color.opacity(0.15))
                 .cornerRadius(12)
-
+            }
+            .popover(
+                isPresented: Binding(
+                    get: { editingSpeakerId == speakerId && editingContext == context },
+                    set: { presented in
+                        if !presented, editingSpeakerId == speakerId {
+                            // Dismissing the popover is equivalent to clicking
+                            // away from the editor: save the current choice and
+                            // close the inline editor as before.
+                            commitRename(speakerId: speakerId)
+                        }
+                    }
+                ),
+                arrowEdge: .top
+            ) {
                 nameSuggestions(for: speakerId)
+                    .frame(minWidth: 260, alignment: .leading)
+                    .padding(4)
             }
         } else {
             Button {
