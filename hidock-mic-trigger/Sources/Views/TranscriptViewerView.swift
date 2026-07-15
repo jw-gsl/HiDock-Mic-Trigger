@@ -475,6 +475,23 @@ struct TranscriptViewerView: View {
         rediarizeNSpeakers = min(max(detected, rediarizeSpeakerRange.lowerBound), rediarizeSpeakerRange.upperBound)
     }
 
+    /// Remove names and provenance for speaker IDs that no longer have any
+    /// segments. Merging speakers reassigns segments, so the old IDs must not
+    /// linger in the sidecar and confuse later review or export logic.
+    private func pruneInactiveSpeakerState() {
+        let activeKeys = Set(transcript.segments.map { "\($0.speakerId)" })
+        transcript.speakerNames = transcript.speakerNames.filter { activeKeys.contains($0.key) }
+        if let meta = transcript.speakerMeta {
+            transcript.speakerMeta = meta.filter { activeKeys.contains($0.key) }
+        }
+        // A merge can remove the currently filtered speaker entirely. Do not
+        // leave the transcript looking empty; fall back to the full meeting.
+        if let filteredId = speakerFilter,
+           !transcript.segments.contains(where: { $0.speakerId == filteredId }) {
+            speakerFilter = nil
+        }
+    }
+
     private var hasSpeakers: Bool {
         // Non-diarized transcripts have all speaker_id=0 and empty speaker_names
         uniqueSpeakerIds.count > 1 || !transcript.speakerNames.isEmpty
@@ -834,6 +851,8 @@ struct TranscriptViewerView: View {
             updated.insert(seg, at: idx + offset)
         }
         transcript.segments = updated
+        pruneInactiveSpeakerState()
+        syncRediarizeSpeakerCount()
 
         // Enrol the range as a sample for the new speaker — cleaner
         // provenance than the whole-segment sample we used to take
@@ -1503,6 +1522,8 @@ struct TranscriptViewerView: View {
         }
         // Remove the old speaker name
         transcript.speakerNames.removeValue(forKey: "\(sourceId)")
+        pruneInactiveSpeakerState()
+        syncRediarizeSpeakerCount()
 
         // NOTE: deliberately DON'T concatenate consecutive same-speaker segments
         // here. The old re-merge glued every adjacent turn into one unbounded
