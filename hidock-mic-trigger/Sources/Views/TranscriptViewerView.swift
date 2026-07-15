@@ -462,6 +462,19 @@ struct TranscriptViewerView: View {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
     }
 
+    /// The re-detection control starts at the number of speakers in the
+    /// transcript currently on screen. Keep the existing generous upper bound
+    /// for recordings where the user wants to try a larger count.
+    private var rediarizeSpeakerRange: ClosedRange<Int> {
+        2...max(8, uniqueSpeakerIds.count)
+    }
+
+    private func syncRediarizeSpeakerCount() {
+        let detected = uniqueSpeakerIds.count
+        guard detected >= rediarizeSpeakerRange.lowerBound else { return }
+        rediarizeNSpeakers = min(max(detected, rediarizeSpeakerRange.lowerBound), rediarizeSpeakerRange.upperBound)
+    }
+
     private var hasSpeakers: Bool {
         // Non-diarized transcripts have all speaker_id=0 and empty speaker_names
         uniqueSpeakerIds.count > 1 || !transcript.speakerNames.isEmpty
@@ -670,7 +683,11 @@ struct TranscriptViewerView: View {
                 }
             }
         }
-        .onAppear { refreshConfidence(); refreshLibraryNames() }
+        .onAppear {
+            syncRediarizeSpeakerCount()
+            refreshConfidence()
+            refreshLibraryNames()
+        }
         .confirmationDialog(
             "Merge speakers?",
             isPresented: Binding(get: { pendingMerge != nil }, set: { if !$0 { pendingMerge = nil } }),
@@ -860,17 +877,17 @@ struct TranscriptViewerView: View {
 
             if onRediarize != nil {
                 Divider().frame(height: 14)
-                Stepper("Count: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
+                Stepper("Speakers: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
                     .font(.caption)
                     .frame(width: 120)
-                    .help("How many speakers to detect when re-detecting.")
+                    .help("The current transcript detected \(uniqueSpeakerIds.count) speakers. Change this to the number you expect before re-detecting.")
                 Button {
                     onRediarize?(filePath, rediarizeNSpeakers)
                 } label: {
-                    Label("Detect Speakers", systemImage: "person.2.wave.2")
+                    Label("Re-detect Speakers", systemImage: "person.2.wave.2")
                 }
                 .fixedSize()
-                .help("Start over — detect the speakers again from scratch (using the count on the left). Discards the current split and any names.")
+                .help("Start over and detect speakers again using the selected count. Discards the current split and any names.")
             }
         }
         .buttonStyle(.bordered)

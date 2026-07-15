@@ -90,6 +90,23 @@ def diarize(
     """
     backend = _active("diarization", "lite")
     if backend == "sortformer":
+        # Sortformer is a fixed-topology model and its public inference API
+        # does not honour an explicit speaker count. The viewer's re-detect
+        # control promises that a selected count is used, so route that
+        # deliberate/manual path through the count-aware local diariser.
+        if n_speakers is not None:
+            print(
+                "Diarization: explicit speaker count requested; using Lite "
+                "count-aware backend instead of Sortformer",
+                file=sys.stderr,
+            )
+            from shared.diarize_lite import diarize as lite_diarize
+            return lite_diarize(
+                audio_path,
+                whisper_segments,
+                n_speakers=n_speakers,
+                calendar_context=calendar_context,
+            )
         from shared.diarize_sortformer import diarize as sortformer_diarize
         return sortformer_diarize(
             audio_path,

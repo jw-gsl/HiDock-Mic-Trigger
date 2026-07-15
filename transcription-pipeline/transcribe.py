@@ -817,6 +817,18 @@ def cmd_rediarize(args):
         print(f"Audio file not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
+    calendar_context = None
+    try:
+        from shared.calendar_context import load_context_for_audio
+        calendar_context = load_context_for_audio(
+            audio_path,
+            getattr(args, "calendar_context", None),
+        )
+        if calendar_context is not None:
+            print(f"Calendar context: {calendar_context.summary()}", file=sys.stderr)
+    except Exception as exc:  # optional context must never block rediarization
+        print(f"Calendar context unavailable; continuing without it: {exc}", file=sys.stderr)
+
     # Try to load the original Whisper micro-segments for better diarization
     whisper_raw_path = json_path.with_name(
         json_path.stem.replace("_diarized", "_whisper") + ".json"
@@ -838,7 +850,14 @@ def cmd_rediarize(args):
     progress(10)
 
     n_speakers = args.n_speakers if hasattr(args, "n_speakers") else None
-    diarized_result = run_diarize(audio_path, segments, n_speakers=n_speakers)
+    diarized_result = run_diarize(
+        audio_path,
+        segments,
+        n_speakers=n_speakers,
+        calendar_context=calendar_context,
+    )
+    if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
+        diarized_result["calendar_context"] = calendar_context.to_metadata()
     progress(90)
 
     # Apply corrections
@@ -1183,6 +1202,10 @@ def main():
     p_rediarize = sub.add_parser("rediarize", help="Re-run speaker diarization without re-transcribing")
     p_rediarize.add_argument("json_path", help="Path to _diarized.json file")
     p_rediarize.add_argument("--n-speakers", type=int, help="Force number of speakers")
+    p_rediarize.add_argument(
+        "--calendar-context",
+        help="Optional JSON exported by the Microsoft 365 MCP calendar bridge",
+    )
     p_rediarize.set_defaults(func=cmd_rediarize)
 
     p_recluster = sub.add_parser(
