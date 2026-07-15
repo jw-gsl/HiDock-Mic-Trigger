@@ -1329,44 +1329,71 @@ struct TranscriptViewerView: View {
         onListVoiceNames?() { names in self.libraryNames = names }
     }
 
-    /// Autocomplete suggestions for the speaker currently being renamed: enrolled
-    /// voices matching what's typed. Picking one maps to that exact voice.
-    /// Shown under the pill in every edit context (verify / legend / segment).
+    /// Distinct real names already assigned to speakers in this meeting, in
+    /// speaker order. These are the most useful mapping targets when correcting
+    /// an over-split meeting.
+    private var meetingMappedNames: [String] {
+        var seen = Set<String>()
+        return uniqueSpeakerIds.compactMap { id in
+            let name = speakerName(for: id).trimmingCharacters(in: .whitespaces)
+            let key = name.lowercased()
+            guard !name.isEmpty, !isGenericName(name), !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return name
+        }
+    }
+
+    /// Voice-library names not already shown in the meeting-mapped section.
+    /// Keep the library order stable, while removing case-insensitive duplicates.
+    private var otherVoiceLibraryNames: [String] {
+        var seen = Set(meetingMappedNames.map { $0.lowercased() })
+        return libraryNames.compactMap { rawName in
+            let name = rawName.trimmingCharacters(in: .whitespaces)
+            let key = name.lowercased()
+            guard !name.isEmpty, !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return name
+        }
+    }
+
+    /// Autocomplete suggestions for the speaker currently being renamed.
+    /// Meeting-mapped names are shown first; typing filters both sections and
+    /// still reaches every other enrolled Voice Library name.
     @ViewBuilder
     private func nameSuggestions(for id: Int) -> some View {
         let typed = editingName.trimmingCharacters(in: .whitespaces)
         let q = typed.lowercased()
         let current = speakerName(for: id).lowercased()
-        // Browse the full library while the field is empty or still the generic
-        // "Speaker N" — otherwise filter as the user types a real query.
-        let browse = typed.isEmpty || isGenericName(typed)
-        let matches = libraryNames
+        // A mapped speaker opens with its current name in the field. Treat that
+        // as browse mode so the user immediately sees the other people in this
+        // meeting, while any newly typed text becomes a normal search query.
+        let browse = typed.isEmpty || isGenericName(typed) || typed.lowercased() == current
+        let meetingMatches = meetingMappedNames
             .filter { browse || $0.lowercased().contains(q) }
             .filter { $0.lowercased() != current }
-            .prefix(8)
-        if !matches.isEmpty {
+        let remainingSlots = max(0, 8 - meetingMatches.count)
+        let libraryMatches = otherVoiceLibraryNames
+            .filter { browse || $0.lowercased().contains(q) }
+            .prefix(remainingSlots)
+
+        if !meetingMatches.isEmpty || !libraryMatches.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Map to an existing voice")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                ForEach(Array(matches), id: \.self) { name in
-                    Button {
-                        editingName = name
-                        commitRename(speakerId: id)   // synchronous → maps to this exact voice
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "person.crop.circle.fill.badge.checkmark")
-                                .foregroundColor(.accentColor)
-                            Text(name).font(.caption)
-                            Spacer()
-                        }
+                if !meetingMatches.isEmpty {
+                    Text("Already mapped in this meeting")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                        .padding(.top, 4)
+                    suggestionRows(meetingMatches, speakerId: id)
+                }
+
+                if !libraryMatches.isEmpty {
+                    Text(meetingMatches.isEmpty ? "Voice Library" : "Other voices")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, meetingMatches.isEmpty ? 4 : 8)
+                    suggestionRows(Array(libraryMatches), speakerId: id)
                 }
             }
             .padding(.vertical, 2)
@@ -1380,6 +1407,27 @@ struct TranscriptViewerView: View {
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func suggestionRows(_ names: [String], speakerId: Int) -> some View {
+        ForEach(names, id: \.self) { name in
+            Button {
+                editingName = name
+                commitRename(speakerId: speakerId)   // map to this exact voice
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.fill.badge.checkmark")
+                        .foregroundColor(.accentColor)
+                    Text(name).font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 
