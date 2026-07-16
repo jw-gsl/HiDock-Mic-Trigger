@@ -3596,11 +3596,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
                 self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)
             },
-            onRenameVoiceLibrary: { [weak self] oldName, newName in
-                self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
-            },
             onScoreSpeakers: { [weak self] jsonPath, completion in
                 self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
+            },
+            onRenameVoiceLibrary: { [weak self] oldName, newName in
+                self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
             },
             onListVoiceNames: { [weak self] completion in
                 self?.listVoiceLibraryNames(completion: completion)
