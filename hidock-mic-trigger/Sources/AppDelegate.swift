@@ -3601,6 +3601,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onListVoiceNames: { [weak self] completion in
                 self?.listVoiceLibraryNames(completion: completion)
+            },
+            onRewriteMarkdown: { [weak self] jsonPath in
+                // JSON is already on disk — refresh the orange/green tagging
+                // badge immediately, then rewrite the sibling .md.
+                self?.refreshSpeakerReview(forDiarizedPath: jsonPath)
+                self?.rewriteTranscriptMarkdown(diarizedPath: jsonPath)
             }
         )
 
@@ -3608,6 +3614,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // same meeting focuses its existing tab).
         let title = (transcript.audioFile as NSString).lastPathComponent
         showDetailTab(id: "transcript:\(diarizedPath)", title: title, icon: "waveform", view: viewer)
+    }
+
+    /// Re-read `speaker_meta` for one meeting and push `speakersTagged` /
+    /// `speakersAutoMatched` into the recordings table. Without this, Confirm /
+    /// Mark all unknown update the JSON but the orange "needs tagging" badge
+    /// stays until a full refresh.
+    private func refreshSpeakerReview(forDiarizedPath diarizedPath: String) {
+        let mdPath = diarizedPath
+            .replacingOccurrences(of: "_diarized.json", with: ".md")
+        let review = speakerReviewState(transcriptPath: mdPath)
+        var touched = false
+        for i in syncEntries.indices {
+            let entryPath = syncEntries[i].transcriptPath
+            let base = (syncEntries[i].recording.outputName as NSString).deletingPathExtension
+            let matches = entryPath == mdPath
+                || diarizedPath.hasSuffix("\(base)_diarized.json")
+                || (entryPath != nil && mdPath.hasSuffix((entryPath! as NSString).lastPathComponent))
+            if matches {
+                syncEntries[i].speakersTagged = review.tagged
+                syncEntries[i].speakersAutoMatched = review.autoMatched
+                touched = true
+            }
+        }
+        if touched {
+            syncViewModelState()
+        }
+    }
+
+    /// Regenerate the .md next to a diarized JSON (confirmed names only).
+    /// Best-effort background — JSON is already saved by the viewer.
+    private func rewriteTranscriptMarkdown(diarizedPath: String) {
+        guard ensureTranscriptionReady() else { return }
+        runTranscription(arguments: ["rewrite-md", diarizedPath]) { [weak self] result in
+            if case .failure(let error) = result {
+                self?.log("rewrite-md failed for \(diarizedPath): \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Open (or focus) a view as a tab in the right-hand detail pane, and bring

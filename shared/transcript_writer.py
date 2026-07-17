@@ -226,15 +226,18 @@ def auto_title(text: str, max_words: int = 10) -> str:
 
 
 def extract_speakers_from_diarized(diarized_result: dict) -> list[str]:
-    """Extract display-name speaker list from a diarization result dict."""
+    """Extract publishable speaker list from a diarization result dict.
+
+    Uses the same confirmed-only rules as the .md body (see
+    ``speaker_meta.export_speaker_label``).
+    """
     if not diarized_result:
         return []
-    names = diarized_result.get("speaker_names", {})
-    # Return display names, ordered by first appearance
+    from shared.speaker_meta import export_speaker_label
+
     seen = []
     for seg in diarized_result.get("segments", []):
-        spk = seg.get("speaker", "")
-        display = names.get(spk, spk)
+        display = export_speaker_label(diarized_result, seg)
         if display and display not in seen:
             seen.append(display)
     return seen
@@ -245,6 +248,8 @@ def format_diarized_transcript(diarized_result: dict) -> str:
 
     Args:
         diarized_result: Dict with ``segments`` and ``speaker_names`` keys.
+            When ``speaker_meta`` is present, only **confirmed** names appear;
+            unconfirmed auto-matches render as ``Speaker N``.
 
     Returns:
         Markdown-formatted transcript text.
@@ -252,12 +257,13 @@ def format_diarized_transcript(diarized_result: dict) -> str:
     if not diarized_result or not diarized_result.get("segments"):
         return ""
 
-    names = diarized_result.get("speaker_names", {})
+    from shared.speaker_meta import export_speaker_label
+
     lines = []
     current_speaker = None
 
     for seg in diarized_result["segments"]:
-        display_name = names.get(seg["speaker"], seg["speaker"])
+        display_name = export_speaker_label(diarized_result, seg)
         text = seg.get("text", "").strip()
         if not text:
             continue

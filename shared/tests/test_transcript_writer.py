@@ -165,6 +165,26 @@ class TestFormatDiarizedTranscript:
         # Should only have one speaker label for consecutive segments
         assert text.count("**Alice:**") == 1
 
+    def test_unconfirmed_auto_names_export_as_speaker_n(self):
+        """With speaker_meta, unconfirmed auto-matches must not appear in .md."""
+        result = {
+            "segments": [
+                {"speaker_id": 0, "speaker": "James", "text": "Hello", "start": 0, "end": 1},
+                {"speaker_id": 1, "speaker": "Chris", "text": "Hi", "start": 1, "end": 2},
+            ],
+            "speaker_names": {"0": "James", "1": "Chris"},
+            "speaker_meta": {
+                "0": {"source": "auto", "confidence": 0.9, "verified": False},
+                "1": {"source": "user", "confidence": None, "verified": True},
+            },
+        }
+        text = format_diarized_transcript(result)
+        assert "**Speaker 1:**" in text
+        assert "**Chris:**" in text
+        assert "James" not in text
+        speakers = extract_speakers_from_diarized(result)
+        assert speakers == ["Speaker 1", "Chris"]
+
 
 class TestParseFrontmatter:
     def test_no_frontmatter(self):

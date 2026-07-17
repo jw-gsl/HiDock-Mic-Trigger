@@ -935,6 +935,46 @@ def cmd_rematch(args):
     print(_json.dumps({"status": "completed", **summary}))
 
 
+def cmd_rewrite_md(args):
+    """Regenerate the .md next to a _diarized.json using confirmed-only labels.
+
+    Used by the desktop app after Confirm / Clear / rename so the on-disk
+    transcript matches publishable names (Speaker N until confirmed). Does not
+    alter the JSON.
+    """
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.transcript_writer import write_transcript
+    md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+    body_text = " ".join(
+        seg.get("text", "").strip()
+        for seg in data.get("segments", [])
+        if seg.get("text")
+    )
+    # Preserve prior frontmatter model if present (best-effort).
+    model = "rewrite-md"
+    try:
+        if md_path.exists():
+            from shared.transcript_writer import parse_frontmatter
+            meta, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
+            if meta.get("model"):
+                model = str(meta["model"])
+    except Exception:
+        pass
+    write_transcript(
+        md_path,
+        body_text,
+        source_path=Path(data.get("audio_file", "")),
+        model=model,
+        diarized_result=data,
+    )
+    print(_json.dumps({"status": "completed", "md_path": str(md_path)}))
+
+
 def cmd_speaker_confidence(args):
     """Report per-speaker confidence that each assigned name is correct
     (cosine similarity of the speaker's stored embedding to the enrolled voice
@@ -1179,6 +1219,13 @@ def main():
         help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
     )
     p_rematch.set_defaults(func=cmd_rematch)
+
+    p_rewrite = sub.add_parser(
+        "rewrite-md",
+        help="Regenerate .md from _diarized.json (confirmed names only; unconfirmed → Speaker N)",
+    )
+    p_rewrite.add_argument("json_path", help="Path to _diarized.json file")
+    p_rewrite.set_defaults(func=cmd_rewrite_md)
 
     p_confidence = sub.add_parser(
         "speaker-confidence",
