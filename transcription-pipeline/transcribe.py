@@ -139,6 +139,7 @@ def _word_timestamps_safe(model) -> bool:
 def transcribe_file(
     mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
     n_speakers: int | None = None,
+    calendar_context_path: str | Path | None = None,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
     from shared.transcript_writer import write_transcript
@@ -326,13 +327,37 @@ def transcribe_file(
         if diarize:
             stage(4, total_stages, "Diarizing speakers")
             try:
+                calendar_context = None
+                try:
+                    from shared.calendar_context import load_context_for_audio
+                    calendar_context = load_context_for_audio(
+                        mp3_path,
+                        context_path=calendar_context_path,
+                    )
+                    if calendar_context is not None:
+                        print(
+                            "Calendar context: "
+                            f"{calendar_context.summary()}",
+                            file=sys.stderr,
+                        )
+                except Exception as context_error:
+                    # Calendar context is an optional narrowing signal. A
+                    # malformed/unavailable provider response must never stop
+                    # local transcription or voice matching.
+                    print(
+                        f"Calendar context unavailable (voice-only fallback): {context_error}",
+                        file=sys.stderr,
+                    )
                 from shared.pipeline_dispatch import diarize as run_diarize, active_pipeline
                 backends = active_pipeline()
                 print(f"Diarization backend: {backends.get('diarization', 'lite')}", file=sys.stderr)
                 diarized_result = run_diarize(
                     str(mp3_path), result.get("segments", []),
                     n_speakers=n_speakers,
+                    calendar_context=calendar_context,
                 )
+                if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
+                    diarized_result["calendar_context"] = calendar_context.to_metadata()
             except ModuleNotFoundError as e:
                 # Selected backend's pip package missing — keep going
                 # with the transcript even if diarization fails, so the
@@ -551,6 +576,7 @@ def cmd_transcribe(args):
         result = transcribe_file(
             mp3_path, diarize=args.diarize, summarize=args.summarize,
             n_speakers=getattr(args, "n_speakers", None),
+            calendar_context_path=getattr(args, "calendar_context", None),
         )
     finally:
         release_lock(lock)
@@ -791,6 +817,18 @@ def cmd_rediarize(args):
         print(f"Audio file not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
+    calendar_context = None
+    try:
+        from shared.calendar_context import load_context_for_audio
+        calendar_context = load_context_for_audio(
+            audio_path,
+            getattr(args, "calendar_context", None),
+        )
+        if calendar_context is not None:
+            print(f"Calendar context: {calendar_context.summary()}", file=sys.stderr)
+    except Exception as exc:  # optional context must never block rediarization
+        print(f"Calendar context unavailable; continuing without it: {exc}", file=sys.stderr)
+
     # Try to load the original Whisper micro-segments for better diarization
     whisper_raw_path = json_path.with_name(
         json_path.stem.replace("_diarized", "_whisper") + ".json"
@@ -812,7 +850,14 @@ def cmd_rediarize(args):
     progress(10)
 
     n_speakers = args.n_speakers if hasattr(args, "n_speakers") else None
-    diarized_result = run_diarize(audio_path, segments, n_speakers=n_speakers)
+    diarized_result = run_diarize(
+        audio_path,
+        segments,
+        n_speakers=n_speakers,
+        calendar_context=calendar_context,
+    )
+    if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
+        diarized_result["calendar_context"] = calendar_context.to_metadata()
     progress(90)
 
     # Apply corrections
@@ -1182,6 +1227,10 @@ def main():
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_transcribe.add_argument("--n-speakers", type=int, help="Hint: expected number of speakers (improves diarization accuracy)")
+    p_transcribe.add_argument(
+        "--calendar-context",
+        help="Optional JSON exported by the Microsoft 365 MCP calendar bridge",
+    )
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
@@ -1193,6 +1242,10 @@ def main():
     p_rediarize = sub.add_parser("rediarize", help="Re-run speaker diarization without re-transcribing")
     p_rediarize.add_argument("json_path", help="Path to _diarized.json file")
     p_rediarize.add_argument("--n-speakers", type=int, help="Force number of speakers")
+    p_rediarize.add_argument(
+        "--calendar-context",
+        help="Optional JSON exported by the Microsoft 365 MCP calendar bridge",
+    )
     p_rediarize.set_defaults(func=cmd_rediarize)
 
     p_recluster = sub.add_parser(

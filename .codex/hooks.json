@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-rebuild.sh\"",
+            "statusMessage": "Checking HiDock rebuild safety"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/post-rebuild-commit-reminder.sh\"",
+            "statusMessage": "Checking HiDock rebuild result"
+          }
+        ]
+      }
+    ]
+  }
+}

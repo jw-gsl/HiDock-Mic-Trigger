@@ -15,6 +15,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 
@@ -244,14 +245,48 @@ def enroll_speaker(
 def enroll_from_diarized(name: str, diarized_path: str | Path, speaker_id) -> dict:
     """Enroll the stored per-speaker centroid (`speaker_embeddings[id]`) from a
     diarized sidecar. This is the robust, multi-segment voiceprint the diarizer
-    already computed — no audio re-decode (works even for Opus/Plaud)."""
-    data = json.loads(Path(diarized_path).read_text(encoding="utf-8"))
+    already computed — no audio re-decode (works even for Opus/Plaud).
+
+    Legacy sidecars may not contain stored speaker embeddings. In that case,
+    fall back to enrolling the longest available audio segment for the speaker
+    so editing or confirming a name still teaches the Voice Library."""
+    sidecar_path = Path(diarized_path)
+    data = json.loads(sidecar_path.read_text(encoding="utf-8"))
     embs = data.get("speaker_embeddings") or {}
     emb = embs.get(str(speaker_id))
-    if emb is None:
-        raise ValueError(f"no stored embedding for speaker {speaker_id} in {diarized_path}")
-    return enroll_embedding(name, emb, embed_dim=len(emb),
-                            model=_NEURAL_MODEL_VERSION, source="confirm")
+    if emb is not None:
+        return enroll_embedding(name, emb, embed_dim=len(emb),
+                                model=_NEURAL_MODEL_VERSION, source="confirm")
+
+    audio_ref = data.get("audio_file")
+    if not audio_ref:
+        raise ValueError(
+            f"no stored embedding or audio file for speaker {speaker_id} in {diarized_path}"
+        )
+    audio_path = Path(str(audio_ref))
+    if not audio_path.is_absolute():
+        audio_path = sidecar_path.resolve().parent / audio_path
+    if not audio_path.exists():
+        raise ValueError(f"audio file not found for speaker {speaker_id}: {audio_path}")
+
+    candidates = []
+    for segment in data.get("segments", []):
+        try:
+            if int(segment.get("speaker_id")) != int(speaker_id):
+                continue
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            candidates.append((end - start, start, end))
+    if not candidates:
+        raise ValueError(
+            f"no audio segments found for speaker {speaker_id} in {diarized_path}"
+        )
+
+    _, start, end = max(candidates)
+    return enroll_speaker(name, audio_path, segment_start=start, segment_end=end)
 
 
 def enroll_from_transcripts(directory: str | Path) -> dict:
@@ -311,15 +346,27 @@ def _best_similarity(embedding: np.ndarray, entry: dict, dim: int) -> float:
     return best
 
 
-def library_scores(embedding: np.ndarray | list) -> list[tuple[str, float]]:
+def library_scores(
+    embedding: np.ndarray | list,
+    allowed_names: Iterable[str] | None = None,
+) -> list[tuple[str, float]]:
     """Best-of-samples similarity of `embedding` against every enrolled speaker
-    (same embedding dim only). Returns [(name, score)] — used by both
-    identify_speaker and speaker_meta.score_speakers."""
+    (same embedding dim only).
+
+    ``allowed_names`` is an optional candidate set supplied by contextual
+    matching (for example a calendar attendee list). An empty set is
+    intentional: it means context was available but did not identify any
+    enrolled candidate, so no voice-library label should be emitted.
+    Returns [(name, score)] — used by both identify_speaker and
+    speaker_meta.score_speakers."""
     lib = load_library()
     embedding = np.asarray(embedding)
     dim = len(embedding)
+    allowed = None if allowed_names is None else set(allowed_names)
     out: list[tuple[str, float]] = []
     for name, entry in lib["speakers"].items():
+        if allowed is not None and name not in allowed:
+            continue
         s = _best_similarity(embedding, entry, dim)
         if s > -1.0:
             out.append((name, round(float(s), 4)))
@@ -329,13 +376,14 @@ def library_scores(embedding: np.ndarray | list) -> list[tuple[str, float]]:
 def identify_speaker(
     embedding: np.ndarray | list,
     threshold: float = 0.7,
+    allowed_names: Iterable[str] | None = None,
 ) -> tuple[str | None, float]:
     """Identify a speaker by best-of-exemplars similarity.
 
     Returns:
         (name, confidence) if the best match clears `threshold`, else (None, 0.0).
     """
-    scores = library_scores(embedding)
+    scores = library_scores(embedding, allowed_names=allowed_names)
     if not scores:
         return (None, 0.0)
     best_name, best_score = max(scores, key=lambda x: x[1])
@@ -347,9 +395,28 @@ def identify_speaker(
 def identify_speakers(
     embeddings: np.ndarray | list,
     threshold: float = 0.7,
+    allowed_names: Iterable[str] | None = None,
 ) -> dict[int, tuple[str | None, float]]:
     """Identify speakers for multiple embeddings."""
-    return {i: identify_speaker(emb, threshold=threshold) for i, emb in enumerate(embeddings)}
+    return {
+        i: identify_speaker(emb, threshold=threshold, allowed_names=allowed_names)
+        for i, emb in enumerate(embeddings)
+    }
+
+
+def set_calendar_emails(name: str, emails: Iterable[str]) -> bool:
+    """Associate Microsoft 365 attendee email addresses with a voice entry."""
+    lib = load_library()
+    if name not in lib["speakers"]:
+        return False
+    cleaned = sorted({str(email).strip().casefold() for email in emails if str(email).strip()})
+    if cleaned:
+        lib["speakers"][name]["calendar_emails"] = cleaned
+    else:
+        lib["speakers"][name].pop("calendar_emails", None)
+    lib["speakers"][name]["last_updated"] = _now()
+    save_library(lib)
+    return True
 
 
 def list_speakers() -> list[dict]:
@@ -459,6 +526,13 @@ def _cli():
     merge_p.add_argument("--from", dest="source", required=True, help="Speaker to absorb and delete")
     merge_p.add_argument("--into", dest="target", required=True, help="Speaker that keeps the name")
 
+    calendar_p = sub.add_parser(
+        "set-calendar-emails",
+        help="Associate Microsoft 365 attendee email addresses with a speaker",
+    )
+    calendar_p.add_argument("--name", required=True)
+    calendar_p.add_argument("--email", action="append", required=True)
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -522,6 +596,12 @@ def _cli():
                 sys.exit(1)
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "set-calendar-emails":
+        ok = set_calendar_emails(args.name, args.email)
+        print(json.dumps({"ok": ok, "name": args.name, "calendar_emails": args.email}))
+        if not ok:
             sys.exit(1)
 
     else:

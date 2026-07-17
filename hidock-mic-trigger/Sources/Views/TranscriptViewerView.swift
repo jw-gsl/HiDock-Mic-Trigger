@@ -458,6 +458,11 @@ struct TranscriptViewerView: View {
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
     var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
+    /// Update an existing library identity when a user deliberately renames it.
+    /// The callback is only used when the new name is not already enrolled;
+    /// mapping to an existing library name should add a sample to that target,
+    /// not rename the old identity.
+    var onRenameVoiceLibrary: ((String, String) -> Void)? = nil
     /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
     /// autocomplete). Optional so older call-sites keep compiling.
     var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
@@ -467,6 +472,36 @@ struct TranscriptViewerView: View {
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
+    }
+
+    /// The re-detection control starts at the number of speakers in the
+    /// transcript currently on screen. Keep the existing generous upper bound
+    /// for recordings where the user wants to try a larger count.
+    private var rediarizeSpeakerRange: ClosedRange<Int> {
+        2...max(8, uniqueSpeakerIds.count)
+    }
+
+    private func syncRediarizeSpeakerCount() {
+        let detected = uniqueSpeakerIds.count
+        guard detected >= rediarizeSpeakerRange.lowerBound else { return }
+        rediarizeNSpeakers = min(max(detected, rediarizeSpeakerRange.lowerBound), rediarizeSpeakerRange.upperBound)
+    }
+
+    /// Remove names and provenance for speaker IDs that no longer have any
+    /// segments. Merging speakers reassigns segments, so the old IDs must not
+    /// linger in the sidecar and confuse later review or export logic.
+    private func pruneInactiveSpeakerState() {
+        let activeKeys = Set(transcript.segments.map { "\($0.speakerId)" })
+        transcript.speakerNames = transcript.speakerNames.filter { activeKeys.contains($0.key) }
+        if let meta = transcript.speakerMeta {
+            transcript.speakerMeta = meta.filter { activeKeys.contains($0.key) }
+        }
+        // A merge can remove the currently filtered speaker entirely. Do not
+        // leave the transcript looking empty; fall back to the full meeting.
+        if let filteredId = speakerFilter,
+           !transcript.segments.contains(where: { $0.speakerId == filteredId }) {
+            speakerFilter = nil
+        }
     }
 
     private var hasSpeakers: Bool {
@@ -622,42 +657,26 @@ struct TranscriptViewerView: View {
                 Divider()
             }
 
-            // Verify speakers — auto-matched voices to confirm/correct so the
-            // meeting counts as reviewed and the voice library keeps improving.
+            // Keep speaker verification and the transcript in separate panes.
+            // VSplitView supplies a draggable divider so the review area can be
+            // expanded when needed without pushing the transcript off-screen.
             if needsVerification {
-                speakerVerifyPanel
-                Divider()
-            }
+                VSplitView {
+                    speakerVerifyPanel
+                        .frame(
+                            minHeight: 96,
+                            idealHeight: speakerVerifyPanelIdealHeight,
+                            maxHeight: 320
+                        )
+                        .layoutPriority(0)
 
-            // "Listening to one speaker" banner — click Show all to clear.
-            if let f = speakerFilter {
-                HStack(spacing: 8) {
-                    Image(systemName: "waveform.circle.fill")
-                        .foregroundColor(colorForSpeaker(f))
-                    Text("Showing only \(speakerName(for: f)) — play through to check the voice")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button("Show all") { speakerFilter = nil }
-                        .controlSize(.small)
+                    transcriptContent
+                        .frame(minHeight: 160, maxHeight: .infinity)
+                        .layoutPriority(1)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(colorForSpeaker(f).opacity(0.08))
-                Divider()
-            }
-
-            // Segments list (narrowed to one speaker when a filter is active).
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
-                        if speakerFilter == nil || segment.speakerId == speakerFilter {
-                            segmentRow(segmentIndex: idx, segment: segment)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                transcriptContent
             }
         }
         .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
@@ -677,7 +696,11 @@ struct TranscriptViewerView: View {
                 }
             }
         }
-        .onAppear { refreshConfidence(); refreshLibraryNames() }
+        .onAppear {
+            syncRediarizeSpeakerCount()
+            refreshConfidence()
+            refreshLibraryNames()
+        }
         .confirmationDialog(
             "Merge speakers?",
             isPresented: Binding(get: { pendingMerge != nil }, set: { if !$0 { pendingMerge = nil } }),
@@ -824,6 +847,8 @@ struct TranscriptViewerView: View {
             updated.insert(seg, at: idx + offset)
         }
         transcript.segments = updated
+        pruneInactiveSpeakerState()
+        syncRediarizeSpeakerCount()
 
         // Enrol the range as a sample for the new speaker — cleaner
         // provenance than the whole-segment sample we used to take
@@ -839,52 +864,58 @@ struct TranscriptViewerView: View {
     /// Secondary strip grouping the speaker-fixing actions, each shown only when
     /// it applies, with plain-language tooltips.
     private var speakerToolsBar: some View {
-      ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 8) {
-            Text("Speakers")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.secondary)
+      VStack(alignment: .leading, spacing: 6) {
+        Text("Speakers")
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 16)
 
-            if onRematch != nil {
-                Button {
-                    onRematch?(filePath)
-                } label: {
-                    Label("Rematch Speakers", systemImage: "sparkle.magnifyingglass")
-                }
-                .fixedSize()
-                .help("Fill in any unnamed speakers by matching their voice against your saved Voice Library. Won't touch ones you've already confirmed.")
-            }
+        // Keep the heading separate from the controls so the actions remain
+        // visible in the narrow transcript pane. The numeric stepper is first
+        // because it is the input to the redetection action.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if onRediarize != nil {
+                    Stepper("\(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
+                        .font(.caption)
+                        .frame(width: 70)
+                        .help("The current transcript detected \(uniqueSpeakerIds.count) speakers. Change this to the number you expect before redetecting.")
 
-            if onReclusterWithLabels != nil, hasUserNamedSpeakers {
-                Button {
-                    onReclusterWithLabels?(filePath)
-                } label: {
-                    Label("Reassign Speakers", systemImage: "person.crop.circle.badge.checkmark")
+                    Button {
+                        onRediarize?(filePath, rediarizeNSpeakers)
+                    } label: {
+                        Label("Redetect", systemImage: "person.2.wave.2")
+                    }
+                    .fixedSize()
+                    .help("Start over and detect speakers again using the selected count. Discards the current split and any names.")
                 }
-                .fixedSize()
-                .help("Use the speakers you've named as anchors and re-assign the still-unnamed bits to whichever of them they sound closest to. This meeting only — nothing you've corrected moves.")
-            }
 
-            if onRediarize != nil {
-                Divider().frame(height: 14)
-                Stepper("Count: \(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: 2...8)
-                    .font(.caption)
-                    .frame(width: 120)
-                    .help("How many speakers to detect when re-detecting.")
-                Button {
-                    onRediarize?(filePath, rediarizeNSpeakers)
-                } label: {
-                    Label("Detect Speakers", systemImage: "person.2.wave.2")
+                if onRematch != nil {
+                    Button {
+                        onRematch?(filePath)
+                    } label: {
+                        Label("Rematch", systemImage: "sparkle.magnifyingglass")
+                    }
+                    .fixedSize()
+                    .help("Fill in unnamed speakers by matching their voices against your saved Voice Library. Confirmed names are left unchanged.")
                 }
-                .fixedSize()
-                .help("Start over — detect the speakers again from scratch (using the count on the left). Discards the current split and any names.")
+
+                if onReclusterWithLabels != nil, hasUserNamedSpeakers {
+                    Button {
+                        onReclusterWithLabels?(filePath)
+                    } label: {
+                        Label("Reassign", systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    .fixedSize()
+                    .help("Use the speakers you've named as anchors and reassign the remaining unnamed segments to the closest anchor. This meeting only.")
+                }
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.horizontal, 16)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
       }
+      .padding(.vertical, 6)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(Color.secondary.opacity(0.04))
     }
@@ -995,8 +1026,8 @@ struct TranscriptViewerView: View {
                     }
                 }
             }
-            // Bound the height and scroll — with many speakers this used to grow
-            // unbounded and push the transcript off-screen.
+            // The surrounding VSplitView controls the panel's height. Keep the
+            // rows scrollable within that user-sized pane for larger meetings.
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(uniqueSpeakerIds, id: \.self) { id in
@@ -1004,11 +1035,53 @@ struct TranscriptViewerView: View {
                     }
                 }
             }
-            .frame(maxHeight: uniqueSpeakerIds.count > 4 ? 170 : .infinity)
+            .frame(maxHeight: .infinity)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color.blue.opacity(0.04))
+    }
+
+    /// A compact default that still fits the header and the common two- or
+    /// three-speaker review case. The divider lets the user grow it as needed.
+    private var speakerVerifyPanelIdealHeight: CGFloat {
+        min(220, max(128, CGFloat(uniqueSpeakerIds.count) * 34 + 54))
+    }
+
+    @ViewBuilder
+    private var transcriptContent: some View {
+        VStack(spacing: 0) {
+            // "Listening to one speaker" banner — click Show all to clear.
+            if let f = speakerFilter {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.circle.fill")
+                        .foregroundColor(colorForSpeaker(f))
+                    Text("Showing only \(speakerName(for: f)) — play through to check the voice")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Show all") { speakerFilter = nil }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(colorForSpeaker(f).opacity(0.08))
+                Divider()
+            }
+
+            // Segments list (narrowed to one speaker when a filter is active).
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
+                        if speakerFilter == nil || segment.speakerId == speakerFilter {
+                            segmentRow(segmentIndex: idx, segment: segment)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1104,8 +1177,10 @@ struct TranscriptViewerView: View {
         // speaker (legend + each transcript row), so the field appeared down in
         // the transcript instead of where you tapped.
         if editingSpeakerId == speakerId && editingContext == context {
-            // Text field + voice-library autocomplete under it (verify panel,
-            // legend, and in-transcript pills all share this path).
+            // Keep the editor at the place where the user clicked. The
+            // suggestions themselves live in a popover so they float above
+            // the transcript rather than consuming space inside its scroll
+            // view (especially important for speaker pills in segment rows).
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Circle()
@@ -1124,8 +1199,24 @@ struct TranscriptViewerView: View {
                 .padding(.vertical, 4)
                 .background(color.opacity(0.15))
                 .cornerRadius(12)
-
+            }
+            .popover(
+                isPresented: Binding(
+                    get: { editingSpeakerId == speakerId && editingContext == context },
+                    set: { presented in
+                        if !presented, editingSpeakerId == speakerId {
+                            // Dismissing the popover is equivalent to clicking
+                            // away from the editor: save the current choice and
+                            // close the inline editor as before.
+                            commitRename(speakerId: speakerId)
+                        }
+                    }
+                ),
+                arrowEdge: .top
+            ) {
                 nameSuggestions(for: speakerId)
+                    .frame(minWidth: 260, alignment: .leading)
+                    .padding(4)
             }
         } else {
             Button {
@@ -1210,6 +1301,7 @@ struct TranscriptViewerView: View {
     // MARK: - Actions
 
     private func commitRename(speakerId: Int) {
+        let previousName = speakerName(for: speakerId)
         let trimmed = editingName.trimmingCharacters(in: .whitespaces)
         // Empty, or unchanged from the current name → just close the editor
         // (no save/enroll). Unchanged matters because clicking off to deselect
@@ -1239,7 +1331,7 @@ struct TranscriptViewerView: View {
         // Typing a name IS confirming it — mark verified/user so the meeting
         // counts as reviewed and stops nagging.
         setMeta(speakerId, source: "user", verified: true, confidence: nil)
-        enrollConfirmed(trimmed, speakerId: speakerId)
+        enrollConfirmed(trimmed, speakerId: speakerId, previousName: previousName)
 
         saveTranscript()
         refreshConfidence()
@@ -1259,7 +1351,20 @@ struct TranscriptViewerView: View {
 
     /// Enrol a confirmed speaker into the voice library. Prefers the diarizer's
     /// stored centroid (robust, multi-segment) over one short audio segment.
-    private func enrollConfirmed(_ name: String, speakerId: Int) {
+    private func enrollConfirmed(_ name: String, speakerId: Int, previousName: String? = nil) {
+        // A deliberate rename of an enrolled identity should keep the existing
+        // voice samples under the new name. If the target is already in the
+        // library, treat this as a remap and only add the current sample there.
+        let targetAlreadyEnrolled = libraryNames.contains {
+            $0.caseInsensitiveCompare(name) == .orderedSame
+        }
+        if let previousName,
+           !isGenericName(previousName),
+           previousName.caseInsensitiveCompare(name) != .orderedSame,
+           !targetAlreadyEnrolled {
+            onRenameVoiceLibrary?(previousName, name)
+        }
+
         if let fromDiarized = onEnrollSpeakerFromDiarized {
             fromDiarized(name, filePath, speakerId)
         } else if let segment = transcript.segments.first(where: { $0.speakerId == speakerId }) {
@@ -1431,10 +1536,11 @@ struct TranscriptViewerView: View {
     /// Merge the just-renamed speaker into the existing speaker that already has
     /// that name (they're the same person split across two clusters).
     private func confirmMerge(_ merge: PendingMerge) {
+        let previousName = speakerName(for: merge.from)
         mapSpeaker(from: merge.from, to: merge.to)   // reassigns segments + saves
         // The surviving speaker now carries a confirmed, user-set identity.
         setMeta(merge.to, source: "user", verified: true, confidence: nil)
-        enrollConfirmed(merge.name, speakerId: merge.to)
+        enrollConfirmed(merge.name, speakerId: merge.to, previousName: previousName)
         saveTranscript()
         refreshConfidence()
         refreshLibraryNames()
@@ -1453,44 +1559,71 @@ struct TranscriptViewerView: View {
         onListVoiceNames?() { names in self.libraryNames = names }
     }
 
-    /// Autocomplete suggestions for the speaker currently being renamed: enrolled
-    /// voices matching what's typed. Picking one maps to that exact voice.
-    /// Shown under the pill in every edit context (verify / legend / segment).
+    /// Distinct real names already assigned to speakers in this meeting, in
+    /// speaker order. These are the most useful mapping targets when correcting
+    /// an over-split meeting.
+    private var meetingMappedNames: [String] {
+        var seen = Set<String>()
+        return uniqueSpeakerIds.compactMap { id in
+            let name = speakerName(for: id).trimmingCharacters(in: .whitespaces)
+            let key = name.lowercased()
+            guard !name.isEmpty, !isGenericName(name), !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return name
+        }
+    }
+
+    /// Voice-library names not already shown in the meeting-mapped section.
+    /// Keep the library order stable, while removing case-insensitive duplicates.
+    private var otherVoiceLibraryNames: [String] {
+        var seen = Set(meetingMappedNames.map { $0.lowercased() })
+        return libraryNames.compactMap { rawName in
+            let name = rawName.trimmingCharacters(in: .whitespaces)
+            let key = name.lowercased()
+            guard !name.isEmpty, !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return name
+        }
+    }
+
+    /// Autocomplete suggestions for the speaker currently being renamed.
+    /// Meeting-mapped names are shown first; typing filters both sections and
+    /// still reaches every other enrolled Voice Library name.
     @ViewBuilder
     private func nameSuggestions(for id: Int) -> some View {
         let typed = editingName.trimmingCharacters(in: .whitespaces)
         let q = typed.lowercased()
         let current = speakerName(for: id).lowercased()
-        // Browse the full library while the field is empty or still the generic
-        // "Speaker N" — otherwise filter as the user types a real query.
-        let browse = typed.isEmpty || isGenericName(typed)
-        let matches = libraryNames
+        // A mapped speaker opens with its current name in the field. Treat that
+        // as browse mode so the user immediately sees the other people in this
+        // meeting, while any newly typed text becomes a normal search query.
+        let browse = typed.isEmpty || isGenericName(typed) || typed.lowercased() == current
+        let meetingMatches = meetingMappedNames
             .filter { browse || $0.lowercased().contains(q) }
             .filter { $0.lowercased() != current }
-            .prefix(8)
-        if !matches.isEmpty {
+        let remainingSlots = max(0, 8 - meetingMatches.count)
+        let libraryMatches = otherVoiceLibraryNames
+            .filter { browse || $0.lowercased().contains(q) }
+            .prefix(remainingSlots)
+
+        if !meetingMatches.isEmpty || !libraryMatches.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Map to an existing voice")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                ForEach(Array(matches), id: \.self) { name in
-                    Button {
-                        editingName = name
-                        commitRename(speakerId: id)   // synchronous → maps to this exact voice
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "person.crop.circle.fill.badge.checkmark")
-                                .foregroundColor(.accentColor)
-                            Text(name).font(.caption)
-                            Spacer()
-                        }
+                if !meetingMatches.isEmpty {
+                    Text("Already mapped in this meeting")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                        .padding(.top, 4)
+                    suggestionRows(meetingMatches, speakerId: id)
+                }
+
+                if !libraryMatches.isEmpty {
+                    Text(meetingMatches.isEmpty ? "Voice Library" : "Other voices")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, meetingMatches.isEmpty ? 4 : 8)
+                    suggestionRows(Array(libraryMatches), speakerId: id)
                 }
             }
             .padding(.vertical, 2)
@@ -1504,6 +1637,27 @@ struct TranscriptViewerView: View {
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func suggestionRows(_ names: [String], speakerId: Int) -> some View {
+        ForEach(names, id: \.self) { name in
+            Button {
+                editingName = name
+                commitRename(speakerId: speakerId)   // map to this exact voice
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.fill.badge.checkmark")
+                        .foregroundColor(.accentColor)
+                    Text(name).font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -1579,6 +1733,8 @@ struct TranscriptViewerView: View {
         }
         // Remove the old speaker name
         transcript.speakerNames.removeValue(forKey: "\(sourceId)")
+        pruneInactiveSpeakerState()
+        syncRediarizeSpeakerCount()
 
         // NOTE: deliberately DON'T concatenate consecutive same-speaker segments
         // here. The old re-merge glued every adjacent turn into one unbounded

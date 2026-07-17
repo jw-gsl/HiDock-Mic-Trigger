@@ -351,7 +351,11 @@ def _collect_speaker_audio(audio: np.ndarray, turns, label: str, sr: int = 16000
 
 
 def _resolve_speaker_names(
-    audio: np.ndarray, turns, internal_labels: list[str], sr: int = 16000,
+    audio: np.ndarray,
+    turns,
+    internal_labels: list[str],
+    sr: int = 16000,
+    allowed_names=None,
 ) -> dict[str, dict]:
     """Try to match each Sortformer speaker against the voice library.
 
@@ -397,7 +401,11 @@ def _resolve_speaker_names(
             norm = float(np.linalg.norm(emb))
             if norm > 1e-10:
                 emb = (emb / norm).astype(np.float32)
-            matched, confidence = identify_speaker(emb, threshold=0.65)
+            matched, confidence = identify_speaker(
+                emb,
+                threshold=0.65,
+                allowed_names=allowed_names,
+            )
             emb_list = [float(x) for x in emb]
         except Exception as e:
             print(f"Sortformer: embed/match failed for {label}: {e}", file=sys.stderr)
@@ -417,6 +425,7 @@ def diarize(
     audio_path: str | Path,
     whisper_segments: list[dict],
     n_speakers: int | None = None,
+    calendar_context=None,
 ) -> dict:
     """Diarize with NeMo Sortformer.
 
@@ -507,7 +516,13 @@ def diarize(
     # their longest turns and try identify_speaker against the user's
     # enrolled library. Adds enrolled-name auto-tagging parity with the
     # lite path (PLAN-diarization-improvements.md, step 10 in lite).
-    speaker_info = _resolve_speaker_names(audio, renamed_turns, internal_labels, sr=16000)
+    speaker_info = _resolve_speaker_names(
+        audio,
+        renamed_turns,
+        internal_labels,
+        sr=16000,
+        allowed_names=getattr(calendar_context, "candidate_names", None),
+    )
     display_names = {label: speaker_info[label]["name"] for label in internal_labels}
 
     # Assign speakers per Whisper segment. Word-level alignment when

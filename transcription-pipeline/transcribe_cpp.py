@@ -162,6 +162,7 @@ def load_whisper_model():
 def transcribe_file(
     mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
     summarize_engine: str | None = None,
+    calendar_context_path: str | Path | None = None,
 ) -> dict:
     """Transcribe a single audio file. Returns result dict for JSON output."""
     from shared.transcript_writer import write_transcript
@@ -214,11 +215,33 @@ def transcribe_file(
         diarized_result = None
         if diarize:
             try:
+                calendar_context = None
+                try:
+                    from shared.calendar_context import load_context_for_audio
+                    calendar_context = load_context_for_audio(
+                        mp3_path,
+                        context_path=calendar_context_path,
+                    )
+                    if calendar_context is not None:
+                        print(
+                            "Calendar context: "
+                            f"{calendar_context.summary()}",
+                            file=sys.stderr,
+                        )
+                except Exception as context_error:
+                    print(
+                        f"Calendar context unavailable (voice-only fallback): {context_error}",
+                        file=sys.stderr,
+                    )
                 from shared.diarize_lite import diarize as run_diarize
                 from shared.voice_library_lite import identify_speakers
                 from shared.audio_utils import load_audio, extract_embedding, segment_audio
 
-                diarized_result = run_diarize(mp3_path, whisper_dicts)
+                diarized_result = run_diarize(
+                    mp3_path,
+                    whisper_dicts,
+                    calendar_context=calendar_context,
+                )
 
                 # Try to identify speakers from voice library
                 audio = load_audio(mp3_path, sr=16000)
@@ -241,11 +264,17 @@ def transcribe_file(
                     import numpy as np
                     emb_list = list(speaker_embeddings.values())
                     spk_list = list(speaker_embeddings.keys())
-                    ids = identify_speakers(emb_list)
+                    ids = identify_speakers(
+                        emb_list,
+                        allowed_names=getattr(calendar_context, "candidate_names", None),
+                    )
                     for i, spk in enumerate(spk_list):
                         name, conf = ids[i]
                         if name is not None:
                             diarized_result["speaker_names"][spk] = name
+
+                if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
+                    diarized_result["calendar_context"] = calendar_context.to_metadata()
 
                 # Write diarized JSON sidecar
                 diarized_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}_diarized.json"
@@ -374,6 +403,7 @@ def cmd_transcribe(args):
             diarize=getattr(args, "diarize", False),
             summarize=getattr(args, "summarize", False),
             summarize_engine=getattr(args, "summarize_engine", None),
+            calendar_context_path=getattr(args, "calendar_context", None),
         )
     finally:
         release_lock(lock)
@@ -673,6 +703,10 @@ def main():
     p_transcribe.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     p_transcribe.add_argument("--summarize", action="store_true", help="Summarize with LLM after transcription")
     p_transcribe.add_argument("--summarize-engine", default=None, help="LLM engine for summarization (e.g. claude, ollama). Default: config [summarization].engine / auto.")
+    p_transcribe.add_argument(
+        "--calendar-context",
+        help="Optional JSON exported by the Microsoft 365 MCP calendar bridge",
+    )
     p_transcribe.set_defaults(func=cmd_transcribe)
 
     p_batch = sub.add_parser("transcribe-batch", help="Transcribe all un-transcribed recordings")
