@@ -38,6 +38,38 @@ def load_audio(path: str | Path, sr: int = 16000) -> np.ndarray:
     return audio
 
 
+def load_audio_segment(
+    path: str | Path,
+    *,
+    start_seconds: float = 0.0,
+    end_seconds: float | None = None,
+    sr: int = 16000,
+) -> np.ndarray:
+    """Load and resample only a bounded portion of an audio file.
+
+    This avoids decoding an entire long meeting when a caller needs to assess
+    or embed one representative speaker turn. ``end_seconds=None`` reads from
+    the requested start to EOF, matching :func:`load_audio` semantics.
+    """
+    with sf.SoundFile(str(path)) as source:
+        file_sr = source.samplerate
+        start_frame = max(0, int(start_seconds * file_sr))
+        source.seek(start_frame)
+        frames = -1 if end_seconds is None else max(
+            0, int((max(start_seconds, end_seconds) - start_seconds) * file_sr)
+        )
+        audio = source.read(frames=frames, dtype="float32")
+
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if file_sr != sr and len(audio):
+        duration = len(audio) / file_sr
+        n_samples = int(duration * sr)
+        indices = np.linspace(0, len(audio) - 1, n_samples)
+        audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+    return np.asarray(audio, dtype=np.float32)
+
+
 def _hz_to_mel(hz: float) -> float:
     """Convert frequency in Hz to mel scale."""
     return 2595.0 * np.log10(1.0 + hz / 700.0)
@@ -122,6 +154,39 @@ def compute_mel_spectrogram(
     log_mel = np.log(mel_spec)
 
     return log_mel.T.astype(np.float32)  # (n_mels, n_frames)
+
+
+def compute_wespeaker_fbank(audio: np.ndarray, sr: int = 16000) -> np.ndarray:
+    """Compute the Kaldi filter banks used by WeSpeaker runtime models.
+
+    WeSpeaker's exported ONNX models are trained with Kaldi-compatible
+    80-bin filter banks, 16-bit waveform scaling, and utterance-level mean
+    normalisation.  That frontend is materially different from the generic
+    log-mel frontend above, so keep it explicit instead of silently treating
+    every ``(batch, time, 80)`` model as interchangeable.
+    """
+    try:
+        import torch
+        import torchaudio.compliance.kaldi as kaldi
+    except ImportError as exc:  # pragma: no cover - depends on optional runtime
+        raise RuntimeError(
+            "WeSpeaker embeddings require torch and torchaudio for the "
+            "Kaldi-compatible feature frontend"
+        ) from exc
+
+    waveform = torch.from_numpy(np.asarray(audio, dtype=np.float32)).reshape(1, -1)
+    features = kaldi.fbank(
+        waveform * (1 << 15),
+        num_mel_bins=80,
+        frame_length=25,
+        frame_shift=10,
+        dither=0.0,
+        sample_frequency=sr,
+        window_type="hamming",
+        use_energy=False,
+    )
+    features = features - torch.mean(features, dim=0)
+    return features.numpy().astype(np.float32)
 
 
 def extract_mfcc(
@@ -214,16 +279,23 @@ def extract_neural_embedding(
     input_shape = input_info.shape
     if len(input_shape) == 3 and (input_shape[1] == 80 or input_shape[-1] == 80):
         # Mel-spectrogram model — detect axis order from shape
-        mel = compute_mel_spectrogram(audio, sr=sr)  # (80, T)
-        if input_shape[-1] == 80:
+        output_names = [o.name for o in session.get_outputs()]
+        is_wespeaker = input_name == "feats" and "embs" in output_names
+        if is_wespeaker:
+            # Official WeSpeaker inference frontend: (T, 80), including CMN.
+            features = compute_wespeaker_fbank(audio, sr=sr)
+            audio_input = features[np.newaxis, :, :]
+            length_input = np.array([features.shape[0]], dtype=np.int64)
+        else:
+            mel = compute_mel_spectrogram(audio, sr=sr)  # (80, T)
+            length_input = np.array([mel.shape[1]], dtype=np.int64)
+        if not is_wespeaker and input_shape[-1] == 80:
             # CAM++ style: (batch, T, 80)
             audio_input = mel.T[np.newaxis, :, :].astype(np.float32)
-        else:
+        elif not is_wespeaker:
             # TitaNet style: (batch, 80, T)
             audio_input = mel[np.newaxis, :, :].astype(np.float32)
-        length_input = np.array([mel.shape[1]], dtype=np.int64)
         # Find the "embs" output (embedding, not logits)
-        output_names = [o.name for o in session.get_outputs()]
         emb_name = next((n for n in output_names if "emb" in n.lower()), output_names[-1])
         inputs = {input_name: audio_input}
         if len(session.get_inputs()) > 1:

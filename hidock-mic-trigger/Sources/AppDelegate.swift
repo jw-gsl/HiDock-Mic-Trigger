@@ -746,6 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
         viewModel.onSetActiveModelByKey = { [weak self] key in self?.setActiveModelByKey(key) }
+        viewModel.onCheckModelCapability = { [weak self] key in self?.checkModelCapability(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
         viewModel.onCheckForUpdates = { UpdateChecker.manualCheck() }
@@ -1347,7 +1348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let voiceTrainingItem = NSMenuItem(title: "Voice Training...", action: #selector(openVoiceTrainingMenu), keyEquivalent: "")
         voiceTrainingItem.target = self
         menu.addItem(voiceTrainingItem)
-        let buildLibraryItem = NSMenuItem(title: "Build Voice Library from Tagged Meetings", action: #selector(buildVoiceLibraryMenu), keyEquivalent: "")
+        let buildLibraryItem = NSMenuItem(title: "Backfill Voice Library from Tagged Meetings", action: #selector(buildVoiceLibraryMenu), keyEquivalent: "")
         buildLibraryItem.target = self
         menu.addItem(buildLibraryItem)
         let rematchAllItem = NSMenuItem(title: "Re-match Untagged Meetings", action: #selector(rematchUntaggedMenu), keyEquivalent: "")
@@ -3300,12 +3301,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func rediarizeTranscript(jsonPath: String, nSpeakers: Int?) {
+    /// Run the benchmark-selected identity model only as a no-write review aid.
+    /// It is deliberately paused while the HiDock is recording so a background
+    /// model load cannot compete with the active capture path.
+    private func suggestSpeakers(
+        jsonPath: String,
+        completion: @escaping ([String: SpeakerSuggestion]) -> Void
+    ) {
+        guard !viewModel.hidockRecordingActive else {
+            log("Deferred WeSpeaker review while HiDock recording is active")
+            completion([:])
+            return
+        }
+        guard ensureTranscriptionReady() else { completion([:]); return }
+        runTranscription(
+            arguments: ["speaker-suggestions", jsonPath],
+            timeout: 300
+        ) { [weak self] result in
+            var suggestions: [String: SpeakerSuggestion] = [:]
+            if case .success(let data) = result,
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let raw = object["suggestions"],
+               let suggestionData = try? JSONSerialization.data(withJSONObject: raw),
+               let decoded = try? JSONDecoder().decode(
+                    [String: SpeakerSuggestion].self, from: suggestionData
+               ) {
+                suggestions = decoded
+            } else if case .failure(let error) = result {
+                self?.log("WeSpeaker review unavailable: \(error.localizedDescription)")
+            }
+            DispatchQueue.main.async { completion(suggestions) }
+        }
+    }
+
+    /// Record an explicit reviewer decision. Confirmed/corrected names teach
+    /// only the isolated WeSpeaker candidate library; unknowns are audit-only.
+    /// Paused while the HiDock is recording, like the suggestion path, so a
+    /// background model load cannot compete with the active capture path.
+    private func recordSpeakerSuggestion(
+        jsonPath: String,
+        speakerId: Int,
+        action: String,
+        proposedName: String?,
+        finalName: String?
+    ) {
+        guard !viewModel.hidockRecordingActive else {
+            log("Deferred WeSpeaker review recording while HiDock recording is active")
+            return
+        }
         guard ensureTranscriptionReady() else { return }
+        var arguments = [
+            "record-speaker-suggestion", jsonPath,
+            "--speaker-id", "\(speakerId)",
+            "--action", action,
+        ]
+        if let proposedName, !proposedName.isEmpty {
+            arguments += ["--proposed-name", proposedName]
+        }
+        if let finalName, !finalName.isEmpty {
+            arguments += ["--final-name", finalName]
+        }
+        runTranscription(arguments: arguments, timeout: 300) { [weak self] result in
+            switch result {
+            case .success:
+                self?.log("Recorded WeSpeaker review for speaker \(speakerId): \(action)")
+            case .failure(let error):
+                self?.log("Could not record WeSpeaker review: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func rediarizeTranscript(
+        jsonPath: String,
+        nSpeakers: Int?,
+        onUpdate: @escaping (TranscriptRediarizeStatus) -> Void
+    ) {
+        guard ensureTranscriptionReady() else {
+            DispatchQueue.main.async {
+                onUpdate(.failed("The transcription pipeline is not ready."))
+            }
+            return
+        }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
         viewModel.syncStatus = "Re-diarizing…"
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
+
+        let before = loadDiarizedTranscript(at: jsonPath)
+        DispatchQueue.main.async { onUpdate(.running) }
 
         var args = ["rediarize", jsonPath]
         if let n = nSpeakers { args += ["--n-speakers", "\(n)"] }
@@ -3314,24 +3397,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             switch result {
             case .success:
-                self.log("Re-diarization complete")
-                self.viewModel.syncStatus = "Re-diarization complete — reopen transcript to see changes"
-                self.viewModel.syncStatusLevel = .success
-                // Close and reopen the viewer to pick up the new data
-                self.transcriptViewerWindow?.close()
-                self.transcriptViewerWindow = nil
-                // Derive md path from json path
-                let mdPath = jsonPath.replacingOccurrences(of: "_diarized.json", with: ".md")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.openTranscriptViewer(transcriptMdPath: mdPath)
+                guard let before = before,
+                      let after = self.loadDiarizedTranscript(at: jsonPath) else {
+                    let message = "The re-diarized sidecar could not be loaded."
+                    self.log(message)
+                    self.viewModel.syncStatus = "Re-diarization failed"
+                    self.viewModel.syncStatusLevel = .error
+                    onUpdate(.failed(message))
+                    break
                 }
+                let summary = self.rediarizeSummary(before: before, after: after)
+                self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
+                self.viewModel.syncStatus = summary.hasChanges
+                    ? "Re-diarization complete — \(summary.changedSegmentAssignments) segment assignments changed"
+                    : "Re-diarization complete — no changes"
+                self.viewModel.syncStatusLevel = .success
+                onUpdate(.completed(summary, after))
             case .failure(let error):
                 self.log("Re-diarization failed: \(error.localizedDescription)")
                 self.viewModel.syncStatus = "Re-diarization failed"
                 self.viewModel.syncStatusLevel = .error
+                onUpdate(.failed(error.localizedDescription))
             }
+            self.refreshTranscriptionState()
             self.syncViewModelState()
         }
+    }
+
+    private func loadDiarizedTranscript(at path: String) -> DiarizedTranscript? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return try? JSONDecoder().decode(DiarizedTranscript.self, from: data)
+    }
+
+    private func rediarizeSummary(
+        before: DiarizedTranscript,
+        after: DiarizedTranscript
+    ) -> TranscriptRediarizeSummary {
+        let beforeCount = Set(before.segments.map(\.speakerId)).count
+        let afterCount = Set(after.segments.map(\.speakerId)).count
+        let comparedCount = min(before.segments.count, after.segments.count)
+        var changed = abs(before.segments.count - after.segments.count)
+        for index in 0..<comparedCount {
+            if before.segments[index].speakerId != after.segments[index].speakerId {
+                changed += 1
+            }
+        }
+        return TranscriptRediarizeSummary(
+            beforeSpeakerCount: beforeCount,
+            afterSpeakerCount: afterCount,
+            changedSegmentAssignments: changed
+        )
     }
 
     /// Batch "close the loop": after enrolling new voices, sweep every
@@ -3584,8 +3699,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onEnrollSpeaker: { [weak self] name, audio, start, end in
                 self?.enrollSpeakerInVoiceLibrary(name: name, audioPath: audio, start: start, end: end)
             },
-            onRediarize: { [weak self] jsonPath, nSpeakers in
-                self?.rediarizeTranscript(jsonPath: jsonPath, nSpeakers: nSpeakers)
+            onRediarize: { [weak self] jsonPath, nSpeakers, onUpdate in
+                self?.rediarizeTranscript(
+                    jsonPath: jsonPath,
+                    nSpeakers: nSpeakers,
+                    onUpdate: onUpdate
+                )
             },
             onReclusterWithLabels: { [weak self] jsonPath in
                 self?.reclusterTranscriptWithLabels(jsonPath: jsonPath)
@@ -3599,8 +3718,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onScoreSpeakers: { [weak self] jsonPath, completion in
                 self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
             },
+            onSuggestSpeakers: { [weak self] jsonPath, completion in
+                self?.suggestSpeakers(jsonPath: jsonPath, completion: completion)
+            },
+            onRecordSpeakerSuggestion: { [weak self] jsonPath, speakerId, action, proposed, final in
+                self?.recordSpeakerSuggestion(
+                    jsonPath: jsonPath,
+                    speakerId: speakerId,
+                    action: action,
+                    proposedName: proposed,
+                    finalName: final
+                )
+            },
             onRenameVoiceLibrary: { [weak self] oldName, newName in
                 self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
+            },
+            onSpeakerReviewChanged: { [weak self] jsonPath in
+                self?.speakerReviewChangedImmediately(jsonPath: jsonPath)
             },
             onListVoiceNames: { [weak self] completion in
                 self?.listVoiceLibraryNames(completion: completion)
@@ -3842,12 +3976,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                             id: name,
                             name: name,
                             sampleCount: dict["sample_count"] as? Int ?? 0,
-                            lastUpdated: dict["last_updated"] as? String ?? ""
+                            meetingCount: dict["meeting_count"] as? Int ?? 0,
+                            lastUpdated: dict["last_updated"] as? String ?? "",
+                            profileStatus: dict["profile_status"] as? String ?? "thin"
                         )
                     }
                 }
             } catch {
                 log("Failed to list voice library: \(error)")
+            }
+        }
+
+        var totalMeetingCount = 0
+        var totalSampleCount = speakers.reduce(0) { $0 + $1.sampleCount }
+        if FileManager.default.fileExists(atPath: scriptPath) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            configureVoiceLibraryProcess(process)
+            process.arguments = [scriptPath, "summary"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let summary = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    totalMeetingCount = summary["meeting_count"] as? Int ?? 0
+                    totalSampleCount = summary["sample_count"] as? Int ?? totalSampleCount
+                }
+            } catch {
+                log("Failed to summarize voice library: \(error)")
             }
         }
 
@@ -3859,7 +4018,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onRename: { [weak self] oldName, newName in
                 self?.renameVoiceLibrarySpeaker(oldName: oldName, newName: newName)
             },
+            onListSamples: { [weak self] name, completion in
+                guard let self = self else { completion([]); return }
+                self.listVoiceLibrarySamples(name: name, completion: completion)
+            },
+            onDeleteSample: { [weak self] name, sampleId in
+                self?.deleteVoiceLibrarySample(name: name, sampleId: sampleId)
+            },
+            onBackfill: { [weak self] name in
+                self?.backfillVoiceLibrary(name: name)
+            },
             meetingCounts: viewModel.personMeetingCounts,
+            totalMeetingCount: totalMeetingCount,
+            totalSampleCount: totalSampleCount,
             onFilterToPerson: { [weak self] name in
                 guard let self = self else { return }
                 self.viewModel.syncFilterPeople = [name]
@@ -3913,6 +4084,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return "\(sharedDir)/../usb-extractor/.venv/bin/python3"
         }
         return "/usr/bin/python3"
+    }
+
+    /// Load sample provenance for one enrolled voice. The sample list is kept
+    /// out of the initial speaker query so opening Voice Library stays quick.
+    private func listVoiceLibrarySamples(
+        name: String,
+        completion: @escaping ([VoiceLibrarySample]) -> Void
+    ) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else {
+            completion([])
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.voiceLibraryPythonPath())
+            self.configureVoiceLibraryProcess(process)
+            process.arguments = [scriptPath, "samples", "--name", name]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = Pipe()
+            var samples: [VoiceLibrarySample] = []
+            do {
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    samples = parsed.compactMap { dict in
+                        guard let id = dict["id"] as? String else { return nil }
+                        return VoiceLibrarySample(
+                            id: id,
+                            source: dict["source"] as? String ?? "unknown",
+                            addedAt: dict["added_at"] as? String ?? "",
+                            updatedAt: dict["updated_at"] as? String ?? "",
+                            sourceFile: dict["source_file"] as? String,
+                            audioFile: dict["audio_file"] as? String,
+                            speakerId: dict["speaker_id"] as? String,
+                            segmentStart: (dict["segment_start"] as? NSNumber)?.doubleValue,
+                            segmentEnd: (dict["segment_end"] as? NSNumber)?.doubleValue,
+                            model: dict["model"] as? String,
+                            qualityScore: (dict["quality_score"] as? NSNumber)?.doubleValue,
+                            qualityState: dict["quality_state"] as? String,
+                            isActive: dict["active"] as? Bool
+                        )
+                    }
+                }
+            } catch {
+                self.log("Failed to list voice samples for '\(name)': \(error)")
+            }
+            DispatchQueue.main.async { completion(samples) }
+        }
     }
 
     /// Save an .srt subtitle file for a transcript.
@@ -4084,20 +4310,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// Build the voice library from the tagged backlog — enrol every trustworthy
-    /// named speaker across all transcripts (excludes unverified auto-matches).
-    private func buildVoiceLibraryFromTranscripts() {
+    /// Backfill the voice library from trustworthy historical meeting labels.
+    /// With a name, this is the focused per-person action in the library UI;
+    /// without one, the menu action updates all already-enrolled profiles.
+    private func backfillVoiceLibrary(name: String? = nil) {
         let scriptPath = voiceLibraryScriptPath()
         guard FileManager.default.fileExists(atPath: scriptPath) else { return }
         let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
-        viewModel.syncStatus = "Building voice library from tagged meetings…"
+        let subject = name.map { " for \($0)" } ?? ""
+        viewModel.syncStatus = "Backfilling voice library\(subject)…"
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: self?.voiceLibraryPythonPath() ?? "/usr/bin/python3")
             if let self = self { self.configureVoiceLibraryProcess(process) }
-            process.arguments = [scriptPath, "enroll-from-transcripts", "--dir", dir]
+            var arguments = [
+                scriptPath, "enroll-from-transcripts", "--dir", dir,
+                "--audio-fallback", "--max-samples", "60",
+            ]
+            if let name = name {
+                arguments += ["--name", name]
+            }
+            process.arguments = arguments
             let out = Pipe(); process.standardOutput = out
             let err = Pipe(); process.standardError = err
             // Stream PROGRESS:i/total from stderr → live percentage.
@@ -4127,11 +4362,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             err.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
-                self?.viewModel.syncStatus = "Voice library updated — \(enrolled) voice sample(s) added"
+                let subject = name.map { " for \($0)" } ?? ""
+                self?.viewModel.syncStatus = "Voice library updated\(subject) — \(enrolled) sample(s) added"
                 self?.viewModel.syncStatusLevel = .success
                 self?.syncViewModelState()
+                // Re-open the view so the updated sample and meeting counts
+                // are visible immediately after a focused backfill.
+                self?.openVoiceLibrary()
             }
         }
+    }
+
+    private func buildVoiceLibraryFromTranscripts() {
+        backfillVoiceLibrary()
     }
 
     /// Re-match a single transcript's still-generic speakers against the library.
@@ -4178,6 +4421,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             log("Deleted speaker '\(name)' from voice library")
         } catch {
             log("Failed to delete speaker '\(name)': \(error)")
+        }
+    }
+
+    private func deleteVoiceLibrarySample(name: String, sampleId: String) {
+        let scriptPath = voiceLibraryScriptPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: voiceLibraryPythonPath())
+        configureVoiceLibraryProcess(process)
+        process.arguments = [
+            scriptPath, "delete-sample", "--name", name, "--id", sampleId,
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                log("Deleted sample '\(sampleId)' from voice library speaker '\(name)'")
+            } else {
+                log("Failed to delete sample '\(sampleId)' from '\(name)'")
+            }
+        } catch {
+            log("Failed to delete sample '\(sampleId)' from '\(name)': \(error)")
         }
     }
 
@@ -5284,7 +5552,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 active: info["active"] as? Bool ?? false,
                                 experimental: info["experimental"] as? Bool ?? false,
                                 builtIn: info["built_in"] as? Bool ?? false,
-                                nemoModel: info["nemo_model"] as? Bool ?? false
+                                nemoModel: info["nemo_model"] as? Bool ?? false,
+                                reviewOnly: info["review_only"] as? Bool ?? false,
+                                planned: info["planned"] as? Bool ?? false,
+                                capability: info["capability"] as? String
                             )
                         }
                         self.viewModel.modelStatuses = statuses
@@ -5380,6 +5651,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             } catch {
                 self?.log("Failed to set active model \(key): \(error)")
+            }
+        }
+    }
+
+    /// Run `shared/models.py capability <key>` — a read-only resource
+    /// preflight for planned models. The parsed report lands in
+    /// viewModel.modelCapabilities[key] and the row re-renders inline.
+    /// Follows the same background-process → main-async pattern as
+    /// setActiveModelByKey; nothing is persisted or mutated.
+    private func checkModelCapability(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.modelCapabilityChecking.insert(key)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "capability", key]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                // Read before waitUntilExit — same pipe-buffer deadlock
+                // ordering as refreshModelStatuses above.
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let report = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    .flatMap { ModelCapabilityReport(json: $0) }
+                DispatchQueue.main.async {
+                    self?.viewModel.modelCapabilityChecking.remove(key)
+                    if let report = report {
+                        self?.viewModel.modelCapabilities[key] = report
+                    } else {
+                        self?.log("Failed to parse capability report for \(key)")
+                    }
+                }
+            } catch {
+                self?.log("Failed to check capability for \(key): \(error)")
+                DispatchQueue.main.async {
+                    self?.viewModel.modelCapabilityChecking.remove(key)
+                }
             }
         }
     }
@@ -7981,12 +8296,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Reconcile merged-row speaker state directly from the sidecars before
+    /// the slower Python status/activity refresh completes. Merge parents are
+    /// not part of `syncEntries`, so otherwise a just-updated parent can keep
+    /// showing the blue auto-match icon until the asynchronous refresh has
+    /// finished (or until the next refresh cycle).
+    private func refreshMergedReviewCacheFromDisk() {
+        guard !mergeGroups.isEmpty else { return }
+
+        let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let transcribed = viewModel.mergedFileTranscribed
+        var tagged = viewModel.mergedFileTagged.intersection(transcribed)
+        var autoMatched = viewModel.mergedFileAutoMatched.intersection(transcribed)
+        var paths = viewModel.mergedFileTranscriptPaths
+
+        for group in mergeGroups {
+            let mp3Name = (group.outputPath as NSString).lastPathComponent
+            guard transcribed.contains(mp3Name) else { continue }
+            let stem = (mp3Name as NSString).deletingPathExtension
+            let mdPath = (transcriptDir as NSString).appendingPathComponent(stem + ".md")
+            guard FileManager.default.fileExists(atPath: mdPath) else { continue }
+
+            paths[mp3Name] = mdPath
+            let review = speakerReviewState(transcriptPath: mdPath)
+            if review.tagged {
+                tagged.insert(mp3Name)
+                autoMatched.remove(mp3Name)
+            } else if review.autoMatched {
+                autoMatched.insert(mp3Name)
+                tagged.remove(mp3Name)
+            } else {
+                tagged.remove(mp3Name)
+                autoMatched.remove(mp3Name)
+            }
+        }
+
+        viewModel.mergedFileTagged = tagged
+        viewModel.mergedFileAutoMatched = autoMatched
+        viewModel.mergedFileTranscriptPaths = paths
+    }
+
     private func refreshTranscriptionState() {
         guard FileManager.default.fileExists(atPath: transcriptionScriptPath),
               FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else {
             log("refreshTranscriptionState: skipping — script=\(FileManager.default.fileExists(atPath: transcriptionScriptPath)), python=\(FileManager.default.isExecutableFile(atPath: transcriptionPythonPath)) at \(transcriptionScriptPath)")
             return
         }
+        // Paint merged speaker-review changes immediately; the Python status
+        // call below remains the authoritative reconciliation for completion
+        // and transcript paths.
+        refreshMergedReviewCacheFromDisk()
         // Refresh the heatmap Tier-2 stats alongside (own async, small payload).
         refreshMeetingExtraStats()
 
@@ -8205,6 +8564,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     // MARK: - Speaker Tagging & Summary Helpers
+
+    /// Apply the just-saved speaker-review state to the recordings table
+    /// synchronously. The normal `refreshTranscriptionState()` scan is still
+    /// useful as reconciliation, but confirmation should be visible in the
+    /// table at the moment the sidecar is saved.
+    private func speakerReviewChangedImmediately(jsonPath: String) {
+        let mdPath = jsonPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+        let review = speakerReviewState(transcriptPath: mdPath)
+        var meetingPeople = viewModel.meetingPeople
+        var matchedRow = false
+
+        for i in syncEntries.indices {
+            guard syncEntries[i].transcriptPath == mdPath else { continue }
+            syncEntries[i].speakersTagged = review.tagged
+            syncEntries[i].speakersAutoMatched = review.autoMatched
+            if review.people.isEmpty {
+                meetingPeople.removeValue(forKey: syncEntries[i].recording.name)
+            } else {
+                meetingPeople[syncEntries[i].recording.name] = Set(review.people)
+            }
+            matchedRow = true
+        }
+
+        // Merged recordings are not regular syncEntries, so update their
+        // cached state separately when the transcript belongs to one.
+        var mergedMatched = false
+        for (mp3Name, path) in viewModel.mergedFileTranscriptPaths where path == mdPath {
+            if review.tagged {
+                viewModel.mergedFileTagged.insert(mp3Name)
+            } else {
+                viewModel.mergedFileTagged.remove(mp3Name)
+            }
+            if review.autoMatched {
+                viewModel.mergedFileAutoMatched.insert(mp3Name)
+            } else {
+                viewModel.mergedFileAutoMatched.remove(mp3Name)
+            }
+            if review.people.isEmpty {
+                meetingPeople.removeValue(forKey: mp3Name)
+            } else {
+                meetingPeople[mp3Name] = Set(review.people)
+            }
+            mergedMatched = true
+        }
+
+        guard matchedRow || mergedMatched else {
+            // The viewer can be opened before the status scan has populated
+            // the table. Reconcile once in that unusual case.
+            refreshTranscriptionState()
+            return
+        }
+
+        viewModel.meetingPeople = meetingPeople
+        syncViewModelState()
+    }
 
     /// Tri-state speaker-review outcome for a transcript (see
     /// PLAN-speaker-tagging-loop.md). Read from the `_diarized.json` sidecar's

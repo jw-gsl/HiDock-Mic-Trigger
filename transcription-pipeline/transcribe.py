@@ -136,6 +136,46 @@ def _word_timestamps_safe(model) -> bool:
         return True
 
 
+def _load_human_speaker_anchors(
+    audio_path: Path,
+    transcript_path: Path,
+    whisper_segments: list[dict],
+) -> dict | None:
+    """Load human names from the existing transcript/archive for preservation.
+
+    New diarization remains authoritative for the acoustic clusters; these
+    anchors only carry forward names that a person previously attached to the
+    same timestamp range. A missing/ambiguous archive match is ignored.
+    """
+    try:
+        from shared.legacy_transcript_recovery import (
+            build_human_label_anchor_result,
+            find_human_label_source,
+        )
+        source = find_human_label_source(
+            transcript_path.with_name(transcript_path.stem + "_diarized.json"),
+            transcript_path,
+        )
+        if source is None:
+            return None
+        source_path, turns = source
+        result = build_human_label_anchor_result(
+            whisper_segments,
+            turns,
+            source_file=source_path,
+        )
+        if result is not None:
+            print(
+                f"Human speaker labels: preserving {len(result.get('speaker_names', {}))} names "
+                f"from {source_path.name}",
+                file=sys.stderr,
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001 - historical evidence is best effort
+        print(f"Human speaker labels unavailable: {exc}", file=sys.stderr)
+        return None
+
+
 def transcribe_file(
     mp3_path: Path, model=None, diarize: bool = False, summarize: bool = False,
     n_speakers: int | None = None,
@@ -147,6 +187,18 @@ def transcribe_file(
     mp3_path = mp3_path.resolve()
     basename = mp3_path.stem
     transcript_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}.md"
+    previous_diarized_result = None
+    previous_sidecar_path = transcript_path.with_name(
+        transcript_path.stem + "_diarized.json"
+    )
+    if previous_sidecar_path.exists():
+        try:
+            import json as _previous_json
+            previous_diarized_result = _previous_json.loads(
+                previous_sidecar_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            print(f"Previous diarized sidecar unavailable; starting fresh: {exc}", file=sys.stderr)
 
     state = load_state()
     entry_key = mp3_path.name
@@ -356,6 +408,35 @@ def transcribe_file(
                     n_speakers=n_speakers,
                     calendar_context=calendar_context,
                 )
+                human_anchor_result = _load_human_speaker_anchors(
+                    mp3_path,
+                    transcript_path,
+                    result.get("segments", []),
+                )
+                if human_anchor_result is not None:
+                    try:
+                        from shared.merge_speaker_labels import preserve_existing_speaker_labels
+                        diarized_result = preserve_existing_speaker_labels(
+                            diarized_result,
+                            human_anchor_result,
+                        )
+                    except Exception as label_error:  # noqa: BLE001
+                        print(
+                            f"Human speaker labels could not be preserved: {label_error}",
+                            file=sys.stderr,
+                        )
+                if previous_diarized_result is not None:
+                    try:
+                        from shared.merge_speaker_labels import preserve_existing_speaker_labels
+                        diarized_result = preserve_existing_speaker_labels(
+                            diarized_result,
+                            previous_diarized_result,
+                        )
+                    except Exception as label_error:  # noqa: BLE001 - preservation is best effort
+                        print(
+                            f"Existing speaker labels could not be preserved: {label_error}",
+                            file=sys.stderr,
+                        )
                 if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
                     diarized_result["calendar_context"] = calendar_context.to_metadata()
             except ModuleNotFoundError as e:
@@ -422,11 +503,16 @@ def transcribe_file(
         whisper_raw_path = transcript_path.with_name(
             transcript_path.stem + "_whisper.json"
         )
-        whisper_raw_segs = [
-            {"start": seg.get("start", 0.0), "end": seg.get("end", 0.0),
-             "text": seg.get("text", "").strip()}
-            for seg in result.get("segments", [])
-        ]
+        whisper_raw_segs = []
+        for seg in result.get("segments", []):
+            raw_seg = {
+                "start": seg.get("start", 0.0),
+                "end": seg.get("end", 0.0),
+                "text": seg.get("text", "").strip(),
+            }
+            if seg.get("words"):
+                raw_seg["words"] = seg["words"]
+            whisper_raw_segs.append(raw_seg)
         whisper_raw_path.write_text(
             _json.dumps({"audio_file": str(mp3_path), "segments": whisper_raw_segs},
                         indent=2, ensure_ascii=False),
@@ -856,6 +942,29 @@ def cmd_rediarize(args):
         n_speakers=n_speakers,
         calendar_context=calendar_context,
     )
+    human_anchor_result = _load_human_speaker_anchors(
+        Path(audio_path),
+        json_path.with_name(json_path.stem.replace("_diarized", "") + ".md"),
+        segments,
+    )
+    if human_anchor_result is not None:
+        try:
+            from shared.merge_speaker_labels import preserve_existing_speaker_labels
+            diarized_result = preserve_existing_speaker_labels(
+                diarized_result,
+                human_anchor_result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Human speaker labels could not be preserved: {exc}", file=sys.stderr)
+    # Rediarization creates fresh cluster IDs. Preserve explicit labels from
+    # the existing sidecar instead of silently turning confirmed people back
+    # into Speaker 1 / Speaker 2. Legacy named sidecars are preserved too;
+    # unverified auto-matches are intentionally re-evaluated.
+    try:
+        from shared.merge_speaker_labels import preserve_existing_speaker_labels
+        diarized_result = preserve_existing_speaker_labels(diarized_result, data)
+    except Exception as exc:  # noqa: BLE001 - label preservation is best effort
+        print(f"WARN: could not preserve existing speaker labels: {exc}", file=sys.stderr)
     if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
         diarized_result["calendar_context"] = calendar_context.to_metadata()
     progress(90)
@@ -946,10 +1055,32 @@ def cmd_rematch(args):
         sys.exit(1)
     progress(5)
     data = _json.loads(json_path.read_text(encoding="utf-8"))
+    before_names = dict(data.get("speaker_names", {}) or {})
     from shared.speaker_meta import rematch_diarized
     progress(10)
     summary = rematch_diarized(data, audio_fallback=not getattr(args, "no_audio", False))
     progress(90)
+
+    result = {
+        "status": "dry_run" if getattr(args, "dry_run", False) else "completed",
+        "source_path": str(json_path),
+        **summary,
+    }
+    if getattr(args, "dry_run", False):
+        result["before_speaker_names"] = before_names
+        result["proposed_speaker_names"] = data.get("speaker_names", {})
+
+    report_path = getattr(args, "report", None)
+    if report_path:
+        report = Path(report_path).expanduser()
+        report.parent.mkdir(parents=True, exist_ok=True)
+        result["report_path"] = str(report.resolve())
+        report.write_text(_json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    if getattr(args, "dry_run", False):
+        progress(100)
+        print(_json.dumps(result))
+        return
 
     json_path.write_text(
         _json.dumps(data, indent=2, ensure_ascii=False),
@@ -977,7 +1108,101 @@ def cmd_rematch(args):
             print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
 
     progress(100)
-    print(_json.dumps({"status": "completed", **summary}))
+    print(_json.dumps(result))
+
+
+def cmd_rematch_preflight(args):
+    """Report quality-gated Rematch suggestions without writing a sidecar."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    from shared.speaker_meta import rematch_preflight
+    result = {
+        "status": "completed",
+        "source_path": str(json_path),
+        **rematch_preflight(data),
+    }
+    if args.report:
+        report = Path(args.report).expanduser()
+        report.parent.mkdir(parents=True, exist_ok=True)
+        result["report_path"] = str(report.resolve())
+        report.write_text(_json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(_json.dumps(result))
+
+
+def cmd_rematch_preflight_batch(args):
+    """Build one no-write Rematch review queue across a transcript archive."""
+    import json as _json
+    directory = Path(args.dir).expanduser().resolve()
+    if not directory.is_dir():
+        print(f"Directory not found: {directory}", file=sys.stderr)
+        sys.exit(1)
+    from shared.speaker_meta import rematch_preflight
+
+    sidecars = []
+    scanned = unreadable = merged_excluded = eligible = review = hold = 0
+    for path in sorted(directory.glob("*_diarized.json")):
+        if path.stem.startswith("Merged-"):
+            merged_excluded += 1
+            continue
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError):
+            unreadable += 1
+            continue
+        scanned += 1
+        preflight = rematch_preflight(data)
+        if not preflight["eligible"]:
+            continue
+        eligible += preflight["eligible"]
+        review += len(preflight["review_candidates"])
+        hold += len(preflight["hold_candidates"])
+        sidecars.append({
+            "source_path": str(path),
+            "review_candidates": preflight["review_candidates"],
+            "hold_candidates": preflight["hold_candidates"],
+        })
+
+    result = {
+        "status": "completed",
+        "directory": str(directory),
+        "sidecars_scanned": scanned,
+        "sidecars_unreadable": unreadable,
+        "merged_sidecars_excluded": merged_excluded,
+        "eligible_generic_speakers": eligible,
+        "review_candidates": review,
+        "hold_candidates": hold,
+        "sidecars": sidecars,
+    }
+    if args.report:
+        report = Path(args.report).expanduser()
+        report.parent.mkdir(parents=True, exist_ok=True)
+        result["report_path"] = str(report.resolve())
+        report.write_text(_json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # Keep normal CLI output small; detailed candidates live in the report.
+    summary = {key: value for key, value in result.items() if key != "sidecars"}
+    print(_json.dumps(summary))
+
+
+def cmd_record_rematch_correction(args):
+    """Persist a reviewed Rematch outcome without changing the transcript."""
+    from shared.speaker_meta import record_rematch_correction
+    try:
+        event = record_rematch_correction(
+            args.json_path,
+            speaker_id=args.speaker_id,
+            action=args.action,
+            proposed_name=args.proposed_name,
+            final_name=args.final_name,
+            event_path=args.event_log,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    print(_json.dumps({"status": "completed", "event": event}))
 
 
 def cmd_speaker_confidence(args):
@@ -993,6 +1218,35 @@ def cmd_speaker_confidence(args):
     data = _json.loads(json_path.read_text(encoding="utf-8"))
     from shared.speaker_meta import score_speakers
     print(_json.dumps({"status": "completed", "confidence": score_speakers(data)}))
+
+
+def cmd_speaker_suggestions(args):
+    """Return review-only WeSpeaker identity suggestions without writing."""
+    import json as _json
+    from shared.voice_candidate_review import suggest_for_transcript
+
+    result = suggest_for_transcript(args.json_path, config_path=args.config)
+    print(_json.dumps(result))
+
+
+def cmd_record_speaker_suggestion(args):
+    """Persist an explicit review and update only the candidate library."""
+    import json as _json
+    from shared.voice_candidate_review import record_suggestion_outcome
+
+    try:
+        event = record_suggestion_outcome(
+            args.json_path,
+            speaker_id=args.speaker_id,
+            action=args.action,
+            proposed_name=args.proposed_name,
+            final_name=args.final_name,
+            config_path=args.config,
+        )
+    except (OSError, ValueError, _json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    print(_json.dumps({"status": "completed", "event": event}))
 
 
 def cmd_merge_rediarize(args):
@@ -1087,6 +1341,20 @@ def cmd_merge_rediarize(args):
     from shared.pipeline_dispatch import diarize as run_diarize
     n_speakers = getattr(args, "n_speakers", None)
     diarized_result = run_diarize(str(merged_audio), stitched_segments, n_speakers=n_speakers)
+    # The merged diarizer creates fresh cluster IDs. Carry explicit speaker
+    # confirmations from the child sidecars back onto those clusters so the
+    # parent transcript keeps the user's labels and review state. Unverified
+    # auto-matches remain unconfirmed and can still be reviewed in the parent.
+    try:
+        from shared.merge_speaker_labels import apply_confirmed_speaker_labels
+        diarized_result = apply_confirmed_speaker_labels(
+            diarized_result,
+            pieces,
+            durations,
+            transcripts_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 - label propagation is best effort
+        print(f"WARN: could not propagate confirmed child speaker labels: {exc}", file=sys.stderr)
     progress(70)
 
     # Apply text corrections on diarized segments (matches cmd_transcribe).
@@ -1178,6 +1446,116 @@ def cmd_merge_rediarize(args):
     }))
 
 
+def cmd_merge_labels(args):
+    """Repair an existing merged sidecar with confirmed child speaker labels.
+
+    This is the lightweight counterpart to ``merge-rediarize``. It does not
+    run diarization again: it reads the existing merged sidecar, maps fresh
+    parent clusters to explicitly verified labels from the ordered child
+    sidecars, then refreshes the parent Markdown/SRT outputs. This lets a
+    merge created by an older app build benefit from the same confirmation
+    propagation as new merges.
+    """
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"Merged diarized JSON not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        diarized_result = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read merged diarized JSON {json_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    pieces = [Path(piece).resolve() for piece in args.pieces]
+    if len(pieces) < 2:
+        print("merge-labels needs at least two child pieces", file=sys.stderr)
+        sys.exit(1)
+
+    from mutagen.mp3 import MP3
+
+    durations: list[float] = []
+    for piece in pieces:
+        if not piece.exists():
+            print(f"Child recording not found: {piece}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            durations.append(float(MP3(str(piece)).info.length))
+        except Exception as exc:
+            print(f"Could not read duration of {piece}: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    from shared.merge_speaker_labels import apply_confirmed_speaker_labels
+
+    updated = apply_confirmed_speaker_labels(
+        diarized_result,
+        pieces,
+        durations,
+        config.RAW_TRANSCRIPTS_DIR,
+    )
+    json_path.write_text(
+        json.dumps(updated, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # Keep the existing meeting summary and metadata, while replacing only
+    # the transcript section and speaker list with the corrected parent view.
+    md_path = json_path.with_name(json_path.name.replace("_diarized.json", ".md"))
+    if md_path.exists():
+        from shared.transcript_writer import (
+            build_frontmatter,
+            extract_speakers_from_diarized,
+            format_diarized_transcript,
+            parse_frontmatter,
+        )
+
+        existing_text = md_path.read_text(encoding="utf-8")
+        metadata, existing_body = parse_frontmatter(existing_text)
+        if metadata:
+            summary_index = existing_body.find("\n## Summary")
+            summary_tail = existing_body[summary_index:].rstrip() if summary_index >= 0 else ""
+            transcript_body = format_diarized_transcript(updated)
+            new_body = f"## Transcript\n\n{transcript_body.rstrip()}"
+            if summary_tail:
+                new_body += f"\n\n{summary_tail}"
+
+            frontmatter = build_frontmatter(
+                title=str(metadata.get("title") or ""),
+                doc_type=str(metadata.get("type") or "meeting"),
+                date=str(metadata.get("date") or "") or None,
+                duration=metadata.get("duration"),
+                speakers=extract_speakers_from_diarized(updated),
+                source_device=str(metadata.get("source_device") or ""),
+                source_file=str(metadata.get("source_file") or ""),
+                model=str(metadata.get("model") or ""),
+                action_items=metadata.get("action_items") or [],
+                decisions=metadata.get("decisions") or [],
+                key_points=metadata.get("key_points") or [],
+                tags=metadata.get("tags") or [],
+            )
+            md_path.write_text(f"{frontmatter}\n\n{new_body}\n", encoding="utf-8")
+
+        try:
+            from shared.srt_writer import srt_path_for, write_srt
+
+            write_srt(srt_path_for(md_path), diarized_result=updated)
+        except Exception as exc:
+            print(f"SRT export failed (non-fatal): {exc}", file=sys.stderr)
+
+    verified_names = [
+        name for speaker_id, name in (updated.get("speaker_names") or {}).items()
+        if (updated.get("speaker_meta") or {}).get(str(speaker_id), {}).get("verified") is True
+    ]
+    print(json.dumps({
+        "updated": True,
+        "transcript_path": str(md_path),
+        "speaker_names": updated.get("speaker_names", {}),
+        "verified_speakers": verified_names,
+        "tagged": bool(verified_names),
+        "method": "merge-labels",
+    }))
+
+
 def main():
     parser = argparse.ArgumentParser(description="HiDock Transcription Pipeline")
     sub = parser.add_subparsers(dest="command")
@@ -1231,7 +1609,57 @@ def main():
         action="store_true",
         help="Stored-embedding fast path only; skip the CPU-heavy audio re-embed fallback for legacy sidecars.",
     )
+    p_rematch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report proposed generic-speaker matches without changing the sidecar or markdown transcript.",
+    )
+    p_rematch.add_argument(
+        "--report",
+        help="Optional JSON path for the rematch audit report.",
+    )
     p_rematch.set_defaults(func=cmd_rematch)
+
+    p_rematch_preflight = sub.add_parser(
+        "rematch-preflight",
+        help="Review quality-gated stored-embedding Rematch suggestions without changing a transcript",
+    )
+    p_rematch_preflight.add_argument("json_path", help="Path to _diarized.json file")
+    p_rematch_preflight.add_argument(
+        "--report",
+        help="Optional JSON path for the no-write Rematch preflight report.",
+    )
+    p_rematch_preflight.set_defaults(func=cmd_rematch_preflight)
+
+    p_rematch_preflight_batch = sub.add_parser(
+        "rematch-preflight-batch",
+        help="Build a no-write quality-gated Rematch review queue for an archive",
+    )
+    p_rematch_preflight_batch.add_argument("--dir", required=True, help="Directory containing _diarized.json sidecars")
+    p_rematch_preflight_batch.add_argument(
+        "--report",
+        help="Optional JSON path containing per-sidecar review and hold candidates.",
+    )
+    p_rematch_preflight_batch.set_defaults(func=cmd_rematch_preflight_batch)
+
+    p_rematch_correction = sub.add_parser(
+        "record-rematch-correction",
+        help="Append a reviewed Rematch result to the correction event log without changing a transcript",
+    )
+    p_rematch_correction.add_argument("json_path", help="Path to the reviewed _diarized.json file")
+    p_rematch_correction.add_argument("--speaker-id", required=True)
+    p_rematch_correction.add_argument(
+        "--action", required=True, choices=["confirmed", "rejected", "unknown"],
+        help="Human-review outcome for the proposal",
+    )
+    p_rematch_correction.add_argument("--proposed-name")
+    p_rematch_correction.add_argument("--final-name")
+    p_rematch_correction.add_argument(
+        "--event-log",
+        default=str(Path.home() / "HiDock" / "Voice Library" / "rematch-corrections.jsonl"),
+        help="JSONL correction log path (default: ~/HiDock/Voice Library/rematch-corrections.jsonl)",
+    )
+    p_rematch_correction.set_defaults(func=cmd_record_rematch_correction)
 
     p_confidence = sub.add_parser(
         "speaker-confidence",
@@ -1239,6 +1667,35 @@ def main():
     )
     p_confidence.add_argument("json_path", help="Path to _diarized.json file")
     p_confidence.set_defaults(func=cmd_speaker_confidence)
+
+    p_suggestions = sub.add_parser(
+        "speaker-suggestions",
+        help="Review-only identity suggestions from the active verified candidate library",
+    )
+    p_suggestions.add_argument("json_path", help="Path to _diarized.json file")
+    p_suggestions.add_argument(
+        "--config",
+        default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
+        help="Active candidate JSON; suggestions are unavailable when it is absent",
+    )
+    p_suggestions.set_defaults(func=cmd_speaker_suggestions)
+
+    p_suggestion_outcome = sub.add_parser(
+        "record-speaker-suggestion",
+        help="Record a reviewed candidate suggestion and learn from an explicit identity",
+    )
+    p_suggestion_outcome.add_argument("json_path", help="Path to the reviewed _diarized.json file")
+    p_suggestion_outcome.add_argument("--speaker-id", required=True)
+    p_suggestion_outcome.add_argument(
+        "--action", required=True, choices=["confirmed", "rejected", "unknown"],
+    )
+    p_suggestion_outcome.add_argument("--proposed-name")
+    p_suggestion_outcome.add_argument("--final-name")
+    p_suggestion_outcome.add_argument(
+        "--config",
+        default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
+    )
+    p_suggestion_outcome.set_defaults(func=cmd_record_speaker_suggestion)
 
     p_merge = sub.add_parser(
         "merge-rediarize",
@@ -1249,6 +1706,19 @@ def main():
     p_merge.add_argument("--summarize", action="store_true", help="Re-run LLM summary on stitched text")
     p_merge.add_argument("--n-speakers", type=int, help="Hint: expected number of speakers")
     p_merge.set_defaults(func=cmd_merge_rediarize)
+
+    p_merge_labels = sub.add_parser(
+        "merge-labels",
+        help="Apply confirmed child speaker labels to an existing merged sidecar",
+    )
+    p_merge_labels.add_argument("json_path", help="Path to the merged _diarized.json file")
+    p_merge_labels.add_argument(
+        "--pieces",
+        nargs="+",
+        required=True,
+        help="Ordered list of child mp3 paths used to create the merged recording",
+    )
+    p_merge_labels.set_defaults(func=cmd_merge_labels)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)

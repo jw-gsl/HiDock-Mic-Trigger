@@ -7,9 +7,8 @@ import AVFoundation
 class SegmentAudioPlayer: ObservableObject {
     @Published var playingSegmentId: String?
     /// Index of the word currently being spoken in the playing segment (for the
-    /// karaoke highlight). Approximated from elapsed/duration since the diarized
-    /// segments carry no per-word timing. Only re-published when it changes, so
-    /// it doesn't re-render the transcript on every timer tick.
+    /// karaoke highlight). Uses the recognizer's absolute word timestamps when
+    /// available, with a proportional fallback for legacy sidecars.
     @Published var playingWordIndex: Int = 0
     private var player: AVAudioPlayer?
     private var stopTimer: Timer?
@@ -17,6 +16,9 @@ class SegmentAudioPlayer: ObservableObject {
     private var playBaseline: Double = 0   // player.currentTime at the segment's start
     private var playDuration: Double = 1
     private var playWordCount: Int = 0
+    private var playTimelineStart: Double = 0
+    private var playTimelineEnd: Double = 0
+    private var playWordTimings: [DiarizedWord] = []
     private var decodeProcess: Process?
     private var tempURL: URL?
     /// Bumped on every play()/stop() so a slow ffmpeg decode that finishes after
@@ -33,7 +35,8 @@ class SegmentAudioPlayer: ObservableObject {
         ffmpegCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    func play(audioPath: String, start: Double, end: Double, segmentId: String, wordCount: Int = 0) {
+    func play(audioPath: String, start: Double, end: Double, segmentId: String,
+              wordCount: Int = 0, wordTimings: [DiarizedWord]? = nil) {
         stop()
         guard FileManager.default.fileExists(atPath: audioPath) else {
             NSLog("SegmentAudioPlayer: audio file not found at \(audioPath)")
@@ -51,37 +54,80 @@ class SegmentAudioPlayer: ObservableObject {
             player.currentTime = max(0, start)
             player.play()
             playingSegmentId = segmentId
-            // Direct path plays from `start`, so the segment's t=0 is at currentTime `start`.
-            startProgressTracking(baseline: max(0, start), duration: end - start, wordCount: wordCount)
+            // Direct path plays from `start`; retain the absolute timeline so
+            // word timings remain correct even when the segment starts late.
+            startProgressTracking(
+                localBaseline: max(0, start),
+                timelineStart: max(0, start),
+                timelineEnd: end,
+                wordCount: wordCount,
+                wordTimings: wordTimings
+            )
             armStopTimer(after: end - start)
             return
         }
 
         // Fallback: Core Audio couldn't open it (e.g. Opus). Use ffmpeg to
         // decode just this segment to a temp WAV, then play that from 0.
-        decodeAndPlayViaFFmpeg(audioPath: audioPath, start: start, end: end, segmentId: segmentId, wordCount: wordCount)
+        decodeAndPlayViaFFmpeg(
+            audioPath: audioPath,
+            start: start,
+            end: end,
+            segmentId: segmentId,
+            wordCount: wordCount,
+            wordTimings: wordTimings
+        )
     }
 
     /// Drive the karaoke word cursor from playback position. Publishes
     /// `playingWordIndex` only when the word changes (a few Hz at most).
-    private func startProgressTracking(baseline: Double, duration: Double, wordCount: Int) {
+    private func startProgressTracking(
+        localBaseline: Double,
+        timelineStart: Double,
+        timelineEnd: Double,
+        wordCount: Int,
+        wordTimings: [DiarizedWord]?
+    ) {
         progressTimer?.invalidate()
-        playBaseline = baseline
-        playDuration = max(0.001, duration)
-        playWordCount = wordCount
+        playBaseline = localBaseline
+        playDuration = max(0.001, timelineEnd - timelineStart)
+        playTimelineStart = timelineStart
+        playTimelineEnd = timelineEnd
+        playWordTimings = wordTimings ?? []
+        playWordCount = wordTimings?.count ?? wordCount
         playingWordIndex = 0
-        guard wordCount > 0 else { return }
+        guard playWordCount > 0 else { return }
         let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player else { return }
-            let frac = min(max((p.currentTime - self.playBaseline) / self.playDuration, 0), 1)
-            let idx = min(self.playWordCount - 1, Int(frac * Double(self.playWordCount)))
+            let timelinePosition = self.playTimelineStart
+                + p.currentTime - self.playBaseline
+            let idx: Int
+            if !self.playWordTimings.isEmpty {
+                // The word timestamps are absolute audio positions. During a
+                // small pause between words, keep the last spoken word lit;
+                // once playback reaches a new word its highlight advances at
+                // the exact recognizer boundary.
+                idx = self.playWordTimings.lastIndex(where: {
+                    timelinePosition >= $0.start
+                }) ?? 0
+            } else {
+                let frac = min(max((timelinePosition - self.playTimelineStart) / self.playDuration, 0), 1)
+                idx = min(self.playWordCount - 1, Int(frac * Double(self.playWordCount)))
+            }
             if idx != self.playingWordIndex { self.playingWordIndex = idx }
         }
         RunLoop.main.add(t, forMode: .common)
         progressTimer = t
     }
 
-    private func decodeAndPlayViaFFmpeg(audioPath: String, start: Double, end: Double, segmentId: String, wordCount: Int = 0) {
+    private func decodeAndPlayViaFFmpeg(
+        audioPath: String,
+        start: Double,
+        end: Double,
+        segmentId: String,
+        wordCount: Int = 0,
+        wordTimings: [DiarizedWord]? = nil
+    ) {
         guard let ffmpeg = Self.ffmpegPath else {
             NSLog("SegmentAudioPlayer: cannot decode \(audioPath) and no ffmpeg found")
             NSSound.beep()
@@ -127,7 +173,13 @@ class SegmentAudioPlayer: ObservableObject {
                 player.prepareToPlay()
                 player.play()
                 // Temp WAV holds just this segment, so it plays from t=0.
-                self.startProgressTracking(baseline: 0, duration: duration, wordCount: wordCount)
+                self.startProgressTracking(
+                    localBaseline: 0,
+                    timelineStart: start,
+                    timelineEnd: end,
+                    wordCount: wordCount,
+                    wordTimings: wordTimings
+                )
                 self.armStopTimer(after: duration)
             }
         }
@@ -155,6 +207,9 @@ class SegmentAudioPlayer: ObservableObject {
         stopTimer = nil
         progressTimer?.invalidate()
         progressTimer = nil
+        playWordTimings = []
+        playTimelineStart = 0
+        playTimelineEnd = 0
         if let proc = decodeProcess, proc.isRunning { proc.terminate() }
         decodeProcess = nil
         if let t = tempURL { try? FileManager.default.removeItem(at: t); tempURL = nil }
@@ -165,11 +220,52 @@ class SegmentAudioPlayer: ObservableObject {
 
 // MARK: - Data Models
 
+/// Word alignment emitted by Parakeet and persisted in diarized sidecars.
+/// Older sidecars may use `text` rather than `word`, so decoding accepts both.
+struct DiarizedWord: Codable, Hashable {
+    let text: String
+    let start: Double
+    let end: Double
+    let confidence: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case word, text, start, end, confidence
+    }
+
+    init(text: String, start: Double, end: Double, confidence: Double? = nil) {
+        self.text = text
+        self.start = start
+        self.end = end
+        self.confidence = confidence
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let word = try? c.decode(String.self, forKey: .word) {
+            text = word
+        } else {
+            text = try c.decode(String.self, forKey: .text)
+        }
+        start = try c.decode(Double.self, forKey: .start)
+        end = try c.decode(Double.self, forKey: .end)
+        confidence = try c.decodeIfPresent(Double.self, forKey: .confidence)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(text, forKey: .word)
+        try c.encode(start, forKey: .start)
+        try c.encode(end, forKey: .end)
+        try c.encodeIfPresent(confidence, forKey: .confidence)
+    }
+}
+
 /// Per-speaker provenance + review state, mirrored from the Python sidecar
 /// (`speaker_meta`). See PLAN-speaker-tagging-loop.md.
 struct SpeakerMeta: Codable {
     /// "auto" (voice-library match) | "user" (typed/confirmed) | "unknown"
-    /// (acknowledged guest) | "generic" (untouched "Speaker N").
+    /// (acknowledged guest) | "generic" (untouched "Speaker N") |
+    /// "legacy"/"legacy_import" (timestamped historical naming evidence).
     var source: String
     var confidence: Double?
     var verified: Bool
@@ -186,6 +282,40 @@ struct SpeakerScore: Codable {
     var runnerUp: String?       // best enrolled voice other than the assigned name
     var runnerUpScore: Double?
     var margin: Double?         // score - runnerUpScore (negative ⇒ another voice fits better)
+}
+
+/// A no-write identity proposal from the isolated WeSpeaker candidate library.
+/// The app only displays this evidence; a user action is required before a
+/// transcript name or voice profile can change.
+struct SpeakerSuggestion: Codable {
+    var currentName: String?
+    var proposedName: String?
+    var similarity: Double?
+    var runnerUp: String?
+    var runnerUpSimilarity: Double?
+    var margin: Double?
+    var scorer: String?
+    var supportingMeetings: Int?
+    var decision: String
+    var reviewOnly: Bool
+    var reasons: [String]
+    var acousticQuality: Double?
+    var audioReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case currentName = "current_name"
+        case proposedName = "proposed_name"
+        case similarity
+        case runnerUp = "runner_up"
+        case runnerUpSimilarity = "runner_up_similarity"
+        case margin, scorer
+        case supportingMeetings = "supporting_meetings"
+        case decision
+        case reviewOnly = "review_only"
+        case reasons
+        case acousticQuality = "acoustic_quality"
+        case audioReason = "audio_reason"
+    }
 }
 
 struct DiarizedTranscript: Codable {
@@ -216,18 +346,21 @@ struct DiarizedSegment: Codable, Identifiable {
     let end: Double
     var speakerId: Int
     var text: String
+    var words: [DiarizedWord]?
 
     enum CodingKeys: String, CodingKey {
         case start, end
         case speakerId = "speaker_id"
-        case text
+        case text, words
     }
 
-    init(start: Double, end: Double, speakerId: Int = 0, text: String) {
+    init(start: Double, end: Double, speakerId: Int = 0, text: String,
+         words: [DiarizedWord]? = nil) {
         self.start = start
         self.end = end
         self.speakerId = speakerId
         self.text = text
+        self.words = words
     }
 
     init(from decoder: Decoder) throws {
@@ -236,6 +369,7 @@ struct DiarizedSegment: Codable, Identifiable {
         end = try c.decode(Double.self, forKey: .end)
         speakerId = (try? c.decode(Int.self, forKey: .speakerId)) ?? 0
         text = try c.decode(String.self, forKey: .text)
+        words = try c.decodeIfPresent([DiarizedWord].self, forKey: .words)
     }
 }
 
@@ -244,6 +378,11 @@ struct DiarizedSegment: Codable, Identifiable {
 private let speakerColors: [Color] = [
     .blue, .green, .orange, .purple, .pink, .teal, .indigo, .mint
 ]
+
+/// Keep transcript text in one consistent column regardless of the speaker
+/// name's rendered width. This leaves enough room for the common named-speaker
+/// pill while keeping the transcript readable in the narrow viewer window.
+private let transcriptSpeakerColumnWidth: CGFloat = 112
 
 private func colorForSpeaker(_ speakerId: Int) -> Color {
     speakerColors[abs(speakerId) % speakerColors.count]
@@ -256,6 +395,20 @@ private func formatTime(seconds: Double) -> String {
     let minutes = totalSeconds / 60
     let secs = totalSeconds % 60
     return String(format: "%02d:%02d", minutes, secs)
+}
+
+private func joinTranscriptWords(_ words: [String]) -> String {
+    let noSpaceBefore = Set([",", ".", "!", "?", ";", ":", "%", ")", "]", "}"])
+    let noSpaceAfter = Set(["(", "[", "{"])
+    var result = ""
+    for word in words where !word.isEmpty {
+        if result.isEmpty || noSpaceBefore.contains(String(word.first!)) || noSpaceAfter.contains(String(result.last!)) {
+            result += word
+        } else {
+            result += " " + word
+        }
+    }
+    return result
 }
 
 // MARK: - FlowLayout
@@ -309,38 +462,79 @@ struct FlowLayout: Layout {
 
 // MARK: - Layer 1 v2 word-range selection
 
-/// Identifies which segment currently has an active word-range
-/// selection and what that range is. Only one segment can have a
-/// selection at a time — starting a drag in another segment moves the
-/// selection there.
-struct SegmentSelection: Equatable {
+/// Identifies one word in the transcript. Segment indices are the indices in
+/// the diarized sidecar, so a selection can span several adjacent chunks.
+struct WordPosition: Hashable {
     let segmentIndex: Int
-    var range: ClosedRange<Int>
+    let wordIndex: Int
 }
 
-/// Lets word-token views inside a row publish their frames (in the
-/// row's local coordinate space) so a single drag gesture on the
-/// container can hit-test which word the pointer is over.
-private struct WordFramesKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+/// Identifies a word selection that may span multiple diarized segments.
+struct SegmentSelection: Equatable {
+    let anchor: WordPosition
+    var focus: WordPosition
+
+    var start: WordPosition {
+        isBeforeOrEqual(anchor, focus) ? anchor : focus
+    }
+
+    var end: WordPosition {
+        isBeforeOrEqual(anchor, focus) ? focus : anchor
+    }
+
+    func contains(_ position: WordPosition) -> Bool {
+        guard isBeforeOrEqual(start, position), isBeforeOrEqual(position, end) else {
+            return false
+        }
+        return true
+    }
+
+    /// Returns the selected word range for one segment, or nil when the
+    /// selection does not reach that segment.
+    func wordRange(for segmentIndex: Int, wordCount: Int) -> ClosedRange<Int>? {
+        guard wordCount > 0, segmentIndex >= start.segmentIndex, segmentIndex <= end.segmentIndex else {
+            return nil
+        }
+
+        if start.segmentIndex == end.segmentIndex {
+            let lower = max(0, min(start.wordIndex, wordCount - 1))
+            let upper = max(lower, min(end.wordIndex, wordCount - 1))
+            return lower...upper
+        }
+
+        if segmentIndex == start.segmentIndex {
+            return max(0, min(start.wordIndex, wordCount - 1))...(wordCount - 1)
+        }
+        if segmentIndex == end.segmentIndex {
+            return 0...max(0, min(end.wordIndex, wordCount - 1))
+        }
+        return 0...(wordCount - 1)
+    }
+
+    private func isBeforeOrEqual(_ lhs: WordPosition, _ rhs: WordPosition) -> Bool {
+        lhs.segmentIndex < rhs.segmentIndex
+            || (lhs.segmentIndex == rhs.segmentIndex && lhs.wordIndex <= rhs.wordIndex)
+    }
+}
+
+/// Lets word-token views publish their frames in the transcript's common
+/// coordinate space so one drag can continue across multiple rows.
+private struct TranscriptWordFramesKey: PreferenceKey {
+    static var defaultValue: [WordPosition: CGRect] = [:]
+    static func reduce(value: inout [WordPosition: CGRect], nextValue: () -> [WordPosition: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { $1 })
     }
 }
 
 /// Renders a segment's text as a flow of clickable word tokens with a
-/// drag-to-select range. A single tap selects one word; dragging
-/// extends the range. The selected range tints blue. Pure UI — the
-/// caller owns the selection state via `activeRange` / `onRangeChange`.
+/// drag-to-select range. The parent owns the gesture so dragging can continue
+/// into another diarized segment. The selected range tints blue.
 private struct WordTokensView: View {
+    let segmentIndex: Int
     let words: [String]
-    let activeRange: ClosedRange<Int>?
+    let selection: SegmentSelection?
     /// Word currently being spoken (karaoke highlight), or nil when not playing.
     var playingWord: Int? = nil
-    let onRangeChange: (ClosedRange<Int>) -> Void
-
-    @State private var wordFrames: [Int: CGRect] = [:]
-    @State private var dragStart: Int? = nil
 
     var body: some View {
         // Reads as a normal paragraph: each word carries its own
@@ -350,7 +544,7 @@ private struct WordTokensView: View {
         // that touch edge-to-edge (matching native text-selection).
         FlowLayout(spacing: 0, lineSpacing: 1) {
             ForEach(Array(words.enumerated()), id: \.offset) { i, w in
-                let inRange = activeRange.map { $0.contains(i) } ?? false
+                let inRange = selection?.contains(WordPosition(segmentIndex: segmentIndex, wordIndex: i)) ?? false
                 let isPlaying = (i == playingWord)
                 let display = (i == words.count - 1) ? w : "\(w) "
                 Text(display)
@@ -363,35 +557,34 @@ private struct WordTokensView: View {
                     .background(
                         GeometryReader { proxy in
                             Color.clear.preference(
-                                key: WordFramesKey.self,
-                                value: [i: proxy.frame(in: .named("wordFlow"))]
+                                key: TranscriptWordFramesKey.self,
+                                value: [
+                                    WordPosition(segmentIndex: segmentIndex, wordIndex: i):
+                                        proxy.frame(in: .named("transcriptWords"))
+                                ]
                             )
                         }
                     )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .coordinateSpace(name: "wordFlow")
-        .contentShape(Rectangle())
-        .onPreferenceChange(WordFramesKey.self) { wordFrames = $0 }
-        .gesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .named("wordFlow"))
-                .onChanged { value in
-                    guard let idx = wordIndex(at: value.location) else { return }
-                    if dragStart == nil { dragStart = idx }
-                    let lower = min(dragStart!, idx)
-                    let upper = max(dragStart!, idx)
-                    onRangeChange(lower...upper)
-                }
-                .onEnded { _ in
-                    dragStart = nil
-                }
-        )
     }
+}
 
-    private func wordIndex(at point: CGPoint) -> Int? {
-        wordFrames.first(where: { $0.value.contains(point) })?.key
+struct TranscriptRediarizeSummary {
+    let beforeSpeakerCount: Int
+    let afterSpeakerCount: Int
+    let changedSegmentAssignments: Int
+
+    var hasChanges: Bool {
+        beforeSpeakerCount != afterSpeakerCount || changedSegmentAssignments > 0
     }
+}
+
+enum TranscriptRediarizeStatus {
+    case running
+    case completed(TranscriptRediarizeSummary, DiarizedTranscript)
+    case failed(String)
 }
 
 // MARK: - TranscriptViewerView
@@ -410,6 +603,8 @@ struct TranscriptViewerView: View {
     /// Live per-speaker confidence (id-string → 0–1) from the background CLI:
     /// how well each speaker's voice matches the enrolled voice of its name.
     @State private var liveConfidence: [String: SpeakerScore] = [:]
+    @State private var liveSuggestions: [String: SpeakerSuggestion] = [:]
+    @State private var suggestionsLoading = false
     /// A rename that collided with another speaker's name — pending the user's
     /// choice to merge the two speakers or cancel.
     @State private var pendingMerge: PendingMerge?
@@ -428,16 +623,18 @@ struct TranscriptViewerView: View {
         let name: String
     }
     @State var rediarizeNSpeakers: Int = 2
+    @State private var rediarizeStatus: TranscriptRediarizeStatus?
     @State var transcriptHistory: [DiarizedTranscript] = []
-    /// Layer 1 v2 — currently active mid-segment word-range selection.
-    /// Drives the inline speaker bar that appears below the affected
-    /// segment row. Only one segment can have a selection at a time.
+    /// Layer 1 v2 — currently active word selection, which may span several
+    /// diarized segments.
     @State var selection: SegmentSelection? = nil
+    @State private var transcriptWordFrames: [WordPosition: CGRect] = [:]
+    @State private var selectionDragStart: WordPosition? = nil
     @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
     let onEnrollSpeaker: (String, String, Double, Double) -> Void
-    var onRediarize: ((String, Int?) -> Void)?
+    var onRediarize: ((String, Int?, @escaping (TranscriptRediarizeStatus) -> Void) -> Void)?
     /// Layer 2 callback — fires `transcribe.py recluster-with-anchors`
     /// against the current diarized.json, treating every segment with
     /// a user-edited speaker name as an anchor centroid. Optional so
@@ -454,11 +651,20 @@ struct TranscriptViewerView: View {
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
     var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
+    /// Re-embed unverified speakers with the isolated WeSpeaker candidate and
+    /// return review-only proposals. The callback never mutates the sidecar.
+    var onSuggestSpeakers: ((String, @escaping ([String: SpeakerSuggestion]) -> Void) -> Void)?
+    /// Record the explicit human outcome and, for a confirmation, teach the
+    /// isolated candidate library from the confirmed audio evidence.
+    var onRecordSpeakerSuggestion: ((String, Int, String, String?, String?) -> Void)?
     /// Update an existing library identity when a user deliberately renames it.
-    /// The callback is only used when the new name is not already enrolled;
-    /// mapping to an existing library name should add a sample to that target,
-    /// not rename the old identity.
+    /// The backend treats a rename into an existing name as a merge, preserving
+    /// both identities' samples under the surviving name.
     var onRenameVoiceLibrary: ((String, String) -> Void)? = nil
+    /// Tell the recordings table that this transcript's speaker-review state
+    /// changed. The table must not wait for the next full transcription-state
+    /// refresh to move from the orange tag/blue match icon to the green tick.
+    var onSpeakerReviewChanged: ((String) -> Void)? = nil
     /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
     /// autocomplete). Optional so older call-sites keep compiling.
     var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
@@ -472,6 +678,11 @@ struct TranscriptViewerView: View {
     /// for recordings where the user wants to try a larger count.
     private var rediarizeSpeakerRange: ClosedRange<Int> {
         2...max(8, uniqueSpeakerIds.count)
+    }
+
+    private var isRediarizing: Bool {
+        if case .running = rediarizeStatus { return true }
+        return false
     }
 
     private func syncRediarizeSpeakerCount() {
@@ -506,18 +717,32 @@ struct TranscriptViewerView: View {
         transcript.speakerNames["\(id)"] ?? "Speaker \(id + 1)"
     }
 
-    /// True when at least one speaker has been renamed away from the
-    /// auto-generated "Speaker N" — the signal we use to know we have
-    /// anchor labels worth re-clustering against (Layer 2).
-    private var hasUserNamedSpeakers: Bool {
-        for (idStr, name) in transcript.speakerNames {
-            guard let id = Int(idStr) else { continue }
-            let trimmed = name.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-            if trimmed == "Speaker \(id + 1)" { continue }
-            return true
+    /// A named speaker is a safe reassignment anchor when it was explicitly
+    /// confirmed, came from the timestamped legacy import, or predates the
+    /// provenance fields entirely. Unverified automatic matches remain
+    /// provisional and must not teach the meeting-level reassignment pass.
+    private func isNamedAnchor(_ id: Int) -> Bool {
+        let name = speakerName(for: id).trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !isGenericName(name) else { return false }
+        guard let meta = speakerMeta(for: id) else { return true }
+        return meta.verified
+            || meta.source == "user"
+            || meta.source == "legacy"
+            || meta.source == "legacy_import"
+    }
+
+    private var hasAnchorNamedSpeakers: Bool {
+        uniqueSpeakerIds.contains(where: isNamedAnchor)
+    }
+
+    private func startRediarize(speakers: Int?) {
+        rediarizeStatus = .running
+        onRediarize?(filePath, speakers) { status in
+            rediarizeStatus = status
+            if case .completed(_, let updatedTranscript) = status {
+                applyRediarizedTranscript(updatedTranscript)
+            }
         }
-        return false
     }
 
     // MARK: - Computed Stats
@@ -657,16 +882,24 @@ struct TranscriptViewerView: View {
                 VSplitView {
                     speakerVerifyPanel
                         .frame(
-                            minHeight: 96,
+                            // The row list scrolls. Never make its calculated
+                            // content height the minimum: meetings with many
+                            // speakers would otherwise consume the full split
+                            // and push the transcript out of sight.
+                            minHeight: 128,
                             idealHeight: speakerVerifyPanelIdealHeight,
-                            maxHeight: 320
+                            maxHeight: speakerVerifyPanelMaximumHeight
                         )
                         .layoutPriority(0)
 
                     transcriptContent
-                        .frame(minHeight: 160, maxHeight: .infinity)
-                        .layoutPriority(1)
+                        .frame(minHeight: 220, maxHeight: .infinity)
+                        .layoutPriority(2)
                 }
+                // VSplitView remembers its divider position. Recreate the
+                // split when diarisation produces a different speaker count
+                // so the new ideal/minimum height is applied on first render.
+                .id("speaker-review-\(uniqueSpeakerIds.count)")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 transcriptContent
@@ -692,6 +925,7 @@ struct TranscriptViewerView: View {
         .onAppear {
             syncRediarizeSpeakerCount()
             refreshConfidence()
+            refreshSuggestions()
             refreshLibraryNames()
         }
         .confirmationDialog(
@@ -717,19 +951,17 @@ struct TranscriptViewerView: View {
         return n
     }
 
-    /// Inline speaker bar that appears directly below a segment row when
-    /// the user has selected a word range inside it. Click a speaker
-    /// pill to assign the range to that speaker; the segment splits
-    /// into up to three pieces depending on whether the range hits the
-    /// start, middle, or end of the segment.
+    /// Speaker bar for the active selection. It sits above the transcript so
+    /// it remains available when the selection spans several rows.
     @ViewBuilder
-    private func inlineSpeakerBar(segmentIndex idx: Int, range: ClosedRange<Int>) -> some View {
-        let count = range.upperBound - range.lowerBound + 1
+    private func inlineSpeakerBar(selection: SegmentSelection) -> some View {
+        let count = selectedWordCount(selection)
+        let spansSegments = selection.start.segmentIndex != selection.end.segmentIndex
         HStack(spacing: 8) {
             Image(systemName: "scissors")
                 .foregroundColor(.blue)
                 .font(.caption)
-            Text("Assign \(count) word\(count == 1 ? "" : "s") to:")
+            Text("Assign \(count) word\(count == 1 ? "" : "s")\(spansSegments ? " across chunks" : "") to:")
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
 
@@ -737,16 +969,16 @@ struct TranscriptViewerView: View {
                 HStack(spacing: 6) {
                     ForEach(uniqueSpeakerIds, id: \.self) { sid in
                         Button {
-                            applyRangeSplit(segmentIndex: idx, wordRange: range, newSpeakerId: sid)
-                            selection = nil
+                            applySelection(selection: selection, newSpeakerId: sid)
+                            self.selection = nil
                         } label: {
-                            speakerPill(speakerId: sid, interactive: false)
+                            speakerPillLabel(speakerId: sid)
                         }
                         .buttonStyle(.plain)
                     }
                     Button {
-                        applyRangeSplit(segmentIndex: idx, wordRange: range, newSpeakerId: nextNewSpeakerId())
-                        selection = nil
+                        applySelection(selection: selection, newSpeakerId: nextNewSpeakerId())
+                        self.selection = nil
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "person.crop.circle.badge.plus")
@@ -765,7 +997,7 @@ struct TranscriptViewerView: View {
             Spacer()
 
             Button {
-                selection = nil
+                self.selection = nil
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(.secondary)
@@ -781,75 +1013,155 @@ struct TranscriptViewerView: View {
         .padding(.trailing, 4)
     }
 
-    /// Layer 1 v2 split. Takes a closed word range inside `segments[idx]`
-    /// and assigns those words to `newSpeakerId`. Up to three pieces:
-    /// optional head (original speaker, words before the range),
-    /// the range itself (new speaker), optional tail (original speaker,
-    /// words after the range). Time boundaries via linear interpolation
-    /// over word count — same approach as the original sheet-based
-    /// Layer 1, kept because it's cheap and TitaNet's effective
-    /// resolution swallows the per-word imprecision.
-    private func applyRangeSplit(segmentIndex idx: Int, wordRange: ClosedRange<Int>, newSpeakerId: Int) {
-        guard idx >= 0, idx < transcript.segments.count else { return }
-        let segment = transcript.segments[idx]
-        let words = segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        guard !words.isEmpty else { return }
-        // Clamp to valid indices rather than bailing — a selection that runs to
-        // the very end of a block could produce an out-of-range upper bound,
-        // which silently did nothing when the user clicked a speaker.
-        let startWord = max(0, min(wordRange.lowerBound, words.count - 1))
-        let endWord = max(startWord, min(wordRange.upperBound, words.count - 1))
+    private func selectedWordCount(_ selection: SegmentSelection) -> Int {
+        var total = 0
+        for idx in selection.start.segmentIndex...selection.end.segmentIndex {
+            let words = transcript.segments[idx].words?.map(\.text)
+                ?? transcript.segments[idx].text
+                    .split(separator: " ", omittingEmptySubsequences: false)
+                    .map(String.init)
+            if let range = selection.wordRange(for: idx, wordCount: words.count) {
+                total += range.upperBound - range.lowerBound + 1
+            }
+        }
+        return total
+    }
+
+    /// Assign the selection to a speaker, splitting only the boundary
+    /// segments and reassigning any wholly selected chunks in between.
+    private func applySelection(selection: SegmentSelection, newSpeakerId: Int) {
+        guard !transcript.segments.isEmpty,
+              selection.start.segmentIndex >= 0,
+              selection.end.segmentIndex < transcript.segments.count else { return }
+
+        let originalSegments = transcript.segments
+        var updatedSegments: [DiarizedSegment] = []
+        var changed = false
+        var sampleStart: Double?
+        var sampleEnd: Double?
+
+        for (idx, segment) in originalSegments.enumerated() {
+            let timedWords = segment.words
+            let words = timedWords?.map(\.text)
+                ?? segment.text
+                    .split(separator: " ", omittingEmptySubsequences: false)
+                    .map(String.init)
+            guard let wordRange = selection.wordRange(for: idx, wordCount: words.count) else {
+                updatedSegments.append(segment)
+                continue
+            }
+
+            // Selecting text already assigned to the chosen speaker should not
+            // create needless zero-information subsegments.
+            if segment.speakerId == newSpeakerId {
+                updatedSegments.append(segment)
+                continue
+            }
+
+            updatedSegments.append(contentsOf: splitSegment(
+                segment,
+                words: words,
+                timedWords: timedWords,
+                wordRange: wordRange,
+                newSpeakerId: newSpeakerId
+            ))
+            changed = true
+
+            let startTime: Double
+            let endTime: Double
+            if let timedWords, !timedWords.isEmpty {
+                startTime = timedWords[wordRange.lowerBound].start
+                endTime = timedWords[wordRange.upperBound].end
+            } else {
+                let duration = max(segment.end - segment.start, 0.001)
+                let totalWords = Double(words.count)
+                startTime = segment.start + (Double(wordRange.lowerBound) / totalWords) * duration
+                endTime = segment.start + (Double(wordRange.upperBound + 1) / totalWords) * duration
+            }
+            sampleStart = min(sampleStart ?? startTime, startTime)
+            sampleEnd = max(sampleEnd ?? endTime, endTime)
+        }
+
+        guard changed else { return }
 
         transcriptHistory.append(transcript)
-
-        let duration = max(segment.end - segment.start, 0.001)
-        let totalWords = Double(words.count)
-        let rangeStartTime = segment.start + (Double(startWord) / totalWords) * duration
-        let rangeEndTime = segment.start + (Double(endWord + 1) / totalWords) * duration
-
-        var replacement: [DiarizedSegment] = []
-        if startWord > 0 {
-            let headText = words[0..<startWord].joined(separator: " ")
-            replacement.append(DiarizedSegment(
-                start: segment.start,
-                end: rangeStartTime,
-                speakerId: segment.speakerId,
-                text: headText
-            ))
-        }
-        let rangeText = words[startWord...endWord].joined(separator: " ")
-        replacement.append(DiarizedSegment(
-            start: rangeStartTime,
-            end: rangeEndTime,
-            speakerId: newSpeakerId,
-            text: rangeText
-        ))
-        if endWord < words.count - 1 {
-            let tailText = words[(endWord + 1)..<words.count].joined(separator: " ")
-            replacement.append(DiarizedSegment(
-                start: rangeEndTime,
-                end: segment.end,
-                speakerId: segment.speakerId,
-                text: tailText
-            ))
-        }
-
-        var updated = transcript.segments
-        updated.remove(at: idx)
-        for (offset, seg) in replacement.enumerated() {
-            updated.insert(seg, at: idx + offset)
-        }
-        transcript.segments = updated
+        transcript.segments = updatedSegments
         pruneInactiveSpeakerState()
         syncRediarizeSpeakerCount()
 
-        // Enrol the range as a sample for the new speaker — cleaner
-        // provenance than the whole-segment sample we used to take
-        // from the second half of a single-cut split.
-        let speakerNameForEnrol = speakerName(for: newSpeakerId)
-        onEnrollSpeaker(speakerNameForEnrol, audioPath, rangeStartTime, rangeEndTime)
+        // A multi-chunk selection is discontinuous in the audio whenever
+        // there are intervening turns, so only enrol a single contiguous chunk.
+        // The user can still confirm the named speaker afterward to enrol its
+        // stored diarized centroid safely.
+        if selection.start.segmentIndex == selection.end.segmentIndex,
+           let start = sampleStart,
+           let end = sampleEnd,
+           !isGenericName(speakerName(for: newSpeakerId)) {
+            onEnrollSpeaker(speakerName(for: newSpeakerId), audioPath, start, end)
+        }
 
         saveTranscript()
+    }
+
+    /// Split one diarized segment around a selected word range. New sidecars
+    /// carry exact word timings; legacy sidecars retain the old proportional
+    /// fallback until that recording is retranscribed.
+    private func splitSegment(
+        _ segment: DiarizedSegment,
+        words: [String],
+        timedWords: [DiarizedWord]?,
+        wordRange: ClosedRange<Int>,
+        newSpeakerId: Int
+    ) -> [DiarizedSegment] {
+        guard !words.isEmpty else { return [segment] }
+        let startWord = max(0, min(wordRange.lowerBound, words.count - 1))
+        let endWord = max(startWord, min(wordRange.upperBound, words.count - 1))
+
+        let exactWords = timedWords?.count == words.count ? timedWords : nil
+        let rangeStartTime: Double
+        let rangeEndTime: Double
+        if let exactWords {
+            rangeStartTime = exactWords[startWord].start
+            rangeEndTime = exactWords[endWord].end
+        } else {
+            let duration = max(segment.end - segment.start, 0.001)
+            let totalWords = Double(words.count)
+            rangeStartTime = segment.start + (Double(startWord) / totalWords) * duration
+            rangeEndTime = segment.start + (Double(endWord + 1) / totalWords) * duration
+        }
+
+        func makeSegment(start: Double, end: Double, speakerId: Int,
+                         wordRange: Range<Int>) -> DiarizedSegment {
+            let text = joinTranscriptWords(Array(words[wordRange]))
+            let wordSlice = exactWords.map { Array($0[wordRange]) }
+            return DiarizedSegment(
+                start: start,
+                end: end,
+                speakerId: speakerId,
+                text: text,
+                words: wordSlice
+            )
+        }
+
+        var replacement: [DiarizedSegment] = []
+        if startWord > 0 {
+            replacement.append(makeSegment(
+                start: segment.start, end: rangeStartTime,
+                speakerId: segment.speakerId, wordRange: 0..<startWord
+            ))
+        }
+        replacement.append(makeSegment(
+            start: rangeStartTime, end: rangeEndTime,
+            speakerId: newSpeakerId, wordRange: startWord..<(endWord + 1)
+        ))
+        if endWord < words.count - 1 {
+            replacement.append(makeSegment(
+                start: rangeEndTime, end: segment.end,
+                speakerId: segment.speakerId,
+                wordRange: (endWord + 1)..<words.count
+            ))
+        }
+        return replacement
     }
 
     // MARK: - Speaker tools
@@ -863,24 +1175,40 @@ struct TranscriptViewerView: View {
             .foregroundColor(.secondary)
             .padding(.horizontal, 16)
 
+        if let rediarizeStatus {
+            rediarizeStatusView(rediarizeStatus)
+                .padding(.horizontal, 16)
+        }
+
         // Keep the heading separate from the controls so the actions remain
-        // visible in the narrow transcript pane. The numeric stepper is first
-        // because it is the input to the redetection action.
+        // visible in the narrow transcript pane. The order mirrors the
+        // workflow: improve the current result, explicitly redetect, then
+        // apply library or meeting-specific identity work.
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 if onRediarize != nil {
+                    Button {
+                        startRediarize(speakers: nil)
+                    } label: {
+                        Label("Refine", systemImage: "wand.and.stars")
+                    }
+                    .fixedSize()
+                    .disabled(isRediarizing)
+                    .help("Refine this transcript with the configured automatic diarizer. Existing confirmed and legacy-named people stay anchored; generic or provisional parts may be re-split, and oversized blocks are capped for readability.")
+
+                    Button {
+                        startRediarize(speakers: rediarizeNSpeakers)
+                    } label: {
+                        Label(isRediarizing ? "Redetecting…" : "Redetect", systemImage: "person.2.wave.2")
+                    }
+                    .fixedSize()
+                    .disabled(isRediarizing)
+                    .help("Redetect speakers from the audio using the expected count shown in the stepper. Confirmed and legacy-named people are preserved where the timestamps support them; other assignments may change.")
+
                     Stepper("\(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
                         .font(.caption)
                         .frame(width: 70)
-                        .help("The current transcript detected \(uniqueSpeakerIds.count) speakers. Change this to the number you expect before redetecting.")
-
-                    Button {
-                        onRediarize?(filePath, rediarizeNSpeakers)
-                    } label: {
-                        Label("Redetect", systemImage: "person.2.wave.2")
-                    }
-                    .fixedSize()
-                    .help("Start over and detect speakers again using the selected count. Discards the current split and any names.")
+                        .help("Expected speaker count for Redetect. The current transcript has \(uniqueSpeakerIds.count) detected speaker\(uniqueSpeakerIds.count == 1 ? "" : "s").")
                 }
 
                 if onRematch != nil {
@@ -890,17 +1218,17 @@ struct TranscriptViewerView: View {
                         Label("Rematch", systemImage: "sparkle.magnifyingglass")
                     }
                     .fixedSize()
-                    .help("Fill in unnamed speakers by matching their voices against your saved Voice Library. Confirmed names are left unchanged.")
+                    .help("Rematch only generic, unconfirmed speakers against the saved Voice Library. It uses stored embeddings when available, re-embeds older sidecars when needed, and leaves confirmed or named people unchanged.")
                 }
 
-                if onReclusterWithLabels != nil, hasUserNamedSpeakers {
+                if onReclusterWithLabels != nil, hasAnchorNamedSpeakers {
                     Button {
                         onReclusterWithLabels?(filePath)
                     } label: {
                         Label("Reassign", systemImage: "person.crop.circle.badge.checkmark")
                     }
                     .fixedSize()
-                    .help("Use the speakers you've named as anchors and reassign the remaining unnamed segments to the closest anchor. This meeting only.")
+                    .help("Reassign remaining unconfirmed turns to the closest confirmed or legacy-named person in this meeting. Named anchors stay fixed; conservative similarity thresholds and a 30-second block cap protect against bad matches.")
                 }
             }
             .buttonStyle(.bordered)
@@ -911,6 +1239,49 @@ struct TranscriptViewerView: View {
       .padding(.vertical, 6)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(Color.secondary.opacity(0.04))
+    }
+
+    @ViewBuilder
+    private func rediarizeStatusView(_ status: TranscriptRediarizeStatus) -> some View {
+        switch status {
+        case .running:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Re-diarising… the transcript will update here when it finishes.")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+        case .completed(let summary, _):
+            Label {
+                if summary.hasChanges {
+                    Text("Re-diarisation complete · \(summary.beforeSpeakerCount) → \(summary.afterSpeakerCount) speakers · \(summary.changedSegmentAssignments) segment assignments changed")
+                } else {
+                    Text("Re-diarisation complete · no changes")
+                }
+            } icon: {
+                Image(systemName: summary.hasChanges ? "checkmark.circle.fill" : "equal.circle.fill")
+            }
+            .font(.caption)
+            .foregroundColor(summary.hasChanges ? .green : .secondary)
+        case .failed(let message):
+            Label(message.isEmpty ? "Re-diarisation failed" : "Re-diarisation failed: \(message)", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundColor(.red)
+                .lineLimit(2)
+        }
+    }
+
+    private func applyRediarizedTranscript(_ updatedTranscript: DiarizedTranscript) {
+        audioPlayer.stop()
+        transcript = updatedTranscript
+        transcriptHistory.removeAll()
+        speakerFilter = nil
+        selection = nil
+        editingSpeakerId = nil
+        syncRediarizeSpeakerCount()
+        refreshConfidence()
+        refreshLibraryNames()
     }
 
     // MARK: - Stats Header
@@ -965,6 +1336,13 @@ struct TranscriptViewerView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
+                if suggestionsLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking voices…")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
             // The surrounding VSplitView controls the panel's height. Keep the
             // rows scrollable within that user-sized pane for larger meetings.
@@ -982,10 +1360,25 @@ struct TranscriptViewerView: View {
         .background(Color.blue.opacity(0.04))
     }
 
-    /// A compact default that still fits the header and the common two- or
-    /// three-speaker review case. The divider lets the user grow it as needed.
+    private var speakerVerifyPanelMaximumHeight: CGFloat { 260 }
+
+    /// Size small meetings to their content, but cap larger meetings so the
+    /// transcript always opens with useful space. Extra speaker rows remain
+    /// available in the review panel's own ScrollView.
     private var speakerVerifyPanelIdealHeight: CGFloat {
-        min(220, max(128, CGFloat(uniqueSpeakerIds.count) * 34 + 54))
+        let count = max(1, uniqueSpeakerIds.count)
+        let rowHeight: CGFloat = 68
+        let rowSpacing: CGFloat = 4
+        let headerAndPadding: CGFloat = 54
+        return min(
+            speakerVerifyPanelMaximumHeight,
+            max(
+                128,
+            CGFloat(count) * rowHeight
+                + CGFloat(max(0, count - 1)) * rowSpacing
+                + headerAndPadding
+            )
+        )
     }
 
     @ViewBuilder
@@ -1009,6 +1402,11 @@ struct TranscriptViewerView: View {
                 Divider()
             }
 
+            if let activeSelection = selection {
+                inlineSpeakerBar(selection: activeSelection)
+                Divider()
+            }
+
             // Segments list (narrowed to one speaker when a filter is active).
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
@@ -1020,8 +1418,31 @@ struct TranscriptViewerView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                .onPreferenceChange(TranscriptWordFramesKey.self) { frames in
+                    transcriptWordFrames = frames
+                }
+                .simultaneousGesture(transcriptSelectionGesture)
             }
+            .coordinateSpace(name: "transcriptWords")
         }
+    }
+
+    private var transcriptSelectionGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("transcriptWords"))
+            .onChanged { value in
+                guard let position = transcriptWordPosition(at: value.location) else { return }
+                if selectionDragStart == nil {
+                    selectionDragStart = position
+                }
+                selection = SegmentSelection(anchor: selectionDragStart!, focus: position)
+            }
+            .onEnded { _ in
+                selectionDragStart = nil
+            }
+    }
+
+    private func transcriptWordPosition(at point: CGPoint) -> WordPosition? {
+        transcriptWordFrames.first(where: { $0.value.contains(point) })?.key
     }
 
     @ViewBuilder
@@ -1100,12 +1521,81 @@ struct TranscriptViewerView: View {
                 .help("Acknowledge an unknown/guest speaker — counts as reviewed, not added to your voice library. Rename via the pill if you know who it is.")
             }
         }
+        if !verified, let suggestion = liveSuggestions["\(id)"] {
+            speakerSuggestionRow(id: id, suggestion: suggestion)
+        }
         }
     }
 
     @ViewBuilder
+    private func speakerSuggestionRow(id: Int, suggestion: SpeakerSuggestion) -> some View {
+        if let proposed = suggestion.proposedName {
+            HStack(spacing: 7) {
+                Image(systemName: suggestion.decision == "strong_review"
+                      ? "person.crop.circle.badge.questionmark.fill"
+                      : "person.crop.circle.badge.questionmark")
+                    .foregroundColor(suggestion.decision == "strong_review" ? .green : .blue)
+                Text(suggestion.decision == "strong_review"
+                     ? "WeSpeaker suggests" : "Closest voice to review")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(proposed)
+                    .font(.caption.weight(.semibold))
+                if let score = suggestion.similarity {
+                    Text("\(Int((score * 100).rounded()))%")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                if let margin = suggestion.margin {
+                    Text("+\(Int((margin * 100).rounded())) margin")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                if let meetings = suggestion.supportingMeetings {
+                    Text("\(meetings) meeting\(meetings == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button(suggestion.decision == "strong_review" ? "Confirm suggestion" : "Confirm this name") {
+                    confirmCandidateSuggestion(id, suggestion: suggestion)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("You are confirming this identity. The model cannot apply it by itself.")
+            }
+            .padding(.leading, 26)
+            .help(suggestionHelp(suggestion))
+        } else if suggestion.decision == "hold" {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform.badge.exclamationmark")
+                    .foregroundColor(.secondary)
+                Text("WeSpeaker held this speaker for manual review")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.leading, 26)
+        }
+    }
+
+    private func suggestionHelp(_ suggestion: SpeakerSuggestion) -> String {
+        var parts = [suggestion.decision == "strong_review"
+                     ? "Passed the conservative review gate — no name has been applied."
+                     : "Did not pass the conservative gate; shown only as the closest candidate for manual review."]
+        if let runnerUp = suggestion.runnerUp {
+            parts.append("Runner-up: \(runnerUp).")
+        }
+        if !suggestion.reasons.isEmpty {
+            parts.append("Warnings: \(suggestion.reasons.joined(separator: ", ")).")
+        }
+        if let reason = suggestion.audioReason {
+            parts.append("Audio: \(reason).")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    @ViewBuilder
     private func speakerPill(speakerId: Int, interactive: Bool, context: String = "legend") -> some View {
-        let name = speakerName(for: speakerId)
         let color = colorForSpeaker(speakerId)
 
         // Only the pill in the SAME place you clicked shows the editor — without
@@ -1154,39 +1644,49 @@ struct TranscriptViewerView: View {
                     .frame(minWidth: 260, alignment: .leading)
                     .padding(4)
             }
-        } else {
+        } else if interactive {
             Button {
-                if interactive {
-                    editingSpeakerId = speakerId
-                    editingContext = context
-                    editingName = speakerName(for: speakerId)
-                    nameFieldFocused = true
-                    // Refresh enrolled names when opening the editor so the
-                    // dropdown is current (library may have grown since appear).
-                    refreshLibraryNames()
-                }
+                editingSpeakerId = speakerId
+                editingContext = context
+                editingName = speakerName(for: speakerId)
+                nameFieldFocused = true
+                // Refresh enrolled names when opening the editor so the
+                // dropdown is current (library may have grown since appear).
+                refreshLibraryNames()
             } label: {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 8, height: 8)
-                    Text(name)
-                        .font(.caption)
-                        .fontWeight(.medium)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(color.opacity(0.15))
-                .cornerRadius(12)
+                speakerPillLabel(speakerId: speakerId)
             }
             .buttonStyle(.plain)
+        } else {
+            // This form is used inside an outer assignment button. It must be
+            // a label, not another Button, otherwise the inner control eats
+            // the click and the assignment action never runs.
+            speakerPillLabel(speakerId: speakerId)
         }
+    }
+
+    private func speakerPillLabel(speakerId: Int) -> some View {
+        let name = speakerName(for: speakerId)
+        let color = colorForSpeaker(speakerId)
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(name)
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(color.opacity(0.15))
+        .cornerRadius(12)
     }
 
     @ViewBuilder
     private func segmentRow(segmentIndex idx: Int, segment: DiarizedSegment) -> some View {
-        let words = segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        let activeRange: ClosedRange<Int>? = (selection?.segmentIndex == idx) ? selection?.range : nil
+        let timedWords = segment.words
+        let words = timedWords?.map(\.text)
+            ?? segment.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
 
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .top, spacing: 8) {
@@ -1195,7 +1695,14 @@ struct TranscriptViewerView: View {
                     if audioPlayer.playingSegmentId == segment.id {
                         audioPlayer.stop()
                     } else {
-                        audioPlayer.play(audioPath: audioPath, start: segment.start, end: segment.end, segmentId: segment.id, wordCount: words.count)
+                        audioPlayer.play(
+                            audioPath: audioPath,
+                            start: segment.start,
+                            end: segment.end,
+                            segmentId: segment.id,
+                            wordCount: words.count,
+                            wordTimings: timedWords
+                        )
                     }
                 } label: {
                     Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
@@ -1213,24 +1720,26 @@ struct TranscriptViewerView: View {
                     // Editable here too — a unique per-row context means the
                     // editor opens on THIS pill, not the legend or another row.
                     speakerPill(speakerId: segment.speakerId, interactive: true, context: "segment-\(idx)")
+                        .frame(width: transcriptSpeakerColumnWidth, alignment: .leading)
+                        .clipped()
                 }
 
                 WordTokensView(
+                    segmentIndex: idx,
                     words: words,
-                    activeRange: activeRange,
-                    playingWord: audioPlayer.playingSegmentId == segment.id ? audioPlayer.playingWordIndex : nil,
-                    onRangeChange: { newRange in
-                        selection = SegmentSelection(segmentIndex: idx, range: newRange)
-                    }
+                    selection: selection,
+                    playingWord: audioPlayer.playingSegmentId == segment.id ? audioPlayer.playingWordIndex : nil
                 )
 
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 2)
-
-            if let active = activeRange {
-                inlineSpeakerBar(segmentIndex: idx, range: active)
-            }
+        }
+        // Detail tabs are removed from the hierarchy when their sidebar tab is
+        // closed. Stop both direct AVAudioPlayer playback and any in-flight
+        // ffmpeg preview at that lifecycle boundary.
+        .onDisappear {
+            audioPlayer.stop()
         }
     }
 
@@ -1238,6 +1747,8 @@ struct TranscriptViewerView: View {
 
     private func commitRename(speakerId: Int) {
         let previousName = speakerName(for: speakerId)
+        let previousMeta = speakerMeta(for: speakerId)
+        let suggestion = liveSuggestions["\(speakerId)"]
         let trimmed = editingName.trimmingCharacters(in: .whitespaces)
         // Empty, or unchanged from the current name → just close the editor
         // (no save/enroll). Unchanged matters because clicking off to deselect
@@ -1267,9 +1778,20 @@ struct TranscriptViewerView: View {
         // Typing a name IS confirming it — mark verified/user so the meeting
         // counts as reviewed and stops nagging.
         setMeta(speakerId, source: "user", verified: true, confidence: nil)
-        enrollConfirmed(trimmed, speakerId: speakerId, previousName: previousName)
+        // An unverified auto-name is only a proposal. Correcting it must not
+        // rename that person's established live voice profile.
+        let renameFrom = previousMeta?.verified == true ? previousName : nil
+        enrollConfirmed(trimmed, speakerId: speakerId, previousName: renameFrom)
 
         saveTranscript()
+        if let suggestion, let proposed = suggestion.proposedName {
+            let action = proposed.caseInsensitiveCompare(trimmed) == .orderedSame
+                ? "confirmed" : "rejected"
+            onRecordSpeakerSuggestion?(
+                filePath, speakerId, action, proposed, trimmed
+            )
+            liveSuggestions.removeValue(forKey: "\(speakerId)")
+        }
         refreshConfidence()
         refreshLibraryNames()
     }
@@ -1289,15 +1811,13 @@ struct TranscriptViewerView: View {
     /// stored centroid (robust, multi-segment) over one short audio segment.
     private func enrollConfirmed(_ name: String, speakerId: Int, previousName: String? = nil) {
         // A deliberate rename of an enrolled identity should keep the existing
-        // voice samples under the new name. If the target is already in the
-        // library, treat this as a remap and only add the current sample there.
-        let targetAlreadyEnrolled = libraryNames.contains {
-            $0.caseInsensitiveCompare(name) == .orderedSame
-        }
+        // voice samples under the new name. The backend rename is also the
+        // merge primitive, so Adam → Adam Gardner removes the old key and
+        // folds its exemplars into the surviving library entry when the target
+        // already exists.
         if let previousName,
            !isGenericName(previousName),
-           previousName.caseInsensitiveCompare(name) != .orderedSame,
-           !targetAlreadyEnrolled {
+           previousName.caseInsensitiveCompare(name) != .orderedSame {
             onRenameVoiceLibrary?(previousName, name)
         }
 
@@ -1370,11 +1890,33 @@ struct TranscriptViewerView: View {
     private func confirmSpeaker(_ id: Int) {
         let name = speakerName(for: id)
         guard !isGenericName(name) else { return }   // nothing to confirm without a name
+        let suggestion = liveSuggestions["\(id)"]
         let existingSource = speakerMeta(for: id)?.source
         setMeta(id, source: existingSource == "user" ? "user" : "auto",
                 verified: true, confidence: speakerMeta(for: id)?.confidence)
         enrollConfirmed(name, speakerId: id)
         saveTranscript()
+        if let suggestion, let proposed = suggestion.proposedName {
+            let action = proposed.caseInsensitiveCompare(name) == .orderedSame
+                ? "confirmed" : "rejected"
+            onRecordSpeakerSuggestion?(filePath, id, action, proposed, name)
+            liveSuggestions.removeValue(forKey: "\(id)")
+        }
+        refreshConfidence()
+        refreshLibraryNames()
+    }
+
+    /// Apply a candidate name only after the reviewer presses the explicit
+    /// confirmation button. Both the live TitaNet library and the isolated
+    /// WeSpeaker library learn from that human-confirmed identity.
+    private func confirmCandidateSuggestion(_ id: Int, suggestion: SpeakerSuggestion) {
+        guard let proposed = suggestion.proposedName, !isGenericName(proposed) else { return }
+        transcript.speakerNames["\(id)"] = proposed
+        setMeta(id, source: "user", verified: true, confidence: suggestion.similarity)
+        enrollConfirmed(proposed, speakerId: id)
+        saveTranscript()
+        onRecordSpeakerSuggestion?(filePath, id, "confirmed", proposed, proposed)
+        liveSuggestions.removeValue(forKey: "\(id)")
         refreshConfidence()
         refreshLibraryNames()
     }
@@ -1382,8 +1924,13 @@ struct TranscriptViewerView: View {
     /// Acknowledge a speaker the user genuinely can't name — counts as reviewed
     /// but is NOT enrolled into the voice library.
     private func markUnknown(_ id: Int) {
+        let suggestion = liveSuggestions["\(id)"]
         setMeta(id, source: "unknown", verified: true, confidence: nil)
         saveTranscript()
+        if let proposed = suggestion?.proposedName {
+            onRecordSpeakerSuggestion?(filePath, id, "unknown", proposed, nil)
+            liveSuggestions.removeValue(forKey: "\(id)")
+        }
     }
 
     /// Merge the just-renamed speaker into the existing speaker that already has
@@ -1404,6 +1951,18 @@ struct TranscriptViewerView: View {
     private func refreshConfidence() {
         onScoreSpeakers?(filePath) { scores in
             self.liveConfidence = scores
+        }
+    }
+
+    /// Ask the isolated candidate model for evidence. Missing configuration,
+    /// a recording in progress, or any inference failure simply yields no
+    /// proposals and leaves the established review screen unchanged.
+    private func refreshSuggestions() {
+        guard !suggestionsLoading, let onSuggestSpeakers else { return }
+        suggestionsLoading = true
+        onSuggestSpeakers(filePath) { suggestions in
+            self.liveSuggestions = suggestions
+            self.suggestionsLoading = false
         }
     }
 
@@ -1603,7 +2162,10 @@ struct TranscriptViewerView: View {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(transcript)
-            try data.write(to: URL(fileURLWithPath: filePath))
+            try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+            // Persist first, then notify the owner. The owner re-reads the
+            // sidecar and updates the table's cached icon immediately.
+            onSpeakerReviewChanged?(filePath)
         } catch {
             print("Failed to save transcript: \(error)")
         }

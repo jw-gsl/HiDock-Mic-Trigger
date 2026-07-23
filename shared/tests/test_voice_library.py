@@ -24,6 +24,16 @@ def test_multi_exemplar_best_of_match():
     assert vl.list_speakers()[0]["sample_count"] == 2
 
 
+def test_ambiguous_runner_up_is_not_auto_tagged():
+    vl.enroll_embedding("Alice", [1.0, 0.0], embed_dim=2)
+    vl.enroll_embedding("Bob", [0.995, 0.1], embed_dim=2)
+
+    name, score = vl.identify_speaker([1.0, 0.0], threshold=0.7)
+
+    assert name is None
+    assert score == 0.0
+
+
 def test_calendar_candidate_filter_limits_voice_matching():
     vl.enroll_embedding("James", [1.0, 0.0], embed_dim=2)
     vl.enroll_embedding("Chris", [0.0, 1.0], embed_dim=2)

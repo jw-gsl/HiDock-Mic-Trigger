@@ -8,6 +8,7 @@ Handles downloading and caching models used for speech processing:
 from __future__ import annotations
 
 import json
+import hashlib
 import ssl
 import sys
 import urllib.request
@@ -32,8 +33,27 @@ SPEAKER_EMBED_MODELS = {
     "campp": {
         "filename": "campp_speaker.onnx",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+        "dim": 192,
+        "description": "3D-Speaker CAM++ (192-dim, time-major mel-spectrogram input)",
+    },
+    "eres2net": {
+        "filename": "eres2net_large_speaker.onnx",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_large_sv_zh-cn_3dspeaker_16k.onnx",
         "dim": 512,
-        "description": "3D-Speaker CAM++ (512-dim, ~12% lower error than TitaNet)",
+        "description": "3D-Speaker ERes2Net Large (512-dim, time-major mel-spectrogram input)",
+    },
+    "wespeaker_resnet293": {
+        "filename": "wespeaker_voxceleb_resnet293_lm.onnx",
+        "url": "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet293-LM/resolve/main/voxceleb_resnet293_LM.onnx?download=true",
+        "dim": 256,
+        "sha256": "dbb1ccc7754caff552ebc46347a51aaee2669bb24efc740e665d1a1133d20e98",
+        "description": "WeSpeaker ResNet293-LM (256-dim, Kaldi fbank input, English VoxCeleb)",
+    },
+    "wavlm_base_plus_sv": {
+        "filename": "wavlm-base-plus-sv",
+        "url": "https://huggingface.co/microsoft/wavlm-base-plus-sv",
+        "dim": 512,
+        "description": "Microsoft WavLM Base Plus SV (512-dim, raw 16 kHz waveform input)",
     },
 }
 
@@ -187,6 +207,48 @@ MODEL_REGISTRY = {
         "backend_key": "titanet",
         "description": "Neural speaker embeddings trained on thousands of voices. Turns a speech clip into a 192-dim vector used for clustering speakers within a meeting and matching them to a personal voice library across meetings.",
     },
+    "wespeaker_identity_review": {
+        "name": "WeSpeaker ResNet293-LM",
+        "filename": "wespeaker_voxceleb_resnet293_lm.onnx",
+        "url": "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet293-LM/resolve/main/voxceleb_resnet293_LM.onnx?download=true",
+        "sha256": "dbb1ccc7754caff552ebc46347a51aaee2669bb24efc740e665d1a1133d20e98",
+        "size_mb": 109,
+        "required": False,
+        "stage": "identity_review",
+        "stage_label": "Speaker Identity Review",
+        "category": "supporting",
+        "used_by": "Transcript speaker verification (suggestions only)",
+        "backend_key": "wespeaker_resnet293",
+        "review_only": True,
+        "description": "English VoxCeleb speaker-identity model selected by the local verified benchmark. It proposes evidence-backed names in the transcript review panel but never applies them automatically.",
+    },
+    # W2V-BERT 2.0 via WeSpeaker's new official support — PLANNED,
+    # review-only. Meta's facebook/w2v-bert-2.0 SSL frontend (580M params)
+    # + a 6.2M-param Adapter-MFA backend. PyTorch-only (no ONNX export),
+    # so there is no runtime integration yet: `planned: True` keeps it
+    # unselectable in the UI, and trying it can't disturb the live
+    # ResNet293 review path. Like Parakeet, weights are managed by the
+    # external runtime (wespeaker) — filename/url are informational and
+    # nothing lands in MODELS_DIR. CC BY-NC-SA 4.0 — non-commercial.
+    "wespeaker_w2vbert2": {
+        "name": "W2V-BERT 2.0 MFA-LM (WeSpeaker)",
+        "filename": "wespeaker-w2vbert2",
+        "url": "https://huggingface.co/facebook/w2v-bert-2.0",
+        "size_mb": 2400,
+        "required": False,
+        "stage": "identity_review",
+        "stage_label": "Speaker Identity Review",
+        "category": "supporting",
+        "used_by": "Planned — offline benchmark ceiling (not yet integrated)",
+        "backend_key": "wespeaker_w2vbert2",
+        "review_only": True,
+        "experimental": True,
+        "planned": True,
+        "managed_externally": True,
+        "pip_import_name": "wespeaker",
+        "capability": "wespeaker_w2vbert2",
+        "description": "SSL speaker model (Meta w2v-bert-2.0 frontend + Adapter-MFA), the strongest candidate found (0.138% Vox1-O EER under the WeSpeaker harness). PyTorch-only, no ONNX; requires ~2.4 GB download and the wespeaker runtime. CC BY-NC-SA 4.0 — non-commercial. Planned for the next bake-off.",
+    },
 }
 
 # Pipeline-stage entries are the user's primary choices; supporting-stage
@@ -197,6 +259,7 @@ _DEFAULT_CATEGORY_FOR_STAGE = {
     "diarization": "pipeline",
     "vad": "supporting",
     "embedding": "supporting",
+    "identity_review": "supporting",
 }
 
 
@@ -223,6 +286,7 @@ def download_model_if_needed(
     url: str,
     filename: str,
     on_progress: callable | None = None,
+    expected_sha256: str | None = None,
 ) -> Path:
     """Download a model file to MODELS_DIR if it does not already exist.
 
@@ -236,7 +300,9 @@ def download_model_if_needed(
     """
     dest = MODELS_DIR / filename
     if dest.exists() and dest.stat().st_size > 1000:
-        return dest
+        if not expected_sha256 or _file_sha256(dest) == expected_sha256.lower():
+            return dest
+        print(f"Existing {filename} failed integrity check; downloading again", file=sys.stderr)
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".downloading")
@@ -270,6 +336,13 @@ def download_model_if_needed(
             raise OSError(
                 f"Incomplete download for {filename}: got {downloaded} of {total} bytes"
             )
+        if expected_sha256:
+            actual_sha256 = _file_sha256(tmp)
+            if actual_sha256 != expected_sha256.lower():
+                raise OSError(
+                    f"Integrity check failed for {filename}: expected "
+                    f"{expected_sha256.lower()}, got {actual_sha256}"
+                )
     except BaseException:
         try:
             tmp.unlink()
@@ -284,6 +357,14 @@ def download_model_if_needed(
     return dest
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def ensure_silero_vad() -> Path:
     """Ensure the Silero VAD ONNX model is available locally."""
     return download_model_if_needed(SILERO_VAD_URL, SILERO_VAD_FILENAME)
@@ -294,7 +375,9 @@ def ensure_speaker_embed(model_key: str | None = None) -> Path:
     key = model_key or SPEAKER_EMBED_MODEL
     if key in SPEAKER_EMBED_MODELS:
         model = SPEAKER_EMBED_MODELS[key]
-        return download_model_if_needed(model["url"], model["filename"])
+        return download_model_if_needed(
+            model["url"], model["filename"], expected_sha256=model.get("sha256")
+        )
     return download_model_if_needed(SPEAKER_EMBED_URL, SPEAKER_EMBED_FILENAME)
 
 
@@ -478,6 +561,13 @@ def get_model_status() -> dict[str, dict]:
             "built_in": info.get("built_in", False),
             "nemo_model": info.get("nemo_model", False),
             "pip_package": info.get("pip_package"),
+            "review_only": info.get("review_only", False),
+            # Planned = listed for visibility/review but not yet wired
+            # into the pipeline; the UI keeps it unselectable.
+            "planned": info.get("planned", False),
+            # Optional key into model_capability.CAPABILITY_REQUIREMENTS —
+            # when set the UI offers a "Check compatibility" preflight.
+            "capability": info.get("capability"),
         }
     return statuses
 
@@ -574,7 +664,9 @@ def _cli():
                 print(json.dumps({"ok": True, "pip_package_installed": pkg}))
                 return
             # Regular file download.
-            path = download_model_if_needed(info["url"], info["filename"])
+            path = download_model_if_needed(
+                info["url"], info["filename"], expected_sha256=info.get("sha256")
+            )
             print(json.dumps({"ok": True, "path": str(path)}))
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}))
@@ -600,6 +692,23 @@ def _cli():
     elif command == "backends":
         # Dump the current backend selection for debugging/inspection.
         print(json.dumps(load_pipeline_backends(), indent=2))
+
+    elif command == "capability":
+        if len(sys.argv) < 3:
+            print("Usage: models.py capability <model_key>", file=sys.stderr)
+            sys.exit(1)
+        key = sys.argv[2]
+        # Imported lazily inside the branch so `status` (the hot path the
+        # UI polls) doesn't pay for it. When invoked as a plain script
+        # (`python shared/models.py ...`) the repo root isn't on sys.path,
+        # so add it before the `shared.` package import (same pattern as
+        # pipeline_dispatch).
+        if not __package__:
+            repo_root = str(Path(__file__).resolve().parent.parent)
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+        from shared.model_capability import check_model_capability
+        print(json.dumps(check_model_capability(key), indent=2))
 
     elif command == "delete":
         if len(sys.argv) < 3:
