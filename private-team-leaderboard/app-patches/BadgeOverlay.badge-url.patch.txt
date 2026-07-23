@@ -1,0 +1,15 @@
+# In src/components/badge/BadgeOverlay.tsx (v0.19.41 ~line 27)
+#
+# Replace:
+#   const SUPABASE_BADGE_URL = "https://giunmtxxvapcgrpxjopq.supabase.co/functions/v1/badge";
+#
+# With:
+
+const SUPABASE_BADGE_URL = import.meta.env.VITE_SUPABASE_URL
+  ? `${String(import.meta.env.VITE_SUPABASE_URL).replace(/\/$/, "")}/functions/v1/badge`
+  : "";
+
+# Notes:
+# - Path A does NOT deploy the public badge Edge Function by default.
+# - Live badge URLs will 404 until you deploy supabase/functions/badge to your project.
+# - PNG/SVG export from the overlay still works offline without the function.

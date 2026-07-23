@@ -1,0 +1,34 @@
+# Local HiDock builds replace the installed app, terminate the running app, and
+# may interrupt recording or transcription. Require an approval prompt before
+# every xcodebuild invocation. Local CI=true validation builds remain
+# non-deploying, but are still approval-gated.
+
+prefix_rule(
+    pattern = ["xcodebuild"],
+    decision = "prompt",
+    justification = "This HiDock build can replace and relaunch the installed app. Approve the rebuild before it runs.",
+    match = [
+        "xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug",
+        "xcodebuild -scheme hidock-mic-trigger -configuration Release build",
+    ],
+)
+
+prefix_rule(
+    pattern = ["CI=true", "xcodebuild"],
+    decision = "prompt",
+    justification = "This local HiDock validation build skips deployment but may interrupt active work. Approve the build before it runs.",
+    match = [
+        "'CI=true' xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug",
+        "'CI=true' xcodebuild -scheme hidock-mic-trigger -configuration Release build",
+    ],
+)
+
+prefix_rule(
+    pattern = ["env", "CI=true", "xcodebuild"],
+    decision = "prompt",
+    justification = "This local HiDock validation build skips deployment but may interrupt active work. Approve the build before it runs.",
+    match = [
+        "env 'CI=true' xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug",
+        "env 'CI=true' xcodebuild -scheme hidock-mic-trigger -configuration Release build",
+    ],
+)
