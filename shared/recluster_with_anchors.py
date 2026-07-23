@@ -5,8 +5,8 @@ Algorithm (kept deliberately small for clarity — see
 PLAN-voice-training-layers-2026-04-26.md for the design rationale):
 
   1. Read the diarized JSON. Collect the set of segments whose
-     speaker has a non-default name (anything other than
-     "Speaker N" auto-labels) — these are the user's anchors.
+     speaker has a trusted non-default name (confirmed, legacy-imported,
+     or from a sidecar predating provenance metadata) — these are the anchors.
   2. Load the audio file and the TitaNet embedding model.
   3. Compute one embedding per anchor segment, average per name to
      get the anchor centroid for that speaker.
@@ -39,6 +39,8 @@ import numpy as np
 from scipy.spatial.distance import cosine as cosine_distance
 
 from shared.audio_utils import extract_embedding, load_audio
+from shared.speaker_meta import is_generic_name
+from shared.word_timing import timed_words, words_to_text
 
 
 # Tuned conservatively: 0.55 cosine similarity (= 0.45 cosine distance)
@@ -48,21 +50,31 @@ from shared.audio_utils import extract_embedding, load_audio
 SIMILARITY_THRESHOLD = 0.55
 _SAMPLE_RATE = 16000
 _MIN_EMBEDDING_DURATION = 1.5
+_MAX_MERGED_SEGMENT_SECONDS = 30.0
 
 
-def _is_user_named(speaker_id: int, names: dict[str, str]) -> bool:
-    """A speaker counts as user-anchored when their name has been
-    edited away from the auto-generated 'Speaker N' format. The Mac
-    transcript viewer writes default names back into speaker_names
-    only when the user explicitly types something — but we still
-    guard against the value matching the default literal in case the
-    user typed it back manually for some reason."""
-    raw = names.get(str(speaker_id), "").strip()
-    if not raw:
+def _is_named_anchor(
+    speaker_id: int,
+    names: dict[str, str],
+    speaker_meta: dict[str, dict] | None = None,
+) -> bool:
+    """Whether a named speaker is trustworthy enough to anchor reassignment.
+
+    Older imported sidecars have no metadata, so a non-generic name is the
+    strongest evidence available there. New unverified automatic matches are
+    deliberately excluded: allowing them to anchor the whole meeting would
+    amplify a possible first-pass error.
+    """
+    name = str(names.get(str(speaker_id), "")).strip()
+    if not name or is_generic_name(name):
         return False
-    if raw == f"Speaker {speaker_id + 1}":
-        return False
-    return True
+    meta = (speaker_meta or {}).get(str(speaker_id))
+    if not meta:
+        return True
+    return bool(
+        meta.get("verified") is True
+        or meta.get("source") in {"user", "legacy", "legacy_import"}
+    )
 
 
 def _embed_segment(
@@ -97,18 +109,34 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _merge_consecutive_same_speaker(segments: list[dict]) -> list[dict]:
-    """After reassignment we may end up with adjacent segments now
-    sharing a speaker_id. Collapse those into one for readability —
-    this matches the post-cluster pass diarize_lite already runs after
-    its initial clustering."""
+    """Collapse safe adjacent turns without creating monster blocks.
+
+    The old pass concatenated every adjacent same-speaker segment, dropped
+    word timing, and had no duration limit. A conservative cap keeps the
+    viewer readable and preserves karaoke/selection data when both sides have
+    it.
+    """
     if not segments:
         return segments
     merged = [dict(segments[0])]
     for seg in segments[1:]:
         last = merged[-1]
-        if last.get("speaker_id") == seg.get("speaker_id"):
+        gap = float(seg.get("start", 0.0)) - float(last.get("end", 0.0))
+        combined_end = float(seg.get("end", 0.0))
+        combined_start = float(last.get("start", 0.0))
+        if (
+            last.get("speaker_id") == seg.get("speaker_id")
+            and gap <= 1.0
+            and combined_end - combined_start <= _MAX_MERGED_SEGMENT_SECONDS
+        ):
             last["end"] = seg["end"]
-            last["text"] = (last.get("text", "") + " " + seg.get("text", "")).strip()
+            previous_words = timed_words(last)
+            current_words = timed_words(seg)
+            if previous_words and current_words:
+                last["words"] = previous_words + current_words
+                last["text"] = words_to_text(last["words"])
+            else:
+                last["text"] = (last.get("text", "") + " " + seg.get("text", "")).strip()
         else:
             merged.append(dict(seg))
     return merged
@@ -134,6 +162,7 @@ def recluster_with_anchors(
     audio_path = data.get("audio_file", "")
     segments = data.get("segments", [])
     names = data.get("speaker_names", {})
+    speaker_meta = data.get("speaker_meta", {}) or {}
 
     if not segments:
         return {"error": "no segments in JSON", "audio_file": audio_path}
@@ -144,7 +173,7 @@ def recluster_with_anchors(
     anchor_segments_by_name: dict[str, list[dict]] = defaultdict(list)
     for seg in segments:
         sid = int(seg.get("speaker_id", 0))
-        if _is_user_named(sid, names):
+        if _is_named_anchor(sid, names, speaker_meta):
             anchor_segments_by_name[names[str(sid)].strip()].append(seg)
 
     if not anchor_segments_by_name:
@@ -206,6 +235,12 @@ def recluster_with_anchors(
     kept = 0
     skipped_short = 0
     for seg in segments:
+        # Anchors are evidence, not candidates. Reassigning them can undo a
+        # confirmed correction simply because another anchor has a similar
+        # embedding.
+        if _is_named_anchor(int(seg.get("speaker_id", 0)), names, speaker_meta):
+            kept += 1
+            continue
         emb = _embed_segment(audio, seg["start"], seg["end"], onnx_session)
         if emb is None:
             skipped_short += 1
@@ -245,6 +280,10 @@ def recluster_with_anchors(
         if sid not in cleaned_names and sid in names:
             cleaned_names[sid] = names[sid]
     data["speaker_names"] = cleaned_names
+    active_ids = {str(int(seg.get("speaker_id", 0))) for seg in segments}
+    data["speaker_meta"] = {
+        sid: meta for sid, meta in speaker_meta.items() if sid in active_ids
+    }
 
     # Keep every segment's display name in sync with its (possibly new)
     # speaker_id — the .md renderer resolves via seg["speaker"], and doing

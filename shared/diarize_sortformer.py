@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from shared.word_timing import normalise_timed_word, timed_words, words_to_text
+
 
 _DIAR_MODEL_NAME = "nvidia/diar_sortformer_4spk-v1"
 _WINDOW_SEC = 300.0
@@ -255,12 +257,16 @@ def _assign_speakers_segment_level(whisper_segments, turns):
     for seg in whisper_segments:
         s, e = float(seg["start"]), float(seg["end"])
         spk = _pick_speaker_by_overlap(s, e, turns) or "Speaker 1"
-        out.append({
+        output = {
             "start": s,
             "end": e,
             "text": seg.get("text", "").strip(),
             "speaker": spk,
-        })
+        }
+        words = timed_words(seg)
+        if words:
+            output["words"] = words
+        out.append(output)
     return out
 
 
@@ -277,45 +283,51 @@ def _assign_speakers_word_level(whisper_segments, turns):
     that's missing per-word timestamps (or whose word list is empty)."""
     out: list[dict] = []
     for seg in whisper_segments:
-        words = seg.get("words") or []
+        words = timed_words(seg)
         seg_start = float(seg["start"])
         seg_end = float(seg["end"])
         if not words:
             spk = _pick_speaker_by_overlap(seg_start, seg_end, turns) or "Speaker 1"
-            out.append({
+            output = {
                 "start": seg_start,
                 "end": seg_end,
                 "text": seg.get("text", "").strip(),
                 "speaker": spk,
-            })
+            }
+            if words:
+                output["words"] = words
+            out.append(output)
             continue
 
         # Build per-word (start, end, text, speaker) then collapse runs
         runs: list[dict] = []
         for w in words:
-            try:
-                ws = float(w.get("start", seg_start))
-                we = float(w.get("end", seg_end))
-            except (TypeError, ValueError):
-                continue
-            wtext = (w.get("word") or w.get("text") or "").strip()
-            if not wtext:
-                continue
+            ws = float(w["start"])
+            we = float(w["end"])
+            wtext = w["word"]
             spk = _pick_speaker_by_overlap(ws, we, turns) or "Speaker 1"
             if runs and runs[-1]["speaker"] == spk:
                 runs[-1]["end"] = we
-                runs[-1]["text"] = (runs[-1]["text"] + " " + wtext).strip()
+                runs[-1]["words"].append(w)
+                runs[-1]["text"] = words_to_text(runs[-1]["words"])
             else:
-                runs.append({"start": ws, "end": we, "text": wtext, "speaker": spk})
+                runs.append({
+                    "start": ws,
+                    "end": we,
+                    "text": wtext,
+                    "words": [w],
+                    "speaker": spk,
+                })
 
         if not runs:
             spk = _pick_speaker_by_overlap(seg_start, seg_end, turns) or "Speaker 1"
-            out.append({
+            output = {
                 "start": seg_start,
                 "end": seg_end,
                 "text": seg.get("text", "").strip(),
                 "speaker": spk,
-            })
+            }
+            out.append(output)
         else:
             out.extend(runs)
     return out
@@ -584,7 +596,13 @@ def diarize(
             continue
         if segments_out and segments_out[-1]["speaker_id"] == seg["speaker_id"]:
             segments_out[-1]["end"] = seg["end"]
-            segments_out[-1]["text"] = (segments_out[-1]["text"] + " " + seg["text"]).strip()
+            previous_words = timed_words(segments_out[-1])
+            current_words = timed_words(seg)
+            if previous_words and current_words:
+                segments_out[-1]["words"] = previous_words + current_words
+                segments_out[-1]["text"] = words_to_text(segments_out[-1]["words"])
+            else:
+                segments_out[-1]["text"] = (segments_out[-1]["text"] + " " + seg["text"]).strip()
         else:
             segments_out.append(dict(seg))
 

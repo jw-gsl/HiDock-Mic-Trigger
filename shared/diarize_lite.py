@@ -12,6 +12,7 @@ Techniques inspired by silverstein/minutes:
 from __future__ import annotations
 
 import bisect
+import math
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from scipy.spatial.distance import cosine as cosine_distance
 from shared.audio_utils import extract_embedding, load_audio, segment_audio
 from shared.models import ensure_silero_vad
 from shared.voice_library_lite import identify_speaker
+from shared.word_timing import timed_words, words_to_text
 
 _VAD_SR = 16000
 _VAD_WINDOW_SIZE = 256  # 16ms at 16kHz (Silero VAD v5)
@@ -800,7 +802,7 @@ def _filter_hallucinations(segments: list[dict], max_repeats: int = 3) -> list[d
 # ── Segment splitting ───────────────────────────────────────────────────────
 
 def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED_SEGMENT_SECONDS) -> list[dict]:
-    """Split segments exceeding max_duration at sentence boundaries."""
+    """Split long segments while preserving exact word timing when present."""
     result = []
     for seg in segments:
         dur = seg.get("end", 0) - seg.get("start", 0)
@@ -808,7 +810,37 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
             result.append(seg)
             continue
 
+        # Parakeet supplies exact token timing. Never replace that with a
+        # character/word-count approximation: the approximation is what made
+        # karaoke drift and hid speaker changes inside very long blocks.
+        words = timed_words(seg)
+        if words:
+            chunk: list[dict] = []
+            chunk_start = float(seg["start"])
+            for word in words:
+                if chunk and float(word["end"]) - chunk_start > max_duration:
+                    result.append({
+                        **seg,
+                        "start": chunk_start,
+                        "end": chunk[-1]["end"],
+                        "text": words_to_text(chunk),
+                        "words": chunk,
+                    })
+                    chunk = []
+                    chunk_start = float(word["start"])
+                chunk.append(word)
+            if chunk:
+                result.append({
+                    **seg,
+                    "start": chunk_start,
+                    "end": float(seg["end"]),
+                    "text": words_to_text(chunk),
+                    "words": chunk,
+                })
+            continue
+
         text = seg.get("text", "")
+        forced_word_chunks: list[str] | None = None
         # Split at sentence boundaries first
         sentences = text.replace("? ", "?\n").replace(". ", ".\n").replace("! ", "!\n").split("\n")
         sentences = [s.strip() for s in sentences if s.strip()]
@@ -831,12 +863,18 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
         # Last resort: split by word count when no punctuation at all
         if len(sentences) <= 1:
             words = text.split()
-            if len(words) > 20:
-                # Split into chunks of ~100 words (~90s of speech at ~130wpm)
-                chunk_size = max(int(len(words) * max_duration / dur), 20)
+            if len(words) > 1:
+                # A long single sentence is still a monster block. Split it
+                # into enough word groups to satisfy the duration cap rather
+                # than leaving the whole paragraph intact just because it has
+                # no punctuation. This is especially important for older
+                # Whisper sidecars whose segments have no word timestamps.
+                required_chunks = max(2, math.ceil(dur / max_duration))
+                chunk_size = max(1, math.ceil(len(words) / required_chunks))
                 sentences = []
                 for i in range(0, len(words), chunk_size):
                     sentences.append(" ".join(words[i:i + chunk_size]))
+                forced_word_chunks = sentences
             else:
                 result.append(seg)
                 continue
@@ -848,6 +886,24 @@ def _split_long_segments(segments: list[dict], max_duration: float = _MAX_MERGED
 
         start = seg["start"]
         total_dur = seg["end"] - seg["start"]
+
+        if forced_word_chunks:
+            # The word chunks above are synthetic because this legacy segment
+            # has no word timestamps. Give each chunk a bounded, continuous
+            # time slice instead of character-proportional timing, which can
+            # overshoot the cap when one chunk is relatively long.
+            chunk_dur = total_dur / len(forced_word_chunks)
+            for index, chunk_text in enumerate(forced_word_chunks):
+                chunk_start = start + index * chunk_dur
+                chunk_end = seg["end"] if index == len(forced_word_chunks) - 1 else start + (index + 1) * chunk_dur
+                result.append({
+                    **seg,
+                    "start": chunk_start,
+                    "end": chunk_end,
+                    "text": chunk_text,
+                })
+            continue
+
         current_start = start
         current_text = []
         current_chars = 0
@@ -1077,12 +1133,16 @@ def diarize(
     # Step 11: Build output, merge same-speaker, split long segments
     raw_segments = []
     for ws, spk in zip(whisper_segments, ws_speakers):
-        raw_segments.append({
+        output = {
             "start": ws["start"], "end": ws["end"],
             "text": ws.get("text", "").strip(),
             "speaker": speaker_names.get(str(spk), f"Speaker {spk + 1}"),
             "speaker_id": spk,
-        })
+        }
+        words = timed_words(ws)
+        if words:
+            output["words"] = words
+        raw_segments.append(output)
 
     # Anonymize non-speech events (from minutes v0.11.0)
     raw_segments = _anonymize_non_speech(raw_segments)
@@ -1094,7 +1154,13 @@ def diarize(
             continue
         if segments_out and segments_out[-1]["speaker_id"] == seg["speaker_id"]:
             segments_out[-1]["end"] = seg["end"]
-            segments_out[-1]["text"] += " " + seg["text"]
+            previous_words = timed_words(segments_out[-1])
+            current_words = timed_words(seg)
+            if previous_words and current_words:
+                segments_out[-1]["words"] = previous_words + current_words
+                segments_out[-1]["text"] = words_to_text(segments_out[-1]["words"])
+            else:
+                segments_out[-1]["text"] += " " + seg["text"]
         else:
             segments_out.append(dict(seg))
 
@@ -1123,12 +1189,22 @@ def _build_single_speaker_result(audio_path, whisper_segments):
             continue
         if segments_out:
             segments_out[-1]["end"] = ws["end"]
-            segments_out[-1]["text"] += " " + text
+            previous_words = timed_words(segments_out[-1])
+            current_words = timed_words(ws)
+            if previous_words and current_words:
+                segments_out[-1]["words"] = previous_words + current_words
+                segments_out[-1]["text"] = words_to_text(segments_out[-1]["words"])
+            else:
+                segments_out[-1]["text"] += " " + text
         else:
-            segments_out.append({
+            output = {
                 "start": ws["start"], "end": ws["end"], "text": text,
                 "speaker": "Speaker 1", "speaker_id": 0,
-            })
+            }
+            words = timed_words(ws)
+            if words:
+                output["words"] = words
+            segments_out.append(output)
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
     return {
         "version": 1, "audio_file": str(audio_path),

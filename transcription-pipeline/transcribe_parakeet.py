@@ -90,14 +90,35 @@ def _load_parakeet():
 
 def _parakeet_result_to_segments(result) -> list[dict]:
     """Convert parakeet-mlx AlignedSentence objects to the shape used by our
-    pipeline (matching OpenAI Whisper's segments output: start/end/text)."""
+    pipeline (matching OpenAI Whisper's segments output, plus word timing)."""
+    from shared.word_timing import aligned_tokens_to_words, words_to_text
+
     segments = []
     for sent in result.sentences:
-        segments.append({
+        start = float(sent.start)
+        end = float(sent.end)
+        raw_tokens = []
+        for token in (getattr(sent, "tokens", None) or getattr(sent, "words", None) or []):
+            raw_tokens.append({
+                "text": getattr(token, "text", None) or getattr(token, "word", None),
+                "start": getattr(token, "start", None),
+                "end": getattr(token, "end", None),
+                "confidence": getattr(token, "confidence", None),
+            })
+        words = aligned_tokens_to_words(
+            raw_tokens,
+            default_start=start,
+            default_end=end,
+        )
+
+        output = {
             "start": float(sent.start),
             "end": float(sent.end),
-            "text": sent.text,
-        })
+            "text": (sent.text or "").strip() or words_to_text(words),
+        }
+        if words:
+            output["words"] = words
+        segments.append(output)
     return segments
 
 
