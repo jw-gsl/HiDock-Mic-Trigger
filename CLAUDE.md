@@ -72,8 +72,8 @@ per-change gate. Until then, don't auto-add "update the Windows app" or
 "update PARITY.md" steps to feature work.
 
 ### For testing on Mac:
-- Build with **Debug** configuration — deploys to `/Applications/HiDock Mic Trigger.app` (same location as Release)
-- There is only one app bundle on the machine (no Dev.app split): a build kills the running instance, replaces the app, re-signs, and relaunches via the "Deploy to Applications" post-build script
+- Build with **Debug** configuration — after approval, deploys to `/Applications/HiDock Mic Trigger.app` (same location as Release)
+- There is only one app bundle on the machine (no Dev.app split): the post-build script asks for approval before killing the running instance, replacing the app, re-signing, and relaunching it
 - Debug still defines the `DEBUG` Swift compile flag so `#if DEBUG` blocks work as expected
 
 ### For testing Windows changes:
@@ -102,11 +102,11 @@ xcodegen generate   # brew install xcodegen — keeps the .xcodeproj in sync wit
 xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug -derivedDataPath /tmp/hidock-build
 ```
 
-(Use `-configuration Release` for optimised production builds. Both configurations deploy to the same location.)
+(Use `-configuration Release` for optimised production builds. Both configurations use the same approval dialog and deploy to the same location.)
 
 ### Deploy
 
-Deploy is **automatic** — the target's "Deploy to Applications" post-build script runs after every local `xcodebuild` (skipped when `CI=true`). It:
+Build/deploy is **approval-gated** — the target's "Deploy to Applications" post-build script shows a native macOS approval for local `xcodebuild` runs. A local validation build with `CI=true` still asks for build approval, then skips deployment; only headless GitHub Actions (`GITHUB_ACTIONS=true`) bypasses the dialog. It:
 
 1. Kills running `hidock-mic-trigger` processes
 2. Removes stale copies (`/Applications/HiDock Mic Trigger.app`, legacy `HiDock Mic Trigger Dev.app`, old lowercase `hidock-mic-trigger.app`, and any `~/Applications/` duplicates)
