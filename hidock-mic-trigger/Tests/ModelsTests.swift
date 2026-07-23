@@ -194,3 +194,69 @@ final class SyncRecordingEntryTests: XCTestCase {
         XCTAssertEqual(entry.deviceProductId, 45068)
     }
 }
+
+final class SegmentSelectionTests: XCTestCase {
+
+    func testSelectionCoversBoundaryAndMiddleSegments() {
+        let selection = SegmentSelection(
+            anchor: WordPosition(segmentIndex: 1, wordIndex: 2),
+            focus: WordPosition(segmentIndex: 3, wordIndex: 1)
+        )
+
+        XCTAssertEqual(selection.wordRange(for: 1, wordCount: 5), 2...4)
+        XCTAssertEqual(selection.wordRange(for: 2, wordCount: 4), 0...3)
+        XCTAssertEqual(selection.wordRange(for: 3, wordCount: 6), 0...1)
+        XCTAssertNil(selection.wordRange(for: 0, wordCount: 4))
+    }
+
+    func testReverseSelectionNormalisesToTranscriptOrder() {
+        let selection = SegmentSelection(
+            anchor: WordPosition(segmentIndex: 3, wordIndex: 1),
+            focus: WordPosition(segmentIndex: 1, wordIndex: 2)
+        )
+
+        XCTAssertEqual(selection.start, WordPosition(segmentIndex: 1, wordIndex: 2))
+        XCTAssertEqual(selection.end, WordPosition(segmentIndex: 3, wordIndex: 1))
+        XCTAssertTrue(selection.contains(WordPosition(segmentIndex: 2, wordIndex: 0)))
+        XCTAssertFalse(selection.contains(WordPosition(segmentIndex: 1, wordIndex: 1)))
+    }
+}
+
+final class TranscriptRediarizeStatusTests: XCTestCase {
+
+    func testRunningStateIsRepresented() {
+        let status = TranscriptRediarizeStatus.running
+        if case .running = status {
+            XCTAssertTrue(true)
+        } else {
+            XCTFail("Expected running state")
+        }
+    }
+
+    func testSuccessWithChangesIsMarkedChanged() {
+        let summary = TranscriptRediarizeSummary(
+            beforeSpeakerCount: 2,
+            afterSpeakerCount: 3,
+            changedSegmentAssignments: 7
+        )
+        XCTAssertTrue(summary.hasChanges)
+    }
+
+    func testSuccessWithoutChangesIsMarkedStable() {
+        let summary = TranscriptRediarizeSummary(
+            beforeSpeakerCount: 2,
+            afterSpeakerCount: 2,
+            changedSegmentAssignments: 0
+        )
+        XCTAssertFalse(summary.hasChanges)
+    }
+
+    func testFailureStateCarriesMessage() {
+        let status = TranscriptRediarizeStatus.failed("audio unavailable")
+        if case .failed(let message) = status {
+            XCTAssertEqual(message, "audio unavailable")
+        } else {
+            XCTFail("Expected failure state")
+        }
+    }
+}

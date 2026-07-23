@@ -53,9 +53,43 @@ targets:
         script: |
           set -euo pipefail
 
-          # Skip deploy on CI (GitHub Actions sets CI=true)
+          # GitHub Actions is genuinely headless, so it must not attempt a
+          # native dialog. A local validation build may also set CI=true to
+          # suppress deployment; it still requires an explicit build approval.
+          IS_GITHUB_CI="${GITHUB_ACTIONS:-}"
+          LOCAL_NON_DEPLOYING="false"
+          if [ "${CI:-}" = "true" ] && [ "$IS_GITHUB_CI" != "true" ]; then
+            LOCAL_NON_DEPLOYING="true"
+          fi
+          if [ "$IS_GITHUB_CI" = "true" ]; then
+            echo "note: Skipping build approval and deployment on GitHub Actions"
+            exit 0
+          fi
+
+          if [ "$LOCAL_NON_DEPLOYING" = "true" ]; then
+            BUILD_APPROVED=$(/usr/bin/osascript \
+              -e 'display dialog "A local HiDock validation build is ready to run. Deployment is disabled for this build, but the build may still interrupt active work if it is already using the app." buttons {"Decline", "Approve Build"} default button "Decline" cancel button "Decline" with title "Approve HiDock rebuild"' \
+              -e 'button returned of the result' 2>/dev/null || true)
+            if [ "$BUILD_APPROVED" != "Approve Build" ]; then
+              echo "note: Local build approval declined; deployment remains disabled"
+              exit 0
+            fi
+            echo "note: Local build approved; deployment remains disabled (CI=true)"
+          else
+            # Local builds replace the installed app, terminate the running
+            # process, and can interrupt recording/transcription. Cancel is
+            # the safe default.
+            DEPLOY_APPROVED=$(/usr/bin/osascript \
+              -e 'display dialog "A HiDock build is ready to replace the installed app and relaunch it. This will close the current app and may interrupt active work." buttons {"Cancel", "Replace App"} default button "Cancel" cancel button "Cancel" with title "Approve HiDock app replacement"' \
+              -e 'button returned of the result' 2>/dev/null || true)
+            if [ "$DEPLOY_APPROVED" != "Replace App" ]; then
+              echo "note: Deployment cancelled; the installed app was not changed"
+              exit 0
+            fi
+          fi
+
+          # CI=true local validation builds stop after the approval above.
           if [ "${CI:-}" = "true" ]; then
-            echo "note: Skipping deploy on CI"
             exit 0
           fi
 

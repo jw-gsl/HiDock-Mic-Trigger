@@ -1,15 +1,26 @@
 import SwiftUI
 
+private struct RecordingsRowFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
 struct RecordingsTableView: View {
     @ObservedObject var viewModel: HiDockViewModel
-    /// Track whether we've programmatically scrolled to the top for the
-    /// first non-empty row set. Without this, SwiftUI's List keeps a
+    /// Track whether we've programmatically restored the initial position for
+    /// the first non-empty row set. Without this, SwiftUI's List keeps a
     /// stale scroll anchor from a prior render (common when the initial
     /// paint-from-cache populate replaces entries with the live-probe
     /// result a second later), leaving the user on row ~5 of 284 instead
-    /// of row 1. One-shot anchor — after the first jump we let the user
-    /// scroll freely.
+    /// of the intended row. One-shot restore — after that we let the user
+    /// scroll freely and record the visible row in the view model.
     @State private var didScrollToTop = false
+    /// Prevent the newly-created table's initial top-row geometry from
+    /// overwriting the anchor we are about to restore after opening a tab.
+    @State private var restoringScroll = false
 
     /// Hide the lower-priority columns (Transcribed date, Size) when the detail
     /// pane is open so the narrowed list fits without much horizontal scrolling.
@@ -65,31 +76,59 @@ struct RecordingsTableView: View {
             // Rows
             ScrollViewReader { proxy in
                 List(viewModel.displayRows) { row in
-                    switch row {
-                    case .recording(let entry):
-                        recordingRow(entry: entry, indented: false)
-                            .contextMenu { entryContextMenu(entry: entry) }
-                            .id(row.id)
-                    case .mergeParent(let group):
-                        mergeParentRow(group: group)
-                            .id(row.id)
-                    case .mergeChild(let entry):
-                        recordingRow(entry: entry, indented: true)
-                            .contextMenu { entryContextMenu(entry: entry) }
-                            .id(row.id)
+                    Group {
+                        switch row {
+                        case .recording(let entry):
+                            recordingRow(entry: entry, indented: false)
+                                .contextMenu { entryContextMenu(entry: entry) }
+                        case .mergeParent(let group):
+                            mergeParentRow(group: group)
+                        case .mergeChild(let entry):
+                            recordingRow(entry: entry, indented: true)
+                                .contextMenu { entryContextMenu(entry: entry) }
+                        }
                     }
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: RecordingsRowFramesKey.self,
+                                value: [row.id: geometry.frame(in: .named("recordings-table"))]
+                            )
+                        }
+                    )
+                    .id(row.id)
                 }
                 .listStyle(.plain)
+                .coordinateSpace(name: "recordings-table")
+                .onAppear {
+                    restoreScrollPosition(using: proxy)
+                }
+                .onPreferenceChange(RecordingsRowFramesKey.self) { frames in
+                    guard didScrollToTop, !restoringScroll else { return }
+                    // The first row whose bottom is still below the viewport's
+                    // top is the row the user is currently looking at. Keeping
+                    // that id in the view model lets the table be rebuilt by
+                    // the sidecar split without jumping back to row one.
+                    guard let top = frames
+                        .filter({ $0.value.maxY > 0 })
+                        .min(by: { $0.value.minY < $1.value.minY }) else { return }
+                    viewModel.recordingsTableScrollAnchor = top.key
+                }
                 .onChange(of: viewModel.displayRows.count) { newCount in
                     guard !didScrollToTop, newCount > 0,
                           let firstId = viewModel.displayRows.first?.id else { return }
                     didScrollToTop = true
+                    restoringScroll = true
                     // Run on next tick so SwiftUI has laid out the rows
                     // before we ask it to scroll.
                     DispatchQueue.main.async {
                         withAnimation(.none) {
-                            proxy.scrollTo(firstId, anchor: .top)
+                            let target = viewModel.displayRows.first(where: {
+                                $0.id == viewModel.recordingsTableScrollAnchor
+                            })?.id ?? firstId
+                            proxy.scrollTo(target, anchor: .top)
                         }
+                        restoringScroll = false
                     }
                 }
                 // User clicked the "N merge suggestions" toolbar label —
@@ -122,6 +161,24 @@ struct RecordingsTableView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private func restoreScrollPosition(using proxy: ScrollViewProxy) {
+        guard !didScrollToTop, !viewModel.displayRows.isEmpty else { return }
+        let firstId = viewModel.displayRows.first!.id
+        let target = viewModel.displayRows.first(where: { $0.id == viewModel.recordingsTableScrollAnchor })?.id ?? firstId
+        didScrollToTop = true
+        restoringScroll = true
+        DispatchQueue.main.async {
+            withAnimation(.none) {
+                proxy.scrollTo(target, anchor: .top)
+            }
+            // Let the restored geometry settle before accepting a new visible
+            // row as the user's current anchor.
+            DispatchQueue.main.async {
+                restoringScroll = false
             }
         }
     }

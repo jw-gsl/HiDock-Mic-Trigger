@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Data Model
@@ -6,13 +7,50 @@ struct VoiceLibrarySpeaker: Identifiable {
     let id: String
     let name: String
     let sampleCount: Int
+    /// Distinct recording sources represented by this profile.
+    let meetingCount: Int
     let lastUpdated: String
+    let profileStatus: String
+
+    init(
+        id: String,
+        name: String,
+        sampleCount: Int,
+        meetingCount: Int = 0,
+        lastUpdated: String,
+        profileStatus: String = "thin"
+    ) {
+        self.id = id
+        self.name = name
+        self.sampleCount = sampleCount
+        self.meetingCount = meetingCount
+        self.lastUpdated = lastUpdated
+        self.profileStatus = profileStatus
+    }
+}
+
+struct VoiceLibrarySample: Identifiable {
+    let id: String
+    let source: String
+    let addedAt: String
+    let updatedAt: String
+    let sourceFile: String?
+    let audioFile: String?
+    let speakerId: String?
+    let segmentStart: Double?
+    let segmentEnd: Double?
+    let model: String?
+    let qualityScore: Double?
+    let qualityState: String?
+    let isActive: Bool?
 }
 
 // MARK: - VoiceLibraryView
 
 enum VoiceSortKey: String, CaseIterable, Identifiable {
-    case name, samples, meetings, updated
+    // Keep the control order aligned with the requested default workflow:
+    // meeting coverage first, then sample depth, name, and recency.
+    case meetings, samples, name, updated
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -29,14 +67,31 @@ struct VoiceLibraryView: View {
     @State private var editingId: String? = nil
     @State private var editingName: String = ""
     @State private var search = ""
-    @State private var sortKey: VoiceSortKey = .name
+    // Meeting coverage is the most useful default: people who appear most
+    // often are the highest-value profiles to keep improving.
+    @State private var sortKey: VoiceSortKey = .meetings
     /// When set, show a picker to merge this speaker into another library name.
     @State private var mergingFrom: VoiceLibrarySpeaker? = nil
     @State private var mergeTargetName: String = ""
+    @State private var selectionMode = false
+    @State private var selectedSpeakerIDs: Set<String> = []
+    @State private var confirmBulkDelete = false
+    @State private var samplesFor: VoiceLibrarySpeaker? = nil
+    @State private var samples: [VoiceLibrarySample] = []
+    @State private var samplesLoading = false
+    @StateObject private var samplePlayer = SegmentAudioPlayer()
     let onDelete: (String) -> Void
     let onRename: (String, String) -> Void
+    var onListSamples: ((String, @escaping ([VoiceLibrarySample]) -> Void) -> Void)? = nil
+    var onDeleteSample: ((String, String) -> Void)? = nil
+    /// Backfill trustworthy historical meeting exemplars for one person.
+    var onBackfill: ((String) -> Void)? = nil
     /// person name → number of meetings they appear in (for display + sort).
     var meetingCounts: [String: Int] = [:]
+    /// Aggregate totals for the full library. Meeting count is already
+    /// deduplicated across speakers by the backend summary command.
+    var totalMeetingCount: Int = 0
+    var totalSampleCount: Int = 0
     /// Filter the main recordings list to meetings this person is in.
     var onFilterToPerson: ((String) -> Void)? = nil
 
@@ -45,12 +100,38 @@ struct VoiceLibraryView: View {
         let filtered = q.isEmpty ? speakers
             : speakers.filter { $0.name.lowercased().contains(q) }
         return filtered.sorted { a, b in
+            // The default order is meetings → samples → name → recent. Keep
+            // the same deterministic tie-breakers when the user chooses a
+            // different primary sort, so rows do not shuffle unpredictably.
+            let keys: [VoiceSortKey]
             switch sortKey {
-            case .name: return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-            case .samples: return a.sampleCount > b.sampleCount
-            case .meetings: return (meetingCounts[a.name] ?? 0) > (meetingCounts[b.name] ?? 0)
-            case .updated: return a.lastUpdated > b.lastUpdated
+            case .meetings:
+                keys = [.meetings, .samples, .name, .updated]
+            case .samples:
+                keys = [.samples, .meetings, .name, .updated]
+            case .name:
+                keys = [.name, .meetings, .samples, .updated]
+            case .updated:
+                keys = [.updated, .meetings, .samples, .name]
             }
+
+            for key in keys {
+                switch key {
+                case .meetings:
+                    let left = a.meetingCount > 0 ? a.meetingCount : (meetingCounts[a.name] ?? 0)
+                    let right = b.meetingCount > 0 ? b.meetingCount : (meetingCounts[b.name] ?? 0)
+                    if left != right { return left > right }
+                case .samples:
+                    if a.sampleCount != b.sampleCount { return a.sampleCount > b.sampleCount }
+                case .name:
+                    let comparison = a.name.localizedCaseInsensitiveCompare(b.name)
+                    if comparison != .orderedSame { return comparison == .orderedAscending }
+                case .updated:
+                    if a.lastUpdated != b.lastUpdated { return a.lastUpdated > b.lastUpdated }
+                }
+            }
+
+            return a.id.localizedCaseInsensitiveCompare(b.id) == .orderedAscending
         }
     }
 
@@ -63,9 +144,11 @@ struct VoiceLibraryView: View {
                 Text("Voice Library")
                     .font(.headline)
                 Spacer()
-                Text("\(speakers.count) speaker\(speakers.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                HStack(spacing: 10) {
+                    libraryTotal(value: speakers.count, label: "speaker", plural: "speakers")
+                    libraryTotal(value: totalMeetingCount, label: "meeting", plural: "meetings")
+                    libraryTotal(value: totalSampleCount, label: "sample", plural: "samples")
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -85,6 +168,26 @@ struct VoiceLibraryView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 260)
+                Spacer(minLength: 0)
+                if selectionMode && !selectedSpeakerIDs.isEmpty {
+                    Text("\(selectedSpeakerIDs.count) selected")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button(role: .destructive) {
+                        confirmBulkDelete = true
+                    } label: {
+                        Label("Remove", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                if speakers.count > 1 {
+                    Button(selectionMode ? "Done" : "Select") {
+                        selectionMode.toggle()
+                        if !selectionMode { selectedSpeakerIDs.removeAll() }
+                    }
+                    .buttonStyle(.bordered)
+                    .help(selectionMode ? "Finish selecting speakers" : "Select multiple speakers to remove them together")
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -98,6 +201,25 @@ struct VoiceLibraryView: View {
             }
         }
         .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
+        .alert("Remove selected speakers?", isPresented: $confirmBulkDelete) {
+            Button("Cancel", role: .cancel) { }
+            Button("Remove", role: .destructive) {
+                deleteSelectedSpeakers()
+            }
+        } message: {
+            Text("This removes their voice samples from the library. Their existing transcripts are not changed.")
+        }
+    }
+
+    private func libraryTotal(value: Int, label: String, plural: String) -> some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text("\(value)")
+                .font(.caption.weight(.semibold))
+            Text(value == 1 ? label : plural)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .help("\(value) \(value == 1 ? label : plural)")
     }
 
     // MARK: - Empty State
@@ -126,6 +248,21 @@ struct VoiceLibraryView: View {
         List {
             ForEach(visibleSpeakers) { speaker in
                 HStack {
+                    if selectionMode {
+                        Toggle(
+                            "Select \(speaker.name)",
+                            isOn: Binding(
+                                get: { selectedSpeakerIDs.contains(speaker.id) },
+                                set: { selected in
+                                    if selected { selectedSpeakerIDs.insert(speaker.id) }
+                                    else { selectedSpeakerIDs.remove(speaker.id) }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+                    }
+
                     if let onFilterToPerson = onFilterToPerson {
                         Button {
                             onFilterToPerson(speaker.name)
@@ -155,10 +292,34 @@ struct VoiceLibraryView: View {
 
                     Spacer()
 
-                    let meetings = meetingCounts[speaker.name] ?? 0
-                    Text("\(speaker.sampleCount) sample\(speaker.sampleCount == 1 ? "" : "s") · \(meetings) meeting\(meetings == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    let meetings = speaker.meetingCount > 0
+                        ? speaker.meetingCount
+                        : (meetingCounts[speaker.name] ?? 0)
+                    Button {
+                        openSamples(for: speaker)
+                    } label: {
+                        Text("\(speaker.sampleCount) sample\(speaker.sampleCount == 1 ? "" : "s") · \(meetings) meeting\(meetings == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(onListSamples == nil)
+                    .help("Inspect and audition the samples behind this voice")
+
+                    if let onBackfill = onBackfill {
+                        Button {
+                            onBackfill(speaker.name)
+                        } label: {
+                            Image(systemName: "arrow.clockwise.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Backfill trustworthy historical meeting samples")
+                    }
+
+                    Text(profileStatusLabel(speaker.profileStatus))
+                        .font(.caption2.weight(.medium))
+                        .foregroundColor(profileStatusColor(speaker.profileStatus))
+                        .help("Voice profile depth: \(profileStatusHelp(speaker.profileStatus))")
 
                     if !speaker.lastUpdated.isEmpty {
                         Text(formatDate(speaker.lastUpdated))
@@ -191,6 +352,9 @@ struct VoiceLibraryView: View {
         }
         .sheet(item: $mergingFrom) { source in
             mergeSheet(source: source)
+        }
+        .sheet(item: $samplesFor) { speaker in
+            samplesSheet(for: speaker)
         }
     }
 
@@ -251,7 +415,9 @@ struct VoiceLibraryView: View {
                 id: target.id,
                 name: target.name,
                 sampleCount: target.sampleCount + source.sampleCount,
-                lastUpdated: target.lastUpdated
+                meetingCount: target.meetingCount + source.meetingCount,
+                lastUpdated: target.lastUpdated,
+                profileStatus: target.profileStatus
             )
             speakers.remove(at: si)
         } else {
@@ -276,7 +442,9 @@ struct VoiceLibraryView: View {
                 id: kept.id,
                 name: kept.name,
                 sampleCount: kept.sampleCount + speaker.sampleCount,
-                lastUpdated: kept.lastUpdated
+                meetingCount: kept.meetingCount + speaker.meetingCount,
+                lastUpdated: kept.lastUpdated,
+                profileStatus: kept.profileStatus
             )
             speakers.removeAll { $0.id == speaker.id }
         } else if let index = speakers.firstIndex(where: { $0.id == speaker.id }) {
@@ -284,7 +452,9 @@ struct VoiceLibraryView: View {
                 id: trimmed,
                 name: trimmed,
                 sampleCount: speaker.sampleCount,
-                lastUpdated: speaker.lastUpdated
+                meetingCount: speaker.meetingCount,
+                lastUpdated: speaker.lastUpdated,
+                profileStatus: speaker.profileStatus
             )
         }
         editingId = nil
@@ -292,7 +462,212 @@ struct VoiceLibraryView: View {
 
     private func deleteSpeaker(_ speaker: VoiceLibrarySpeaker) {
         onDelete(speaker.name)
+        selectedSpeakerIDs.remove(speaker.id)
         speakers.removeAll { $0.id == speaker.id }
+    }
+
+    private func deleteSelectedSpeakers() {
+        let selected = speakers.filter { selectedSpeakerIDs.contains($0.id) }
+        for speaker in selected {
+            onDelete(speaker.name)
+        }
+        speakers.removeAll { selectedSpeakerIDs.contains($0.id) }
+        selectedSpeakerIDs.removeAll()
+        selectionMode = false
+    }
+
+    // MARK: - Samples
+
+    private func openSamples(for speaker: VoiceLibrarySpeaker) {
+        guard let onListSamples = onListSamples else { return }
+        samplePlayer.stop()
+        samplesFor = speaker
+        samples = []
+        samplesLoading = true
+        onListSamples(speaker.name) { loaded in
+            DispatchQueue.main.async {
+                guard samplesFor?.id == speaker.id else { return }
+                samples = loaded
+                samplesLoading = false
+            }
+        }
+    }
+
+    private func samplesSheet(for speaker: VoiceLibrarySpeaker) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Samples for \(speaker.name)")
+                        .font(.headline)
+                    Text("One exemplar per meeting is retained; remove clips that are noisy or misattributed.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Text("\(samples.count) sample\(samples.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button {
+                    samplesFor = nil
+                } label: {
+                    Label("Close", systemImage: "xmark")
+                }
+                .keyboardShortcut(.cancelAction)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(16)
+
+            Divider()
+
+            if samplesLoading {
+                VStack {
+                    Spacer()
+                    ProgressView("Loading sample provenance…")
+                    Spacer()
+                }
+            } else if samples.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "waveform.slash")
+                        .font(.system(size: 30))
+                        .foregroundColor(.secondary)
+                    Text("No sample provenance is available for this profile.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                List {
+                    ForEach(samples) { sample in
+                        sampleRow(sample, speaker: speaker)
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 560, minHeight: 360)
+        .onDisappear {
+            samplePlayer.stop()
+        }
+    }
+
+    private func sampleRow(_ sample: VoiceLibrarySample, speaker: VoiceLibrarySpeaker) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                toggleSamplePlayback(sample)
+            } label: {
+                Image(systemName: samplePlayer.playingSegmentId == sample.id ? "stop.fill" : "play.fill")
+                    .frame(width: 18)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canPlay(sample))
+            .help(canPlay(sample) ? "Play representative clip" : "Source audio is unavailable")
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(sampleMeetingName(sample))
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(sample.source.capitalized)
+                    if let range = sampleRange(sample) {
+                        Text("·")
+                        Text(range)
+                    }
+                    if let model = sample.model, !model.isEmpty {
+                        Text("·")
+                        Text(model)
+                    }
+                    if let quality = sample.qualityScore {
+                        Text("·")
+                        Text("quality \(Int((quality * 100).rounded()))%")
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if let active = sample.isActive {
+                Text(active ? "Active" : "Archived")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(active ? .green : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background((active ? Color.green : Color.secondary).opacity(0.12))
+                    .clipShape(Capsule())
+                    .help(active
+                        ? "Used for automatic voice matching"
+                        : "Retained as provenance-backed evidence, but excluded from automatic matching")
+            }
+
+            if let sourceFile = sample.sourceFile, !sourceFile.isEmpty {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: sourceFile)])
+                } label: {
+                    Image(systemName: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("Show the diarization sidecar")
+            }
+
+            Button(role: .destructive) {
+                samplePlayer.stop()
+                onDeleteSample?(speaker.name, sample.id)
+                samples.removeAll { $0.id == sample.id }
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this voice sample")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func canPlay(_ sample: VoiceLibrarySample) -> Bool {
+        guard let audioFile = sample.audioFile,
+              let start = sample.segmentStart,
+              let end = sample.segmentEnd,
+              end > start else { return false }
+        return FileManager.default.fileExists(atPath: audioFile)
+    }
+
+    private func toggleSamplePlayback(_ sample: VoiceLibrarySample) {
+        guard let audioFile = sample.audioFile,
+              let start = sample.segmentStart,
+              let end = sample.segmentEnd else { return }
+        if samplePlayer.playingSegmentId == sample.id {
+            samplePlayer.stop()
+        } else {
+            samplePlayer.play(
+                audioPath: audioFile,
+                start: start,
+                end: end,
+                segmentId: sample.id
+            )
+        }
+    }
+
+    private func sampleMeetingName(_ sample: VoiceLibrarySample) -> String {
+        let path = sample.sourceFile ?? sample.audioFile ?? "Unknown meeting"
+        var name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        if name.hasSuffix("_diarized") {
+            name = String(name.dropLast("_diarized".count))
+        }
+        return name.isEmpty ? "Unknown meeting" : name
+    }
+
+    private func sampleRange(_ sample: VoiceLibrarySample) -> String? {
+        guard let start = sample.segmentStart, let end = sample.segmentEnd, end > start else {
+            return nil
+        }
+        return "\(formatDuration(start))–\(formatDuration(end))"
+    }
+
+    private func formatDuration(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     private func formatDate(_ isoString: String) -> String {
@@ -313,5 +688,29 @@ struct VoiceLibraryView: View {
             return display.string(from: date)
         }
         return isoString
+    }
+
+    private func profileStatusLabel(_ status: String) -> String {
+        switch status {
+        case "healthy": return "Healthy"
+        case "usable": return "Usable"
+        default: return "Needs samples"
+        }
+    }
+
+    private func profileStatusColor(_ status: String) -> Color {
+        switch status {
+        case "healthy": return .green
+        case "usable": return .orange
+        default: return .secondary
+        }
+    }
+
+    private func profileStatusHelp(_ status: String) -> String {
+        switch status {
+        case "healthy": return "at least 12 samples across 5 meetings"
+        case "usable": return "at least 5 samples across 3 meetings; more varied meetings will improve it"
+        default: return "fewer than 5 samples or fewer than 3 meetings"
+        }
     }
 }

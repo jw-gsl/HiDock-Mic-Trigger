@@ -245,6 +245,29 @@ final class HiDockViewModel: ObservableObject {
             hiddenStatuses.insert(status)
         }
     }
+
+    /// Whether the recordings table is narrowed by any user-facing filter.
+    /// Sorting and selection are deliberately not included: this reset is for
+    /// visibility filters only.
+    var hasActiveRecordingFilters: Bool {
+        syncFilterDeviceId != nil
+            || !syncFilterPeople.isEmpty
+            || !statusFilters.subtracting([.all]).isEmpty
+            || summaryTypeFilter != nil
+            || heatmapSelectedDay != nil
+    }
+
+    /// Remove every filter that can narrow the recordings table in one action.
+    /// Keep the people mode at its neutral default so a later people selection
+    /// starts from the predictable "Any" behaviour.
+    func clearAllRecordingFilters() {
+        syncFilterDeviceId = nil
+        syncFilterPeople = []
+        syncPeopleFilterMode = .any
+        statusFilters = []
+        summaryTypeFilter = nil
+        heatmapSelectedDay = nil
+    }
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
     @Published var syncPaired = false
@@ -335,6 +358,11 @@ final class HiDockViewModel: ObservableObject {
     /// want consecutive clicks to work even when the row is already
     /// visible (a re-bump still triggers `.onChange`).
     @Published var scrollToFirstCandidateTrigger: Int = 0
+
+    /// Stable row anchor for the recordings table. The table is recreated when
+    /// the right-hand detail pane opens, so keeping this in the view model
+    /// prevents that layout transition from resetting the user's place.
+    @Published var recordingsTableScrollAnchor: String?
 
     // MARK: - Transcription State
     @Published var diarizeEnabled = false
@@ -978,6 +1006,15 @@ final class HiDockViewModel: ObservableObject {
     /// The registry entry's stage metadata determines what gets
     /// persisted; only one model per stage can be active at a time.
     var onSetActiveModelByKey: (String) -> Void = { _ in }
+    /// Capability-preflight reports for planned models, keyed by registry
+    /// key. Populated by the "Check compatibility" action; transient
+    /// (re-run on demand, not persisted).
+    @Published var modelCapabilities: [String: ModelCapabilityReport] = [:]
+    /// Registry keys whose capability preflight is currently running.
+    @Published var modelCapabilityChecking: Set<String> = []
+    /// Run `models.py capability <key>` and store the parsed report in
+    /// `modelCapabilities`. Read-only — never changes model state.
+    var onCheckModelCapability: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
 
     // MARK: - AI summariser engine
