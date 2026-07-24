@@ -4010,8 +4010,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
 
+        // Review-only candidate library people (WeSpeaker suggestions). These
+        // live outside the matching library, so the All People tab unions both.
+        var candidatePeople: [VoiceLibrarySpeaker] = []
+        var candidateEvidence: [String: Set<String>] = [:]
+        if FileManager.default.fileExists(atPath: transcriptionScriptPath) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            configureVoiceLibraryProcess(process)
+            process.arguments = [transcriptionScriptPath, "candidate-speakers"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    candidatePeople = parsed.compactMap { dict in
+                        guard let name = dict["name"] as? String else { return nil }
+                        if let meetings = dict["meetings"] as? [String], !meetings.isEmpty {
+                            candidateEvidence[name] = Set(meetings)
+                        }
+                        return VoiceLibrarySpeaker(
+                            id: name,
+                            name: name,
+                            sampleCount: dict["active_sample_count"] as? Int ?? dict["sample_count"] as? Int ?? 0,
+                            meetingCount: dict["meeting_count"] as? Int ?? 0,
+                            lastUpdated: dict["last_updated"] as? String ?? "",
+                            profileStatus: (dict["strong_eligible"] as? Bool ?? false) ? "usable" : "thin",
+                            inMatchingLibrary: false,
+                            inCandidateLibrary: true
+                        )
+                    }
+                }
+            } catch {
+                log("Failed to list candidate library people: \(error)")
+            }
+        }
+        // Let candidate evidence augment the recordings people-filter so a
+        // candidate-only person resolves to their evidenced meetings.
+        viewModel.candidateMeetingEvidence = candidateEvidence
+
+        var peopleByName: [String: VoiceLibrarySpeaker] = [:]
+        for speaker in speakers {
+            peopleByName[speaker.name] = speaker
+        }
+        for person in candidatePeople {
+            if let existing = peopleByName[person.name] {
+                peopleByName[person.name] = VoiceLibrarySpeaker(
+                    id: existing.id,
+                    name: existing.name,
+                    sampleCount: existing.sampleCount,
+                    meetingCount: existing.meetingCount,
+                    lastUpdated: existing.lastUpdated,
+                    profileStatus: existing.profileStatus,
+                    inMatchingLibrary: true,
+                    inCandidateLibrary: true
+                )
+            } else {
+                peopleByName[person.name] = person
+            }
+        }
+        let allPeople = Array(peopleByName.values)
+
         let libraryView = VoiceLibraryView(
             speakers: speakers,
+            allPeople: allPeople,
             onDelete: { [weak self] name in
                 self?.deleteVoiceLibrarySpeaker(name: name)
             },
@@ -4037,6 +4102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.syncPeopleFilterMode = .any
                 self.syncWindow?.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
+            },
+            onMergePerson: { [weak self] from, into in
+                self?.mergePersonAcrossLibraries(from: from, into: into)
             }
         )
 
@@ -4479,6 +4547,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         } catch {
             log("Failed to rename speaker '\(oldName)': \(error)")
+        }
+    }
+
+    /// Merge a person in every voice library that contains the source name:
+    /// the live matching library (rename-to-existing folds exemplars) and the
+    /// review-only candidate library (atomic, logged merge). Each side is a
+    /// no-op when the source is absent there, so All People merges work for
+    /// people who exist in only one of the two libraries.
+    private func mergePersonAcrossLibraries(from source: String, into target: String) {
+        renameVoiceLibrarySpeaker(oldName: source, newName: target)
+        let scriptPath = transcriptionScriptPath
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.voiceLibraryPythonPath())
+            self.configureVoiceLibraryProcess(process)
+            process.arguments = [
+                scriptPath, "merge-candidate-speakers",
+                "--from", source, "--into", target,
+            ]
+            let output = Pipe()
+            let errors = Pipe()
+            process.standardOutput = output
+            process.standardError = errors
+            do {
+                try process.run()
+                _ = output.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = errors.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                DispatchQueue.main.async {
+                    if process.terminationStatus == 0 {
+                        self.log("Merged candidate identity '\(source)' into '\(target)'")
+                    } else {
+                        self.log("Candidate merge skipped/failed for '\(source)' → '\(target)': \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.log("Candidate merge failed for '\(source)': \(error.localizedDescription)")
+                }
+            }
         }
     }
 

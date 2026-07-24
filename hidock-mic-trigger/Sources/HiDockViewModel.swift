@@ -168,6 +168,24 @@ final class HiDockViewModel: ObservableObject {
     /// spinner instead of a blank table until the first combined paint lands.
     @Published var recordingsLoading = false
     @Published var meetingPeople: [String: Set<String>] = [:] { didSet { markDerivedDirty() } }
+    /// Review-only candidate-library evidence, person → meeting (recording)
+    /// names. Augments sidecar-derived `meetingPeople`: a candidate-only
+    /// person (e.g. a first-name-only archive identity) may never appear in a
+    /// sidecar's speaker_names, but their samples still point at real
+    /// meetings, so filtering to them must find those recordings.
+    @Published var candidateMeetingEvidence: [String: Set<String>] = [:] {
+        didSet {
+            var inverted: [String: Set<String>] = [:]
+            for (person, meetings) in candidateMeetingEvidence {
+                for meeting in meetings { inverted[meeting, default: []].insert(person) }
+            }
+            candidatePeopleByMeeting = inverted
+            markDerivedDirty()
+        }
+    }
+    /// meeting (recording) name → candidate people evidenced there. Derived
+    /// from `candidateMeetingEvidence`; do not set directly.
+    private(set) var candidatePeopleByMeeting: [String: Set<String>] = [:]
     /// Active people filter (empty = off). Combined AND with device/status/day.
     @Published var syncFilterPeople: Set<String> = [] { didSet { markDerivedDirty() } }
     /// Whether a meeting must contain ANY or ALL of the filtered people.
@@ -175,15 +193,22 @@ final class HiDockViewModel: ObservableObject {
 
     /// Every named person seen across meetings, sorted — for the filter menu.
     var allPeople: [String] {
-        Array(Set(meetingPeople.values.flatMap { $0 })).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        var names = Set(meetingPeople.values.flatMap { $0 })
+        names.formUnion(candidateMeetingEvidence.keys)
+        return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
-    /// person name → number of meetings they appear in.
+    /// person name → number of meetings they appear in (sidecar labels and
+    /// candidate-library evidence unioned per meeting, so evidence for the
+    /// same meeting is never double-counted).
     var personMeetingCounts: [String: Int] {
-        var counts: [String: Int] = [:]
-        for people in meetingPeople.values {
-            for p in people { counts[p, default: 0] += 1 }
+        var meetingsByPerson: [String: Set<String>] = [:]
+        for (meeting, people) in meetingPeople {
+            for p in people { meetingsByPerson[p, default: []].insert(meeting) }
         }
-        return counts
+        for (person, meetings) in candidateMeetingEvidence {
+            meetingsByPerson[person, default: []].formUnion(meetings)
+        }
+        return meetingsByPerson.mapValues { $0.count }
     }
 
     /// Whether an entry matches a given status filter.
@@ -521,7 +546,8 @@ final class HiDockViewModel: ObservableObject {
         // one of the selected people; ALL = includes every selected person.
         if !syncFilterPeople.isEmpty {
             entries = entries.filter { e in
-                let people = meetingPeople[e.recording.name] ?? []
+                let people = (meetingPeople[e.recording.name] ?? [])
+                    .union(candidatePeopleByMeeting[e.recording.name] ?? [])
                 switch syncPeopleFilterMode {
                 case .any: return !people.isDisjoint(with: syncFilterPeople)
                 case .all: return syncFilterPeople.isSubset(of: people)
