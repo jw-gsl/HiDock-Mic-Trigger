@@ -6,7 +6,9 @@ import numpy as np
 
 from shared.voice_candidate_review import (
     activate_candidate,
+    list_candidate_speakers,
     load_candidate_config,
+    merge_candidate_speakers,
     record_suggestion_outcome,
     suggest_for_transcript,
 )
@@ -224,3 +226,71 @@ def test_candidate_learning_rejects_unverified_sidecar(tmp_path):
         assert "verified saved speaker" in str(exc)
     else:
         raise AssertionError("unverified candidate learning should fail")
+
+
+def test_list_candidate_speakers_reports_coverage(tmp_path):
+    config, _sidecar = _fixture(tmp_path)
+
+    people = list_candidate_speakers(config_path=config)
+
+    by_name = {person["name"]: person for person in people}
+    assert set(by_name) == {"James Whiting", "Chris Wildsmith"}
+    james = by_name["James Whiting"]
+    assert james["sample_count"] == 3
+    assert james["active_sample_count"] == 3
+    assert james["meeting_count"] == 3
+    assert james["meetings"] == ["james-0", "james-1", "james-2"]
+    assert james["strong_eligible"] is True
+
+
+def test_list_candidate_speakers_empty_when_unconfigured(tmp_path):
+    assert list_candidate_speakers(config_path=tmp_path / "missing.json") == []
+
+
+def test_merge_folds_samples_deletes_source_and_logs(tmp_path):
+    config, _sidecar = _fixture(tmp_path)
+
+    event = merge_candidate_speakers("Chris Wildsmith", "James Whiting", config_path=config)
+
+    library = json.loads((tmp_path / "library.json").read_text())
+    assert "Chris Wildsmith" not in library["speakers"]
+    samples = library["speakers"]["James Whiting"]["samples"]
+    assert len(samples) == 6
+    assert all(sample.get("active") is not False for sample in samples)
+    assert event["action"] == "merged"
+    assert event["renamed"] is False
+    assert event["samples_moved"] == 3
+    assert event["meetings_moved"] == 3
+    assert event["speaker_count"] == 1
+    saved_config = json.loads(config.read_text())
+    assert saved_config["speaker_count"] == 1
+    logged = json.loads((tmp_path / "review-events.jsonl").read_text())
+    assert logged["kind"] == "library_merge"
+    assert logged["source_name"] == "Chris Wildsmith"
+    assert logged["target_name"] == "James Whiting"
+
+
+def test_merge_renames_when_target_missing(tmp_path):
+    config, _sidecar = _fixture(tmp_path)
+
+    event = merge_candidate_speakers("Chris Wildsmith", "Chris W", config_path=config)
+
+    library = json.loads((tmp_path / "library.json").read_text())
+    assert "Chris Wildsmith" not in library["speakers"]
+    assert len(library["speakers"]["Chris W"]["samples"]) == 3
+    assert event["renamed"] is True
+    assert event["speaker_count"] == 2
+
+
+def test_merge_requires_existing_source(tmp_path):
+    config, _sidecar = _fixture(tmp_path)
+
+    for source, target in (("Nobody", "James Whiting"), ("James Whiting", "James Whiting")):
+        try:
+            merge_candidate_speakers(source, target, config_path=config)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"merge {source!r} -> {target!r} should fail")
+    library = json.loads((tmp_path / "library.json").read_text())
+    assert set(library["speakers"]) == {"James Whiting", "Chris Wildsmith"}

@@ -1249,6 +1249,27 @@ def cmd_record_speaker_suggestion(args):
     print(_json.dumps({"status": "completed", "event": event}))
 
 
+def cmd_candidate_speakers(args):
+    """List people in the review-only candidate library (JSON, read-only)."""
+    import json as _json
+    from shared.voice_candidate_review import list_candidate_speakers
+
+    print(_json.dumps(list_candidate_speakers(config_path=args.config)))
+
+
+def cmd_merge_candidate_speakers(args):
+    """Merge one candidate-library identity into another (human decision)."""
+    import json as _json
+    from shared.voice_candidate_review import merge_candidate_speakers
+
+    try:
+        event = merge_candidate_speakers(args.source, args.target, config_path=args.config)
+    except (OSError, ValueError, _json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    print(_json.dumps({"status": "completed", "event": event}))
+
+
 def cmd_merge_rediarize(args):
     """Build a merged transcript from existing per-piece transcripts.
 
@@ -1696,6 +1717,30 @@ def main():
         default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
     )
     p_suggestion_outcome.set_defaults(func=cmd_record_speaker_suggestion)
+
+    p_candidate_people = sub.add_parser(
+        "candidate-speakers",
+        help="List people in the review-only candidate library (JSON, read-only)",
+    )
+    p_candidate_people.add_argument(
+        "--config",
+        default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
+    )
+    p_candidate_people.set_defaults(func=cmd_candidate_speakers)
+
+    p_candidate_merge = sub.add_parser(
+        "merge-candidate-speakers",
+        help="Merge one review-only candidate identity into another (keeps the target name; logs the decision)",
+    )
+    p_candidate_merge.add_argument("--from", dest="source", required=True,
+                                   help="Candidate identity to absorb and delete")
+    p_candidate_merge.add_argument("--into", dest="target", required=True,
+                                   help="Identity that keeps the name")
+    p_candidate_merge.add_argument(
+        "--config",
+        default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
+    )
+    p_candidate_merge.set_defaults(func=cmd_merge_candidate_speakers)
 
     p_merge = sub.add_parser(
         "merge-rediarize",

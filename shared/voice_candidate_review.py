@@ -28,6 +28,7 @@ from shared.voice_library_lite import (
     _enroll_into,
     _extract_audio_embedding,
     _get_speaker_embed_session,
+    _refresh_active_samples,
     _samples_of,
     cosine_similarity,
 )
@@ -511,6 +512,134 @@ def record_suggestion_outcome(
             "acoustic_quality": quality.get("acoustic_quality"),
         })
 
+    event_path = Path(config["candidate_dir"]) / "review-events.jsonl"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    with event_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    event["event_log"] = str(event_path)
+    return event
+
+
+def list_candidate_speakers(
+    config_path: str | Path = ACTIVE_CANDIDATE_CONFIG,
+) -> list[dict]:
+    """List identities in the review-only candidate library for UI display.
+
+    Returns one row per person with sample/meeting coverage and whether the
+    profile has enough active meetings to ever pass the robust three-meeting
+    gate. Empty when no candidate is configured. Read-only.
+    """
+    config = load_candidate_config(config_path)
+    if not config.get("available"):
+        return []
+    library = json.loads(Path(config["library_path"]).read_text(encoding="utf-8"))
+    people = []
+    for name, entry in (library.get("speakers") or {}).items():
+        samples = _samples_of(entry)
+        meetings = set()
+        active_meetings = set()
+        for sample in samples:
+            source = str(
+                sample.get("source_file") or sample.get("audio_file") or ""
+            )
+            if not source:
+                continue
+            meetings.add(source)
+            if sample.get("active") is not False:
+                active_meetings.add(source)
+        people.append({
+            "name": name,
+            "sample_count": len(samples),
+            "active_sample_count": sum(
+                1 for sample in samples if sample.get("active") is not False
+            ),
+            "meeting_count": len(meetings),
+            # Recording names (sidecar basename minus _diarized) so the app can
+            # point a person filter at real meetings without re-reading samples.
+            "meetings": sorted(_meeting_key(source) for source in meetings),
+            "last_updated": str(entry.get("last_updated") or ""),
+            "strong_eligible": len(active_meetings) >= 3,
+        })
+    return sorted(people, key=lambda item: item["name"].casefold())
+
+
+def _meeting_key(source_path: str) -> str:
+    """Reduce a sample source path to the recording/meeting name used by the app."""
+    stem = Path(source_path).stem
+    for suffix in ("_diarized", "_whisper"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    return stem
+
+
+def merge_candidate_speakers(
+    source_name: str,
+    target_name: str,
+    *,
+    config_path: str | Path = ACTIVE_CANDIDATE_CONFIG,
+) -> dict:
+    """Merge one candidate-library identity into another (explicit human decision).
+
+    Folds the source's samples into the target and deletes the source key, or
+    renames the source outright when the target does not exist yet. Writes are
+    atomic, the decision is appended to review-events.jsonl, and the active
+    config's speaker_count is kept in step. Review-only boundaries are
+    unchanged: this never touches the live voice library or any sidecar.
+    """
+    source = " ".join(str(source_name or "").split())
+    target = " ".join(str(target_name or "").split())
+    if not source or not target:
+        raise ValueError("both source and target names are required")
+    if source == target:
+        raise ValueError("source and target names must differ")
+    config = load_candidate_config(config_path)
+    if not config.get("available"):
+        raise ValueError(str(config.get("reason") or "candidate unavailable"))
+
+    library_path = Path(config["library_path"])
+    library = json.loads(library_path.read_text(encoding="utf-8"))
+    speakers = library.get("speakers")
+    if not isinstance(speakers, dict):
+        raise ValueError("candidate library has no speakers map")
+    if source not in speakers:
+        raise ValueError(f"candidate speaker not found: {source}")
+
+    moved = list(_samples_of(speakers[source]))
+    if target in speakers:
+        entry = speakers[target]
+        entry.setdefault("samples", _samples_of(entry)).extend(moved)
+        _refresh_active_samples(entry, int(config.get("max_active_samples", _MAX_SAMPLES)))
+        entry["last_updated"] = _now()
+        del speakers[source]
+        renamed = False
+    else:
+        speakers[target] = speakers.pop(source)
+        speakers[target]["last_updated"] = _now()
+        renamed = True
+    _atomic_write(library_path, library)
+
+    config_file = Path(config["config_path"])
+    saved_config = json.loads(config_file.read_text(encoding="utf-8"))
+    saved_config["speaker_count"] = len(speakers)
+    _atomic_write(config_file, saved_config)
+
+    event = {
+        "schema_version": 1,
+        "kind": "library_merge",
+        "recorded_at": _now(),
+        "action": "merged",
+        "source_name": source,
+        "target_name": target,
+        "renamed": renamed,
+        "samples_moved": len(moved),
+        "meetings_moved": len({
+            str(sample.get("source_file") or sample.get("audio_file") or "")
+            for sample in moved
+            if sample.get("source_file") or sample.get("audio_file")
+        }),
+        "speaker_count": len(speakers),
+        "library_path": str(library_path),
+    }
     event_path = Path(config["candidate_dir"]) / "review-events.jsonl"
     event_path.parent.mkdir(parents=True, exist_ok=True)
     with event_path.open("a", encoding="utf-8") as handle:
