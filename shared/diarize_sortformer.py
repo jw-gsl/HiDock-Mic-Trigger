@@ -34,6 +34,85 @@ _DIAR_MODEL_NAME = "nvidia/diar_sortformer_4spk-v1"
 _WINDOW_SEC = 300.0
 _OVERLAP_SEC = 30.0
 
+# Cross-window voice linking. Sortformer re-labels speakers independently per
+# window; temporal overlap in the 30 s handover region only identifies people
+# who speak during the handover. On sparse calls one party is often silent
+# there, and used to be re-minted as a new speaker per window. Embeddings give
+# an identity signal that survives overlap silence. Conservative by design: a
+# link needs both a strong similarity and a clear margin over the runner-up,
+# because a wrong merge is far more destructive than an extra label (extra
+# labels stay recoverable via the review/merge tools).
+_LINK_MIN_SPEECH_SECONDS = 3.0   # below this a window label's embedding is unreliable
+_LINK_SIMILARITY_THRESHOLD = 0.70
+_LINK_MARGIN = 0.05
+
+# Micro-label absorption. After stitching, a label with only a few seconds of
+# speech is almost always a diarizer tail-fragment, not a real participant
+# (Rec07: a 9.1 s "Speaker 3" of goodbye smalltalk). Its embedding is too
+# noisy for a margin check, so it is absorbed into its closest full-size
+# voice when the plain similarity clears the link threshold; a fragment that
+# matches nothing stays its own label.
+_MICRO_LABEL_MAX_SECONDS = 12.0
+_ABSORB_SIMILARITY_THRESHOLD = 0.70
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na <= 1e-10 or nb <= 1e-10:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+class _CrossWindowLinker:
+    """Per-window raw-label voice embeddings for cross-window linking.
+
+    Lazily loads the TitaNet speaker-embedding model on first use and
+    degrades to None (no link evidence) whenever the model or an extraction
+    fails, so the stitcher falls back to legacy overlap-only behaviour.
+    """
+
+    def __init__(self, audio: np.ndarray, sr: int = 16000):
+        self.audio = audio
+        self.sr = sr
+        self._session = None
+        self._session_failed = False
+
+    def _session_or_none(self):
+        if self._session is None and not self._session_failed:
+            try:
+                from shared.models import ensure_speaker_embed
+                import onnxruntime as ort
+                self._session = ort.InferenceSession(
+                    str(ensure_speaker_embed()), providers=["CPUExecutionProvider"]
+                )
+            except Exception:
+                self._session_failed = True
+        return self._session
+
+    def embed(self, turns, label: str, window_index: int | None = None):
+        """Embedding for one raw label within one window, or None.
+
+        `turns` are that window's turns with absolute timestamps; the linker
+        slices the full recording with them. `window_index` is unused in
+        production but lets tests key canned embeddings per window.
+        """
+        session = self._session_or_none()
+        if session is None:
+            return None
+        chunk = _collect_speaker_audio(self.audio, turns, label, sr=self.sr)
+        if chunk.size < int(self.sr * _LINK_MIN_SPEECH_SECONDS):
+            return None
+        try:
+            from shared.audio_utils import extract_embedding
+            emb = extract_embedding(chunk, sr=self.sr, onnx_session=session)
+        except Exception:
+            return None
+        norm = float(np.linalg.norm(emb))
+        if norm <= 1e-10:
+            return None
+        return (emb / norm).astype(np.float32)
+
 
 def _load_diarizer():
     """Load Sortformer once and return a CPU-bound model handle.
@@ -124,20 +203,28 @@ def _run_window(model, audio_window: np.ndarray, offset_s: float):
 def _stitch_windows(
     windows: list[tuple[float, list[tuple[float, float, str]]]],
     overlap_sec: float = _OVERLAP_SEC,
+    linker=None,
 ) -> list[tuple[float, float, str]]:
     """Join per-window Sortformer turns into one globally-labelled list.
 
     Sortformer assigns speaker IDs independently per window — window 2's
-    `speaker_0` may be window 1's `speaker_1`. This performs the
-    majority-overlap join the windowing scheme relies on:
+    `speaker_0` may be window 1's `speaker_1`. Two reconciliation passes:
 
-    1. **Label remapping** — for each window after the first, pair its raw
+    1. **Temporal overlap** — for each window after the first, pair its raw
        labels with the previous windows' (already-remapped) global labels
        by maximum total temporal overlap of same-speaker turns inside the
        `overlap_sec` region at the window start (greedy one-to-one, largest
-       overlap first). Raw labels with no overlap evidence get fresh global
-       labels — genuinely new speakers stay distinct.
-    2. **De-duplication** — both windows diarized the overlap region, so
+       overlap first).
+    2. **Voice embedding** (when `linker` is provided) — raw labels with no
+       overlap evidence are compared against the seeded embeddings of
+       existing global labels. A match needs similarity >=
+       `_LINK_SIMILARITY_THRESHOLD` and a margin >= `_LINK_MARGIN` over the
+       runner-up; anything weaker still gets a fresh global label. This is
+       what stops a speaker who is silent through the handover region (a
+       near-certainty on two-person calls) being re-minted as a new person
+       every window. Overlap evidence always wins over embeddings, and no
+       two raw labels in the same window may share a global label.
+    3. **De-duplication** — both windows diarized the overlap region, so
        turns there would otherwise be emitted twice. Earlier windows keep
        the region up to the overlap midpoint; the new window keeps it from
        the midpoint on (turns straddling the midpoint are clipped). Each
@@ -149,6 +236,10 @@ def _stitch_windows(
             order. `turns` use absolute timestamps and raw per-window
             speaker labels (as returned by `_run_window`).
         overlap_sec: size of the inter-window overlap region.
+        linker: optional `_CrossWindowLinker`-compatible object with an
+            `embed(turns, label, window_index=...)` method returning a voice
+            embedding (or None). When None, behaviour is exactly the legacy
+            overlap-only stitch.
 
     Returns:
         list of (start_s, end_s, global_label) tuples sorted by start.
@@ -167,16 +258,65 @@ def _stitch_windows(
         next_global += 1
         return label
 
+    global_embeddings: dict[str, np.ndarray] = {}
+
+    def _embed(window_index: int, turns, raw: str):
+        if linker is None:
+            return None
+        try:
+            return linker.embed(turns, raw, window_index=window_index)
+        except Exception:  # noqa: BLE001 - link evidence is best-effort
+            return None
+
+    def _raw_labels(turns) -> list[str]:
+        seen: list[str] = []
+        for _, _, raw in turns:
+            if raw not in seen:
+                seen.append(raw)
+        return seen
+
+    def _link(embedding, claimed: set[str]) -> str | None:
+        """Best existing global label for an embedding, or None.
+
+        Requires the similarity threshold and, with two or more candidates,
+        a clear margin over the runner-up. Never links to a global already
+        claimed by a different raw label in this window.
+        """
+        if embedding is None:
+            return None
+        scored = sorted(
+            (
+                (glab, _cosine(embedding, gemb))
+                for glab, gemb in global_embeddings.items()
+                if glab not in claimed
+            ),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )
+        if not scored:
+            return None
+        best_label, best = scored[0]
+        if best < _LINK_SIMILARITY_THRESHOLD:
+            return None
+        if len(scored) > 1 and best - scored[1][1] < _LINK_MARGIN:
+            return None
+        return best_label
+
     first_turns = sorted(windows[0][1])
     mapping: dict[str, str] = {}
     for _, _, raw in first_turns:
         if raw not in mapping:
             mapping[raw] = fresh()
+    if linker is not None:
+        for raw in _raw_labels(first_turns):
+            emb = _embed(0, first_turns, raw)
+            if emb is not None:
+                global_embeddings[mapping[raw]] = emb
     stitched: list[tuple[float, float, str]] = [
         (s, e, mapping[raw]) for s, e, raw in first_turns
     ]
 
-    for offset, turns in windows[1:]:
+    for window_index, (offset, turns) in enumerate(windows[1:], start=1):
         turns = sorted(turns)
         ov_start = offset
         ov_end = offset + overlap_sec
@@ -205,9 +345,39 @@ def _stitch_windows(
                 continue
             mapping[raw] = glab
             used_globals.add(glab)
-        for _, _, raw in turns:
+
+        # Embedding pass: raw labels with no overlap evidence try to link
+        # back to an existing voice instead of always minting a new person.
+        window_embs: dict[str, object] = {}
+        if linker is not None:
+            for raw in _raw_labels(turns):
+                window_embs[raw] = _embed(window_index, turns, raw)
+            claimed = set(used_globals)
+            for raw in _raw_labels(turns):
+                if raw in mapping:
+                    continue
+                linked = _link(window_embs[raw], claimed)
+                if linked is not None:
+                    mapping[raw] = linked
+                    claimed.add(linked)
+                    print(
+                        f"Sortformer: linked window-{window_index} {raw} → {linked} by voice",
+                        file=sys.stderr,
+                    )
+
+        # Genuinely new voices (or unverifiable ones) get fresh global labels.
+        for raw in _raw_labels(turns):
             if raw not in mapping:
                 mapping[raw] = fresh()
+
+        # Seed embeddings for labels that don't have one yet — both freshly
+        # minted globals and overlap-mapped globals that previously had no
+        # embeddable speech.
+        if linker is not None:
+            for raw in _raw_labels(turns):
+                glab = mapping[raw]
+                if glab not in global_embeddings and window_embs.get(raw) is not None:
+                    global_embeddings[glab] = window_embs[raw]
 
         # De-duplicate the overlap: earlier windows own [.., mid),
         # this window owns [mid, ..).
@@ -354,9 +524,14 @@ def _collect_speaker_audio(audio: np.ndarray, turns, label: str, sr: int = 16000
         end_idx = min(len(audio), int(te * sr))
         if end_idx <= start_idx:
             continue
-        piece = audio[start_idx:end_idx]
+        # Truncate the final piece at the remaining budget: the cap used to
+        # only stop adding *further* pieces, so one long turn could produce a
+        # multi-minute chunk — and TitaNet's ONNX graph fails with a
+        # broadcast error on very long inputs.
+        remaining = int((max_seconds - collected) * sr)
+        piece = audio[start_idx:min(end_idx, start_idx + remaining)]
         pieces.append(piece)
-        collected += (end_idx - start_idx) / sr
+        collected += len(piece) / sr
     if not pieces:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(pieces).astype(np.float32)
@@ -433,6 +608,69 @@ def _resolve_speaker_names(
     return info
 
 
+def _prune_empty_speakers(
+    speaker_names: dict,
+    speaker_meta: dict,
+    speaker_embeddings: dict,
+    segments: list[dict],
+) -> tuple[dict, dict, dict]:
+    """Drop speaker entries that own no surviving segments.
+
+    A label can end up segment-less when all of its text was filtered out
+    (empty segments, non-speech anonymisation); keeping it in
+    `speaker_names`/`speaker_meta` shows a phantom extra person in the app.
+    Ids are left as-is (sparse str keys are fine downstream) — nothing is
+    renumbered, so stored embeddings keep matching their sidecar ids.
+    """
+    used = {str(seg.get("speaker_id")) for seg in segments}
+    return (
+        {k: v for k, v in speaker_names.items() if k in used},
+        {k: v for k, v in speaker_meta.items() if k in used},
+        {k: v for k, v in speaker_embeddings.items() if k in used},
+    )
+
+
+def _absorb_micro_labels(
+    turns: list[tuple[float, float, str]],
+    label_embeddings: dict,
+    talk_seconds: dict[str, float],
+    *,
+    max_seconds: float = _MICRO_LABEL_MAX_SECONDS,
+    threshold: float = _ABSORB_SIMILARITY_THRESHOLD,
+) -> list[tuple[float, float, str]]:
+    """Reassign micro labels (total speech < `max_seconds`) to their closest
+    full-size voice when the embedding similarity clears `threshold`.
+
+    Diarizer tail-fragments — a few seconds of goodbye smalltalk or a
+    misheard interjection — are not real participants, but their short audio
+    makes embeddings too noisy for the margin rule used in cross-window
+    linking. Absorption uses a plain threshold against full-size labels
+    only; a fragment that matches nothing keeps its own label, and anything
+    without an embedding is left untouched.
+    """
+    micro = {lab for lab, secs in talk_seconds.items() if secs < max_seconds}
+    full = [lab for lab in talk_seconds if lab not in micro]
+    if not micro or not full:
+        return turns
+    out: list[tuple[float, float, str]] = []
+    for s, e, lab in turns:
+        if lab not in micro:
+            out.append((s, e, lab))
+            continue
+        emb = label_embeddings.get(lab)
+        best_label = None
+        best_sim = threshold
+        for cand in full:
+            cand_emb = label_embeddings.get(cand)
+            if emb is None or cand_emb is None:
+                continue
+            sim = _cosine(emb, cand_emb)
+            if sim >= best_sim:
+                best_label, best_sim = cand, sim
+        out.append((s, e, best_label if best_label is not None else lab))
+    return out
+
+
 def diarize(
     audio_path: str | Path,
     whisper_segments: list[dict],
@@ -477,7 +715,11 @@ def diarize(
             windows.append((offset, turns))
             if end >= len(audio):
                 break
-        all_turns = _stitch_windows(windows, overlap_sec=_OVERLAP_SEC)
+        # Cross-window voice linking: overlap-only stitching re-mints a new
+        # "speaker" whenever someone is silent through a handover region.
+        # The linker degrades to overlap-only if TitaNet is unavailable.
+        linker = _CrossWindowLinker(audio)
+        all_turns = _stitch_windows(windows, overlap_sec=_OVERLAP_SEC, linker=linker)
 
     if not all_turns:
         # Sortformer returned nothing — fall through to a single-speaker
@@ -535,6 +777,32 @@ def diarize(
         sr=16000,
         allowed_names=getattr(calendar_context, "candidate_names", None),
     )
+
+    # Absorb micro tail-fragments (a few seconds of speech) into their
+    # closest full-size voice — a fragment is not a real participant, and
+    # the margin rule used for cross-window linking is too strict for its
+    # noisy short-clip embedding.
+    talk_seconds: dict[str, float] = {}
+    for ts, te, lab in renamed_turns:
+        talk_seconds[lab] = talk_seconds.get(lab, 0.0) + (te - ts)
+    print(
+        "Sortformer: talk per label: "
+        + ", ".join(f"{lab}={secs:.1f}s" for lab, secs in sorted(talk_seconds.items())),
+        file=sys.stderr,
+    )
+    label_embs = {
+        label: (speaker_info.get(label) or {}).get("embedding")
+        for label in internal_labels
+    }
+    absorbed_turns = _absorb_micro_labels(renamed_turns, label_embs, talk_seconds)
+    for lab in sorted(set(talk_seconds) - {lab for _, _, lab in absorbed_turns}):
+        print(
+            f"Sortformer: absorbed micro label {lab} ({talk_seconds[lab]:.1f}s) into a fuller voice",
+            file=sys.stderr,
+        )
+    renamed_turns = absorbed_turns
+    surviving = {lab for _, _, lab in renamed_turns}
+    internal_labels = [lab for lab in internal_labels if lab in surviving]
     display_names = {label: speaker_info[label]["name"] for label in internal_labels}
 
     # Assign speakers per Whisper segment. Word-level alignment when
@@ -610,6 +878,12 @@ def diarize(
     # chunks slightly over `max_duration` near sentence boundaries.
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
+
+    # Labels whose segments all got filtered out would show as phantom
+    # people in the app — drop them from the speaker maps.
+    speaker_names, speaker_meta, speaker_embeddings = _prune_empty_speakers(
+        speaker_names, speaker_meta, speaker_embeddings, segments_out
+    )
 
     max_dur = max((s["end"] - s["start"] for s in segments_out), default=0)
     print(
