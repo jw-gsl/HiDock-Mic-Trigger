@@ -983,6 +983,33 @@ def cmd_rediarize(args):
         _json.dumps(diarized_result, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+    # Re-render the .md/.srt alongside — without this they keep showing the
+    # pre-rediarize speaker blocks (mirrors cmd_recluster_with_anchors).
+    try:
+        from shared.transcript_writer import write_transcript
+        md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+        body_text = " ".join(
+            seg.get("text", "").strip()
+            for seg in diarized_result.get("segments", [])
+            if seg.get("text")
+        )
+        write_transcript(
+            md_path,
+            body_text,
+            source_path=Path(audio_path),
+            model="rediarize",
+            diarized_result=diarized_result,
+        )
+    except Exception as exc:  # noqa: BLE001 - stale .md must not fail the run
+        print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+    try:
+        from shared.srt_writer import srt_path_for, write_srt
+        if diarized_result.get("segments"):
+            write_srt(srt_path_for(md_path), diarized_result=diarized_result)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARN: could not refresh .srt: {exc}", file=sys.stderr)
+
     progress(100)
 
     n = len(diarized_result.get("segments", []))

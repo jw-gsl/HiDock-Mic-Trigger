@@ -329,6 +329,14 @@ struct DiarizedTranscript: Codable {
     /// viewer never reads these, but they MUST survive a save round-trip (an
     /// explicit CodingKeys list would otherwise drop them and break `rematch`).
     var speakerEmbeddings: [String: [Double]]?
+    /// Which diarization backend produced the sidecar (e.g. "sortformer").
+    /// Read by pipeline tooling; must survive a viewer save.
+    var backend: String?
+    /// Names preserved across the last rediarize (provenance for the merge
+    /// tools). Pass-through only.
+    var preservedSpeakerLabels: [String]?
+    /// Cluster-merge lineage from label preservation. Pass-through only.
+    var speakerLineage: [String: SpeakerLineageEntry]?
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -337,6 +345,21 @@ struct DiarizedTranscript: Codable {
         case speakerNames = "speaker_names"
         case speakerMeta = "speaker_meta"
         case speakerEmbeddings = "speaker_embeddings"
+        case backend
+        case preservedSpeakerLabels = "preserved_speaker_labels"
+        case speakerLineage = "speaker_lineage"
+    }
+}
+
+/// Pass-through for the `speaker_lineage` sidecar map produced when labels
+/// are preserved across a rediarize.
+struct SpeakerLineageEntry: Codable {
+    var sourceClusterIds: [String]?
+    var survivingName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sourceClusterIds = "source_cluster_ids"
+        case survivingName = "surviving_name"
     }
 }
 
@@ -347,20 +370,30 @@ struct DiarizedSegment: Codable, Identifiable {
     var speakerId: Int
     var text: String
     var words: [DiarizedWord]?
+    /// Display name at diarization time. Renderers fall back to resolving
+    /// speaker_id when this is absent, but keeping it avoids the lookup.
+    var speaker: String?
+    /// Cluster id this segment belonged to before label preservation
+    /// remapped it. Pass-through only.
+    var sourceSpeakerId: String?
 
     enum CodingKeys: String, CodingKey {
         case start, end
         case speakerId = "speaker_id"
         case text, words
+        case speaker
+        case sourceSpeakerId = "source_speaker_id"
     }
 
     init(start: Double, end: Double, speakerId: Int = 0, text: String,
-         words: [DiarizedWord]? = nil) {
+         words: [DiarizedWord]? = nil, speaker: String? = nil, sourceSpeakerId: String? = nil) {
         self.start = start
         self.end = end
         self.speakerId = speakerId
         self.text = text
         self.words = words
+        self.speaker = speaker
+        self.sourceSpeakerId = sourceSpeakerId
     }
 
     init(from decoder: Decoder) throws {
@@ -370,6 +403,16 @@ struct DiarizedSegment: Codable, Identifiable {
         speakerId = (try? c.decode(Int.self, forKey: .speakerId)) ?? 0
         text = try c.decode(String.self, forKey: .text)
         words = try c.decodeIfPresent([DiarizedWord].self, forKey: .words)
+        speaker = try c.decodeIfPresent(String.self, forKey: .speaker)
+        // merge_speaker_labels writes source_speaker_id as a string, but be
+        // tolerant of numeric sidecars.
+        if let sid = try? c.decode(String.self, forKey: .sourceSpeakerId) {
+            sourceSpeakerId = sid
+        } else if let sid = try? c.decode(Int.self, forKey: .sourceSpeakerId) {
+            sourceSpeakerId = String(sid)
+        } else {
+            sourceSpeakerId = nil
+        }
     }
 }
 

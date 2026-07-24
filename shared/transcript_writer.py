@@ -257,7 +257,18 @@ def format_diarized_transcript(diarized_result: dict) -> str:
     current_speaker = None
 
     for seg in diarized_result["segments"]:
-        display_name = names.get(seg["speaker"], seg["speaker"])
+        # Per-segment "speaker" may be absent: the macOS viewer's Codable
+        # round-trip drops it (keeps only start/end/speaker_id/text/words).
+        # Fall back to resolving speaker_id so a viewer save can never make
+        # the transcript unrenderable.
+        if "speaker" in seg:
+            display_name = names.get(seg["speaker"], seg["speaker"])
+        else:
+            speaker_id = seg.get("speaker_id", 0)
+            display_name = names.get(
+                str(speaker_id),
+                "" if (isinstance(speaker_id, int) and speaker_id < 0) else f"Speaker {int(speaker_id) + 1}",
+            )
         text = seg.get("text", "").strip()
         if not text:
             continue
