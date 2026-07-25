@@ -658,6 +658,12 @@ struct TranscriptViewerView: View {
     /// maps the speaker to that exact enrolled voice (so confirming reinforces
     /// the same centroid instead of fragmenting into near-duplicate names).
     @State private var libraryNames: [String] = []
+    /// Weak ("closest voice") candidates stay hidden behind a click so they
+    /// can't anchor the reviewer's judgement; this set tracks reveals.
+    @State private var revealedWeakSuggestions: Set<String> = []
+    /// When every speaker is verified the panel collapses to a one-line done
+    /// state; this re-expands it for inspection.
+    @State private var verifyPanelExpanded = false
 
     struct PendingMerge: Identifiable {
         let id = UUID()
@@ -921,29 +927,39 @@ struct TranscriptViewerView: View {
             // Keep speaker verification and the transcript in separate panes.
             // VSplitView supplies a draggable divider so the review area can be
             // expanded when needed without pushing the transcript off-screen.
-            if needsVerification {
-                VSplitView {
-                    speakerVerifyPanel
-                        .frame(
-                            // The row list scrolls. Never make its calculated
-                            // content height the minimum: meetings with many
-                            // speakers would otherwise consume the full split
-                            // and push the transcript out of sight.
-                            minHeight: 128,
-                            idealHeight: speakerVerifyPanelIdealHeight,
-                            maxHeight: speakerVerifyPanelMaximumHeight
-                        )
-                        .layoutPriority(0)
+            // Once nothing needs review, the panel collapses to a one-line
+            // done state instead of vanishing mid-interaction.
+            if uniqueSpeakerIds.count > 1 {
+                if needsVerification || verifyPanelExpanded {
+                    VSplitView {
+                        speakerVerifyPanel
+                            .frame(
+                                // The row list scrolls. Never make its calculated
+                                // content height the minimum: meetings with many
+                                // speakers would otherwise consume the full split
+                                // and push the transcript out of sight.
+                                minHeight: 128,
+                                idealHeight: speakerVerifyPanelIdealHeight,
+                                maxHeight: speakerVerifyPanelMaximumHeight
+                            )
+                            .layoutPriority(0)
 
-                    transcriptContent
-                        .frame(minHeight: 220, maxHeight: .infinity)
-                        .layoutPriority(2)
+                        transcriptContent
+                            .frame(minHeight: 220, maxHeight: .infinity)
+                            .layoutPriority(2)
+                    }
+                    // VSplitView remembers its divider position. Recreate the
+                    // split when diarisation produces a different speaker count
+                    // so the new ideal/minimum height is applied on first render.
+                    .id("speaker-review-\(uniqueSpeakerIds.count)")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    VStack(spacing: 0) {
+                        allVerifiedBanner
+                        Divider()
+                        transcriptContent
+                    }
                 }
-                // VSplitView remembers its divider position. Recreate the
-                // split when diarisation produces a different speaker count
-                // so the new ideal/minimum height is applied on first render.
-                .id("speaker-review-\(uniqueSpeakerIds.count)")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 transcriptContent
             }
@@ -1368,6 +1384,26 @@ struct TranscriptViewerView: View {
 
     // MARK: - Subviews
 
+    /// One-line done state shown in place of the verification panel once
+    /// nothing needs review. "Review" re-expands the full panel.
+    private var allVerifiedBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundColor(.green)
+            Text("All speakers verified")
+                .font(.caption.weight(.semibold))
+            Button("Review") { verifyPanelExpanded = true }
+                .font(.caption2)
+                .buttonStyle(.borderless)
+                .foregroundColor(.accentColor)
+                .help("Show the speaker verification panel again")
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color.green.opacity(0.06))
+    }
+
     private var speakerVerifyPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -1379,6 +1415,30 @@ struct TranscriptViewerView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
+                if strongSuggestionIds.count >= 2 {
+                    Button {
+                        // Snapshot first: each confirmation mutates liveSuggestions.
+                        let batch = strongSuggestionIds
+                        for id in batch {
+                            if let s = liveSuggestions["\(id)"] {
+                                confirmCandidateSuggestion(id, suggestion: s)
+                            }
+                        }
+                    } label: {
+                        Label("Confirm \(strongSuggestionIds.count) strong", systemImage: "checkmark.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.green)
+                    .help("Accept every gate-passing suggestion in one click. Weaker closest-voice candidates still need individual review.")
+                }
+                if !needsVerification {
+                    Button("Collapse") { verifyPanelExpanded = false }
+                        .font(.caption2)
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.accentColor)
+                        .help("Back to the one-line verified summary")
+                }
                 if suggestionsLoading {
                     ProgressView()
                         .controlSize(.small)
@@ -1401,6 +1461,18 @@ struct TranscriptViewerView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color.blue.opacity(0.04))
+    }
+
+    /// Unverified speakers whose suggestion passed the conservative gate —
+    /// the ones the bulk-confirm button accepts in one click.
+    private var strongSuggestionIds: [Int] {
+        uniqueSpeakerIds.filter { id in
+            guard !(speakerMeta(for: id)?.verified ?? false),
+                  let s = liveSuggestions["\(id)"],
+                  s.decision == "strong_review",
+                  s.proposedName != nil else { return false }
+            return true
+        }
     }
 
     private var speakerVerifyPanelMaximumHeight: CGFloat { 260 }
@@ -1539,21 +1611,22 @@ struct TranscriptViewerView: View {
                 .controlSize(.small)
                 .tint(.orange)
                 .help("This name is assigned to two speakers — merge them into one person.")
+                speakerActionsMenu(id: id)
             } else if verified {
                 Label("Verified", systemImage: "checkmark.seal.fill")
                     .font(.caption2)
                     .foregroundColor(.green)
-            } else {
-                if !isGenericName(name) {
-                    Button {
-                        confirmSpeaker(id)
-                    } label: {
-                        Label("Confirm", systemImage: "checkmark")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .help("Accept this name, lock it in, and reinforce it in your voice library.")
+            } else if !isGenericName(name) {
+                Button {
+                    confirmSpeaker(id)
+                } label: {
+                    Label("Confirm", systemImage: "checkmark")
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("Accept this name, lock it in, and reinforce it in your voice library.")
+                speakerActionsMenu(id: id)
+            } else {
                 Button {
                     markUnknown(id)
                 } label: {
@@ -1566,50 +1639,36 @@ struct TranscriptViewerView: View {
         }
         if !verified, let suggestion = liveSuggestions["\(id)"] {
             speakerSuggestionRow(id: id, suggestion: suggestion)
+        } else if !verified && suggestionsLoading {
+            // Placeholder while suggestions compute — keeps rows from
+            // jumping when the real evidence arrives.
+            RoundedRectangle(cornerRadius: 3)
+                .fill(.quaternary)
+                .frame(width: 180, height: 12)
+                .padding(.leading, 26)
+                .padding(.vertical, 4)
         }
         }
     }
 
+    /// Secondary per-speaker actions behind a ⋯ menu, so each row carries a
+    /// single primary action instead of a row of competing buttons.
+    private func speakerActionsMenu(id: Int) -> some View {
+        Menu {
+            Button("Mark unknown") { markUnknown(id) }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundColor(.secondary)
+        .help("More actions for \(speakerName(for: id))")
+    }
+
     @ViewBuilder
     private func speakerSuggestionRow(id: Int, suggestion: SpeakerSuggestion) -> some View {
-        if let proposed = suggestion.proposedName {
-            HStack(spacing: 7) {
-                Image(systemName: suggestion.decision == "strong_review"
-                      ? "person.crop.circle.badge.questionmark.fill"
-                      : "person.crop.circle.badge.questionmark")
-                    .foregroundColor(suggestion.decision == "strong_review" ? .green : .blue)
-                Text(suggestion.decision == "strong_review"
-                     ? "WeSpeaker suggests" : "Closest voice to review")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                Text(proposed)
-                    .font(.caption.weight(.semibold))
-                if let score = suggestion.similarity {
-                    Text("\(Int((score * 100).rounded()))%")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundColor(.secondary)
-                }
-                if let margin = suggestion.margin {
-                    Text("+\(Int((margin * 100).rounded())) margin")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundColor(.secondary)
-                }
-                if let meetings = suggestion.supportingMeetings {
-                    Text("\(meetings) meeting\(meetings == 1 ? "" : "s")")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button(suggestion.decision == "strong_review" ? "Confirm suggestion" : "Confirm this name") {
-                    confirmCandidateSuggestion(id, suggestion: suggestion)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("You are confirming this identity. The model cannot apply it by itself.")
-            }
-            .padding(.leading, 26)
-            .help(suggestionHelp(suggestion))
-        } else if suggestion.decision == "hold" {
+        if suggestion.decision == "hold" {
             HStack(spacing: 6) {
                 Image(systemName: "waveform.badge.exclamationmark")
                     .foregroundColor(.secondary)
@@ -1618,6 +1677,67 @@ struct TranscriptViewerView: View {
                     .foregroundColor(.secondary)
             }
             .padding(.leading, 26)
+        } else if let proposed = suggestion.proposedName {
+            if suggestion.decision == "strong_review" {
+                // Gate-passing suggestion: name + confidence + confirm. Margin,
+                // meetings, and runner-up stay in the tooltip (suggestionHelp).
+                HStack(spacing: 7) {
+                    Image(systemName: "person.crop.circle.badge.questionmark.fill")
+                        .foregroundColor(.green)
+                    Text(proposed)
+                        .font(.caption.weight(.semibold))
+                    if let score = suggestion.similarity {
+                        Text("\(Int((score * 100).rounded()))%")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Confirm suggestion") {
+                        confirmCandidateSuggestion(id, suggestion: suggestion)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("You are confirming this identity. The model cannot apply it by itself.")
+                }
+                .padding(.leading, 26)
+                .help(suggestionHelp(suggestion))
+            } else if revealedWeakSuggestions.contains("\(id)") {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.crop.circle.badge.questionmark")
+                        .foregroundColor(.blue)
+                    Text(proposed)
+                        .font(.caption.weight(.semibold))
+                    if let score = suggestion.similarity {
+                        Text("\(Int((score * 100).rounded()))%")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Confirm this name") {
+                        confirmCandidateSuggestion(id, suggestion: suggestion)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("You are confirming this identity. The model cannot apply it by itself.")
+                }
+                .padding(.leading, 26)
+                .help(suggestionHelp(suggestion))
+            } else {
+                // Weak candidates stay hidden until asked for — an unverified
+                // name on screen can anchor the reviewer into confirming it.
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.badge.questionmark")
+                        .foregroundColor(.blue)
+                    Button("Closest match found — view") {
+                        revealedWeakSuggestions.insert("\(id)")
+                    }
+                    .font(.caption2)
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.accentColor)
+                }
+                .padding(.leading, 26)
+                .help("Did not pass the conservative gate. Reveal the candidate only if you want it — it is hidden so it cannot anchor your judgement.")
+            }
         }
     }
 
