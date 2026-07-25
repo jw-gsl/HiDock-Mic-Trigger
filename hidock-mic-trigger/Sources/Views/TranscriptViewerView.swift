@@ -301,6 +301,8 @@ struct SpeakerSuggestion: Codable {
     var reasons: [String]
     var acousticQuality: Double?
     var audioReason: String?
+    /// Calendar-event support for the proposed name (nil = no calendar data).
+    var inCalendar: Bool?
 
     enum CodingKeys: String, CodingKey {
         case currentName = "current_name"
@@ -315,6 +317,7 @@ struct SpeakerSuggestion: Codable {
         case reasons
         case acousticQuality = "acoustic_quality"
         case audioReason = "audio_reason"
+        case inCalendar = "in_calendar"
     }
 }
 
@@ -1666,6 +1669,21 @@ struct TranscriptViewerView: View {
         .help("More actions for \(speakerName(for: id))")
     }
 
+    /// Calendar support for a proposed name: plain calendar when the event's
+    /// attendee list includes them, warning mark when it doesn't.
+    private func calendarBadge(_ inCalendar: Bool?) -> some View {
+        Group {
+            if let inCalendar {
+                Image(systemName: inCalendar ? "calendar" : "calendar.badge.exclamationmark")
+                    .font(.caption2)
+                    .foregroundColor(inCalendar ? .accentColor : .orange)
+                    .help(inCalendar
+                        ? "In the meeting's calendar event"
+                        : "Not in the meeting's attendee list — held for your review")
+            }
+        }
+    }
+
     @ViewBuilder
     private func speakerSuggestionRow(id: Int, suggestion: SpeakerSuggestion) -> some View {
         if suggestion.decision == "hold" {
@@ -1686,6 +1704,7 @@ struct TranscriptViewerView: View {
                         .foregroundColor(.green)
                     Text(proposed)
                         .font(.caption.weight(.semibold))
+                    calendarBadge(suggestion.inCalendar)
                     if let score = suggestion.similarity {
                         Text("\(Int((score * 100).rounded()))%")
                             .font(.caption2.monospacedDigit())
@@ -1718,6 +1737,7 @@ struct TranscriptViewerView: View {
                             .foregroundColor(.blue)
                         Text(proposed)
                             .font(.caption.weight(.semibold))
+                        calendarBadge(suggestion.inCalendar)
                         if let score = suggestion.similarity {
                             Text("\(Int((score * 100).rounded()))%")
                                 .font(.caption2.monospacedDigit())

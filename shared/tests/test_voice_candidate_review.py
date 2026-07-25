@@ -228,6 +228,62 @@ def test_candidate_learning_rejects_unverified_sidecar(tmp_path):
         raise AssertionError("unverified candidate learning should fail")
 
 
+def _with_calendar(sidecar, names, ambiguous=False):
+    data = json.loads(sidecar.read_text())
+    data["calendar_context"] = {
+        "calendar_candidate_names": names,
+        "calendar_ambiguous": ambiguous,
+    }
+    sidecar.write_text(json.dumps(data))
+
+
+@patch("shared.voice_candidate_review._audio_quality_from_path")
+@patch("shared.voice_candidate_review._extract_audio_embedding")
+def test_calendar_candidate_is_badged_and_stays_strong(mock_embed, mock_quality, tmp_path):
+    config, sidecar = _fixture(tmp_path)
+    _with_calendar(sidecar, ["James Whiting"])
+    mock_embed.return_value = (np.asarray([1.0, 0.0], dtype=np.float32), 2, "wespeaker_resnet293")
+    mock_quality.return_value = {"acoustic_quality": 0.9, "audio_reason": "adequate acoustic signal"}
+
+    suggestion = suggest_for_transcript(sidecar, config_path=config, session=object())["suggestions"]["0"]
+
+    assert suggestion["proposed_name"] == "James Whiting"
+    assert suggestion["in_calendar"] is True
+    assert "not_in_calendar" not in suggestion["reasons"]
+    assert suggestion["decision"] == "strong_review"
+
+
+@patch("shared.voice_candidate_review._audio_quality_from_path")
+@patch("shared.voice_candidate_review._extract_audio_embedding")
+def test_proposal_outside_calendar_is_held_for_review(mock_embed, mock_quality, tmp_path):
+    config, sidecar = _fixture(tmp_path)
+    _with_calendar(sidecar, ["Someone Else"])
+    mock_embed.return_value = (np.asarray([1.0, 0.0], dtype=np.float32), 2, "wespeaker_resnet293")
+    mock_quality.return_value = {"acoustic_quality": 0.9, "audio_reason": "adequate acoustic signal"}
+
+    suggestion = suggest_for_transcript(sidecar, config_path=config, session=object())["suggestions"]["0"]
+
+    assert suggestion["proposed_name"] == "James Whiting"
+    assert suggestion["in_calendar"] is False
+    assert "not_in_calendar" in suggestion["reasons"]
+    assert suggestion["decision"] == "review"
+
+
+@patch("shared.voice_candidate_review._audio_quality_from_path")
+@patch("shared.voice_candidate_review._extract_audio_embedding")
+def test_ambiguous_calendar_disables_narrowing(mock_embed, mock_quality, tmp_path):
+    config, sidecar = _fixture(tmp_path)
+    _with_calendar(sidecar, ["Someone Else"], ambiguous=True)
+    mock_embed.return_value = (np.asarray([1.0, 0.0], dtype=np.float32), 2, "wespeaker_resnet293")
+    mock_quality.return_value = {"acoustic_quality": 0.9, "audio_reason": "adequate acoustic signal"}
+
+    suggestion = suggest_for_transcript(sidecar, config_path=config, session=object())["suggestions"]["0"]
+
+    assert suggestion["in_calendar"] is None
+    assert "not_in_calendar" not in suggestion["reasons"]
+    assert suggestion["decision"] == "strong_review"
+
+
 def test_list_candidate_speakers_reports_coverage(tmp_path):
     config, _sidecar = _fixture(tmp_path)
 

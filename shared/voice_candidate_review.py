@@ -261,6 +261,17 @@ def suggest_for_transcript(
     names = data.get("speaker_names") or {}
     meta = data.get("speaker_meta") or {}
     segments = data.get("segments") or []
+    # Calendar context recorded on the sidecar at diarization time (if any):
+    # library-matched attendee names from the recording's event. Used to badge
+    # suggestions and to hold proposed names no attendee list supports —
+    # never to boost a score, so the tuned gate stays calibrated.
+    calendar_meta = data.get("calendar_context") or {}
+    calendar_candidates = set()
+    if not calendar_meta.get("calendar_ambiguous"):
+        calendar_candidates = {
+            str(name).casefold()
+            for name in (calendar_meta.get("calendar_candidate_names") or [])
+        }
     active_speakers = {str(segment.get("speaker_id")) for segment in segments}
     unverified_speakers = {
         speaker_id
@@ -359,6 +370,17 @@ def suggest_for_transcript(
             acoustic_quality = quality.get("acoustic_quality")
             if acoustic_quality is not None and float(acoustic_quality) < _MIN_ACOUSTIC_QUALITY:
                 reasons.append("low_audio_cleanliness")
+            in_calendar = None
+            runner_up_in_calendar = None
+            if calendar_candidates:
+                in_calendar = best["name"].casefold() in calendar_candidates
+                if runner_up is not None:
+                    runner_up_in_calendar = runner_up["name"].casefold() in calendar_candidates
+                if not in_calendar:
+                    # The event's attendee list does not support this name.
+                    # It may still be a genuine guest, so this is a review
+                    # hold, not a rejection — but it must not pass strong.
+                    reasons.append("not_in_calendar")
             strong = robust and not reasons
             suggestions[speaker_id] = {
                 "current_name": name,
@@ -372,6 +394,8 @@ def suggest_for_transcript(
                 "margin": round(margin, 4),
                 "scorer": best["scorer"],
                 "supporting_meetings": best["supporting_meetings"],
+                "in_calendar": in_calendar,
+                "runner_up_in_calendar": runner_up_in_calendar,
                 "decision": "strong_review" if strong else "review",
                 "review_only": True,
                 "reasons": reasons,
