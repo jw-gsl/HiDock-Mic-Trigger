@@ -215,6 +215,12 @@ def preserve_existing_speaker_labels(
     diarized_result["speaker_embeddings"] = remapped_embeddings
     diarized_result["speaker_lineage"] = lineage
     diarized_result["preserved_speaker_labels"] = sorted(set(cluster_to_name.values()))
+    # Anchors and fresh auto-matches can hand the same name to two different
+    # clusters (anchor says cluster A is James, auto-match says cluster B is
+    # James). The diarizer's collision pass already ran before preservation,
+    # so re-resolve here: one name, one speaker (Rec53 kept two James rows).
+    from shared.speaker_meta import resolve_name_collisions
+    resolve_name_collisions(diarized_result["speaker_names"], diarized_result["speaker_meta"])
     return diarized_result
 
 

@@ -246,3 +246,32 @@ def test_legacy_timestamps_leave_verified_sidecars_untouched():
     whisper = {"segments": [{"start": 0.0, "end": 3.9, "text": "hello"}]}
 
     assert restore_legacy_timed_segments(data, whisper, turns, export_path="/tmp/imported.txt") is None
+
+
+def test_preserve_re_resolves_name_collisions_from_anchor_auto_mix():
+    """Anchor says cluster 0 is James; the fresh auto-match named cluster 1
+    James too. Only one James may survive (Rec53: two James rows persisted
+    because collision resolution never re-ran after preservation)."""
+    diarized = {
+        "segments": [
+            {"start": 0.0, "end": 10.0, "speaker_id": 0, "speaker": "Speaker 1", "text": "a"},
+            {"start": 10.0, "end": 20.0, "speaker_id": 1, "speaker": "Speaker 2", "text": "b"},
+        ],
+        "speaker_names": {"0": "Speaker 1", "1": "James Whiting"},
+        "speaker_meta": {
+            "0": {"source": "generic", "confidence": None, "verified": False},
+            "1": {"source": "auto", "confidence": 0.98, "verified": False},
+        },
+    }
+    previous = {
+        "segments": [
+            {"start": 0.0, "end": 9.0, "speaker_id": 0, "speaker": "James Whiting"},
+        ],
+        "speaker_names": {"0": "James Whiting"},
+        "speaker_meta": {"0": {"source": "legacy_import", "confidence": 0.8, "verified": False}},
+    }
+
+    result = preserve_existing_speaker_labels(diarized, previous)
+
+    names = list(result["speaker_names"].values())
+    assert names.count("James Whiting") == 1
