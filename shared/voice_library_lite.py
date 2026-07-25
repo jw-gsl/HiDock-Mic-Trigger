@@ -89,6 +89,66 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _ReDimNet2Session:
+    """ReDimNet2-B6 (PalabraAI, VoxBlink2+VoxCeleb2, large-margin) presented
+    as a speaker-embedding session: raw 16 kHz waveform in, embedding out.
+
+    Loads from local vendored copies (torch.hub's downloader hits SSL
+    certificate issues with urllib on this machine):
+      * model definition: ~/HiDock/Speech-to-Text/redimnet2-repo
+        (official PalabraAI/redimnet2 clone, MIT-licensed code)
+      * weights: ~/HiDock/Speech-to-Text/b6-vb2+vox2_v0-lm.pt (official
+        v1.0.0 release asset, sha256
+        e0a7d340a92f798720d1208949aa6a6bd0cddcb0ba7d4cec33596a17a484e6a2)
+    The checkpoint is VoxBlink2-derived (CC BY-NC-SA 4.0): local benchmark
+    use only, not for distribution.
+    """
+
+    _DEFAULT_REPO = Path.home() / "HiDock" / "Speech-to-Text" / "redimnet2-repo"
+    _DEFAULT_CHECKPOINT = Path.home() / "HiDock" / "Speech-to-Text" / "b6-vb2+vox2_v0-lm.pt"
+
+    def __init__(self, model_path=None, repo_dir=None):
+        import sys
+        import torch
+        repo = Path(repo_dir).expanduser() if repo_dir else self._DEFAULT_REPO
+        checkpoint = Path(model_path).expanduser() if model_path else self._DEFAULT_CHECKPOINT
+        if not (repo / "redimnet2" / "redimnet2.py").is_file():
+            raise RuntimeError(
+                f"ReDimNet2 package not found at {repo}; clone "
+                "https://github.com/PalabraAI/redimnet2 there first."
+            )
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        from redimnet2.redimnet2 import ReDimNet2Wrap
+
+        full_state_dict = torch.load(
+            str(checkpoint), map_location="cpu", weights_only=False,
+        )
+        self._model = ReDimNet2Wrap(**full_state_dict["model_config"])
+        result = self._model.load_state_dict(full_state_dict["state_dict"])
+        if result.missing_keys or result.unexpected_keys:
+            raise RuntimeError(
+                f"ReDimNet2 checkpoint mismatch: missing={result.missing_keys}, "
+                f"unexpected={result.unexpected_keys}"
+            )
+        self._model.eval()
+
+    def extract_embedding(self, audio, sr: int = 16000):
+        import torch
+        if sr != 16000:
+            raise ValueError(f"ReDimNet2 expects 16 kHz mono audio, got {sr}")
+        wav = torch.as_tensor(
+            np.asarray(audio, dtype=np.float32)
+        ).unsqueeze(0)
+        with torch.no_grad():
+            embedding = self._model(wav)
+        vector = embedding[0].cpu().numpy().astype(np.float32)
+        norm = float(np.linalg.norm(vector))
+        if norm > 1e-10:
+            vector = vector / norm
+        return vector
+
+
 def _get_speaker_embed_session(model_key: str | None = None, model_path: str | Path | None = None):
     """Try to load a configured speaker embedding ONNX model.
 
@@ -96,6 +156,8 @@ def _get_speaker_embed_session(model_key: str | None = None, model_path: str | P
         onnxruntime.InferenceSession or None if not available.
     """
     try:
+        if model_key == "redimnet2_b6":
+            return _ReDimNet2Session(model_path)
         from shared.models import MODELS_DIR, SPEAKER_EMBED_FILENAME, SPEAKER_EMBED_MODELS
 
         filename = SPEAKER_EMBED_FILENAME

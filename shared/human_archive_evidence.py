@@ -687,7 +687,7 @@ def _main() -> None:
     shadow.add_argument("--limit", type=int, help="Maximum candidates to embed in this shard")
     shadow.add_argument(
         "--model",
-        choices=("titanet", "campp", "eres2net", "wespeaker_resnet293", "wavlm_base_plus_sv"),
+        choices=("titanet", "campp", "eres2net", "wespeaker_resnet293", "wavlm_base_plus_sv", "redimnet2_b6"),
         default="titanet",
     )
     shadow.add_argument("--model-path", help="Explicit isolated ONNX model path")
@@ -701,7 +701,7 @@ def _main() -> None:
     evaluate.add_argument("--report", required=True)
     evaluate.add_argument(
         "--model",
-        choices=("titanet", "campp", "eres2net", "wespeaker_resnet293", "wavlm_base_plus_sv"),
+        choices=("titanet", "campp", "eres2net", "wespeaker_resnet293", "wavlm_base_plus_sv", "redimnet2_b6"),
     )
     evaluate.add_argument("--model-path", help="Explicit isolated ONNX model path")
     evaluate.add_argument("--scorer", choices=("max", "top3_median", "centroid"), default="max")
