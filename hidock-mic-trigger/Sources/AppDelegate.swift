@@ -4105,6 +4105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onMergePerson: { [weak self] from, into in
                 self?.mergePersonAcrossLibraries(from: from, into: into)
+            },
+            meName: viewModel.voiceLibraryMeName,
+            onToggleMe: { [weak self] name in
+                self?.toggleVoiceLibraryMe(name)
             }
         )
 
@@ -4135,7 +4139,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             } catch {
                 self.log("listVoiceLibraryNames failed: \(error.localizedDescription)")
             }
-            DispatchQueue.main.async { completion(names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }) }
+            let me = self.viewModel.voiceLibraryMeName
+            let ordered = names.sorted {
+                if let me = me {
+                    if $0 == me { return true }
+                    if $1 == me { return false }
+                }
+                return $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+            }
+            DispatchQueue.main.async { completion(ordered) }
         }
     }
 
@@ -4548,6 +4560,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } catch {
             log("Failed to rename speaker '\(oldName)': \(error)")
         }
+    }
+
+    /// Set or clear the voice-library person who is the user themselves
+    /// ("Me"). Pinned to the top of person pickers.
+    private func toggleVoiceLibraryMe(_ name: String) {
+        viewModel.voiceLibraryMeName = (viewModel.voiceLibraryMeName == name) ? nil : name
     }
 
     /// Merge a person in every voice library that contains the source name:

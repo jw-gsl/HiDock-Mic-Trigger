@@ -125,6 +125,10 @@ struct VoiceLibraryView: View {
     /// Merge a person in every library that contains the source name (live
     /// matching library and/or review-only candidate library).
     var onMergePerson: ((String, String) -> Void)? = nil
+    /// The person who is the user themselves ("Me"), pinned atop person
+    /// pickers. Tapping a row's star toggles it; nil means no Me set.
+    @State var meName: String? = nil
+    var onToggleMe: ((String) -> Void)? = nil
 
     private var visibleSpeakers: [VoiceLibrarySpeaker] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -359,6 +363,20 @@ struct VoiceLibraryView: View {
                         .help("Show only meetings \(speaker.name) is in")
                     }
 
+                    if let onToggleMe = onToggleMe {
+                        Button {
+                            meName = (meName == speaker.name) ? nil : speaker.name
+                            onToggleMe(speaker.name)
+                        } label: {
+                            Image(systemName: meName == speaker.name ? "star.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(meName == speaker.name ? .yellow : .secondary)
+                        .help(meName == speaker.name
+                            ? "This is you — tap to unset"
+                            : "Mark \(speaker.name) as Me — pinned to the top of name lists")
+                    }
+
                     if editingId == speaker.id {
                         TextField("Name", text: $editingName, onCommit: {
                             commitRename(speaker: speaker)
@@ -373,6 +391,10 @@ struct VoiceLibraryView: View {
                                 editingId = speaker.id
                                 editingName = speaker.name
                             }
+                    }
+
+                    if meName == speaker.name {
+                        meBadge()
                     }
 
                     Spacer()
@@ -415,7 +437,7 @@ struct VoiceLibraryView: View {
                     if speakers.count > 1 {
                         Button {
                             mergingFrom = speaker
-                            mergeTargetName = speakers.first(where: { $0.id != speaker.id })?.name ?? ""
+                            mergeTargetName = defaultMergeTarget(excluding: speaker, pool: speakers)
                         } label: {
                             Image(systemName: "arrow.triangle.merge")
                         }
@@ -476,9 +498,26 @@ struct VoiceLibraryView: View {
                         .help("Show only meetings \(person.name) is in")
                     }
 
+                    if let onToggleMe = onToggleMe {
+                        Button {
+                            meName = (meName == person.name) ? nil : person.name
+                            onToggleMe(person.name)
+                        } label: {
+                            Image(systemName: meName == person.name ? "star.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(meName == person.name ? .yellow : .secondary)
+                        .help(meName == person.name
+                            ? "This is you — tap to unset"
+                            : "Mark \(person.name) as Me — pinned to the top of name lists")
+                    }
+
                     Text(person.name)
                         .font(.body)
                         .fontWeight(.medium)
+                    if meName == person.name {
+                        meBadge()
+                    }
                     libraryBadge(person.inMatchingLibrary, label: "Matching", color: .accentColor)
                     libraryBadge(person.inCandidateLibrary, label: "Review", color: .purple)
 
@@ -490,7 +529,7 @@ struct VoiceLibraryView: View {
 
                     Button {
                         mergingFrom = person
-                        mergeTargetName = allPeople.first(where: { $0.id != person.id })?.name ?? ""
+                        mergeTargetName = defaultMergeTarget(excluding: person, pool: allPeople)
                     } label: {
                         Image(systemName: "arrow.triangle.merge")
                     }
@@ -519,13 +558,39 @@ struct VoiceLibraryView: View {
         }
     }
 
+    private func meBadge() -> some View {
+        Text("Me")
+            .font(.caption2.weight(.semibold))
+            .foregroundColor(.orange)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.orange.opacity(0.15))
+            .clipShape(Capsule())
+            .help("This person is you — pinned to the top of name lists")
+    }
+
     // MARK: - Merge
+
+    /// Default merge target for a row action: Me when set (and not the row
+    /// being merged), otherwise the first other person in the pool.
+    private func defaultMergeTarget(excluding source: VoiceLibrarySpeaker, pool: [VoiceLibrarySpeaker]) -> String {
+        if let me = meName, me != source.name, pool.contains(where: { $0.name == me }) {
+            return me
+        }
+        return pool.first(where: { $0.id != source.id })?.name ?? ""
+    }
 
     private func mergeSheet(source: VoiceLibrarySpeaker) -> some View {
         let pool = tab == .people ? allPeople : speakers
         let targets = pool
             .filter { $0.id != source.id }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .sorted {
+                if let me = meName {
+                    if $0.name == me { return true }
+                    if $1.name == me { return false }
+                }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
         let detail = tab == .people
             ? "Move all voice samples from “\(source.name)” into another name in every library that contains it (matching and review-only), then remove “\(source.name)”. Use this for duplicates like a first-name-only profile."
             : "Move all voice samples from “\(source.name)” into another library name, then remove “\(source.name)”. Use this for typos (e.g. Wildmsith → Wildsmith)."

@@ -191,11 +191,34 @@ final class HiDockViewModel: ObservableObject {
     /// Whether a meeting must contain ANY or ALL of the filtered people.
     @Published var syncPeopleFilterMode: PeopleFilterMode = .any { didSet { markDerivedDirty() } }
 
+    /// The voice-library person who is the user themselves ("Me"). Pinned to
+    /// the top of person pickers — the user is usually in their own meetings.
+    /// Persisted across launches.
+    @Published var voiceLibraryMeName: String? =
+        UserDefaults.standard.string(forKey: "hidockVoiceLibraryMeName") {
+        didSet {
+            if let name = voiceLibraryMeName {
+                UserDefaults.standard.set(name, forKey: "hidockVoiceLibraryMeName")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "hidockVoiceLibraryMeName")
+            }
+            markDerivedDirty()
+        }
+    }
+
     /// Every named person seen across meetings, sorted — for the filter menu.
+    /// "Me" (when set) pins to the top.
     var allPeople: [String] {
         var names = Set(meetingPeople.values.flatMap { $0 })
         names.formUnion(candidateMeetingEvidence.keys)
-        return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        let me = voiceLibraryMeName
+        return names.sorted {
+            if let me = me {
+                if $0 == me { return true }
+                if $1 == me { return false }
+            }
+            return $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
     }
     /// person name → number of meetings they appear in (sidecar labels and
     /// candidate-library evidence unioned per meeting, so evidence for the
