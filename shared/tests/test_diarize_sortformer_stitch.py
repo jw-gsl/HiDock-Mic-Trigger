@@ -472,6 +472,23 @@ def test_expected_speakers_from_calendar_ignores_singletons():
     assert _expected_speakers_from_calendar(context) is None
 
 
+def test_stitch_respects_linker_threshold_override():
+    """Per-model linkers carry their own calibrated threshold (WeSpeaker
+    0.65 vs TitaNet 0.70); a stricter threshold must reject the link."""
+    w1, w2 = _two_person_call_windows()
+    linker = _FakeLinker({
+        (0, "speaker_0"): _ALICE,
+        (0, "speaker_1"): _BOB,
+        (1, "speaker_0"): _BOB_LIKE,
+        (1, "speaker_1"): _ALICE_LIKE,  # cosine ≈ 0.9986 vs Alice
+    })
+    linker.threshold = 0.9995  # stricter than the pair's similarity
+    out = _stitch_windows(
+        [(0.0, w1), (W2_OFFSET, w2)], overlap_sec=OVERLAP, linker=linker
+    )
+    assert len({lab for _, _, lab in out}) == 3  # link rejected -> fresh label
+
+
 # ── empty-speaker pruning ─────────────────────────────────────────────────────
 
 

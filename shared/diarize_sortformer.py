@@ -43,7 +43,10 @@ _OVERLAP_SEC = 30.0
 # because a wrong merge is far more destructive than an extra label (extra
 # labels stay recoverable via the review/merge tools).
 _LINK_MIN_SPEECH_SECONDS = 3.0   # below this a window label's embedding is unreliable
-_LINK_SIMILARITY_THRESHOLD = 0.70
+_LINK_SIMILARITY_THRESHOLD = 0.70        # TitaNet cosine space
+_LINK_SIMILARITY_THRESHOLD_WESPEAKER = 0.65  # WeSpeaker cosine space (calibrated
+# 2026-07-25 on the frozen 134-person benchmark library: 0.27% false-merge vs
+# 19% missed-link at 0.65; the margin rule guards the heavy between-person tail)
 _LINK_MARGIN = 0.05
 
 # Micro-label absorption. After stitching, a label with only a few seconds of
@@ -67,28 +70,56 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 class _CrossWindowLinker:
     """Per-window raw-label voice embeddings for cross-window linking.
 
-    Lazily loads the TitaNet speaker-embedding model on first use and
-    degrades to None (no link evidence) whenever the model or an extraction
-    fails, so the stitcher falls back to legacy overlap-only behaviour.
+    Lazily loads the strongest available speaker-embedding model on first
+    use — WeSpeaker (the review-candidate model) when configured, TitaNet
+    otherwise — and degrades to None (no link evidence) whenever the model
+    or an extraction fails, so the stitcher falls back to legacy
+    overlap-only behaviour. Linking decides same/different-person only; it
+    names nobody, so using the review model here does not change its
+    review-only role.
     """
 
     def __init__(self, audio: np.ndarray, sr: int = 16000):
         self.audio = audio
         self.sr = sr
+        self.threshold = _LINK_SIMILARITY_THRESHOLD
+        self.model_key: str | None = None
         self._session = None
         self._session_failed = False
 
     def _session_or_none(self):
         if self._session is None and not self._session_failed:
             try:
-                from shared.models import ensure_speaker_embed
-                import onnxruntime as ort
-                self._session = ort.InferenceSession(
-                    str(ensure_speaker_embed()), providers=["CPUExecutionProvider"]
+                self._session, self.model_key, self.threshold = self._load_best_session()
+                print(
+                    f"Sortformer: cross-window linking via {self.model_key}",
+                    file=sys.stderr,
                 )
             except Exception:
                 self._session_failed = True
         return self._session
+
+    def _load_best_session(self):
+        """Prefer WeSpeaker (far stronger voice separation on this user's
+        data); fall back to TitaNet when no review candidate is configured."""
+        from pathlib import Path as _Path
+        try:
+            from shared.voice_candidate_review import load_candidate_config
+            from shared.voice_library_lite import _get_speaker_embed_session
+            config = load_candidate_config()
+            if config.get("available") and config.get("model_path"):
+                model_key = str(config.get("model_key") or "wespeaker_resnet293")
+                session = _get_speaker_embed_session(model_key, _Path(config["model_path"]))
+                if session is not None:
+                    return session, model_key, _LINK_SIMILARITY_THRESHOLD_WESPEAKER
+        except Exception:
+            pass
+        from shared.models import ensure_speaker_embed
+        import onnxruntime as ort
+        session = ort.InferenceSession(
+            str(ensure_speaker_embed()), providers=["CPUExecutionProvider"]
+        )
+        return session, "titanet", _LINK_SIMILARITY_THRESHOLD
 
     def embed(self, turns, label: str, window_index: int | None = None):
         """Embedding for one raw label within one window, or None.
@@ -284,6 +315,7 @@ def _stitch_windows(
         """
         if embedding is None:
             return None
+        threshold = getattr(linker, "threshold", None) or _LINK_SIMILARITY_THRESHOLD
         scored = sorted(
             (
                 (glab, _cosine(embedding, gemb))
@@ -296,7 +328,7 @@ def _stitch_windows(
         if not scored:
             return None
         best_label, best = scored[0]
-        if best < _LINK_SIMILARITY_THRESHOLD:
+        if best < threshold:
             return None
         if len(scored) > 1 and best - scored[1][1] < _LINK_MARGIN:
             return None
