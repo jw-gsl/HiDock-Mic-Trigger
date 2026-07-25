@@ -433,6 +433,45 @@ def test_merge_labels_to_count_never_merges_unembedded():
     assert [t[2] for t in out] == ["A", "A", "C"]
 
 
+# ── calendar-derived expected speaker count ───────────────────────────────────
+
+
+def test_expected_speakers_from_calendar_counts_non_declined():
+    from types import SimpleNamespace as NS
+    from shared.diarize_sortformer import _expected_speakers_from_calendar
+
+    attendees = tuple(
+        NS(name=n, declined=d)
+        for n, d in [("A", False), ("B", False), ("C", False), ("D", True)]
+    )
+    context = NS(
+        ambiguous=False,
+        selected_event_id="evt-1",
+        events=(NS(id="evt-1", attendees=attendees),),
+    )
+    assert _expected_speakers_from_calendar(context) == 3
+
+
+def test_expected_speakers_from_calendar_rejects_ambiguous_and_missing():
+    from types import SimpleNamespace as NS
+    from shared.diarize_sortformer import _expected_speakers_from_calendar
+
+    event = NS(id="evt-1", attendees=(NS(name="A", declined=False), NS(name="B", declined=False)))
+    assert _expected_speakers_from_calendar(NS(ambiguous=True, selected_event_id="evt-1", events=(event,))) is None
+    assert _expected_speakers_from_calendar(NS(ambiguous=False, selected_event_id=None, events=(event,))) is None
+    assert _expected_speakers_from_calendar(NS(ambiguous=False, selected_event_id="other", events=(event,))) is None
+    assert _expected_speakers_from_calendar(None) is None
+
+
+def test_expected_speakers_from_calendar_ignores_singletons():
+    from types import SimpleNamespace as NS
+    from shared.diarize_sortformer import _expected_speakers_from_calendar
+
+    event = NS(id="evt-1", attendees=(NS(name="A", declined=False),))
+    context = NS(ambiguous=False, selected_event_id="evt-1", events=(event,))
+    assert _expected_speakers_from_calendar(context) is None
+
+
 # ── empty-speaker pruning ─────────────────────────────────────────────────────
 
 

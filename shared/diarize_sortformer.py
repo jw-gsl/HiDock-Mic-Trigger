@@ -657,6 +657,30 @@ def _merge_labels_to_count(
     return [(s, e, mapping[lab]) for s, e, lab in turns]
 
 
+def _expected_speakers_from_calendar(calendar_context) -> int | None:
+    """Expected speaker count from the recording's calendar event, if any.
+
+    Non-declined attendees of the selected event. Used as a soft cap for the
+    post-hoc count merge: over-splitting is the common diarization failure,
+    so when more labels than attendees are found, merging down to the
+    attendee count is right far more often than wrong. Never applied for
+    ambiguous events or sub-2-person counts (a guest may be uninvited).
+    """
+    if calendar_context is None or getattr(calendar_context, "ambiguous", False):
+        return None
+    event_id = getattr(calendar_context, "selected_event_id", None)
+    if not event_id:
+        return None
+    for event in getattr(calendar_context, "events", None) or ():
+        if getattr(event, "id", None) == event_id:
+            count = sum(
+                1 for attendee in getattr(event, "attendees", ())
+                if not getattr(attendee, "declined", False)
+            )
+            return count if count >= 2 else None
+    return None
+
+
 def _prune_empty_speakers(
     speaker_names: dict,
     speaker_meta: dict,
@@ -833,16 +857,27 @@ def diarize(
 
     # Honour an explicitly requested speaker count post-hoc: Sortformer's
     # inference API is fixed-topology, but the stitched global labels can be
-    # merged down by voice similarity. The user's count is the guardrail that
-    # makes this aggressive merging safe on same-channel calls.
-    if n_speakers is not None and len(internal_labels) > n_speakers:
+    # merged down by voice similarity. Without an explicit count, fall back
+    # to the calendar event's non-declined attendee count — over-splitting
+    # is the common failure, so the attendee count is a safe soft cap.
+    # Either way the count is external evidence, which is what makes this
+    # aggressive merging safe on same-channel calls.
+    effective_n_speakers = n_speakers
+    if effective_n_speakers is None:
+        effective_n_speakers = _expected_speakers_from_calendar(calendar_context)
+        if effective_n_speakers is not None:
+            print(
+                f"Sortformer: calendar expects {effective_n_speakers} attendees",
+                file=sys.stderr,
+            )
+    if effective_n_speakers is not None and len(internal_labels) > effective_n_speakers:
         before = len(internal_labels)
-        renamed_turns = _merge_labels_to_count(renamed_turns, label_embs, n_speakers)
+        renamed_turns = _merge_labels_to_count(renamed_turns, label_embs, effective_n_speakers)
         surviving = {lab for _, _, lab in renamed_turns}
         internal_labels = [lab for lab in internal_labels if lab in surviving]
         print(
             f"Sortformer: merged {before} labels down to {len(internal_labels)} "
-            f"at requested speaker count {n_speakers}",
+            f"at speaker count {effective_n_speakers}",
             file=sys.stderr,
         )
 
