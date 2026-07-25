@@ -239,6 +239,35 @@ def _legacy_segment_assignments(
     return assignments, assigned_seconds
 
 
+def _drop_unverified_auto_turns(
+    turns: list[LegacyTurn],
+    sidecar_path: str | Path,
+) -> list[LegacyTurn]:
+    """Drop .md turns whose name the sidecar marks as an unverified auto-match.
+
+    The canonical .md is only trustworthy as a *human* naming source when the
+    names came from a person. Automatic .md writers (e.g. rediarize's
+    transcript refresh) put unverified auto names in it too; read back in,
+    those would pose as human anchors and can collapse fresh clusters onto
+    the wrong identity. Verified/user/legacy entries remain trusted.
+    """
+    try:
+        data = json.loads(Path(sidecar_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return turns
+    names = data.get("speaker_names") or {}
+    meta = data.get("speaker_meta") or {}
+    auto_names = {
+        str(name).casefold()
+        for sid, name in names.items()
+        if (meta.get(sid) or {}).get("source") == "auto"
+        and (meta.get(sid) or {}).get("verified") is not True
+    }
+    if not auto_names:
+        return turns
+    return [turn for turn in turns if turn.name.casefold() not in auto_names]
+
+
 def find_human_label_source(
     sidecar_path: str | Path,
     transcript_path: str | Path | None = None,
@@ -261,6 +290,8 @@ def find_human_label_source(
             _created, turns = parse_human_named_transcript(candidate)
         except OSError:
             continue
+        if turns:
+            turns = _drop_unverified_auto_turns(turns, sidecar_path)
         if turns:
             return candidate, turns
 
