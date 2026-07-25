@@ -1701,42 +1701,52 @@ struct TranscriptViewerView: View {
                 }
                 .padding(.leading, 26)
                 .help(suggestionHelp(suggestion))
-            } else if revealedWeakSuggestions.contains("\(id)") {
-                HStack(spacing: 7) {
-                    Image(systemName: "person.crop.circle.badge.questionmark")
-                        .foregroundColor(.blue)
-                    Text(proposed)
-                        .font(.caption.weight(.semibold))
-                    if let score = suggestion.similarity {
-                        Text("\(Int((score * 100).rounded()))%")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button("Confirm this name") {
-                        confirmCandidateSuggestion(id, suggestion: suggestion)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("You are confirming this identity. The model cannot apply it by itself.")
-                }
-                .padding(.leading, 26)
-                .help(suggestionHelp(suggestion))
             } else {
                 // Weak candidates stay hidden until asked for — an unverified
                 // name on screen can anchor the reviewer into confirming it.
-                HStack(spacing: 6) {
-                    Image(systemName: "person.crop.circle.badge.questionmark")
-                        .foregroundColor(.blue)
-                    Button("Closest match found — view") {
-                        revealedWeakSuggestions.insert("\(id)")
+                // Exception: when the quick library guess on this row names
+                // someone DIFFERENT, the contradiction is exactly what the
+                // reviewer needs to see, so show it (and the badge is
+                // suppressed, leaving one name on screen).
+                let contradictsLibraryGuess: Bool = {
+                    guard let best = liveConfidence["\(id)"]?.best else { return false }
+                    return best.caseInsensitiveCompare(proposed) != .orderedSame
+                }()
+                if contradictsLibraryGuess || revealedWeakSuggestions.contains("\(id)") {
+                    HStack(spacing: 7) {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                            .foregroundColor(.blue)
+                        Text(proposed)
+                            .font(.caption.weight(.semibold))
+                        if let score = suggestion.similarity {
+                            Text("\(Int((score * 100).rounded()))%")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Confirm this name") {
+                            confirmCandidateSuggestion(id, suggestion: suggestion)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("You are confirming this identity. The model cannot apply it by itself.")
                     }
-                    .font(.caption2)
-                    .buttonStyle(.borderless)
-                    .foregroundColor(.accentColor)
+                    .padding(.leading, 26)
+                    .help(suggestionHelp(suggestion))
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                            .foregroundColor(.blue)
+                        Button("Closest match found — view") {
+                            revealedWeakSuggestions.insert("\(id)")
+                        }
+                        .font(.caption2)
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.accentColor)
+                    }
+                    .padding(.leading, 26)
+                    .help("Did not pass the conservative gate. Reveal the candidate only if you want it — it is hidden so it cannot anchor your judgement.")
                 }
-                .padding(.leading, 26)
-                .help("Did not pass the conservative gate. Reveal the candidate only if you want it — it is hidden so it cannot anchor your judgement.")
             }
         }
     }
@@ -2240,6 +2250,16 @@ struct TranscriptViewerView: View {
     /// raw cosine (which looks high even when the match is wrong). Flags the case
     /// the user hit — another enrolled voice fits better than the assigned name.
     private func confidenceBadge(for id: Int) -> (text: String, color: Color)? {
+        // One name per speaker: when WeSpeaker proposes something different
+        // from the quick library guess, its suggestion row carries the naming
+        // decision and this badge stays out of the way (the two models
+        // disagreeing on screen was read as one confused signal).
+        if let suggestion = liveSuggestions["\(id)"],
+           let proposed = suggestion.proposedName,
+           let best = liveConfidence["\(id)"]?.best,
+           best.caseInsensitiveCompare(proposed) != .orderedSame {
+            return nil
+        }
         guard let s = liveConfidence["\(id)"] else { return nil }
         // Assigned name isn't enrolled yet — hint at the closest known voice.
         guard let assignedScore = s.score else {
