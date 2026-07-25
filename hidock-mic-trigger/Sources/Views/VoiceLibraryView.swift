@@ -209,13 +209,20 @@ struct VoiceLibraryView: View {
                 Divider()
             }
 
-            // Search (+ matching-library controls)
+            // Search — full-width row of its own (it was unreadably cramped
+            // beside the tab controls)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundColor(.secondary)
                 TextField(tab == .people ? "Search people…" : "Search speakers…", text: $search)
                     .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            // Controls row
+            HStack(spacing: 8) {
                 if tab == .matching {
-                    Divider().frame(height: 16)
                     Text("Sort:").font(.caption.weight(.medium)).foregroundColor(.secondary)
                     Picker("", selection: $sortKey) {
                         ForEach(VoiceSortKey.allCases) { Text($0.label).tag($0) }
@@ -268,7 +275,8 @@ struct VoiceLibraryView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.bottom, 8)
+            .padding(.top, 4)
 
             Divider()
 
