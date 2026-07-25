@@ -608,6 +608,55 @@ def _resolve_speaker_names(
     return info
 
 
+def _merge_labels_to_count(
+    turns: list[tuple[float, float, str]],
+    label_embeddings: dict,
+    count: int,
+) -> list[tuple[float, float, str]]:
+    """Merge global labels down to `count` by repeatedly combining the two
+    most similar clusters (single-linkage max cosine over member embeddings).
+
+    Only ever used when the user explicitly requests a speaker count: on
+    same-channel calls different people can sit at 0.94 cosine while
+    fragments of one person sit at 0.97+, so no fixed threshold is safe —
+    the human-supplied count is the guardrail that makes aggressive merging
+    correct here. Labels without embeddings are never force-merged; if too
+    many remain, the merge stops short rather than guessing.
+    """
+    labels: list[str] = []
+    for _, _, lab in turns:
+        if lab not in labels:
+            labels.append(lab)
+    if count < 1 or len(labels) <= count:
+        return turns
+
+    clusters: list[list[str]] = [[lab] for lab in labels]
+    while len(clusters) > count:
+        best = None
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                sims = [
+                    _cosine(label_embeddings[a], label_embeddings[b])
+                    for a in clusters[i]
+                    for b in clusters[j]
+                    if label_embeddings.get(a) is not None
+                    and label_embeddings.get(b) is not None
+                ]
+                if not sims:
+                    continue
+                sim = max(sims)
+                if best is None or sim > best[0]:
+                    best = (sim, i, j)
+        if best is None:
+            break
+        _, i, j = best
+        clusters[i].extend(clusters[j])
+        del clusters[j]
+
+    mapping = {member: cluster[0] for cluster in clusters for member in cluster}
+    return [(s, e, mapping[lab]) for s, e, lab in turns]
+
+
 def _prune_empty_speakers(
     speaker_names: dict,
     speaker_meta: dict,
@@ -777,6 +826,25 @@ def diarize(
         sr=16000,
         allowed_names=getattr(calendar_context, "candidate_names", None),
     )
+    label_embs = {
+        label: (speaker_info.get(label) or {}).get("embedding")
+        for label in internal_labels
+    }
+
+    # Honour an explicitly requested speaker count post-hoc: Sortformer's
+    # inference API is fixed-topology, but the stitched global labels can be
+    # merged down by voice similarity. The user's count is the guardrail that
+    # makes this aggressive merging safe on same-channel calls.
+    if n_speakers is not None and len(internal_labels) > n_speakers:
+        before = len(internal_labels)
+        renamed_turns = _merge_labels_to_count(renamed_turns, label_embs, n_speakers)
+        surviving = {lab for _, _, lab in renamed_turns}
+        internal_labels = [lab for lab in internal_labels if lab in surviving]
+        print(
+            f"Sortformer: merged {before} labels down to {len(internal_labels)} "
+            f"at requested speaker count {n_speakers}",
+            file=sys.stderr,
+        )
 
     # Absorb micro tail-fragments (a few seconds of speech) into their
     # closest full-size voice — a fragment is not a real participant, and
@@ -790,10 +858,6 @@ def diarize(
         + ", ".join(f"{lab}={secs:.1f}s" for lab, secs in sorted(talk_seconds.items())),
         file=sys.stderr,
     )
-    label_embs = {
-        label: (speaker_info.get(label) or {}).get("embedding")
-        for label in internal_labels
-    }
     absorbed_turns = _absorb_micro_labels(renamed_turns, label_embs, talk_seconds)
     for lab in sorted(set(talk_seconds) - {lab for _, _, lab in absorbed_turns}):
         print(

@@ -388,6 +388,51 @@ def test_absorb_micro_labels_ignores_unembedded_fragment():
     assert [t[2] for t in out] == ["A", "C"]
 
 
+# ── merge-to-count (explicit user-requested speaker count) ────────────────────
+
+
+def test_merge_labels_to_count_merges_most_similar_first():
+    from shared.diarize_sortformer import _merge_labels_to_count
+
+    turns = [
+        (0.0, 10.0, "A"), (10.0, 20.0, "B"), (20.0, 30.0, "C"), (30.0, 40.0, "D"),
+    ]
+    embs = {
+        "A": _ALICE, "B": _BOB,
+        "C": _ALICE_LIKE,   # closest to A
+        "D": _BOB_LIKE,     # closest to B
+    }
+    out = _merge_labels_to_count(turns, embs, 2)
+    assert [t[2] for t in out] == ["A", "B", "A", "B"]
+
+
+def test_merge_labels_to_count_noop_when_at_or_below_count():
+    from shared.diarize_sortformer import _merge_labels_to_count
+
+    turns = [(0.0, 5.0, "A"), (5.0, 10.0, "B")]
+    embs = {"A": _ALICE, "B": _BOB}
+    assert _merge_labels_to_count(turns, embs, 2) == turns
+    assert _merge_labels_to_count(turns, embs, 5) == turns
+
+
+def test_merge_labels_to_count_chains_by_best_pair():
+    from shared.diarize_sortformer import _merge_labels_to_count
+
+    turns = [(0.0, 5.0, "A"), (5.0, 10.0, "B"), (10.0, 15.0, "C")]
+    embs = {"A": _ALICE, "B": _ALICE_LIKE, "C": _BOB}  # A~B (0.999) before B~C
+    out = _merge_labels_to_count(turns, embs, 2)
+    assert [t[2] for t in out] == ["A", "A", "C"]
+
+
+def test_merge_labels_to_count_never_merges_unembedded():
+    from shared.diarize_sortformer import _merge_labels_to_count
+
+    turns = [(0.0, 5.0, "A"), (5.0, 10.0, "B"), (10.0, 15.0, "C")]
+    embs = {"A": _ALICE, "B": _BOB}  # C has no embedding
+    out = _merge_labels_to_count(turns, embs, 1)
+    assert [t[2] for t in out] == ["A", "A", "C"]
+
+
 # ── empty-speaker pruning ─────────────────────────────────────────────────────
 
 
