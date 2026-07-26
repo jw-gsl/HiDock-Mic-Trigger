@@ -1287,12 +1287,16 @@ def cmd_candidate_speakers(args):
 def cmd_calendar_context(args):
     """Write a <stem>_calendar.json sidecar for an audio recording.
 
-    The payload is a Microsoft 365 MCP-style events JSON (a bare list, or a
-    dict with value/events/items). recording_start defaults to the audio
-    filename's timestamp, recording_end to start + audio duration. The
-    resolved calendar context is printed so a wrong event match is visible
+    The payload is a calendar events JSON from your provider (Microsoft 365
+    MCP or Google Calendar MCP shape — a bare list, or a dict with
+    value/events/items). recording_start defaults to the audio filename's
+    timestamp, recording_end to start + audio duration. The resolved
+    calendar context is printed so a wrong event match is visible
     immediately."""
     import json as _json
+    if not args.payload:
+        print(_CALENDAR_ONBOARDING)
+        sys.exit(2)
     import soundfile as sf
     from shared.calendar_context import (
         build_sidecar_doc,
@@ -1325,7 +1329,7 @@ def cmd_calendar_context(args):
         from shared.calendar_context import _timestamp
         end = (_timestamp(start) + timedelta(seconds=duration)).isoformat()
     try:
-        doc = build_sidecar_doc(payload, start, end)
+        doc = build_sidecar_doc(payload, start, end, source=args.source)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -1338,11 +1342,39 @@ def cmd_calendar_context(args):
     print(_json.dumps({
         "status": "completed",
         "sidecar": str(destination),
-        "events": len(doc.get("value", [])),
+        "source": doc["source"],
+        "events": len(doc.get("value", doc.get("items", []))),
         "context": context.summary(),
         "candidate_names": sorted(context.candidate_names),
         "ambiguous": context.ambiguous,
     }))
+
+
+_CALENDAR_ONBOARDING = """\
+Calendar context needs an events payload from your calendar provider.
+The app cannot start the OAuth sign-in itself — consent must happen in
+your MCP client (browser). Pick a provider, connect it, export events,
+then re-run this command:
+
+  Microsoft 365 (Claude connector):
+    1. In Claude, enable the "Microsoft 365" connector
+       (already connected on this account: claude mcp list to check).
+    2. Ask for the events around your meeting and save them as JSON
+       (M365 Graph event shape).
+    3. transcribe.py calendar-context <audio> --payload events.json \
+         --source microsoft365-mcp
+
+  Google Calendar:
+    1. Enable a Google Calendar MCP (e.g. npx @cocal/google-calendar-mcp)
+       and complete its Google sign-in.
+    2. Ask for the events around your meeting and save them as JSON
+       (Google Calendar event shape; summary/start/end/attendees).
+    3. transcribe.py calendar-context <audio> --payload events.json \
+         --source google-calendar-mcp
+
+The written <stem>_calendar.json is then picked up automatically on the
+next rediarize/transcribe: attendee count soft-caps speaker merging and
+suggestions are narrowed to attendees."""
 
 
 def cmd_merge_candidate_speakers(args):
@@ -1832,11 +1864,14 @@ def main():
 
     p_calendar = sub.add_parser(
         "calendar-context",
-        help="Write a <stem>_calendar.json sidecar from an M365-style events payload (JSON)",
+        help="Write a <stem>_calendar.json sidecar from a calendar events payload (JSON)",
     )
     p_calendar.add_argument("audio_path", help="Recording mp3 whose timestamp/duration sets the window")
-    p_calendar.add_argument("--payload", required=True,
-                            help="M365-style events JSON (list, or dict with value/events/items)")
+    p_calendar.add_argument("--payload",
+                            help="Calendar events JSON (list, or dict with value/events/items); omit for setup instructions")
+    p_calendar.add_argument("--source", default="microsoft365-mcp",
+                            choices=("microsoft365-mcp", "google-calendar-mcp"),
+                            help="Provider label recorded in the sidecar (default: %(default)s)")
     p_calendar.add_argument("--recording-start", help="ISO start override (default: filename timestamp)")
     p_calendar.add_argument("--recording-end", help="ISO end override (default: start + audio duration)")
     p_calendar.set_defaults(func=cmd_calendar_context)

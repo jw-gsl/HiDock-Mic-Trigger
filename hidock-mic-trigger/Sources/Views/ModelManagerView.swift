@@ -183,6 +183,32 @@ struct ModelManagerView: View {
 
             Divider()
 
+            // Calendar provider — meeting context (attendees) used for
+            // speaker merging and suggestion narrowing.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "calendar").foregroundColor(.teal)
+                    Text("Calendar").fontWeight(.medium)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { viewModel.calendarProvider },
+                        set: { viewModel.onSetCalendarProvider($0) }
+                    )) {
+                        ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
+                            Text(choice.label).tag(choice.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                }
+                Text(calendarExplainer)
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+
+            Divider()
+
             if viewModel.modelStatuses.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
@@ -218,6 +244,19 @@ struct ModelManagerView: View {
     /// bold section header with a one-line explainer.
     private let pipelineStageOrder = ["transcription", "diarization"]
     private let supportingStageOrder = ["vad", "embedding", "identity_review"]
+
+    /// Explainer under the Calendar provider picker — honest about the app
+    /// not being able to start the provider's sign-in itself.
+    private var calendarExplainer: String {
+        switch viewModel.calendarProvider {
+        case "microsoft365":
+            return "Attendee lists from the Microsoft 365 connector narrow speaker merging and suggestions. Connect it in your MCP client (e.g. Claude's Microsoft 365 connector) — the app can't start the sign-in for you — then events flow in via calendar-context."
+        case "google":
+            return "Attendee lists from a Google Calendar MCP narrow speaker merging and suggestions. Connect it in your MCP client (e.g. @cocal/google-calendar-mcp) — the app can't start the sign-in for you — then events flow in via calendar-context."
+        default:
+            return "Calendar context is off. Speaker merging and suggestions won't use attendee lists."
+        }
+    }
 
     /// Group model statuses by stage, keeping active entries first so
     /// the current selection is always at the top of each section.

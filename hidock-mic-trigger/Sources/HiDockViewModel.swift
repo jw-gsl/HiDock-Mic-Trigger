@@ -1084,6 +1084,18 @@ final class HiDockViewModel: ObservableObject {
     @Published var showCLIWhileSummarising: Bool = true
     var onSetShowCLIWhileSummarising: (Bool) -> Void = { _ in }
 
+    // MARK: - Calendar provider
+    /// Which calendar the app takes meeting context from ("off" /
+    /// "microsoft365" / "google"). Drives attendee-based speaker merging
+    /// and suggestion narrowing via _calendar.json sidecars.
+    @Published var calendarProvider: String = "off"
+    let calendarProviderChoices: [(id: String, label: String)] = [
+        ("off", "Off"),
+        ("microsoft365", "Microsoft 365"),
+        ("google", "Google Calendar"),
+    ]
+    var onSetCalendarProvider: (String) -> Void = { _ in }
+
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
     /// Open Claude Code in the CLI pane to refine an existing template file.

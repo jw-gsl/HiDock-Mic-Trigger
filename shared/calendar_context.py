@@ -191,7 +191,7 @@ def _event(raw: Any, index: int) -> CalendarEvent | None:
         return None
     attendees = tuple(a for a in (_attendee(item) for item in raw.get("attendees", [])) if a)
     return CalendarEvent(str(raw.get("id") or raw.get("iCalUId") or index),
-                         str(raw.get("subject") or raw.get("title") or "").strip(),
+                         str(raw.get("subject") or raw.get("title") or raw.get("summary") or "").strip(),
                          start, end, attendees)
 
 

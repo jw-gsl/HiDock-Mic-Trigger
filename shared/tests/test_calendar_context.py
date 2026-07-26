@@ -149,3 +149,25 @@ def test_build_sidecar_doc_accepts_bare_event_lists_and_rejects_bad_input():
         pass
     else:
         raise AssertionError("end before start should be rejected")
+
+
+def test_google_calendar_shape_parses_title_and_declines():
+    google_payload = {
+        "items": [{
+            "id": "g1",
+            "summary": "Weekly sync",
+            "start": {"dateTime": "2026-07-21T13:55:00+01:00", "timeZone": "Europe/London"},
+            "end": {"dateTime": "2026-07-21T15:00:00+01:00", "timeZone": "Europe/London"},
+            "attendees": [
+                {"email": "james@example.com", "displayName": "James Whiting", "responseStatus": "accepted"},
+                {"email": "riley@example.com", "displayName": "Riley Roberts", "responseStatus": "needsAction"},
+                {"email": "chris@example.com", "displayName": "Chris Wildsmith", "responseStatus": "declined"},
+            ],
+        }]
+    }
+    events = parse_context_payload(google_payload)
+    assert len(events) == 1
+    assert events[0].title == "Weekly sync"
+    context = load_context(google_payload, "2026-07-21T13:58:00+01:00", "2026-07-21T14:40:00+01:00")
+    assert context.selected_event_title == "Weekly sync"
+    assert context.candidate_names == frozenset({"James Whiting", "Riley Roberts"})

@@ -189,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // --summarize-engine. Mirrors shared/llm_cli.py's engine ids.
     private let summarizeEngineKey = "summarizeEngine"
     private var summarizeEngine: String { UserDefaults.standard.string(forKey: summarizeEngineKey) ?? "auto" }
+    private let calendarProviderKey = "hidockCalendarProvider"
     private let showCLIWhileSummarisingKey = "showCLIWhileSummarising"
     /// Defaults to true when never set.
     private var showCLIWhileSummarising: Bool {
@@ -547,6 +548,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("Summarisation provider set to \(id)")
     }
 
+    /// Single setter for the calendar provider (off / Microsoft 365 /
+    /// Google) — the Models-window picker writes through this.
+    private func setCalendarProvider(_ id: String) {
+        UserDefaults.standard.set(id, forKey: calendarProviderKey)
+        viewModel.calendarProvider = id
+        log("Calendar provider set to \(id)")
+    }
+
     // MARK: - UNUserNotificationCenterDelegate
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -608,6 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.syncAutoSummarise = UserDefaults.standard.bool(forKey: syncAutoSummariseKey)
         syncAutoSummarise = viewModel.syncAutoSummarise
         viewModel.summarizeEngine = summarizeEngine
+        viewModel.calendarProvider = UserDefaults.standard.string(forKey: calendarProviderKey) ?? "off"
         viewModel.showCLIWhileSummarising = showCLIWhileSummarising
         refreshResolvedAutoEngine()
         // Default diarization to ON — speaker labels are almost always wanted
@@ -729,6 +739,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onCancelTranscription = { [weak self] in self?.cancelTranscription() }
         viewModel.onShowModelManager = { [weak self] in self?.openModelManager() }
         viewModel.onSetSummarizeEngine = { [weak self] id in self?.setSummarizeEngine(id) }
+        viewModel.onSetCalendarProvider = { [weak self] id in self?.setCalendarProvider(id) }
         viewModel.onSetShowCLIWhileSummarising = { [weak self] on in
             UserDefaults.standard.set(on, forKey: self?.showCLIWhileSummarisingKey ?? "showCLIWhileSummarising")
             self?.viewModel.showCLIWhileSummarising = on
