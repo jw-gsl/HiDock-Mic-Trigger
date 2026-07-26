@@ -285,7 +285,7 @@ struct FeedbackHistoryView: View {
                 .frame(minWidth: 300)
             }
         }
-        .frame(minWidth: 600, minHeight: 380)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in the resizable detail pane (min 480 wide)
         .onAppear {
             if selectedID == nil, let first = filteredItems.first {
                 selectedID = first.id

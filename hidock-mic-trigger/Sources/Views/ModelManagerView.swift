@@ -209,7 +209,7 @@ struct ModelManagerView: View {
                 }
             }
         }
-        .frame(minWidth: 540, minHeight: 420)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in the resizable detail pane (min 480 wide)
     }
 
     /// Top-level categorisation. Pipeline stages are the user's direct

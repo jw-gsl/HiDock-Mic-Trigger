@@ -141,7 +141,7 @@ struct DeviceManagerView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
         }
-        .frame(minWidth: 560, minHeight: 400)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in the resizable detail pane (min 480 wide)
     }
 
     private var filteredDevices: [HiDockPairedDevice] {
