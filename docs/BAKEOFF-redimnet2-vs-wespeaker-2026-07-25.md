@@ -95,3 +95,13 @@ both sets. Activation is a user decision (config switch in
 continue into the ReDimNet2 library. Remaining bake-off items from the
 handover stay open: open-set/held-out-identity suite, confidence intervals,
 W2V-BERT as offline ceiling.
+
+## Outcome (2026-07-25, later same day)
+
+**Promoted.** ReDimNet2-B6 is the active review candidate. The Models UI
+Speaker Identity Review stage now lists both models with a radio toggle:
+each candidate dir holds a `review-candidate.json`, and `models.py
+set-active` repoints `active.json` (backing up first), so WeSpeaker is one
+click away if wanted. Live verification on Rec76 produced strong Riley
+Roberts (0.83 — the speaker who was mislabelled "Rebecca" by the old
+auto-matcher) and strong Ellen Barss, with two cautious review rows.
