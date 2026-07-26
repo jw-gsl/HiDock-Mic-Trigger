@@ -31,7 +31,6 @@ from shared.legacy_transcript_recovery import (
 )
 from shared.srt_writer import srt_path_for, write_srt
 from shared.voice_library_lite import (
-    _AUDIO_QUALITY_VERSION,
     _MAX_SAMPLES,
     _NEURAL_MODEL_VERSION,
     _assess_sample_quality,

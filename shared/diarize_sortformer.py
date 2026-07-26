@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from shared.word_timing import normalise_timed_word, timed_words, words_to_text
+from shared.word_timing import timed_words, words_to_text
 
 
 _DIAR_MODEL_NAME = "nvidia/diar_sortformer_4spk-v1"

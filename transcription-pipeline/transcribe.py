@@ -1224,6 +1224,7 @@ def cmd_rematch_preflight_batch(args):
 
 def cmd_record_rematch_correction(args):
     """Persist a reviewed Rematch outcome without changing the transcript."""
+    import json as _json
     from shared.speaker_meta import record_rematch_correction
     try:
         event = record_rematch_correction(
