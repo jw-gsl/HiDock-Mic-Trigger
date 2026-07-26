@@ -1,0 +1,174 @@
+<div id="rematch-review" aria-live="polite">
+  <div class="viz-controls">
+    <label class="form-label" for="report-file">Preflight report</label>
+    <input class="form-control" id="report-file" type="file" accept="application/json">
+    <label class="form-label" for="report-json">Or paste report JSON</label>
+    <textarea class="form-control" id="report-json" rows="4" spellcheck="false"></textarea>
+    <button class="btn btn-primary" id="load-report" type="button">Load review queue</button>
+    <label class="form-label" for="candidate-filter">Show</label>
+    <select class="form-select" id="candidate-filter">
+      <option value="review">Needs review</option>
+      <option value="hold">Held candidates</option>
+      <option value="decided">My decisions</option>
+    </select>
+    <button class="btn" id="export-decisions" type="button" disabled>Export decisions</button>
+  </div>
+
+  <p class="text-destructive" id="load-error" hidden></p>
+  <div class="viz-grid" id="counts" hidden>
+    <div class="card viz-stat"><div class="text-muted">Needs review</div><div class="viz-stat-value" id="review-count">0</div></div>
+    <div class="card viz-stat"><div class="text-muted">Held</div><div class="viz-stat-value" id="hold-count">0</div></div>
+    <div class="card viz-stat"><div class="text-muted">Decisions made</div><div class="viz-stat-value" id="decision-count">0</div></div>
+  </div>
+
+  <div id="candidate-list"></div>
+</div>
+
+<script>
+(() => {
+  const root = document.getElementById('rematch-review');
+  const fileInput = root.querySelector('#report-file');
+  const pastedInput = root.querySelector('#report-json');
+  const loadButton = root.querySelector('#load-report');
+  const filter = root.querySelector('#candidate-filter');
+  const exportButton = root.querySelector('#export-decisions');
+  const error = root.querySelector('#load-error');
+  const counts = root.querySelector('#counts');
+  const list = root.querySelector('#candidate-list');
+  const reviewCount = root.querySelector('#review-count');
+  const holdCount = root.querySelector('#hold-count');
+  const decisionCount = root.querySelector('#decision-count');
+  let candidates = [];
+  const decisions = new Map();
+
+  function flatten(report) {
+    if (Array.isArray(report.sidecars)) {
+      return report.sidecars.flatMap(sidecar => [
+        ...(sidecar.review_candidates || []).map(item => ({ ...item, source_path: sidecar.source_path, bucket: 'review' })),
+        ...(sidecar.hold_candidates || []).map(item => ({ ...item, source_path: sidecar.source_path, bucket: 'hold' }))
+      ]);
+    }
+    return [
+      ...(report.review_candidates || []).map(item => ({ ...item, source_path: report.source_path, bucket: 'review' })),
+      ...(report.hold_candidates || []).map(item => ({ ...item, source_path: report.source_path, bucket: 'hold' }))
+    ];
+  }
+
+  function candidateKey(item) {
+    return `${item.source_path || 'unknown'}::${item.id}`;
+  }
+
+  function updateCounts() {
+    reviewCount.textContent = candidates.filter(item => item.bucket === 'review').length;
+    holdCount.textContent = candidates.filter(item => item.bucket === 'hold').length;
+    decisionCount.textContent = decisions.size;
+    counts.hidden = candidates.length === 0;
+    exportButton.disabled = decisions.size === 0;
+  }
+
+  function value(item, key, fallback = '—') {
+    const itemValue = item[key];
+    return itemValue === undefined || itemValue === null || itemValue === '' ? fallback : itemValue;
+  }
+
+  function render() {
+    const mode = filter.value;
+    const shown = candidates.filter(item => {
+      if (mode === 'decided') return decisions.has(candidateKey(item));
+      return item.bucket === mode;
+    });
+    list.replaceChildren();
+    if (!candidates.length) return;
+    if (!shown.length) {
+      const empty = document.createElement('p');
+      empty.className = 'text-muted';
+      empty.textContent = mode === 'decided' ? 'No decisions yet.' : 'No candidates in this group.';
+      list.append(empty);
+      return;
+    }
+    const grid = document.createElement('div');
+    grid.className = 'viz-grid';
+    shown.forEach(item => {
+      const card = document.createElement('section');
+      card.className = 'card';
+      const key = candidateKey(item);
+      const decision = decisions.get(key);
+      const path = (item.source_path || '').split('/').pop() || 'Unknown sidecar';
+      const heading = document.createElement('h3');
+      heading.textContent = `${path} · Speaker ${value(item, 'id')}`;
+      const proposal = document.createElement('p');
+      proposal.textContent = `${item.bucket === 'review' ? 'Suggested' : 'Held'}: ${value(item, 'proposed_name')}`;
+      const evidence = document.createElement('p');
+      evidence.className = 'text-small';
+      evidence.textContent = `Similarity ${value(item, 'similarity')} · margin ${value(item, 'margin')} · ${value(item, 'talk_seconds')} s · ${value(item, 'turn_count')} turns · ${value(item, 'meeting_speaker_count')} speakers`;
+      const runnerUp = document.createElement('p');
+      runnerUp.className = 'text-small';
+      runnerUp.textContent = `Runner-up: ${value(item, 'runner_up')} (${value(item, 'runner_up_similarity')})`;
+      const reasons = document.createElement('p');
+      reasons.className = 'text-small';
+      reasons.textContent = (item.reasons || []).join(', ') || 'Passed preflight';
+      card.append(heading, proposal, evidence, runnerUp, reasons);
+      const controls = document.createElement('div');
+      controls.className = 'viz-row';
+      ['confirmed', 'unknown', 'rejected'].forEach(action => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = action === 'confirmed' ? 'btn btn-primary' : 'btn';
+        button.textContent = action[0].toUpperCase() + action.slice(1);
+        button.setAttribute('aria-pressed', String(decision && decision.action === action));
+        button.addEventListener('click', () => {
+          decisions.set(key, {
+            source_path: item.source_path,
+            speaker_id: item.id,
+            proposed_name: item.proposed_name || null,
+            action,
+            final_name: action === 'confirmed' ? item.proposed_name || null : action === 'unknown' ? 'Unknown' : null
+          });
+          updateCounts();
+          render();
+        });
+        controls.append(button);
+      });
+      card.append(controls);
+      grid.append(card);
+    });
+    list.append(grid);
+  }
+
+  function loadReport(text) {
+    try {
+      const report = JSON.parse(text);
+      candidates = flatten(report);
+      decisions.clear();
+      error.hidden = true;
+      updateCounts();
+      render();
+    } catch (exception) {
+      error.textContent = `Could not read report JSON: ${exception.message}`;
+      error.hidden = false;
+    }
+  }
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      pastedInput.value = String(reader.result || '');
+      loadReport(pastedInput.value);
+    });
+    reader.readAsText(file);
+  });
+  loadButton.addEventListener('click', () => loadReport(pastedInput.value));
+  filter.addEventListener('change', render);
+  exportButton.addEventListener('click', () => {
+    const payload = JSON.stringify({ decisions: Array.from(decisions.values()) }, null, 2);
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'rematch-review-decisions.json';
+    link.click();
+    URL.revokeObjectURL(url);
+  });
+})();
+</script>

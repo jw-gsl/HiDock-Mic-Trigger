@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Data Model
@@ -6,13 +7,58 @@ struct VoiceLibrarySpeaker: Identifiable {
     let id: String
     let name: String
     let sampleCount: Int
+    /// Distinct recording sources represented by this profile.
+    let meetingCount: Int
     let lastUpdated: String
+    let profileStatus: String
+    /// Membership badges for the All People tab: the live TitaNet matching
+    /// library and/or the review-only WeSpeaker candidate library.
+    let inMatchingLibrary: Bool
+    let inCandidateLibrary: Bool
+
+    init(
+        id: String,
+        name: String,
+        sampleCount: Int,
+        meetingCount: Int = 0,
+        lastUpdated: String,
+        profileStatus: String = "thin",
+        inMatchingLibrary: Bool = true,
+        inCandidateLibrary: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.sampleCount = sampleCount
+        self.meetingCount = meetingCount
+        self.lastUpdated = lastUpdated
+        self.profileStatus = profileStatus
+        self.inMatchingLibrary = inMatchingLibrary
+        self.inCandidateLibrary = inCandidateLibrary
+    }
+}
+
+struct VoiceLibrarySample: Identifiable {
+    let id: String
+    let source: String
+    let addedAt: String
+    let updatedAt: String
+    let sourceFile: String?
+    let audioFile: String?
+    let speakerId: String?
+    let segmentStart: Double?
+    let segmentEnd: Double?
+    let model: String?
+    let qualityScore: Double?
+    let qualityState: String?
+    let isActive: Bool?
 }
 
 // MARK: - VoiceLibraryView
 
 enum VoiceSortKey: String, CaseIterable, Identifiable {
-    case name, samples, meetings, updated
+    // Keep the control order aligned with the requested default workflow:
+    // meeting coverage first, then sample depth, name, and recency.
+    case meetings, samples, name, updated
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -24,33 +70,103 @@ enum VoiceSortKey: String, CaseIterable, Identifiable {
     }
 }
 
+/// Tabs inside the Voice Library pane: the live TitaNet matching library, or
+/// every named person across the matching and review-only candidate libraries.
+enum VoiceLibraryTab: String, CaseIterable, Identifiable {
+    case matching, people
+    var id: String { rawValue }
+    var label: String { self == .matching ? "Matching" : "All People" }
+}
+
 struct VoiceLibraryView: View {
     @State var speakers: [VoiceLibrarySpeaker]
     @State private var editingId: String? = nil
     @State private var editingName: String = ""
     @State private var search = ""
-    @State private var sortKey: VoiceSortKey = .name
+    // Meeting coverage is the most useful default: people who appear most
+    // often are the highest-value profiles to keep improving.
+    @State private var sortKey: VoiceSortKey = .meetings
     /// When set, show a picker to merge this speaker into another library name.
     @State private var mergingFrom: VoiceLibrarySpeaker? = nil
     @State private var mergeTargetName: String = ""
+    @State private var selectionMode = false
+    @State private var selectedSpeakerIDs: Set<String> = []
+    @State private var confirmBulkDelete = false
+    @State private var samplesFor: VoiceLibrarySpeaker? = nil
+    @State private var samples: [VoiceLibrarySample] = []
+    @State private var samplesLoading = false
+    @StateObject private var samplePlayer = SegmentAudioPlayer()
+    /// Which library view is showing. The people tab only appears when the
+    /// host populated `allPeople`.
+    @State private var tab: VoiceLibraryTab = .matching
+    /// Union of live matching-library and review-only candidate people for
+    /// the All People tab (empty when the host did not load candidate data).
+    @State var allPeople: [VoiceLibrarySpeaker] = []
+    /// All People tab multi-select state: tick exactly two people to enable
+    /// the top Merge button (avoids scrolling the target picker).
+    @State private var peopleSelectMode = false
+    @State private var peopleSelection: Set<String> = []
+    @State private var pairMerge = false
+    @State private var pairKeepName: String = ""
     let onDelete: (String) -> Void
     let onRename: (String, String) -> Void
+    var onListSamples: ((String, @escaping ([VoiceLibrarySample]) -> Void) -> Void)? = nil
+    var onDeleteSample: ((String, String) -> Void)? = nil
+    /// Backfill trustworthy historical meeting exemplars for one person.
+    var onBackfill: ((String) -> Void)? = nil
     /// person name → number of meetings they appear in (for display + sort).
     var meetingCounts: [String: Int] = [:]
+    /// Aggregate totals for the full library. Meeting count is already
+    /// deduplicated across speakers by the backend summary command.
+    var totalMeetingCount: Int = 0
+    var totalSampleCount: Int = 0
     /// Filter the main recordings list to meetings this person is in.
     var onFilterToPerson: ((String) -> Void)? = nil
+    /// Merge a person in every library that contains the source name (live
+    /// matching library and/or review-only candidate library).
+    var onMergePerson: ((String, String) -> Void)? = nil
+    /// The person who is the user themselves ("Me"), pinned atop person
+    /// pickers. Tapping a row's star toggles it; nil means no Me set.
+    @State var meName: String? = nil
+    var onToggleMe: ((String) -> Void)? = nil
 
     private var visibleSpeakers: [VoiceLibrarySpeaker] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         let filtered = q.isEmpty ? speakers
             : speakers.filter { $0.name.lowercased().contains(q) }
         return filtered.sorted { a, b in
+            // The default order is meetings → samples → name → recent. Keep
+            // the same deterministic tie-breakers when the user chooses a
+            // different primary sort, so rows do not shuffle unpredictably.
+            let keys: [VoiceSortKey]
             switch sortKey {
-            case .name: return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-            case .samples: return a.sampleCount > b.sampleCount
-            case .meetings: return (meetingCounts[a.name] ?? 0) > (meetingCounts[b.name] ?? 0)
-            case .updated: return a.lastUpdated > b.lastUpdated
+            case .meetings:
+                keys = [.meetings, .samples, .name, .updated]
+            case .samples:
+                keys = [.samples, .meetings, .name, .updated]
+            case .name:
+                keys = [.name, .meetings, .samples, .updated]
+            case .updated:
+                keys = [.updated, .meetings, .samples, .name]
             }
+
+            for key in keys {
+                switch key {
+                case .meetings:
+                    let left = a.meetingCount > 0 ? a.meetingCount : (meetingCounts[a.name] ?? 0)
+                    let right = b.meetingCount > 0 ? b.meetingCount : (meetingCounts[b.name] ?? 0)
+                    if left != right { return left > right }
+                case .samples:
+                    if a.sampleCount != b.sampleCount { return a.sampleCount > b.sampleCount }
+                case .name:
+                    let comparison = a.name.localizedCaseInsensitiveCompare(b.name)
+                    if comparison != .orderedSame { return comparison == .orderedAscending }
+                case .updated:
+                    if a.lastUpdated != b.lastUpdated { return a.lastUpdated > b.lastUpdated }
+                }
+            }
+
+            return a.id.localizedCaseInsensitiveCompare(b.id) == .orderedAscending
         }
     }
 
@@ -63,9 +179,17 @@ struct VoiceLibraryView: View {
                 Text("Voice Library")
                     .font(.headline)
                 Spacer()
-                Text("\(speakers.count) speaker\(speakers.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                HStack(spacing: 10) {
+                    if tab == .people {
+                        libraryTotal(value: allPeople.count, label: "person", plural: "people")
+                        libraryTotal(value: allPeople.filter { $0.inMatchingLibrary }.count, label: "matching", plural: "matching")
+                        libraryTotal(value: allPeople.filter { $0.inCandidateLibrary }.count, label: "review", plural: "review")
+                    } else {
+                        libraryTotal(value: speakers.count, label: "speaker", plural: "speakers")
+                        libraryTotal(value: totalMeetingCount, label: "meeting", plural: "meetings")
+                        libraryTotal(value: totalSampleCount, label: "sample", plural: "samples")
+                    }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -73,31 +197,126 @@ struct VoiceLibraryView: View {
 
             Divider()
 
-            // Search + sort
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                TextField("Search speakers…", text: $search)
-                    .textFieldStyle(.roundedBorder)
-                Divider().frame(height: 16)
-                Text("Sort:").font(.caption.weight(.medium)).foregroundColor(.secondary)
-                Picker("", selection: $sortKey) {
-                    ForEach(VoiceSortKey.allCases) { Text($0.label).tag($0) }
+            if !allPeople.isEmpty {
+                Picker("", selection: $tab) {
+                    ForEach(VoiceLibraryTab.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 260)
+                .labelsHidden()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
+                Divider()
+            }
+
+            // Search — full-width row of its own (it was unreadably cramped
+            // beside the tab controls)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                TextField(tab == .people ? "Search people…" : "Search speakers…", text: $search)
+                    .textFieldStyle(.roundedBorder)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            // Controls row
+            HStack(spacing: 8) {
+                if tab == .matching {
+                    Text("Sort:").font(.caption.weight(.medium)).foregroundColor(.secondary)
+                    Picker("", selection: $sortKey) {
+                        ForEach(VoiceSortKey.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                    Spacer(minLength: 0)
+                    if selectionMode && !selectedSpeakerIDs.isEmpty {
+                        Text("\(selectedSpeakerIDs.count) selected")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Button(role: .destructive) {
+                            confirmBulkDelete = true
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    if speakers.count > 1 {
+                        Button(selectionMode ? "Done" : "Select") {
+                            selectionMode.toggle()
+                            if !selectionMode { selectedSpeakerIDs.removeAll() }
+                        }
+                        .buttonStyle(.bordered)
+                        .help(selectionMode ? "Finish selecting speakers" : "Select multiple speakers to remove them together")
+                    }
+                } else {
+                    Spacer(minLength: 0)
+                    if peopleSelectMode && !peopleSelection.isEmpty {
+                        Text("\(peopleSelection.count) selected")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if peopleSelectMode && peopleSelection.count == 2 {
+                        Button {
+                            pairKeepName = defaultPairKeep()
+                            pairMerge = true
+                        } label: {
+                            Label("Merge", systemImage: "arrow.triangle.merge")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .help("Merge the two ticked people into one name")
+                    }
+                    Button(peopleSelectMode ? "Done" : "Select") {
+                        peopleSelectMode.toggle()
+                        if !peopleSelectMode { peopleSelection.removeAll() }
+                    }
+                    .buttonStyle(.bordered)
+                    .help(peopleSelectMode ? "Finish selecting people" : "Tick two people, then merge them with one button")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+            .padding(.top, 4)
 
             Divider()
 
-            if speakers.isEmpty {
+            if tab == .people {
+                peopleList
+            } else if speakers.isEmpty {
                 emptyState
             } else {
                 speakerList
             }
         }
         .frame(minWidth: 360, minHeight: 300)   // hosted in a resizable pane now
+        .sheet(item: $mergingFrom) { source in
+            mergeSheet(source: source)
+        }
+        .sheet(item: $samplesFor) { speaker in
+            samplesSheet(for: speaker)
+        }
+        .sheet(isPresented: $pairMerge) {
+            pairMergeSheet
+        }
+        .alert("Remove selected speakers?", isPresented: $confirmBulkDelete) {
+            Button("Cancel", role: .cancel) { }
+            Button("Remove", role: .destructive) {
+                deleteSelectedSpeakers()
+            }
+        } message: {
+            Text("This removes their voice samples from the library. Their existing transcripts are not changed.")
+        }
+    }
+
+    private func libraryTotal(value: Int, label: String, plural: String) -> some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text("\(value)")
+                .font(.caption.weight(.semibold))
+            Text(value == 1 ? label : plural)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .help("\(value) \(value == 1 ? label : plural)")
     }
 
     // MARK: - Empty State
@@ -126,6 +345,21 @@ struct VoiceLibraryView: View {
         List {
             ForEach(visibleSpeakers) { speaker in
                 HStack {
+                    if selectionMode {
+                        Toggle(
+                            "Select \(speaker.name)",
+                            isOn: Binding(
+                                get: { selectedSpeakerIDs.contains(speaker.id) },
+                                set: { selected in
+                                    if selected { selectedSpeakerIDs.insert(speaker.id) }
+                                    else { selectedSpeakerIDs.remove(speaker.id) }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+                    }
+
                     if let onFilterToPerson = onFilterToPerson {
                         Button {
                             onFilterToPerson(speaker.name)
@@ -135,6 +369,20 @@ struct VoiceLibraryView: View {
                         .buttonStyle(.borderless)
                         .foregroundColor(.accentColor)
                         .help("Show only meetings \(speaker.name) is in")
+                    }
+
+                    if let onToggleMe = onToggleMe {
+                        Button {
+                            meName = (meName == speaker.name) ? nil : speaker.name
+                            onToggleMe(speaker.name)
+                        } label: {
+                            Image(systemName: meName == speaker.name ? "star.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(meName == speaker.name ? .yellow : .secondary)
+                        .help(meName == speaker.name
+                            ? "This is you — tap to unset"
+                            : "Mark \(speaker.name) as Me — pinned to the top of name lists")
                     }
 
                     if editingId == speaker.id {
@@ -153,12 +401,40 @@ struct VoiceLibraryView: View {
                             }
                     }
 
+                    if meName == speaker.name {
+                        meBadge()
+                    }
+
                     Spacer()
 
-                    let meetings = meetingCounts[speaker.name] ?? 0
-                    Text("\(speaker.sampleCount) sample\(speaker.sampleCount == 1 ? "" : "s") · \(meetings) meeting\(meetings == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    let meetings = speaker.meetingCount > 0
+                        ? speaker.meetingCount
+                        : (meetingCounts[speaker.name] ?? 0)
+                    Button {
+                        openSamples(for: speaker)
+                    } label: {
+                        Text("\(speaker.sampleCount) sample\(speaker.sampleCount == 1 ? "" : "s") · \(meetings) meeting\(meetings == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(onListSamples == nil)
+                    .help("Inspect and audition the samples behind this voice")
+
+                    if let onBackfill = onBackfill {
+                        Button {
+                            onBackfill(speaker.name)
+                        } label: {
+                            Image(systemName: "arrow.clockwise.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Backfill trustworthy historical meeting samples")
+                    }
+
+                    Text(profileStatusLabel(speaker.profileStatus))
+                        .font(.caption2.weight(.medium))
+                        .foregroundColor(profileStatusColor(speaker.profileStatus))
+                        .help("Voice profile depth: \(profileStatusHelp(speaker.profileStatus))")
 
                     if !speaker.lastUpdated.isEmpty {
                         Text(formatDate(speaker.lastUpdated))
@@ -169,7 +445,7 @@ struct VoiceLibraryView: View {
                     if speakers.count > 1 {
                         Button {
                             mergingFrom = speaker
-                            mergeTargetName = speakers.first(where: { $0.id != speaker.id })?.name ?? ""
+                            mergeTargetName = defaultMergeTarget(excluding: speaker, pool: speakers)
                         } label: {
                             Image(systemName: "arrow.triangle.merge")
                         }
@@ -189,21 +465,147 @@ struct VoiceLibraryView: View {
                 .padding(.vertical, 2)
             }
         }
-        .sheet(item: $mergingFrom) { source in
-            mergeSheet(source: source)
+    }
+
+    // MARK: - All People
+
+    /// Every named person across the matching and review-only candidate
+    /// libraries, alphabetical. Merge is the only mutation offered here —
+    /// deletes and sample inspection stay in the Matching tab.
+    private var peopleList: some View {
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        let visible = allPeople
+            .filter { q.isEmpty || $0.name.lowercased().contains(q) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return List {
+            ForEach(visible) { person in
+                HStack(spacing: 8) {
+                    if peopleSelectMode {
+                        Toggle(
+                            "Select \(person.name)",
+                            isOn: Binding(
+                                get: { peopleSelection.contains(person.name) },
+                                set: { selected in
+                                    if selected { peopleSelection.insert(person.name) }
+                                    else { peopleSelection.remove(person.name) }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+                    }
+
+                    if let onFilterToPerson = onFilterToPerson {
+                        Button {
+                            onFilterToPerson(person.name)
+                        } label: {
+                            Image(systemName: "line.3.horizontal.decrease.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.accentColor)
+                        .help("Show only meetings \(person.name) is in")
+                    }
+
+                    if let onToggleMe = onToggleMe {
+                        Button {
+                            meName = (meName == person.name) ? nil : person.name
+                            onToggleMe(person.name)
+                        } label: {
+                            Image(systemName: meName == person.name ? "star.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(meName == person.name ? .yellow : .secondary)
+                        .help(meName == person.name
+                            ? "This is you — tap to unset"
+                            : "Mark \(person.name) as Me — pinned to the top of name lists")
+                    }
+
+                    Text(person.name)
+                        .font(.body)
+                        .fontWeight(.medium)
+                    if meName == person.name {
+                        meBadge()
+                    }
+                    libraryBadge(person.inMatchingLibrary, label: "Matching", color: .accentColor)
+                    libraryBadge(person.inCandidateLibrary, label: "Review", color: .purple)
+
+                    Spacer()
+
+                    Text("\(person.sampleCount) sample\(person.sampleCount == 1 ? "" : "s") · \(person.meetingCount) meeting\(person.meetingCount == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button {
+                        mergingFrom = person
+                        mergeTargetName = defaultMergeTarget(excluding: person, pool: allPeople)
+                    } label: {
+                        Image(systemName: "arrow.triangle.merge")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Merge into another person — applies in every library that has \(person.name)")
+                }
+                .padding(.vertical, 2)
+            }
         }
+    }
+
+    private func libraryBadge(_ show: Bool, label: String, color: Color) -> some View {
+        Group {
+            if show {
+                Text(label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundColor(color)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(color.opacity(0.12))
+                    .clipShape(Capsule())
+                    .help(label == "Matching"
+                        ? "In the live voice-matching library used for speaker labels"
+                        : "In the review-only candidate library used for identity suggestions")
+            }
+        }
+    }
+
+    private func meBadge() -> some View {
+        Text("Me")
+            .font(.caption2.weight(.semibold))
+            .foregroundColor(.orange)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.orange.opacity(0.15))
+            .clipShape(Capsule())
+            .help("This person is you — pinned to the top of name lists")
     }
 
     // MARK: - Merge
 
+    /// Default merge target for a row action: Me when set (and not the row
+    /// being merged), otherwise the first other person in the pool.
+    private func defaultMergeTarget(excluding source: VoiceLibrarySpeaker, pool: [VoiceLibrarySpeaker]) -> String {
+        if let me = meName, me != source.name, pool.contains(where: { $0.name == me }) {
+            return me
+        }
+        return pool.first(where: { $0.id != source.id })?.name ?? ""
+    }
+
     private func mergeSheet(source: VoiceLibrarySpeaker) -> some View {
-        let targets = speakers
+        let pool = tab == .people ? allPeople : speakers
+        let targets = pool
             .filter { $0.id != source.id }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .sorted {
+                if let me = meName {
+                    if $0.name == me { return true }
+                    if $1.name == me { return false }
+                }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        let detail = tab == .people
+            ? "Move all voice samples from “\(source.name)” into another name in every library that contains it (matching and review-only), then remove “\(source.name)”. Use this for duplicates like a first-name-only profile."
+            : "Move all voice samples from “\(source.name)” into another library name, then remove “\(source.name)”. Use this for typos (e.g. Wildmsith → Wildsmith)."
         return VStack(alignment: .leading, spacing: 16) {
-            Text("Merge speakers")
+            Text(tab == .people ? "Merge people" : "Merge speakers")
                 .font(.headline)
-            Text("Move all voice samples from “\(source.name)” into another library name, then remove “\(source.name)”. Use this for typos (e.g. Wildmsith → Wildsmith).")
+            Text(detail)
                 .font(.callout)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -226,7 +628,11 @@ struct VoiceLibraryView: View {
                 Button("Cancel") { mergingFrom = nil }
                     .keyboardShortcut(.cancelAction)
                 Button("Merge") {
-                    commitMerge(from: source, into: mergeTargetName)
+                    if tab == .people {
+                        commitPersonMerge(from: source, into: mergeTargetName)
+                    } else {
+                        commitMerge(from: source, into: mergeTargetName)
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(mergeTargetName.isEmpty || mergeTargetName == source.name)
@@ -235,6 +641,103 @@ struct VoiceLibraryView: View {
         }
         .padding(20)
         .frame(minWidth: 360)
+    }
+
+    /// Merge from the All People tab: the host applies the merge in every
+    /// library that contains the source name; local state mirrors that here.
+    private func commitPersonMerge(from source: VoiceLibrarySpeaker, into targetName: String) {
+        guard !targetName.isEmpty, targetName != source.name else {
+            mergingFrom = nil
+            return
+        }
+        onMergePerson?(source.name, targetName)
+        if let ti = allPeople.firstIndex(where: { $0.name == targetName }),
+           let si = allPeople.firstIndex(where: { $0.id == source.id }) {
+            let target = allPeople[ti]
+            allPeople[ti] = VoiceLibrarySpeaker(
+                id: target.id,
+                name: target.name,
+                sampleCount: target.sampleCount + source.sampleCount,
+                meetingCount: target.meetingCount + source.meetingCount,
+                lastUpdated: target.lastUpdated,
+                profileStatus: target.profileStatus,
+                inMatchingLibrary: target.inMatchingLibrary || source.inMatchingLibrary,
+                inCandidateLibrary: target.inCandidateLibrary || source.inCandidateLibrary
+            )
+            allPeople.remove(at: si)
+        } else if let si = allPeople.firstIndex(where: { $0.id == source.id }) {
+            // Target not in the union yet — the source was effectively renamed.
+            let old = allPeople[si]
+            allPeople[si] = VoiceLibrarySpeaker(
+                id: targetName,
+                name: targetName,
+                sampleCount: old.sampleCount,
+                meetingCount: old.meetingCount,
+                lastUpdated: old.lastUpdated,
+                profileStatus: old.profileStatus,
+                inMatchingLibrary: old.inMatchingLibrary,
+                inCandidateLibrary: old.inCandidateLibrary
+            )
+        }
+        mergingFrom = nil
+    }
+
+    /// Default name to keep when pair-merging: deeper profile wins (more
+    /// meetings, then more samples); alphabetical on a tie.
+    private func defaultPairKeep() -> String {
+        let pair = peopleSelection.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        guard pair.count == 2,
+              let a = allPeople.first(where: { $0.name == pair[0] }),
+              let b = allPeople.first(where: { $0.name == pair[1] }) else {
+            return pair.first ?? ""
+        }
+        if a.meetingCount != b.meetingCount { return a.meetingCount > b.meetingCount ? a.name : b.name }
+        if a.sampleCount != b.sampleCount { return a.sampleCount > b.sampleCount ? a.name : b.name }
+        return a.name
+    }
+
+    /// Sheet for merging two ticked people: choose which name to keep; the
+    /// other is absorbed in every library that contains it.
+    private var pairMergeSheet: some View {
+        let pair = peopleSelection.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        let first = pair.first ?? ""
+        let second = pair.count > 1 ? pair[1] : ""
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Merge people")
+                .font(.headline)
+            Text("Combine “\(first)” and “\(second)” into one person. All voice samples move to the name you keep — in every library that contains them — and the other name is removed.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Keep", selection: $pairKeepName) {
+                Text(first).tag(first)
+                Text(second).tag(second)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            HStack {
+                Spacer()
+                Button("Cancel") { pairMerge = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Merge") {
+                    let keep = pairKeepName
+                    let absorb = keep == first ? second : first
+                    pairMerge = false
+                    peopleSelection.removeAll()
+                    peopleSelectMode = false
+                    if let source = allPeople.first(where: { $0.name == absorb }) {
+                        commitPersonMerge(from: source, into: keep)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(pairKeepName.isEmpty || first.isEmpty || second.isEmpty)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 380)
     }
 
     private func commitMerge(from source: VoiceLibrarySpeaker, into targetName: String) {
@@ -251,7 +754,9 @@ struct VoiceLibraryView: View {
                 id: target.id,
                 name: target.name,
                 sampleCount: target.sampleCount + source.sampleCount,
-                lastUpdated: target.lastUpdated
+                meetingCount: target.meetingCount + source.meetingCount,
+                lastUpdated: target.lastUpdated,
+                profileStatus: target.profileStatus
             )
             speakers.remove(at: si)
         } else {
@@ -276,7 +781,9 @@ struct VoiceLibraryView: View {
                 id: kept.id,
                 name: kept.name,
                 sampleCount: kept.sampleCount + speaker.sampleCount,
-                lastUpdated: kept.lastUpdated
+                meetingCount: kept.meetingCount + speaker.meetingCount,
+                lastUpdated: kept.lastUpdated,
+                profileStatus: kept.profileStatus
             )
             speakers.removeAll { $0.id == speaker.id }
         } else if let index = speakers.firstIndex(where: { $0.id == speaker.id }) {
@@ -284,7 +791,9 @@ struct VoiceLibraryView: View {
                 id: trimmed,
                 name: trimmed,
                 sampleCount: speaker.sampleCount,
-                lastUpdated: speaker.lastUpdated
+                meetingCount: speaker.meetingCount,
+                lastUpdated: speaker.lastUpdated,
+                profileStatus: speaker.profileStatus
             )
         }
         editingId = nil
@@ -292,7 +801,212 @@ struct VoiceLibraryView: View {
 
     private func deleteSpeaker(_ speaker: VoiceLibrarySpeaker) {
         onDelete(speaker.name)
+        selectedSpeakerIDs.remove(speaker.id)
         speakers.removeAll { $0.id == speaker.id }
+    }
+
+    private func deleteSelectedSpeakers() {
+        let selected = speakers.filter { selectedSpeakerIDs.contains($0.id) }
+        for speaker in selected {
+            onDelete(speaker.name)
+        }
+        speakers.removeAll { selectedSpeakerIDs.contains($0.id) }
+        selectedSpeakerIDs.removeAll()
+        selectionMode = false
+    }
+
+    // MARK: - Samples
+
+    private func openSamples(for speaker: VoiceLibrarySpeaker) {
+        guard let onListSamples = onListSamples else { return }
+        samplePlayer.stop()
+        samplesFor = speaker
+        samples = []
+        samplesLoading = true
+        onListSamples(speaker.name) { loaded in
+            DispatchQueue.main.async {
+                guard samplesFor?.id == speaker.id else { return }
+                samples = loaded
+                samplesLoading = false
+            }
+        }
+    }
+
+    private func samplesSheet(for speaker: VoiceLibrarySpeaker) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Samples for \(speaker.name)")
+                        .font(.headline)
+                    Text("One exemplar per meeting is retained; remove clips that are noisy or misattributed.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Text("\(samples.count) sample\(samples.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button {
+                    samplesFor = nil
+                } label: {
+                    Label("Close", systemImage: "xmark")
+                }
+                .keyboardShortcut(.cancelAction)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(16)
+
+            Divider()
+
+            if samplesLoading {
+                VStack {
+                    Spacer()
+                    ProgressView("Loading sample provenance…")
+                    Spacer()
+                }
+            } else if samples.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "waveform.slash")
+                        .font(.system(size: 30))
+                        .foregroundColor(.secondary)
+                    Text("No sample provenance is available for this profile.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                List {
+                    ForEach(samples) { sample in
+                        sampleRow(sample, speaker: speaker)
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 560, minHeight: 360)
+        .onDisappear {
+            samplePlayer.stop()
+        }
+    }
+
+    private func sampleRow(_ sample: VoiceLibrarySample, speaker: VoiceLibrarySpeaker) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                toggleSamplePlayback(sample)
+            } label: {
+                Image(systemName: samplePlayer.playingSegmentId == sample.id ? "stop.fill" : "play.fill")
+                    .frame(width: 18)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canPlay(sample))
+            .help(canPlay(sample) ? "Play representative clip" : "Source audio is unavailable")
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(sampleMeetingName(sample))
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(sample.source.capitalized)
+                    if let range = sampleRange(sample) {
+                        Text("·")
+                        Text(range)
+                    }
+                    if let model = sample.model, !model.isEmpty {
+                        Text("·")
+                        Text(model)
+                    }
+                    if let quality = sample.qualityScore {
+                        Text("·")
+                        Text("quality \(Int((quality * 100).rounded()))%")
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if let active = sample.isActive {
+                Text(active ? "Active" : "Archived")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(active ? .green : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background((active ? Color.green : Color.secondary).opacity(0.12))
+                    .clipShape(Capsule())
+                    .help(active
+                        ? "Used for automatic voice matching"
+                        : "Retained as provenance-backed evidence, but excluded from automatic matching")
+            }
+
+            if let sourceFile = sample.sourceFile, !sourceFile.isEmpty {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: sourceFile)])
+                } label: {
+                    Image(systemName: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("Show the diarization sidecar")
+            }
+
+            Button(role: .destructive) {
+                samplePlayer.stop()
+                onDeleteSample?(speaker.name, sample.id)
+                samples.removeAll { $0.id == sample.id }
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this voice sample")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func canPlay(_ sample: VoiceLibrarySample) -> Bool {
+        guard let audioFile = sample.audioFile,
+              let start = sample.segmentStart,
+              let end = sample.segmentEnd,
+              end > start else { return false }
+        return FileManager.default.fileExists(atPath: audioFile)
+    }
+
+    private func toggleSamplePlayback(_ sample: VoiceLibrarySample) {
+        guard let audioFile = sample.audioFile,
+              let start = sample.segmentStart,
+              let end = sample.segmentEnd else { return }
+        if samplePlayer.playingSegmentId == sample.id {
+            samplePlayer.stop()
+        } else {
+            samplePlayer.play(
+                audioPath: audioFile,
+                start: start,
+                end: end,
+                segmentId: sample.id
+            )
+        }
+    }
+
+    private func sampleMeetingName(_ sample: VoiceLibrarySample) -> String {
+        let path = sample.sourceFile ?? sample.audioFile ?? "Unknown meeting"
+        var name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        if name.hasSuffix("_diarized") {
+            name = String(name.dropLast("_diarized".count))
+        }
+        return name.isEmpty ? "Unknown meeting" : name
+    }
+
+    private func sampleRange(_ sample: VoiceLibrarySample) -> String? {
+        guard let start = sample.segmentStart, let end = sample.segmentEnd, end > start else {
+            return nil
+        }
+        return "\(formatDuration(start))–\(formatDuration(end))"
+    }
+
+    private func formatDuration(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     private func formatDate(_ isoString: String) -> String {
@@ -313,5 +1027,29 @@ struct VoiceLibraryView: View {
             return display.string(from: date)
         }
         return isoString
+    }
+
+    private func profileStatusLabel(_ status: String) -> String {
+        switch status {
+        case "healthy": return "Healthy"
+        case "usable": return "Usable"
+        default: return "Needs samples"
+        }
+    }
+
+    private func profileStatusColor(_ status: String) -> Color {
+        switch status {
+        case "healthy": return .green
+        case "usable": return .orange
+        default: return .secondary
+        }
+    }
+
+    private func profileStatusHelp(_ status: String) -> String {
+        switch status {
+        case "healthy": return "at least 12 samples across 5 meetings"
+        case "usable": return "at least 5 samples across 3 meetings; more varied meetings will improve it"
+        default: return "fewer than 5 samples or fewer than 3 meetings"
+        }
     }
 }

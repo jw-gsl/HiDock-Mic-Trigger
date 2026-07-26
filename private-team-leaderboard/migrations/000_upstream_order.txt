@@ -1,0 +1,30 @@
+# Apply these upstream migrations first (from soulduse/ai-token-monitor @ v0.19.41),
+# in this exact order, then apply 001_team_allowlist_and_rls.sql.
+#
+# If you clone the app and `supabase link` + `db push`, the upstream files under
+# supabase/migrations/ already apply in filename order. Then push our 001_* file
+# as an extra migration (see scripts/bootstrap-private-fork.sh).
+
+20260321_init.sql
+20260325_add_provider.sql
+20260326_chat_messages.sql
+20260327000000_chat_reactions_and_replies.sql
+20260327010000_multi_device_snapshots.sql
+20260330_leaderboard_hidden.sql
+20260402000000_add_opencode_provider.sql
+20260402010000_chat_images.sql
+20260403_profile_links.sql
+20260410_leaderboard_date_grid.sql
+20260411000000_remove_leaderboard_outlier_filter.sql
+20260411010000_add_get_user_activity.sql
+20260414000000_chat_cleanup_cron.sql
+20260414010000_chat_reactions_identity.sql
+20260417000000_relax_chat_cleanup_cron.sql
+20260417010000_drop_unused_indexes.sql
+20260417020000_sync_device_snapshots_bulk.sql
+20260417030000_swap_sync_device_snapshots_to_v2.sql
+20260417040000_add_kimi_glm_providers.sql
+20260627000000_add_gjc_provider.sql
+20260707000000_add_get_badge_rank.sql
+# then:
+001_team_allowlist_and_rls.sql

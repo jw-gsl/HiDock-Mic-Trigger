@@ -5,7 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from shared.audio_utils import extract_embedding, extract_mfcc, load_audio, segment_audio
+from shared.audio_utils import (
+    extract_embedding,
+    extract_mfcc,
+    extract_neural_embedding,
+    load_audio,
+    load_audio_segment,
+    segment_audio,
+)
 
 
 # ── extract_mfcc ────────────────────────────────────────────────────────────
@@ -81,6 +88,30 @@ def test_extract_embedding_with_onnx_session():
     session.run.assert_called_once()
 
 
+@patch("shared.audio_utils.compute_wespeaker_fbank")
+def test_wespeaker_session_uses_kaldi_fbank_frontend(mock_fbank):
+    """A WeSpeaker export must not receive the generic log-mel frontend."""
+    mock_fbank.return_value = np.ones((17, 80), dtype=np.float32)
+    session = MagicMock()
+    input_info = MagicMock()
+    input_info.name = "feats"
+    input_info.shape = ["B", "T", 80]
+    output_info = MagicMock()
+    output_info.name = "embs"
+    session.get_inputs.return_value = [input_info]
+    session.get_outputs.return_value = [output_info]
+    session.run.return_value = [np.ones((1, 256), dtype=np.float32)]
+
+    embedding = extract_neural_embedding(_sine_wave(), 16000, session)
+
+    mock_fbank.assert_called_once()
+    output_names, inputs = session.run.call_args.args
+    assert output_names == ["embs"]
+    assert inputs["feats"].shape == (1, 17, 80)
+    assert embedding.shape == (256,)
+    assert np.isclose(np.linalg.norm(embedding), 1.0)
+
+
 # ── load_audio ──────────────────────────────────────────────────────────────
 
 
@@ -118,6 +149,20 @@ def test_load_audio_stereo_to_mono(mock_sf):
 
     result = load_audio("/fake/path.wav", sr=16000)
     assert result.ndim == 1
+
+
+def test_load_audio_segment_reads_only_requested_window(tmp_path):
+    """Long recordings need not be decoded in full to assess one speaker turn."""
+    import soundfile as sf
+
+    path = tmp_path / "recording.wav"
+    source = np.arange(16000 * 3, dtype=np.float32) / (16000 * 3)
+    sf.write(path, source, 16000)
+
+    result = load_audio_segment(path, start_seconds=1.0, end_seconds=1.5, sr=16000)
+
+    assert len(result) == 8000
+    assert np.isclose(result[0], source[16000], atol=1e-4)
 
 
 # ── segment_audio ───────────────────────────────────────────────────────────

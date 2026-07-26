@@ -127,7 +127,7 @@ struct VoiceTrainingView: View {
                 }
             }
         }
-        .frame(minWidth: 700, minHeight: 500)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in the resizable detail pane (min 480 wide)
         .onAppear {
             onRefresh { clusters = $0; loading = false }
         }

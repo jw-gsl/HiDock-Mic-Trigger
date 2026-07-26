@@ -1,6 +1,7 @@
 """Tests for shared.models — model registry, status, download, delete."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -247,3 +248,51 @@ def test_managed_externally_download_refused(capsys):
     assert out["ok"] is False
     assert out.get("managed_externally") is True
     assert "managed externally" in out["error"]
+
+
+def _candidate_config(tmp_path, dirname, model_key):
+    d = tmp_path / dirname
+    d.mkdir()
+    (d / "review-candidate.json").write_text(json.dumps({
+        "model_key": model_key, "threshold": 0.5, "review_only": True,
+    }))
+
+
+def test_identity_candidate_sync_writes_active_config_with_backup(tmp_path, monkeypatch):
+    from shared import models as shared_models
+
+    active = tmp_path / "active.json"
+    monkeypatch.setattr(shared_models, "_VOICE_CANDIDATES_DIR", tmp_path)
+    monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", active)
+    _candidate_config(tmp_path, "ReDimNet2-B6-2026-07-25", "redimnet2_b6")
+
+    result = shared_models._sync_identity_review_candidate("redimnet2_b6")
+
+    assert result["ok"] is True
+    config = json.loads(active.read_text())
+    assert config["model_key"] == "redimnet2_b6"
+    assert config["review_only"] is True and config["enabled"] is True
+
+    # A second sync backs up the previous active config first — the Models
+    # UI toggle is genuinely reversible.
+    _candidate_config(tmp_path, "WeSpeaker-ResNet293-LM-2026-07-22", "wespeaker_resnet293")
+    result = shared_models._sync_identity_review_candidate("wespeaker_resnet293")
+    assert result["ok"] is True
+    backup = json.loads(active.with_suffix(".json.bak").read_text())
+    assert backup["model_key"] == "redimnet2_b6"
+    assert json.loads(active.read_text())["model_key"] == "wespeaker_resnet293"
+
+
+def test_identity_candidate_sync_errors_without_config(tmp_path, monkeypatch):
+    from shared import models as shared_models
+
+    monkeypatch.setattr(shared_models, "_VOICE_CANDIDATES_DIR", tmp_path)
+    monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", tmp_path / "active.json")
+
+    result = shared_models._sync_identity_review_candidate("redimnet2_b6")
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+    assert not (tmp_path / "active.json").exists()
+
+    result = shared_models._sync_identity_review_candidate("unknown_backend")
+    assert result["ok"] is False

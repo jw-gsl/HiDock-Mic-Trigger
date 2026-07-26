@@ -180,6 +180,12 @@ struct SyncToolbarSection: View {
             // "On device" / "Untranscribed" / etc., which is the
             // strictly more general control.
             HStack(spacing: 8) {
+                // "Hide" is a persistent visibility preference, separate from
+                // the temporary filters cleared by Clear filters. Keep it at
+                // the far left so the table's hidden-row policy is visible
+                // before the selection and narrowing controls.
+                hiddenStatusesMenu
+
                 Menu {
                     Button("All")            { viewModel.onSelectAll() }
                     Button("None")           { viewModel.onSelectNone() }
@@ -229,47 +235,6 @@ struct SyncToolbarSection: View {
                 .fixedSize()
                 .help("Show recordings matching any of the selected stages (stackable). 'All' clears the filter. Combines with the device filter on the cards above.")
 
-                // "Hide" — multiselect menu (sibling of Filter). Hides the
-                // user-actioned terminal states (Skipped / Removed) so they
-                // stop cluttering the table. Picking one in Filter overrides
-                // its hide.
-                Menu {
-                    ForEach(HiDockViewModel.hideableStatuses, id: \.self) { s in
-                        Button {
-                            viewModel.toggleHidden(s)
-                        } label: {
-                            HStack {
-                                Image(systemName: viewModel.hiddenStatuses.contains(s)
-                                      ? "checkmark.square.fill" : "square")
-                                // Show how many recordings carry this status so
-                                // the user can see what hiding it removes.
-                                Text("\(s) (\(viewModel.statusCount(s)))")
-                            }
-                        }
-                    }
-                } label: {
-                    let count = HiDockViewModel.hideableStatuses
-                        .filter { viewModel.hiddenStatuses.contains($0) }.count
-                    Label {
-                        // The layout-participating view is ALWAYS the widest
-                        // state ("Hidden (2)") so the menu measures a constant
-                        // width and the dropdown arrow / toolbar row never
-                        // shifts. The actual label is drawn as a leading
-                        // overlay on top (overlays don't affect layout).
-                        Text("Hidden (\(HiDockViewModel.hideableStatuses.count))")
-                            .hidden()
-                            .overlay(alignment: .leading) {
-                                Text(count == 0 ? "Hide" : "Hidden (\(count))")
-                                    .fixedSize()
-                            }
-                    } icon: {
-                        Image(systemName: "eye.slash")
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Hide rows you've already actioned — Skipped (won't download) and Removed (local copy deleted). Multiselect; picking a status in Filter overrides hiding it.")
-
                 // Summary-type filter — only shown once something has been
                 // summarised. Lets the user narrow to one classification
                 // (e.g. just "Brainstorming"). AND-ed with the Filter above.
@@ -312,6 +277,17 @@ struct SyncToolbarSection: View {
                 // People filter — sits with the other narrowing controls.
                 if !viewModel.allPeople.isEmpty {
                     peopleFilterMenu
+
+                    Button {
+                        viewModel.clearAllRecordingFilters()
+                    } label: {
+                        Label("Clear filters", systemImage: "xmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .fixedSize()
+                    .foregroundColor(viewModel.hasActiveRecordingFilters ? .accentColor : .secondary)
+                    .disabled(!viewModel.hasActiveRecordingFilters)
+                    .help("Clear people, device, status, summary-type, and day filters. Hidden-status choices are kept.")
                 }
 
                 Spacer()
@@ -326,6 +302,43 @@ struct SyncToolbarSection: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
+    }
+
+    /// Persistent visibility menu for terminal states. This is intentionally
+    /// separate from the temporary filters so Clear filters does not undo it.
+    private var hiddenStatusesMenu: some View {
+        Menu {
+            ForEach(HiDockViewModel.hideableStatuses, id: \.self) { s in
+                Button {
+                    viewModel.toggleHidden(s)
+                } label: {
+                    HStack {
+                        Image(systemName: viewModel.hiddenStatuses.contains(s)
+                              ? "checkmark.square.fill" : "square")
+                        // Show how many recordings carry this status so the
+                        // user can see what hiding it removes.
+                        Text("\(s) (\(viewModel.statusCount(s)))")
+                    }
+                }
+            }
+        } label: {
+            let count = HiDockViewModel.hideableStatuses
+                .filter { viewModel.hiddenStatuses.contains($0) }.count
+            Label {
+                // Keep the menu's measured width stable as the count changes.
+                Text("Hidden (\(HiDockViewModel.hideableStatuses.count))")
+                    .hidden()
+                    .overlay(alignment: .leading) {
+                        Text(count == 0 ? "Hide" : "Hidden (\(count))")
+                            .fixedSize()
+                    }
+            } icon: {
+                Image(systemName: "eye.slash")
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Hide rows you've already actioned — Skipped (won't download) and Removed (local copy deleted). Multiselect; picking a status in Filter overrides hiding it.")
     }
 
     /// People filter — multi-select with an Any/All mode. Filters the list to

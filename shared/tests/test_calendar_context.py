@@ -101,3 +101,73 @@ def test_load_context_for_audio_uses_environment_and_missing_is_optional(tmp_pat
     assert context is not None
     assert context.selected_event_id is None
     assert context.reason == "recording window not supplied"
+
+
+def test_recording_start_from_name_parses_hidock_formats():
+    from shared.calendar_context import recording_start_from_name
+
+    a = recording_start_from_name("2026Jul24-133007-Rec07")
+    assert (a.year, a.month, a.day, a.hour, a.minute, a.second) == (2026, 7, 24, 13, 30, 7)
+    b = recording_start_from_name("2025Feb27-102100-HiD37")
+    assert (b.year, b.month, b.day) == (2025, 2, 27)
+    c = recording_start_from_name("2026-07-07 14-47-20_diarized")
+    assert (c.hour, c.minute, c.second) == (14, 47, 20)
+    assert a.tzinfo is not None and b.tzinfo is not None and c.tzinfo is not None
+    assert recording_start_from_name("no-timestamp-here") is None
+    assert recording_start_from_name("2026Xxx24-133007") is None
+
+
+def test_build_sidecar_doc_normalizes_window_and_keeps_events_verbatim():
+    from shared.calendar_context import build_sidecar_doc
+
+    payload = {"value": [event(attendees=[{"emailAddress": {"name": "Alice", "address": "a@x.com"}}])]}
+    doc = build_sidecar_doc(payload, "2026-07-14T09:00:00+00:00", "2026-07-14T09:47:00+00:00")
+
+    assert doc["source"] == "microsoft365-mcp"
+    assert doc["recording_start"] == "2026-07-14T09:00:00+00:00"
+    assert doc["recording_end"] == "2026-07-14T09:47:00+00:00"
+    assert doc["value"] == payload["value"]
+
+
+def test_build_sidecar_doc_accepts_bare_event_lists_and_rejects_bad_input():
+    from shared.calendar_context import build_sidecar_doc
+
+    doc = build_sidecar_doc([event()], "2026-07-14T09:00:00Z", "2026-07-14T09:47:00Z")
+    assert doc["value"] and doc["source"] == "microsoft365-mcp"
+
+    for bad in ([], {"value": []}, {"items": [{"subject": "no times"}]}):
+        try:
+            build_sidecar_doc(bad, "2026-07-14T09:00:00Z", "2026-07-14T09:47:00Z")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"payload should be rejected: {bad}")
+
+    try:
+        build_sidecar_doc([event()], "2026-07-14T10:00:00Z", "2026-07-14T09:00:00Z")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("end before start should be rejected")
+
+
+def test_google_calendar_shape_parses_title_and_declines():
+    google_payload = {
+        "items": [{
+            "id": "g1",
+            "summary": "Weekly sync",
+            "start": {"dateTime": "2026-07-21T13:55:00+01:00", "timeZone": "Europe/London"},
+            "end": {"dateTime": "2026-07-21T15:00:00+01:00", "timeZone": "Europe/London"},
+            "attendees": [
+                {"email": "james@example.com", "displayName": "James Whiting", "responseStatus": "accepted"},
+                {"email": "riley@example.com", "displayName": "Riley Roberts", "responseStatus": "needsAction"},
+                {"email": "chris@example.com", "displayName": "Chris Wildsmith", "responseStatus": "declined"},
+            ],
+        }]
+    }
+    events = parse_context_payload(google_payload)
+    assert len(events) == 1
+    assert events[0].title == "Weekly sync"
+    context = load_context(google_payload, "2026-07-21T13:58:00+01:00", "2026-07-21T14:40:00+01:00")
+    assert context.selected_event_title == "Weekly sync"
+    assert context.candidate_names == frozenset({"James Whiting", "Riley Roberts"})

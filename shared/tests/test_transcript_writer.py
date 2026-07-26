@@ -165,6 +165,29 @@ class TestFormatDiarizedTranscript:
         # Should only have one speaker label for consecutive segments
         assert text.count("**Alice:**") == 1
 
+    def test_segments_without_speaker_key_fall_back_to_speaker_id(self):
+        """Viewer-saved sidecars drop per-segment 'speaker' (the Swift
+        Codable round-trip keeps only start/end/speaker_id/text/words) —
+        rendering must resolve speaker_id instead of crashing."""
+        result = {
+            "segments": [
+                {"speaker_id": 0, "text": "Hello", "start": 0, "end": 1.5},
+                {"speaker_id": 1, "text": "Hi there", "start": 1.5, "end": 3.0},
+            ],
+            "speaker_names": {"0": "Alice", "1": "Bob"},
+        }
+        text = format_diarized_transcript(result)
+        assert "**Alice:**" in text
+        assert "**Bob:**" in text
+
+    def test_missing_speaker_key_and_unknown_id_gets_generic_label(self):
+        result = {
+            "segments": [{"speaker_id": 2, "text": "Hmm", "start": 0, "end": 1}],
+            "speaker_names": {"0": "Alice"},
+        }
+        text = format_diarized_transcript(result)
+        assert "**Speaker 3:**" in text
+
     def test_unconfirmed_auto_names_export_as_speaker_n(self):
         """With speaker_meta, unconfirmed auto-matches must not appear in .md."""
         result = {

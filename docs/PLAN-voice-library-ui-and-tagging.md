@@ -71,25 +71,24 @@ different UX is wanted (e.g. "Tagged" only when *all* speakers named, or a disti
       `deleteVoiceLibrarySpeaker`, `renameVoiceLibrarySpeaker`. Build succeeded + deployed;
       `list` now returns the 14 enrolled speakers. (Still to do: commit/PR the branch.)
 
-## Planned — Voice Library UX (requested 2026-07-04, NOT yet built)
+## Voice Library UX status (updated 2026-07-17)
 Goal: a curated library, not "everyone ever named". Interlinked features:
-- [ ] **Opt-in enrolment at naming time**: when naming a speaker in the transcript viewer,
-      add an "Add to Voice Library" checkbox (so naming ≠ auto-enrol). Default off/on TBD.
-      (Backend already supports enrol on demand via `voice_library_lite.py enroll`.)
-- [ ] **Voice Library management**: multi-select + bulk "remove" of speakers no longer wanted.
-- [ ] **Per-speaker meeting count** in the Voice Library list (how many meetings each appears in).
-- [ ] **Click a speaker's count → filter the recordings list** to that speaker's meetings.
-- [ ] **Speaker filter** in the recordings list (see who was in which meetings).
+- [x] **Enrolment at naming time**: confirming/renaming a speaker enrolls the diarizer's
+      stored centroid. Reconfirming the same meeting refreshes that exemplar, while a
+      different meeting adds another one. Unverified auto-matches are not used for bulk
+      enrollment.
+- [ ] **Explicit opt-in enrolment policy**: decide whether naming should eventually offer
+      a separate checkbox (rather than the current deliberate-confirmation behavior).
+- [x] **Voice Library management**: multi-select + bulk "remove" of speakers no longer wanted.
+- [x] **Per-speaker meeting count** in the Voice Library list (how many meetings each appears in).
+- [x] **Click a speaker's count → filter the recordings list** to that speaker's meetings.
+- [x] **Speaker filter** in the recordings list (see who was in which meetings).
       Note: "who is in a meeting" = the `speaker_names` values of that meeting's
       `_diarized.json`; a speaker↔meeting index can be built by scanning those.
-- [ ] **Sorting** in the Voice Library list (by name / sample count / last updated / #meetings).
-- [ ] **Audition samples**: view/play a speaker's enrolled samples; if a person has
-      multiple samples, open a sub-window listing each with a play button.
-      DEPENDENCY: `enroll_speaker` currently keeps only the averaged embedding +
-      `sample_count` — it does NOT store per-sample provenance. To play samples,
-      enrolment must persist a `samples: [{audio_file, start, end}]` list per speaker
-      (schema change in `voice_library_lite.py` + whatever bulk-enrol we run). Decide
-      this BEFORE bulk-enrolling the migration set, or provenance is lost.
+- [x] **Sorting** in the Voice Library list (Meetings / Samples / Name / Recent; default Meetings).
+- [x] **Audition samples**: the sample count opens a provenance sheet with representative
+      meeting/segment metadata, playback where the source audio is available, source-file
+      reveal, and individual sample removal. Samples now carry provenance in the schema.
 - [ ] Decide whether to adjust "Tagged" logic (optional; see §2).
 
 ## Named-speaker distribution (informs bulk-enrol threshold)

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from shared.word_timing import aligned_tokens_to_words, words_to_text
+
 
 def transcribe(audio_path: str | Path, language: str | None = None) -> dict:
     """Transcribe audio with Parakeet TDT v2 via MLX.
@@ -111,10 +113,40 @@ def transcribe(audio_path: str | Path, language: str | None = None) -> dict:
                 continue
             start = float(getattr(words[0], "start", 0))
             end = float(getattr(words[-1], "end", start))
-        segments.append({
+        # Parakeet exposes token-level alignment on AlignedSentence.tokens.
+        # Keep it: diarization can then change speaker at a word boundary
+        # instead of assigning one long sentence to whichever speaker has the
+        # most overlap with it.  A few package versions call this collection
+        # ``words``, so support both names.
+        raw_tokens = []
+        for token in (getattr(seg, "tokens", None) or getattr(seg, "words", None) or []):
+            raw_tokens.append({
+                "text": getattr(token, "text", None) or getattr(token, "word", None),
+                "start": getattr(token, "start", None),
+                "end": getattr(token, "end", None),
+                "confidence": getattr(token, "confidence", None),
+            })
+        timed_words = aligned_tokens_to_words(
+            raw_tokens,
+            default_start=float(start),
+            default_end=float(end),
+        )
+
+        if timed_words:
+            # Some releases omit sentence text or expose slightly different
+            # whitespace. Reconstructing from the aligned tokens gives the
+            # downstream sidecars one consistent representation.
+            seg_text = seg_text.strip() or words_to_text(timed_words)
+            start = min(float(start), timed_words[0]["start"])
+            end = max(float(end), timed_words[-1]["end"])
+
+        output = {
             "start": float(start),
             "end": float(end),
             "text": seg_text.strip(),
-        })
+        }
+        if timed_words:
+            output["words"] = timed_words
+        segments.append(output)
 
     return {"text": text.strip(), "segments": segments}

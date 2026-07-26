@@ -105,10 +105,17 @@ class TestSplitLongSegments:
         for word in ["First", "Second", "Third", "Fourth"]:
             assert word in combined
 
-    def test_single_sentence_not_split(self):
-        segments = [{"start": 0, "end": 200, "text": "One long sentence without periods", "speaker_id": 0}]
+    def test_single_sentence_is_split_when_it_exceeds_the_cap(self):
+        segments = [{
+            "start": 0,
+            "end": 200,
+            "text": "One long sentence without periods and enough words to require several readable chunks",
+            "speaker_id": 0,
+        }]
         result = _split_long_segments(segments, max_duration=90)
-        assert len(result) == 1  # Can't split without sentence boundaries
+        assert len(result) >= 2
+        assert max(item["end"] - item["start"] for item in result) <= 90
+        assert "without periods" in " ".join(item["text"] for item in result)
 
     def test_empty_segments(self):
         result = _split_long_segments([])

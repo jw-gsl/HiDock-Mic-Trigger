@@ -43,7 +43,7 @@ class TestDetectEngines:
         with patch("shutil.which", return_value="/usr/bin/mock"):
             engines = detect_engines()
             names = [e.name for e in engines]
-            assert names == ["claude", "codex", "gemini", "ollama"]
+            assert names == ["claude", "codex", "gemini", "ollama", "kimi", "grok"]
 
 
 class TestGetEngine:
@@ -124,3 +124,46 @@ class TestExtractJson:
         result = _extract_json(text)
         assert result["title"] == "Test"
         assert result["items"] == [1, 2, 3]
+
+
+class TestNewCliRegistration:
+    def test_kimi_and_grok_detected_when_installed(self):
+        with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
+            names = [e.name for e in detect_engines()]
+        assert "kimi" in names and "grok" in names
+        # Existing users keep their auto-resolution: new CLIs rank last.
+        assert names.index("kimi") > names.index("ollama")
+        assert names.index("grok") > names.index("ollama")
+
+    def test_argv_prompt_engines_run_prompt_as_argument(self):
+        with patch("shutil.which", return_value="/usr/bin/kimi"), \
+             patch("subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            run_mock.return_value.stdout = "• OK\n\nTo resume this session: kimi -r abc\n"
+            run_mock.return_value.stderr = ""
+            result = query("summarise this", engine=get_engine("kimi"))
+        args, kwargs = run_mock.call_args
+        assert args[0] == ["kimi", "-p", "summarise this"]
+        assert kwargs["input"] is None
+        assert result == "OK"
+
+    def test_grok_runs_single_turn_argv(self):
+        with patch("shutil.which", return_value="/usr/bin/grok"), \
+             patch("subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            run_mock.return_value.stdout = "OK"
+            run_mock.return_value.stderr = ""
+            result = query("hi", engine=get_engine("grok"))
+        args, _kwargs = run_mock.call_args
+        assert args[0] == ["grok", "--single", "hi"]
+        assert result == "OK"
+
+    def test_list_engines_labels_installed_clis(self):
+        from shared.llm_cli import list_engines
+
+        with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
+            rows = list_engines()
+        by_id = {row["id"]: row for row in rows}
+        assert by_id["kimi"]["label"] == "Kimi"
+        assert by_id["grok"]["label"] == "Grok"
+        assert all(row["description"] for row in rows)

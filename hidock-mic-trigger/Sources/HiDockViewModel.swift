@@ -168,22 +168,70 @@ final class HiDockViewModel: ObservableObject {
     /// spinner instead of a blank table until the first combined paint lands.
     @Published var recordingsLoading = false
     @Published var meetingPeople: [String: Set<String>] = [:] { didSet { markDerivedDirty() } }
+    /// Review-only candidate-library evidence, person → meeting (recording)
+    /// names. Augments sidecar-derived `meetingPeople`: a candidate-only
+    /// person (e.g. a first-name-only archive identity) may never appear in a
+    /// sidecar's speaker_names, but their samples still point at real
+    /// meetings, so filtering to them must find those recordings.
+    @Published var candidateMeetingEvidence: [String: Set<String>] = [:] {
+        didSet {
+            var inverted: [String: Set<String>] = [:]
+            for (person, meetings) in candidateMeetingEvidence {
+                for meeting in meetings { inverted[meeting, default: []].insert(person) }
+            }
+            candidatePeopleByMeeting = inverted
+            markDerivedDirty()
+        }
+    }
+    /// meeting (recording) name → candidate people evidenced there. Derived
+    /// from `candidateMeetingEvidence`; do not set directly.
+    private(set) var candidatePeopleByMeeting: [String: Set<String>] = [:]
     /// Active people filter (empty = off). Combined AND with device/status/day.
     @Published var syncFilterPeople: Set<String> = [] { didSet { markDerivedDirty() } }
     /// Whether a meeting must contain ANY or ALL of the filtered people.
     @Published var syncPeopleFilterMode: PeopleFilterMode = .any { didSet { markDerivedDirty() } }
 
-    /// Every named person seen across meetings, sorted — for the filter menu.
-    var allPeople: [String] {
-        Array(Set(meetingPeople.values.flatMap { $0 })).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    }
-    /// person name → number of meetings they appear in.
-    var personMeetingCounts: [String: Int] {
-        var counts: [String: Int] = [:]
-        for people in meetingPeople.values {
-            for p in people { counts[p, default: 0] += 1 }
+    /// The voice-library person who is the user themselves ("Me"). Pinned to
+    /// the top of person pickers — the user is usually in their own meetings.
+    /// Persisted across launches.
+    @Published var voiceLibraryMeName: String? =
+        UserDefaults.standard.string(forKey: "hidockVoiceLibraryMeName") {
+        didSet {
+            if let name = voiceLibraryMeName {
+                UserDefaults.standard.set(name, forKey: "hidockVoiceLibraryMeName")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "hidockVoiceLibraryMeName")
+            }
+            markDerivedDirty()
         }
-        return counts
+    }
+
+    /// Every named person seen across meetings, sorted — for the filter menu.
+    /// "Me" (when set) pins to the top.
+    var allPeople: [String] {
+        var names = Set(meetingPeople.values.flatMap { $0 })
+        names.formUnion(candidateMeetingEvidence.keys)
+        let me = voiceLibraryMeName
+        return names.sorted {
+            if let me = me {
+                if $0 == me { return true }
+                if $1 == me { return false }
+            }
+            return $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+    }
+    /// person name → number of meetings they appear in (sidecar labels and
+    /// candidate-library evidence unioned per meeting, so evidence for the
+    /// same meeting is never double-counted).
+    var personMeetingCounts: [String: Int] {
+        var meetingsByPerson: [String: Set<String>] = [:]
+        for (meeting, people) in meetingPeople {
+            for p in people { meetingsByPerson[p, default: []].insert(meeting) }
+        }
+        for (person, meetings) in candidateMeetingEvidence {
+            meetingsByPerson[person, default: []].formUnion(meetings)
+        }
+        return meetingsByPerson.mapValues { $0.count }
     }
 
     /// Whether an entry matches a given status filter.
@@ -244,6 +292,29 @@ final class HiDockViewModel: ObservableObject {
         } else {
             hiddenStatuses.insert(status)
         }
+    }
+
+    /// Whether the recordings table is narrowed by any user-facing filter.
+    /// Sorting and selection are deliberately not included: this reset is for
+    /// visibility filters only.
+    var hasActiveRecordingFilters: Bool {
+        syncFilterDeviceId != nil
+            || !syncFilterPeople.isEmpty
+            || !statusFilters.subtracting([.all]).isEmpty
+            || summaryTypeFilter != nil
+            || heatmapSelectedDay != nil
+    }
+
+    /// Remove every filter that can narrow the recordings table in one action.
+    /// Keep the people mode at its neutral default so a later people selection
+    /// starts from the predictable "Any" behaviour.
+    func clearAllRecordingFilters() {
+        syncFilterDeviceId = nil
+        syncFilterPeople = []
+        syncPeopleFilterMode = .any
+        statusFilters = []
+        summaryTypeFilter = nil
+        heatmapSelectedDay = nil
     }
     @Published var syncPairedDevices: [HiDockPairedDevice] = []
     @Published var syncDeviceConnected: [String: Bool] = [:]
@@ -335,6 +406,11 @@ final class HiDockViewModel: ObservableObject {
     /// want consecutive clicks to work even when the row is already
     /// visible (a re-bump still triggers `.onChange`).
     @Published var scrollToFirstCandidateTrigger: Int = 0
+
+    /// Stable row anchor for the recordings table. The table is recreated when
+    /// the right-hand detail pane opens, so keeping this in the view model
+    /// prevents that layout transition from resetting the user's place.
+    @Published var recordingsTableScrollAnchor: String?
 
     // MARK: - Transcription State
     @Published var diarizeEnabled = false
@@ -493,7 +569,8 @@ final class HiDockViewModel: ObservableObject {
         // one of the selected people; ALL = includes every selected person.
         if !syncFilterPeople.isEmpty {
             entries = entries.filter { e in
-                let people = meetingPeople[e.recording.name] ?? []
+                let people = (meetingPeople[e.recording.name] ?? [])
+                    .union(candidatePeopleByMeeting[e.recording.name] ?? [])
                 switch syncPeopleFilterMode {
                 case .any: return !people.isDisjoint(with: syncFilterPeople)
                 case .all: return syncFilterPeople.isSubset(of: people)
@@ -978,18 +1055,26 @@ final class HiDockViewModel: ObservableObject {
     /// The registry entry's stage metadata determines what gets
     /// persisted; only one model per stage can be active at a time.
     var onSetActiveModelByKey: (String) -> Void = { _ in }
+    /// Capability-preflight reports for planned models, keyed by registry
+    /// key. Populated by the "Check compatibility" action; transient
+    /// (re-run on demand, not persisted).
+    @Published var modelCapabilities: [String: ModelCapabilityReport] = [:]
+    /// Registry keys whose capability preflight is currently running.
+    @Published var modelCapabilityChecking: Set<String> = []
+    /// Run `models.py capability <key>` and store the parsed report in
+    /// `modelCapabilities`. Read-only — never changes model state.
+    var onCheckModelCapability: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
 
     // MARK: - AI summariser engine
     /// Which CLI runs Summarise / Ask AI (claude/codex/gemini/ollama/auto).
     /// Mirrors the menu-bar provider submenu; also surfaced in the Models window.
     @Published var summarizeEngine: String = "auto"
-    let summarizeEngineChoices: [(id: String, label: String)] = [
+    /// Built from the pipeline's `list-engines` at launch — the installed
+    /// CLIs on this machine, so new ones (e.g. Kimi, Grok) appear without an
+    /// app update. "auto" is always first.
+    @Published var summarizeEngineChoices: [(id: String, label: String)] = [
         ("auto", "Auto (detect)"),
-        ("claude", "Claude"),
-        ("codex", "Codex"),
-        ("gemini", "Gemini"),
-        ("ollama", "Ollama (local)"),
     ]
     var onSetSummarizeEngine: (String) -> Void = { _ in }
     /// When true (default), summarising auto-opens the CLI pane so the user
@@ -997,6 +1082,18 @@ final class HiDockViewModel: ObservableObject {
     /// `claude --print` uses the one-time global login, no pane needed).
     @Published var showCLIWhileSummarising: Bool = true
     var onSetShowCLIWhileSummarising: (Bool) -> Void = { _ in }
+
+    // MARK: - Calendar provider
+    /// Which calendar the app takes meeting context from ("off" /
+    /// "microsoft365" / "google"). Drives attendee-based speaker merging
+    /// and suggestion narrowing via _calendar.json sidecars.
+    @Published var calendarProvider: String = "off"
+    let calendarProviderChoices: [(id: String, label: String)] = [
+        ("off", "Off"),
+        ("microsoft365", "Microsoft 365"),
+        ("google", "Google Calendar"),
+    ]
+    var onSetCalendarProvider: (String) -> Void = { _ in }
 
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}

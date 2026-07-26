@@ -42,6 +42,57 @@ struct ModelStatus: Identifiable {
     /// True if this entry is installed via pip + uses HuggingFace's
     /// cache rather than MODELS_DIR — e.g. Sortformer via nemo-toolkit.
     var nemoModel: Bool = false
+    /// Candidate identity models can generate human-review suggestions but
+    /// are never allowed to write speaker names automatically.
+    var reviewOnly: Bool = false
+    /// True if this entry is listed for visibility only — no runtime
+    /// integration exists yet, so it must stay unselectable (e.g. the
+    /// W2V-BERT 2.0 speaker model ahead of the next bake-off).
+    var planned: Bool = false
+    /// Optional key into the Python capability preflight
+    /// (`models.py capability <key>`). When set, the row offers a
+    /// "Check compatibility" action.
+    var capability: String? = nil
+}
+
+/// One check from a `models.py capability <key>` preflight report.
+struct CapabilityCheck {
+    var name: String
+    /// "pass" | "warn" | "fail" | "info" — warn/info never block.
+    var status: String
+    var detail: String
+    /// Remediation hint shown when non-empty (e.g. "pip install torch").
+    var fix: String
+}
+
+/// Parsed capability-preflight report for a planned model — per-check
+/// results plus an overall can-run flag.
+struct ModelCapabilityReport {
+    var canRun: Bool
+    var checks: [CapabilityCheck]
+    /// Set when the CLI returned {"error": ...} (e.g. unknown key).
+    var error: String?
+
+    init?(json: [String: Any]) {
+        if let error = json["error"] as? String {
+            self.canRun = false
+            self.checks = []
+            self.error = error
+            return
+        }
+        guard let canRun = json["can_run"] as? Bool,
+              let rawChecks = json["checks"] as? [[String: Any]] else { return nil }
+        self.canRun = canRun
+        self.error = nil
+        self.checks = rawChecks.map { check in
+            CapabilityCheck(
+                name: check["name"] as? String ?? "",
+                status: check["status"] as? String ?? "info",
+                detail: check["detail"] as? String ?? "",
+                fix: check["fix"] as? String ?? ""
+            )
+        }
+    }
 }
 
 /// Format a model size in human-readable form — switches to GB once the
@@ -58,6 +109,15 @@ func formatSize(mb: Int) -> String {
 
 struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Stages are collapsed by default; this holds the expanded ones.
+    @State private var expandedStages: Set<String> = []
+
+    /// Every stage currently having at least one registered model.
+    private var allStageKeys: Set<String> {
+        Set((pipelineStageOrder + supportingStageOrder).filter {
+            stageGroups[$0]?.isEmpty == false
+        })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,6 +127,14 @@ struct ModelManagerView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
+                Button("Expand all") { expandedStages = allStageKeys }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Expand every pipeline stage")
+                Button("Collapse all") { expandedStages = [] }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Collapse every pipeline stage")
                 Button {
                     viewModel.onRefreshModelStatuses()
                 } label: {
@@ -115,6 +183,32 @@ struct ModelManagerView: View {
 
             Divider()
 
+            // Calendar provider — meeting context (attendees) used for
+            // speaker merging and suggestion narrowing.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "calendar").foregroundColor(.teal)
+                    Text("Calendar").fontWeight(.medium)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { viewModel.calendarProvider },
+                        set: { viewModel.onSetCalendarProvider($0) }
+                    )) {
+                        ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
+                            Text(choice.label).tag(choice.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                }
+                Text(calendarExplainer)
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+
+            Divider()
+
             if viewModel.modelStatuses.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
@@ -141,7 +235,7 @@ struct ModelManagerView: View {
                 }
             }
         }
-        .frame(minWidth: 540, minHeight: 420)
+        .frame(minWidth: 360, minHeight: 300)   // hosted in the resizable detail pane (min 480 wide)
     }
 
     /// Top-level categorisation. Pipeline stages are the user's direct
@@ -149,7 +243,20 @@ struct ModelManagerView: View {
     /// that those backends depend on. Each category renders as a
     /// bold section header with a one-line explainer.
     private let pipelineStageOrder = ["transcription", "diarization"]
-    private let supportingStageOrder = ["vad", "embedding"]
+    private let supportingStageOrder = ["vad", "embedding", "identity_review"]
+
+    /// Explainer under the Calendar provider picker — honest about the app
+    /// not being able to start the provider's sign-in itself.
+    private var calendarExplainer: String {
+        switch viewModel.calendarProvider {
+        case "microsoft365":
+            return "Attendee lists from the Microsoft 365 connector narrow speaker merging and suggestions. Connect it in your MCP client (e.g. Claude's Microsoft 365 connector) — the app can't start the sign-in for you — then events flow in via calendar-context."
+        case "google":
+            return "Attendee lists from a Google Calendar MCP narrow speaker merging and suggestions. Connect it in your MCP client (e.g. @cocal/google-calendar-mcp) — the app can't start the sign-in for you — then events flow in via calendar-context."
+        default:
+            return "Calendar context is off. Speaker merging and suggestions won't use attendee lists."
+        }
+    }
 
     /// Group model statuses by stage, keeping active entries first so
     /// the current selection is always at the top of each section.
@@ -197,32 +304,56 @@ struct ModelManagerView: View {
 
     @ViewBuilder
     private func stageSection(stage: String, entries: [ModelStatus]) -> some View {
+        let expanded = expandedStages.contains(stage)
         VStack(alignment: .leading, spacing: 0) {
-            // Section header shows the stage label + a count of how many
-            // alternatives exist so the user sees at a glance that this
-            // is a pick-one choice.
-            HStack(alignment: .firstTextBaseline) {
-                Text(entries.first?.stageLabel ?? stage.capitalized)
-                    .font(.headline)
-                Text(entries.count == 1 ? "" : " — pick one")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
+            // Section header: chevron toggle + stage label. Collapsed rows
+            // still name the active backend so the current selection is
+            // visible without expanding.
+            Button {
+                if expanded { expandedStages.remove(stage) } else { expandedStages.insert(stage) }
+            } label: {
+                HStack(alignment: .firstTextBaseline) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 12)
+                    Text(entries.first?.stageLabel ?? stage.capitalized)
+                        .font(.headline)
+                    Text(entries.count == 1 ? "" : " — pick one")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    if !expanded, let current = entries.first(where: { $0.active }) ?? entries.first {
+                        Text(current.name)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+                .padding(.bottom, 6)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 6)
+            .buttonStyle(.plain)
+            .help(expanded ? "Collapse \(entries.first?.stageLabel ?? stage)" : "Expand \(entries.first?.stageLabel ?? stage)")
 
-            ForEach(entries) { status in
-                ModelRowView(
-                    status: status,
-                    allowSelection: entries.count > 1,
-                    onDownload: { viewModel.onDownloadModelByKey(status.id) },
-                    onDelete: { viewModel.onDeleteModelByKey(status.id) },
-                    onSetActive: { viewModel.onSetActiveModelByKey(status.id) }
-                )
-                Divider()
-                    .padding(.horizontal, 16)
+            if expanded {
+                ForEach(entries) { status in
+                    ModelRowView(
+                        status: status,
+                        allowSelection: entries.count > 1,
+                        capabilityReport: viewModel.modelCapabilities[status.id],
+                        capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
+                        onDownload: { viewModel.onDownloadModelByKey(status.id) },
+                        onDelete: { viewModel.onDeleteModelByKey(status.id) },
+                        onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
+                        onCheckCapability: { viewModel.onCheckModelCapability(status.id) }
+                    )
+                    Divider()
+                        .padding(.horizontal, 16)
+                }
             }
         }
     }
@@ -234,18 +365,26 @@ struct ModelRowView: View {
     /// a radio-style selector. Stages with only one candidate (VAD,
     /// Voice Library) hide the picker and just show installed state.
     let allowSelection: Bool
+    /// Latest capability-preflight report for this row, if the user has
+    /// run "Check compatibility". Rendered inline under the description.
+    let capabilityReport: ModelCapabilityReport?
+    /// True while `models.py capability <key>` is running for this row.
+    let capabilityChecking: Bool
     let onDownload: () -> Void
     let onDelete: () -> Void
     let onSetActive: () -> Void
+    let onCheckCapability: () -> Void
 
     /// A radio-style indicator for which backend is active within a
     /// stage. Tapping a not-currently-active installed row promotes
     /// it. Not-installed rows can't be selected until downloaded.
+    /// Planned rows are never selectable — no runtime integration
+    /// exists yet, so promoting one would break the stage.
     @ViewBuilder
     private var selector: some View {
         if allowSelection {
             Button {
-                if status.installed && !status.active {
+                if status.installed && !status.active && !status.planned {
                     onSetActive()
                 }
             } label: {
@@ -256,13 +395,15 @@ struct ModelRowView: View {
                     .foregroundColor(status.active ? .accentColor : (status.installed ? .secondary : .secondary.opacity(0.4)))
             }
             .buttonStyle(.plain)
-            .disabled(!status.installed || status.active)
+            .disabled(status.planned || !status.installed || status.active)
             .help(
-                status.active
-                    ? "Active — currently used for \(friendlyStage(status.stage))"
-                    : (status.installed
-                        ? "Set as active for \(friendlyStage(status.stage))"
-                        : "Download first to select this backend")
+                status.planned
+                    ? "Planned for the next model bake-off — not yet integrated into live review"
+                    : (status.active
+                        ? "Active — currently used for \(friendlyStage(status.stage))"
+                        : (status.installed
+                            ? "Set as active for \(friendlyStage(status.stage))"
+                            : "Download first to select this backend"))
             )
         } else {
             // Single-option stage: still show an installed/uninstalled
@@ -271,6 +412,15 @@ struct ModelRowView: View {
                 .font(.title2)
                 .foregroundColor(status.installed ? .green : .secondary)
         }
+    }
+
+    private func tagPill(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.caption2.weight(.bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color, in: Capsule())
     }
 
     var body: some View {
@@ -283,35 +433,34 @@ struct ModelRowView: View {
                 HStack(spacing: 6) {
                     Text(status.name)
                         .font(.headline)
-                    if status.active && status.installed {
-                        Text("ACTIVE")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.green, in: Capsule())
-                    }
-                    if status.builtIn {
-                        Text("BUILT-IN")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.gray, in: Capsule())
-                    }
-                    if status.experimental {
-                        Text("EXPERIMENTAL")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.orange, in: Capsule())
-                    }
                     Spacer()
                     if !status.builtIn && status.sizeMB > 0 {
                         Text(formatSize(mb: status.sizeMB))
                             .font(.callout)
                             .foregroundColor(.secondary)
+                    }
+                }
+
+                // Tag pills on their own line — several at once (e.g.
+                // EXPERIMENTAL + REVIEW ONLY + PLANNED) no longer crush the
+                // model name or wrap mid-pill.
+                if (status.active && status.installed) || status.builtIn || status.experimental || status.reviewOnly || status.planned {
+                    HStack(spacing: 6) {
+                        if status.active && status.installed {
+                            tagPill("ACTIVE", .green)
+                        }
+                        if status.builtIn {
+                            tagPill("BUILT-IN", .gray)
+                        }
+                        if status.experimental {
+                            tagPill("EXPERIMENTAL", .orange)
+                        }
+                        if status.reviewOnly {
+                            tagPill("REVIEW ONLY", .blue)
+                        }
+                        if status.planned {
+                            tagPill("PLANNED", .purple)
+                        }
                     }
                 }
 
@@ -340,10 +489,46 @@ struct ModelRowView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
+
+                // Entries with a capability key offer a read-only
+                // resource preflight (`models.py capability <key>`);
+                // the report renders inline once it comes back.
+                if status.capability != nil {
+                    if capabilityChecking {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Checking compatibility...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.top, 2)
+                    } else {
+                        Button {
+                            onCheckCapability()
+                        } label: {
+                            Label("Check compatibility", systemImage: "checkmark.shield")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("Verify this Mac meets the hardware and software requirements")
+                        .padding(.top, 2)
+                    }
+                }
+                if let report = capabilityReport {
+                    capabilityReportView(report)
+                        .padding(.top, 4)
+                }
             }
 
             VStack {
-                if status.builtIn {
+                if status.planned {
+                    // Managed externally with no runtime integration yet —
+                    // no Download/Delete actions; the row's only action is
+                    // "Check compatibility" (inline, above).
+                    EmptyView()
+                } else if status.builtIn {
                     // Always available; nothing to download or delete.
                     Text("Always on")
                         .font(.caption)
@@ -388,6 +573,43 @@ struct ModelRowView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
+
+    /// Inline rendering of a capability preflight: an overall verdict
+    /// line followed by one row per check (status icon, detail, and the
+    /// fix hint when the check produced one).
+    @ViewBuilder
+    private func capabilityReportView(_ report: ModelCapabilityReport) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let error = report.error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            } else {
+                Label(report.canRun ? "This Mac can run it" : "Missing requirements",
+                      systemImage: report.canRun ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(report.canRun ? .green : .red)
+                ForEach(Array(report.checks.enumerated()), id: \.offset) { _, check in
+                    HStack(alignment: .top, spacing: 4) {
+                        Image(systemName: capabilityIcon(check.status))
+                            .foregroundColor(capabilityColor(check.status))
+                            .font(.caption2)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(check.name): \(check.detail)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !check.fix.isEmpty {
+                                Text(check.fix)
+                                    .font(.caption2.monospaced())
+                                    .foregroundColor(.secondary.opacity(0.85))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private func friendlyStage(_ stage: String) -> String {
@@ -395,8 +617,27 @@ private func friendlyStage(_ stage: String) -> String {
     case "transcription": return "Transcription"
     case "diarization":   return "Speaker Diarization"
     case "vad":           return "Voice Activity Detection"
+    case "identity_review": return "Speaker Identity Review"
     case "voice_library": return "Voice Library"
     default:              return stage.capitalized
     }
 }
 
+/// SF Symbol per capability-check status ("pass" | "warn" | "fail" | "info").
+private func capabilityIcon(_ status: String) -> String {
+    switch status {
+    case "pass": return "checkmark.circle.fill"
+    case "warn": return "exclamationmark.triangle.fill"
+    case "fail": return "xmark.octagon.fill"
+    default:     return "info.circle.fill"
+    }
+}
+
+private func capabilityColor(_ status: String) -> Color {
+    switch status {
+    case "pass": return .green
+    case "warn": return .orange
+    case "fail": return .red
+    default:     return .blue
+    }
+}
