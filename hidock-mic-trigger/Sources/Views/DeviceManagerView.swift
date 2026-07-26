@@ -29,16 +29,20 @@ struct DeviceManagerView: View {
 
             Divider()
 
-            // Toolbar: search + filter + sort
+            // Toolbar: search on its own row, controls below — segmented
+            // pickers get max-width so they shrink with the detail pane
+            // instead of spilling over it.
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
                 TextField("Search devices...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 200)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
 
-                Divider().frame(height: 16)
-
+            HStack(spacing: 8) {
                 Text("Type:").font(.caption.weight(.medium))
                 Picker("", selection: $filterType) {
                     Text("All").tag("all")
@@ -47,7 +51,7 @@ struct DeviceManagerView: View {
                     Text("Plaud").tag("plaud")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 240)
+                .frame(maxWidth: 220)
 
                 Divider().frame(height: 16)
 
@@ -58,7 +62,7 @@ struct DeviceManagerView: View {
                     Text("Paired").tag(DeviceSortKey.pairedAt)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .frame(maxWidth: 170)
 
                 Spacer()
 
@@ -81,12 +85,13 @@ struct DeviceManagerView: View {
                         Text("15 min").tag(900.0)
                     }
                     .pickerStyle(.menu)
-                    .frame(width: 90)
+                    .frame(maxWidth: 80)
                     .help("How often to check your Plaud account for new recordings in the background.")
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 8)
+            .padding(.bottom, 8)
+            .padding(.top, 4)
 
             Divider()
 

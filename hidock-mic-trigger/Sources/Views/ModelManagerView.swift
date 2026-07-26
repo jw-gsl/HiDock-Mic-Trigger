@@ -414,6 +414,15 @@ struct ModelRowView: View {
         }
     }
 
+    private func tagPill(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.caption2.weight(.bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color, in: Capsule())
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             selector
@@ -424,51 +433,34 @@ struct ModelRowView: View {
                 HStack(spacing: 6) {
                     Text(status.name)
                         .font(.headline)
-                    if status.active && status.installed {
-                        Text("ACTIVE")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.green, in: Capsule())
-                    }
-                    if status.builtIn {
-                        Text("BUILT-IN")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.gray, in: Capsule())
-                    }
-                    if status.experimental {
-                        Text("EXPERIMENTAL")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.orange, in: Capsule())
-                    }
-                    if status.reviewOnly {
-                        Text("REVIEW ONLY")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.blue, in: Capsule())
-                    }
-                    if status.planned {
-                        Text("PLANNED")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.purple, in: Capsule())
-                    }
                     Spacer()
                     if !status.builtIn && status.sizeMB > 0 {
                         Text(formatSize(mb: status.sizeMB))
                             .font(.callout)
                             .foregroundColor(.secondary)
+                    }
+                }
+
+                // Tag pills on their own line — several at once (e.g.
+                // EXPERIMENTAL + REVIEW ONLY + PLANNED) no longer crush the
+                // model name or wrap mid-pill.
+                if (status.active && status.installed) || status.builtIn || status.experimental || status.reviewOnly || status.planned {
+                    HStack(spacing: 6) {
+                        if status.active && status.installed {
+                            tagPill("ACTIVE", .green)
+                        }
+                        if status.builtIn {
+                            tagPill("BUILT-IN", .gray)
+                        }
+                        if status.experimental {
+                            tagPill("EXPERIMENTAL", .orange)
+                        }
+                        if status.reviewOnly {
+                            tagPill("REVIEW ONLY", .blue)
+                        }
+                        if status.planned {
+                            tagPill("PLANNED", .purple)
+                        }
                     }
                 }
 

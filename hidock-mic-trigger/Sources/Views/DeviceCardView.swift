@@ -521,25 +521,18 @@ struct DeviceStripView: View {
 /// Fixed frame keeps the spin from affecting surrounding layout (which was
 /// visibly bouncing the chip when the transcript detail pane was open).
 private struct AnimatedConnectingChip: View {
-    @State private var spinning = false
-
+    /// Static blue glyph for the in-flight connecting state. The perpetual
+    /// spin read as a floating icon "across the app", especially with
+    /// several cards connecting at once; the state itself is unchanged.
     var body: some View {
         Image(systemName: "arrow.triangle.2.circlepath")
             .font(.caption.weight(.medium))
             .foregroundColor(.blue)
-            .rotationEffect(.degrees(spinning ? 360 : 0))
-            .animation(
-                .linear(duration: 1.2).repeatForever(autoreverses: false),
-                value: spinning
-            )
-            // Frame *after* rotation so layout size stays fixed while the
-            // glyph spins — avoids the chip "scrolling" neighbouring views.
             .frame(width: 18, height: 18)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(Color.blue.opacity(0.12), in: Capsule())
             .help("Connecting…")
             .accessibilityLabel("Connecting")
-            .onAppear { spinning = true }
     }
 }
