@@ -667,6 +667,10 @@ struct TranscriptViewerView: View {
     /// When every speaker is verified the panel collapses to a one-line done
     /// state; this re-expands it for inspection.
     @State private var verifyPanelExpanded = false
+    /// Confirm dialog for "Clear all" unconfirmed auto-matches in the verify panel.
+    @State private var confirmClearAllSpeakers = false
+    /// Confirm dialog for "Mark all unknown" (dismiss needs-tagging without names).
+    @State private var confirmMarkAllUnknown = false
 
     struct PendingMerge: Identifiable {
         let id = UUID()
@@ -720,6 +724,9 @@ struct TranscriptViewerView: View {
     /// Fetch the enrolled voice-library names (for the map-to-existing-speaker
     /// autocomplete). Optional so older call-sites keep compiling.
     var onListVoiceNames: ((@escaping ([String]) -> Void) -> Void)?
+    /// After the diarized JSON is saved, regenerate the sibling .md so
+    /// confirmed-only names hit disk (unconfirmed stay Speaker N).
+    var onRewriteMarkdown: ((String) -> Void)?
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -1408,7 +1415,8 @@ struct TranscriptViewerView: View {
     }
 
     private var speakerVerifyPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let clearable = clearableUnverifiedSpeakerIds
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.seal")
                     .foregroundColor(.blue)
@@ -1417,7 +1425,8 @@ struct TranscriptViewerView: View {
                 Text("Confirm each voice to lock it in — this also teaches your voice library.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                Spacer()
+                    .lineLimit(1)
+                Spacer(minLength: 8)
                 if strongSuggestionIds.count >= 2 {
                     Button {
                         // Snapshot first: each confirmation mutates liveSuggestions.
@@ -1434,6 +1443,57 @@ struct TranscriptViewerView: View {
                     .controlSize(.small)
                     .tint(.green)
                     .help("Accept every gate-passing suggestion in one click. Weaker closest-voice candidates still need individual review.")
+                }
+                // Bulk undo for bad auto-matches — only when 2+ unverified
+                // speakers can be cleared (single-row × is enough otherwise).
+                if clearable.count >= 2 {
+                    Button {
+                        confirmClearAllSpeakers = true
+                    } label: {
+                        Label("Clear all", systemImage: "xmark.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Clear all unconfirmed names — revert each to Speaker N. Confirmed speakers are left alone.")
+                    .confirmationDialog(
+                        "Clear all unconfirmed speakers?",
+                        isPresented: $confirmClearAllSpeakers,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Clear all", role: .destructive) {
+                            clearAllUnverifiedSpeakers()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Revert \(clearable.count) unconfirmed auto-matches to Speaker 1/2/…. Confirmed names stay locked in.")
+                    }
+                }
+                // Finish review without naming: marks every still-open speaker
+                // as verified-unknown (Speaker N). That sets speakersTagged so
+                // the orange "needs tagging" nag clears. Does not enroll.
+                if canMarkAllUnknown {
+                    Button {
+                        confirmMarkAllUnknown = true
+                    } label: {
+                        Label("Mark all unknown", systemImage: "person.crop.circle.badge.questionmark")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Everyone left is a guest — mark the meeting reviewed without names. Clears the orange needs-tagging badge. Does not add to your voice library.")
+                    .confirmationDialog(
+                        "Mark all remaining speakers unknown?",
+                        isPresented: $confirmMarkAllUnknown,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Mark all unknown", role: .destructive) {
+                            markAllSpeakersUnknown()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Sets every unconfirmed speaker to Speaker N and marks them reviewed. Confirmed real names stay. Nothing is enrolled in the voice library.")
+                    }
                 }
                 if !needsVerification {
                     Button("Collapse") { verifyPanelExpanded = false }
@@ -1602,6 +1662,20 @@ struct TranscriptViewerView: View {
             .buttonStyle(.plain)
             .foregroundColor(speakerFilter == id ? .accentColor : .secondary)
             .help("Show only \(speakerName(for: id))'s segments so you can play through and check the voice.")
+
+            // Clear: undo auto/typed assignment → back to "Speaker N", drop
+            // provenance + confidence chips. (Unlike the old "Mark unknown",
+            // this does not count as reviewed — rematch/confirm can run again.)
+            if canClearSpeaker(id) {
+                Button {
+                    clearSpeakerAssignment(id)
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Clear this name — revert to Speaker \(id + 1) and remove the auto-match.")
+            }
 
             if let partner = duplicatePartner(for: id) {
                 // Same name as an earlier speaker — offer to merge them into one.
@@ -2126,6 +2200,96 @@ struct TranscriptViewerView: View {
         }
     }
 
+    /// True when there's something to clear: a non-generic name and/or
+    /// auto/unknown meta (not a pristine "Speaker N").
+    private func canClearSpeaker(_ id: Int) -> Bool {
+        if !isGenericName(speakerName(for: id)) { return true }
+        if let m = speakerMeta(for: id), m.source != "generic" { return true }
+        if liveConfidence["\(id)"] != nil { return true }
+        return false
+    }
+
+    /// Unverified speakers that `canClearSpeaker` — used by Clear all (never
+    /// bulk-undo locked-in / confirmed names).
+    private var clearableUnverifiedSpeakerIds: [Int] {
+        uniqueSpeakerIds.filter { id in
+            canClearSpeaker(id) && !(speakerMeta(for: id)?.verified ?? false)
+        }
+    }
+
+    /// Undo assignment: name → "Speaker N", meta → generic/unverified, drop
+    /// confidence chip. Does not enroll and does not count as reviewed.
+    private func clearSpeakerAssignment(_ id: Int, save: Bool = true) {
+        let generic = "Speaker \(id + 1)"
+        transcript.speakerNames["\(id)"] = generic
+        setMeta(id, source: "generic", verified: false, confidence: nil)
+        liveConfidence.removeValue(forKey: "\(id)")
+        if speakerFilter == id { speakerFilter = nil }
+        if editingSpeakerId == id {
+            editingSpeakerId = nil
+            nameFieldFocused = false
+        }
+        if save { saveTranscript() }
+    }
+
+    /// Clear every unconfirmed auto/typed assignment in one pass. Confirmed
+    /// speakers are left alone.
+    private func clearAllUnverifiedSpeakers() {
+        let ids = clearableUnverifiedSpeakerIds
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            clearSpeakerAssignment(id, save: false)
+        }
+        saveTranscript()
+    }
+
+    /// True when this multi-speaker meeting still has anyone not fully
+    /// reviewed — so "Mark all unknown" can close the tagging loop.
+    private var canMarkAllUnknown: Bool {
+        guard uniqueSpeakerIds.count > 1 else { return false }
+        return uniqueSpeakerIds.contains { id in
+            !(speakerMeta(for: id)?.verified ?? false)
+        }
+    }
+
+    /// Mark every unverified speaker as a reviewed guest: name → Speaker N,
+    /// meta → unknown + verified. Confirmed real names are untouched.
+    /// Result: ≥1 verified speaker ⇒ speakersTagged / orange nag clears.
+    ///
+    /// Iterates **all** `speakerNames` keys (not only segment speaker ids) so
+    /// orphan name-table rows don't leave the meeting in "needs tagging".
+    private func markAllSpeakersUnknown() {
+        var changed = false
+        let ids: [Int] = {
+            var set = Set(uniqueSpeakerIds)
+            for key in transcript.speakerNames.keys {
+                if let n = Int(key) { set.insert(n) }
+            }
+            return set.sorted()
+        }()
+        for id in ids {
+            if speakerMeta(for: id)?.verified == true,
+               !isGenericName(speakerName(for: id)) {
+                continue   // keep locked-in people
+            }
+            let generic = "Speaker \(id + 1)"
+            if speakerName(for: id) != generic
+                || speakerMeta(for: id)?.source != "unknown"
+                || speakerMeta(for: id)?.verified != true {
+                transcript.speakerNames["\(id)"] = generic
+                setMeta(id, source: "unknown", verified: true, confidence: nil)
+                liveConfidence.removeValue(forKey: "\(id)")
+                changed = true
+            }
+        }
+        if speakerFilter != nil { speakerFilter = nil }
+        if editingSpeakerId != nil {
+            editingSpeakerId = nil
+            nameFieldFocused = false
+        }
+        if changed { saveTranscript() }
+    }
+
     /// Merge the just-renamed speaker into the existing speaker that already has
     /// that name (they're the same person split across two clusters).
     private func confirmMerge(_ merge: PendingMerge) {
@@ -2369,6 +2533,8 @@ struct TranscriptViewerView: View {
             // Persist first, then notify the owner. The owner re-reads the
             // sidecar and updates the table's cached icon immediately.
             onSpeakerReviewChanged?(filePath)
+            // Keep the sibling .md in sync: confirmed names only on disk.
+            onRewriteMarkdown?(filePath)
         } catch {
             print("Failed to save transcript: \(error)")
         }
