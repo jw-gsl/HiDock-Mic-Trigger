@@ -1284,6 +1284,67 @@ def cmd_candidate_speakers(args):
     print(_json.dumps(list_candidate_speakers(config_path=args.config)))
 
 
+def cmd_calendar_context(args):
+    """Write a <stem>_calendar.json sidecar for an audio recording.
+
+    The payload is a Microsoft 365 MCP-style events JSON (a bare list, or a
+    dict with value/events/items). recording_start defaults to the audio
+    filename's timestamp, recording_end to start + audio duration. The
+    resolved calendar context is printed so a wrong event match is visible
+    immediately."""
+    import json as _json
+    import soundfile as sf
+    from shared.calendar_context import (
+        build_sidecar_doc,
+        load_context,
+        recording_start_from_name,
+    )
+
+    audio = Path(args.audio_path).expanduser().resolve()
+    if not audio.exists():
+        print(f"File not found: {audio}", file=sys.stderr)
+        sys.exit(1)
+    payload_path = Path(args.payload).expanduser()
+    try:
+        payload = _json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        print(f"calendar payload unreadable: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    from datetime import timedelta
+    start = args.recording_start or recording_start_from_name(audio.stem)
+    if start is None:
+        print(
+            "recording start unknown: pass --recording-start (filename has no timestamp)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    end = args.recording_end
+    if end is None:
+        duration = sf.info(str(audio)).duration
+        from shared.calendar_context import _timestamp
+        end = (_timestamp(start) + timedelta(seconds=duration)).isoformat()
+    try:
+        doc = build_sidecar_doc(payload, start, end)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    destination = audio.with_name(f"{audio.stem}_calendar.json")
+    destination.write_text(
+        _json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    context = load_context(doc, doc["recording_start"], doc["recording_end"])
+    print(_json.dumps({
+        "status": "completed",
+        "sidecar": str(destination),
+        "events": len(doc.get("value", [])),
+        "context": context.summary(),
+        "candidate_names": sorted(context.candidate_names),
+        "ambiguous": context.ambiguous,
+    }))
+
+
 def cmd_merge_candidate_speakers(args):
     """Merge one candidate-library identity into another (human decision)."""
     import json as _json
@@ -1768,6 +1829,17 @@ def main():
         default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
     )
     p_candidate_merge.set_defaults(func=cmd_merge_candidate_speakers)
+
+    p_calendar = sub.add_parser(
+        "calendar-context",
+        help="Write a <stem>_calendar.json sidecar from an M365-style events payload (JSON)",
+    )
+    p_calendar.add_argument("audio_path", help="Recording mp3 whose timestamp/duration sets the window")
+    p_calendar.add_argument("--payload", required=True,
+                            help="M365-style events JSON (list, or dict with value/events/items)")
+    p_calendar.add_argument("--recording-start", help="ISO start override (default: filename timestamp)")
+    p_calendar.add_argument("--recording-end", help="ISO end override (default: start + audio duration)")
+    p_calendar.set_defaults(func=cmd_calendar_context)
 
     p_merge = sub.add_parser(
         "merge-rediarize",

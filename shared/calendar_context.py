@@ -79,6 +79,64 @@ def normalize_email(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+_MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def recording_start_from_name(stem: str) -> datetime | None:
+    """Recover a recording's start time from its HiDock filename, as a
+    timezone-aware local datetime. Supported shapes:
+    ``2026Jul24-133007-Rec07``, ``2025Feb27-102100-HiD37``,
+    ``2026-07-07 14-47-20`` / ``2026-07-07_14-47-20``.
+    """
+    match = re.match(r"(\d{4})([A-Z][a-z]{2})(\d{2})-(\d{2})(\d{2})(\d{2})", stem)
+    if match and match[2] in _MONTHS:
+        naive = datetime(
+            int(match[1]), _MONTHS[match[2]], int(match[3]),
+            int(match[4]), int(match[5]), int(match[6]),
+        )
+        return naive.astimezone()
+    match = re.match(r"(\d{4})-(\d{2})-(\d{2})[ _](\d{2})-(\d{2})(?:-(\d{2}))?", stem)
+    if match:
+        naive = datetime(
+            int(match[1]), int(match[2]), int(match[3]),
+            int(match[4]), int(match[5]), int(match[6] or 0),
+        )
+        return naive.astimezone()
+    return None
+
+
+def build_sidecar_doc(
+    payload: Any,
+    recording_start: Any,
+    recording_end: Any,
+    *,
+    source: str = "microsoft365-mcp",
+) -> dict:
+    """Assemble a ``<stem>_calendar.json`` document from an M365-style
+    events payload plus the recording window.
+
+    The payload may be a bare events list or a dict shaped like an M365 MCP
+    response (``value``/``events``/``items``/``results``). Events are kept
+    verbatim; start/end are normalised to timezone-aware ISO strings.
+    Raises ValueError when no usable events are present.
+    """
+    events = parse_context_payload(payload)
+    if not events:
+        raise ValueError("calendar payload contains no usable events")
+    start = _timestamp(recording_start)
+    end = _timestamp(recording_end)
+    if end <= start:
+        raise ValueError("recording_end must be after recording_start")
+    doc = dict(payload) if isinstance(payload, dict) else {"value": payload}
+    doc["source"] = doc.get("source") or source
+    doc["recording_start"] = start.isoformat()
+    doc["recording_end"] = end.isoformat()
+    return doc
+
+
 def _timestamp(value: Any, timezone_name: str | None = None) -> datetime:
     if isinstance(value, datetime):
         parsed = value
