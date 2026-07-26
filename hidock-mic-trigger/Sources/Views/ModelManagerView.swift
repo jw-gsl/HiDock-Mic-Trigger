@@ -109,6 +109,15 @@ func formatSize(mb: Int) -> String {
 
 struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Stages are collapsed by default; this holds the expanded ones.
+    @State private var expandedStages: Set<String> = []
+
+    /// Every stage currently having at least one registered model.
+    private var allStageKeys: Set<String> {
+        Set((pipelineStageOrder + supportingStageOrder).filter {
+            stageGroups[$0]?.isEmpty == false
+        })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -118,6 +127,14 @@ struct ModelManagerView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
+                Button("Expand all") { expandedStages = allStageKeys }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Expand every pipeline stage")
+                Button("Collapse all") { expandedStages = [] }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Collapse every pipeline stage")
                 Button {
                     viewModel.onRefreshModelStatuses()
                 } label: {
@@ -248,35 +265,56 @@ struct ModelManagerView: View {
 
     @ViewBuilder
     private func stageSection(stage: String, entries: [ModelStatus]) -> some View {
+        let expanded = expandedStages.contains(stage)
         VStack(alignment: .leading, spacing: 0) {
-            // Section header shows the stage label + a count of how many
-            // alternatives exist so the user sees at a glance that this
-            // is a pick-one choice.
-            HStack(alignment: .firstTextBaseline) {
-                Text(entries.first?.stageLabel ?? stage.capitalized)
-                    .font(.headline)
-                Text(entries.count == 1 ? "" : " — pick one")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
+            // Section header: chevron toggle + stage label. Collapsed rows
+            // still name the active backend so the current selection is
+            // visible without expanding.
+            Button {
+                if expanded { expandedStages.remove(stage) } else { expandedStages.insert(stage) }
+            } label: {
+                HStack(alignment: .firstTextBaseline) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 12)
+                    Text(entries.first?.stageLabel ?? stage.capitalized)
+                        .font(.headline)
+                    Text(entries.count == 1 ? "" : " — pick one")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    if !expanded, let current = entries.first(where: { $0.active }) ?? entries.first {
+                        Text(current.name)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+                .padding(.bottom, 6)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 6)
+            .buttonStyle(.plain)
+            .help(expanded ? "Collapse \(entries.first?.stageLabel ?? stage)" : "Expand \(entries.first?.stageLabel ?? stage)")
 
-            ForEach(entries) { status in
-                ModelRowView(
-                    status: status,
-                    allowSelection: entries.count > 1,
-                    capabilityReport: viewModel.modelCapabilities[status.id],
-                    capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
-                    onDownload: { viewModel.onDownloadModelByKey(status.id) },
-                    onDelete: { viewModel.onDeleteModelByKey(status.id) },
-                    onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
-                    onCheckCapability: { viewModel.onCheckModelCapability(status.id) }
-                )
-                Divider()
-                    .padding(.horizontal, 16)
+            if expanded {
+                ForEach(entries) { status in
+                    ModelRowView(
+                        status: status,
+                        allowSelection: entries.count > 1,
+                        capabilityReport: viewModel.modelCapabilities[status.id],
+                        capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
+                        onDownload: { viewModel.onDownloadModelByKey(status.id) },
+                        onDelete: { viewModel.onDeleteModelByKey(status.id) },
+                        onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
+                        onCheckCapability: { viewModel.onCheckModelCapability(status.id) }
+                    )
+                    Divider()
+                        .padding(.horizontal, 16)
+                }
             }
         }
     }
