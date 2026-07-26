@@ -1070,12 +1070,11 @@ final class HiDockViewModel: ObservableObject {
     /// Which CLI runs Summarise / Ask AI (claude/codex/gemini/ollama/auto).
     /// Mirrors the menu-bar provider submenu; also surfaced in the Models window.
     @Published var summarizeEngine: String = "auto"
-    let summarizeEngineChoices: [(id: String, label: String)] = [
+    /// Built from the pipeline's `list-engines` at launch — the installed
+    /// CLIs on this machine, so new ones (e.g. Kimi, Grok) appear without an
+    /// app update. "auto" is always first.
+    @Published var summarizeEngineChoices: [(id: String, label: String)] = [
         ("auto", "Auto (detect)"),
-        ("claude", "Claude"),
-        ("codex", "Codex"),
-        ("gemini", "Gemini"),
-        ("ollama", "Ollama (local)"),
     ]
     var onSetSummarizeEngine: (String) -> Void = { _ in }
     /// When true (default), summarising auto-opens the CLI pane so the user

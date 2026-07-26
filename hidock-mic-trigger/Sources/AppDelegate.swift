@@ -196,12 +196,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         UserDefaults.standard.object(forKey: showCLIWhileSummarisingKey) == nil
             ? true : UserDefaults.standard.bool(forKey: showCLIWhileSummarisingKey)
     }
-    private let summarizeEngineOptions: [(id: String, label: String)] = [
+    private var summarizeEngineOptions: [(id: String, label: String)] = [
         ("auto", "Auto (detect)"),
-        ("claude", "Claude"),
-        ("codex", "Codex"),
-        ("gemini", "Gemini"),
-        ("ollama", "Ollama (local)"),
     ]
     private var summarizeSubmenu: NSMenu!
     private var summarizeMenuItem: NSMenuItem!
@@ -241,6 +237,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                   let name = json["engine"] as? String, !name.isEmpty else { return }
             self.resolvedAutoEngine = name
             self.log("AI auto-detect resolved to: \(name)")
+        }
+    }
+
+    /// Build the summariser provider list from the CLIs actually installed on
+    /// this machine (via the pipeline's `list-engines`), so a new CLI — e.g.
+    /// Kimi, Grok — shows up in the menu and the Models picker without an app
+    /// update. A persisted selection that no longer exists resets to auto.
+    private func refreshEngineOptions() {
+        runTranscription(arguments: ["list-engines"], timeout: 30) { [weak self] result in
+            guard let self = self else { return }
+            guard case .success(let data) = result,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let engines = json["engines"] as? [[String: Any]], !engines.isEmpty else { return }
+            var options: [(id: String, label: String)] = [("auto", "Auto (detect)")]
+            for engine in engines {
+                guard let id = engine["id"] as? String, !id.isEmpty,
+                      let label = engine["label"] as? String, !label.isEmpty else { continue }
+                options.append((id: id, label: label))
+            }
+            self.summarizeEngineOptions = options
+            self.viewModel.summarizeEngineChoices = options
+            let current = self.summarizeEngine
+            if current != "auto", !options.contains(where: { $0.id == current }) {
+                self.log("Summariser engine '\(current)' is no longer installed — resetting to auto")
+                self.setSummarizeEngine("auto")
+            }
+            self.rebuildSummarizeSubmenu()
         }
     }
 
@@ -620,6 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.calendarProvider = UserDefaults.standard.string(forKey: calendarProviderKey) ?? "off"
         viewModel.showCLIWhileSummarising = showCLIWhileSummarising
         refreshResolvedAutoEngine()
+        refreshEngineOptions()
         // Default diarization to ON — speaker labels are almost always wanted
         if UserDefaults.standard.object(forKey: "diarizeEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "diarizeEnabled")

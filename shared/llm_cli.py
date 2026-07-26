@@ -1,24 +1,29 @@
 """LLM CLI detection and invocation — uses existing AI subscriptions.
 
-Detects installed LLM command-line tools (claude, codex, gemini, ollama)
-and provides a unified interface for querying them. This avoids API key
-management and leverages the user's existing subscriptions.
+Detects installed LLM command-line tools (claude, codex, gemini, ollama,
+kimi, grok) and provides a unified interface for querying them. This avoids
+API key management and leverages the user's existing subscriptions.
 
-Detection priority: claude > codex > gemini > ollama
+Detection priority: claude > codex > gemini > ollama > kimi > grok
 """
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
 
-# Detection order — first available wins for "auto" mode
-_CLI_PRIORITY = ["claude", "codex", "gemini", "ollama"]
+# Detection order — first available wins for "auto" mode. New CLIs are
+# appended so existing users keep their current auto-resolution.
+_CLI_PRIORITY = ["claude", "codex", "gemini", "ollama", "kimi", "grok"]
 
-# How to invoke each CLI with a prompt via stdin
+# How to invoke each CLI with a prompt.
+# prompt_via "stdin" (default): prompt piped on stdin (no size limit).
+# prompt_via "argv": prompt appended as a single argv element (the CLI has
+# no stdin mode; long prompts are chunked upstream by the summariser).
 _CLI_CONFIGS: dict[str, dict] = {
     "claude": {
         "command": ["claude", "--print"],
@@ -36,6 +41,27 @@ _CLI_CONFIGS: dict[str, dict] = {
         "command": ["ollama", "run", "llama3.2"],
         "description": "Ollama (local) — free, runs locally, requires ollama install",
     },
+    "kimi": {
+        # `kimi -p <prompt>` — a bare "-" is NOT stdin, it is a literal prompt.
+        "command": ["kimi", "-p"],
+        "prompt_via": "argv",
+        "description": "Kimi (Moonshot AI) — requires Kimi CLI login",
+    },
+    "grok": {
+        # `grok --single <prompt>` — single-turn, prints response and exits.
+        "command": ["grok", "--single"],
+        "prompt_via": "argv",
+        "description": "Grok (xAI) — requires Grok CLI login",
+    },
+}
+
+_ENGINE_LABELS = {
+    "claude": "Claude",
+    "codex": "Codex",
+    "gemini": "Gemini",
+    "ollama": "Ollama (local)",
+    "kimi": "Kimi",
+    "grok": "Grok",
 }
 
 
@@ -76,6 +102,38 @@ def detect_engines() -> list[LLMEngine]:
                 description=cfg["description"],
             ))
     return available
+
+
+def list_engines() -> list[dict]:
+    """Installed engines as picker-ready rows for the desktop apps.
+
+    The app's AI Summariser provider list is built from this so newly
+    installed CLIs (e.g. Kimi, Grok) appear without an app update.
+    """
+    return [
+        {
+            "id": engine.name,
+            "label": _ENGINE_LABELS.get(engine.name, engine.name.capitalize()),
+            "description": engine.description,
+        }
+        for engine in detect_engines()
+    ]
+
+
+def _clean_output(name: str, text: str) -> str:
+    """Normalise a CLI's stdout into just the model's answer text.
+
+    Kimi prints "• " bullet markers and a "To resume this session:" trailer
+    around the response; both would leak into summaries and JSON extraction.
+    """
+    if not text or name != "kimi":
+        return text
+    lines = [
+        line for line in text.splitlines()
+        if not line.startswith("To resume this session:")
+    ]
+    cleaned = [re.sub(r"^\s*•\s*", "", line) for line in lines]
+    return "\n".join(cleaned).strip()
 
 
 def get_engine(name: str = "auto") -> LLMEngine | None:
@@ -131,10 +189,11 @@ def query(
     if engine is None:
         return None
 
+    argv_prompt = _CLI_CONFIGS.get(engine.name, {}).get("prompt_via") == "argv"
     try:
         result = subprocess.run(
-            engine.command,
-            input=prompt,
+            engine.command + ([prompt] if argv_prompt else []),
+            input=None if argv_prompt else prompt,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -145,7 +204,7 @@ def query(
                 file=sys.stderr,
             )
             return None
-        return result.stdout.strip()
+        return _clean_output(engine.name, result.stdout.strip())
     except subprocess.TimeoutExpired:
         print(f"LLM CLI ({engine.name}) timed out after {timeout}s", file=sys.stderr)
         return None

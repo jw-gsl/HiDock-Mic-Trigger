@@ -776,6 +776,14 @@ def cmd_detect_engine(_args):
     print(json.dumps({"engine": eng.name if eng else None}))
 
 
+def cmd_list_engines(_args):
+    """List installed LLM CLI engines so the app's provider pickers are
+    dynamic (a newly installed CLI — e.g. Kimi, Grok — appears without an
+    app update). Prints {"engines": [{id, label, description}]}."""
+    from shared.llm_cli import list_engines
+    print(json.dumps({"engines": list_engines()}))
+
+
 def cmd_summarize(args):
     """Type-aware, template-driven summary of an existing transcript via the
     configured AI CLI -> ~/HiDock/Summaries/. No-ops cleanly if no LLM /
@@ -1918,6 +1926,12 @@ def main():
 
     p_detect = sub.add_parser("detect-engine", help="Report which AI CLI 'auto' resolves to -> JSON {engine}")
     p_detect.set_defaults(func=cmd_detect_engine)
+
+    p_list_engines = sub.add_parser(
+        "list-engines",
+        help="List installed LLM CLI engines for the app's dynamic provider lists -> JSON {engines: [...]}",
+    )
+    p_list_engines.set_defaults(func=cmd_list_engines)
 
     p_activity = sub.add_parser("activity-stats", help="Per-transcript speaker/action-item counts -> JSON (heatmap Tier-2 tooltip)")
     p_activity.set_defaults(func=cmd_activity_stats)
