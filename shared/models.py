@@ -222,6 +222,27 @@ MODEL_REGISTRY = {
         "review_only": True,
         "description": "English VoxCeleb speaker-identity model selected by the local verified benchmark. It proposes evidence-backed names in the transcript review panel but never applies them automatically.",
     },
+    # PalabraAI ReDimNet2-B6 — current bake-off winner on the local verified
+    # benchmark (docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md): 96.65%
+    # archive top-1, zero false accepts on archive and recent sets, 82.9%
+    # combined safe-gate coverage vs WeSpeaker's 75.49%. Vendored code clone
+    # at Speech-to-Text/redimnet2-repo; torch runtime (no ONNX). Checkpoint
+    # is VoxBlink2-derived: CC BY-NC-SA 4.0 — local use only.
+    "redimnet2_identity_review": {
+        "name": "ReDimNet2-B6 (PalabraAI)",
+        "filename": "b6-vb2+vox2_v0-lm.pt",
+        "url": "https://github.com/PalabraAI/redimnet2/releases/download/v1.0.0/b6-vb2%2Bvox2_v0-lm.pt",
+        "sha256": "e0a7d340a92f798720d1208949aa6a6bd0cddcb0ba7d4cec33596a17a484e6a2",
+        "size_mb": 49,
+        "required": False,
+        "stage": "identity_review",
+        "stage_label": "Speaker Identity Review",
+        "category": "supporting",
+        "used_by": "Transcript speaker verification (suggestions only)",
+        "backend_key": "redimnet2_b6",
+        "review_only": True,
+        "description": "Strongest speaker-identity model on the local verified benchmark (96.65% archive top-1, zero false accepts, 82.9% safe-gate coverage). Proposes evidence-backed names in the review panel but never applies them automatically. Local use only (CC BY-NC-SA 4.0).",
+    },
     # W2V-BERT 2.0 via WeSpeaker's new official support — PLANNED,
     # review-only. Meta's facebook/w2v-bert-2.0 SSL frontend (580M params)
     # + a 6.2M-param Adapter-MFA backend. PyTorch-only (no ONNX export),
@@ -473,6 +494,52 @@ def set_active_backend(stage: str, backend_key: str) -> dict[str, str]:
     return backends
 
 
+# ── Speaker Identity Review candidate switching ──────────────────────────────
+
+# Which candidate directory each identity_review backend reviews from. Each
+# holds a `review-candidate.json` (model, library, scorer, gate) that becomes
+# the active candidate config when the backend is selected.
+_VOICE_CANDIDATES_DIR = Path.home() / "HiDock" / "Voice Library Candidates"
+_ACTIVE_CANDIDATE_PATH = _VOICE_CANDIDATES_DIR / "active.json"
+_IDENTITY_CANDIDATE_DIRS = {
+    "wespeaker_resnet293": "WeSpeaker-ResNet293-LM-2026-07-22",
+    "redimnet2_b6": "ReDimNet2-B6-2026-07-25",
+}
+
+
+def _sync_identity_review_candidate(backend_key: str) -> dict:
+    """Point the review-candidate config (active.json) at the selected
+    model's candidate library, backing up the previous config first.
+
+    The Models UI radio for Speaker Identity Review therefore genuinely
+    switches the suggestion engine — not just the badge. The previous
+    candidate stays fully intact on disk, so switching back is a click.
+    """
+    dirname = _IDENTITY_CANDIDATE_DIRS.get(backend_key)
+    if not dirname:
+        return {"ok": False, "error": f"no review candidate configured for backend '{backend_key}'"}
+    source = _VOICE_CANDIDATES_DIR / dirname / "review-candidate.json"
+    if not source.is_file():
+        return {"ok": False, "error": f"candidate config not found: {source}"}
+    try:
+        config = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"candidate config unreadable: {exc}"}
+    config["enabled"] = True
+    config["review_only"] = True
+    from datetime import datetime, timezone
+    config["switched_at"] = datetime.now(timezone.utc).isoformat()
+    if _ACTIVE_CANDIDATE_PATH.exists():
+        backup = _ACTIVE_CANDIDATE_PATH.with_suffix(".json.bak")
+        backup.write_text(
+            _ACTIVE_CANDIDATE_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    tmp = _ACTIVE_CANDIDATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(_ACTIVE_CANDIDATE_PATH)
+    return {"ok": True, "config_path": str(_ACTIVE_CANDIDATE_PATH)}
+
+
 def _python_module_available(module_name: str) -> bool:
     """Whether a Python module is importable in the current venv.
 
@@ -686,8 +753,17 @@ def _cli():
         if not stage:
             print(json.dumps({"ok": False, "error": f"Model {key} has no stage"}))
             sys.exit(1)
+        result: dict = {}
+        if stage == "identity_review":
+            # Sync active.json to the chosen candidate FIRST — if it fails,
+            # nothing changes (badge and suggestion engine stay consistent).
+            result = _sync_identity_review_candidate(backend_key)
+            if not result.get("ok"):
+                print(json.dumps(result))
+                sys.exit(1)
         backends = set_active_backend(stage, backend_key)
-        print(json.dumps({"ok": True, "backends": backends}))
+        out = {"ok": True, "backends": backends, **result}
+        print(json.dumps(out))
 
     elif command == "backends":
         # Dump the current backend selection for debugging/inspection.
