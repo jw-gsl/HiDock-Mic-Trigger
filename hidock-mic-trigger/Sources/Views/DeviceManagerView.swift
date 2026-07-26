@@ -29,69 +29,69 @@ struct DeviceManagerView: View {
 
             Divider()
 
-            // Toolbar: search on its own row, controls below — segmented
-            // pickers get max-width so they shrink with the detail pane
-            // instead of spilling over it.
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Search devices...", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 4)
-
-            HStack(spacing: 8) {
-                Text("Type:").font(.caption.weight(.medium))
-                Picker("", selection: $filterType) {
-                    Text("All").tag("all")
-                    Text("HiDock").tag("hidock")
-                    Text("Volume").tag("volume")
-                    Text("Plaud").tag("plaud")
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 220)
-
-                Divider().frame(height: 16)
-
-                Text("Sort:").font(.caption.weight(.medium))
-                Picker("", selection: $sortOrder) {
-                    Text("Name").tag(DeviceSortKey.name)
-                    Text("Type").tag(DeviceSortKey.type)
-                    Text("Paired").tag(DeviceSortKey.pairedAt)
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 170)
-
-                Spacer()
-
-                // Plaud is an API (not USB), so a background poll is the only
-                // thing that surfaces new Plaud recordings. Let the user set how
-                // often (or turn it off). Shown only when a Plaud account exists.
-                if viewModel.hasPlaudAccount {
-                    Divider().frame(height: 16)
-                    Image(systemName: "arrow.triangle.2.circlepath")
+            // Toolbar: one control per row so nothing competes for width in
+            // the detail pane. Segmented pickers stretch to fill their row.
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    Text("Check Plaud:").font(.caption.weight(.medium))
-                    Picker("", selection: Binding(
-                        get: { viewModel.plaudPollIntervalSeconds },
-                        set: { viewModel.onSetPlaudPollInterval($0) }
-                    )) {
-                        Text("Off").tag(0.0)
-                        Text("1 min").tag(60.0)
-                        Text("2 min").tag(120.0)
-                        Text("5 min").tag(300.0)
-                        Text("15 min").tag(900.0)
+                    TextField("Search devices...", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Type:")
+                        .font(.caption.weight(.medium))
+                        .frame(width: 38, alignment: .leading)
+                    Picker("", selection: $filterType) {
+                        Text("All").tag("all")
+                        Text("HiDock").tag("hidock")
+                        Text("Volume").tag("volume")
+                        Text("Plaud").tag("plaud")
                     }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 80)
-                    .help("How often to check your Plaud account for new recordings in the background.")
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: .infinity)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Sort:")
+                        .font(.caption.weight(.medium))
+                        .frame(width: 38, alignment: .leading)
+                    Picker("", selection: $sortOrder) {
+                        Text("Name").tag(DeviceSortKey.name)
+                        Text("Type").tag(DeviceSortKey.type)
+                        Text("Paired").tag(DeviceSortKey.pairedAt)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: .infinity)
+
+                    // Plaud is an API (not USB), so a background poll is the only
+                    // thing that surfaces new Plaud recordings. Shown only when
+                    // a Plaud account exists.
+                    if viewModel.hasPlaudAccount {
+                        Divider().frame(height: 16)
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundColor(.secondary)
+                        Text("Check:")
+                            .font(.caption.weight(.medium))
+                        Picker("", selection: Binding(
+                            get: { viewModel.plaudPollIntervalSeconds },
+                            set: { viewModel.onSetPlaudPollInterval($0) }
+                        )) {
+                            Text("Off").tag(0.0)
+                            Text("1m").tag(60.0)
+                            Text("2m").tag(120.0)
+                            Text("5m").tag(300.0)
+                            Text("15m").tag(900.0)
+                        }
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .help("How often to check your Plaud account for new recordings in the background.")
+                    }
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 8)
-            .padding(.top, 4)
+            .padding(.vertical, 8)
 
             Divider()
 
