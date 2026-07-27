@@ -95,6 +95,19 @@ _REASSIGN_MAX_ITERATIONS = 5
 _REASSIGN_MIN_MARGIN = 0.04
 _REASSIGN_MIN_TURN_SECONDS = 1.5
 
+# Two-sided partition search. Modularity gains below this are noise, not
+# structure. A newly split voice must also hold this much speech: the measured
+# failure is under-counting, but the cure must not be a pipeline that invents
+# participants out of a few scraps of audio.
+_PARTITION_MIN_GAIN = 0.01
+_SPLIT_MIN_NEW_VOICE_SECONDS = 20.0
+
+# Both refinements start off. They change every diarisation, so the defaults are
+# set from what `shared.diarisation_eval` measures on the reviewed corpus, not
+# from how convincing the reasoning sounds.
+_TWO_SIDED_PARTITION_DEFAULT = False
+_REFINE_ASSIGNMENTS_DEFAULT = False
+
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     na = float(np.linalg.norm(a))
@@ -1387,6 +1400,142 @@ def _auto_merge_labels_by_graph(
     return chosen_turns, chosen_count, best_score
 
 
+def _turn_affinity_graph(
+    embeddings: dict[str, np.ndarray], neighbours: int = 5,
+) -> dict[tuple[str, str], float]:
+    """kNN voice-affinity graph over individual turns.
+
+    `_speaker_affinity_graph` builds the same structure over labels, which is
+    fine for choosing among merges but cannot compare a *split* — splitting
+    changes the node set, and modularity is only meaningful relative to a fixed
+    graph. Turn nodes stay put no matter how they are grouped, so one graph
+    scores merges and splits on the same footing.
+    """
+    return _speaker_affinity_graph(list(embeddings), embeddings, neighbours=neighbours)
+
+
+def _refine_partition_by_turn_graph(
+    audio: np.ndarray,
+    turns: list[tuple[float, float, str]],
+    *,
+    max_speakers: int = 8,
+    min_gain: float = _PARTITION_MIN_GAIN,
+    min_split_seconds: float = _SPLIT_MIN_NEW_VOICE_SECONDS,
+) -> tuple[list[tuple[float, float, str]], str | None]:
+    """Hill-climb the speaker partition, allowing splits as well as merges.
+
+    Every automatic path in this file could previously only *reduce* the speaker
+    count: the count merge and the label-graph pass both merge down from the
+    stitched labels, and only a ≥24 s blended turn or an explicit user count
+    could ever add a speaker. Measured on 16 reviewed meetings, that showed up as
+    a -1.25 speaker bias with just 25% of counts correct.
+
+    Here both directions are candidates, scored by modularity on one fixed
+    turn-level graph, and applied only when they beat the current partition by
+    `min_gain`. Splitting is held to a higher bar than merging — a new voice must
+    also hold `min_split_seconds` of speech and clear the two-means separation
+    floor — because inventing a participant is worse than merging two.
+    """
+    labels = list(dict.fromkeys(label for _, _, label in turns))
+    if not labels:
+        return turns, None
+    embedding_for = _turn_embedder(audio, turns, min_seconds=_SPLIT_MIN_TURN_SECONDS)
+    if embedding_for is None:
+        return turns, None
+
+    node_embeddings: dict[str, np.ndarray] = {}
+    for index in range(len(turns)):
+        emb = embedding_for(index)
+        if emb is not None:
+            node_embeddings[str(index)] = emb
+    if len(node_embeddings) < _SPLIT_MIN_TURNS_PER_VOICE * 2:
+        return turns, None
+    edges = _turn_affinity_graph(node_embeddings)
+    if not edges:
+        return turns, None
+
+    nodes = list(node_embeddings)
+    assignment = {node: turns[int(node)][2] for node in nodes}
+    duration = {node: turns[int(node)][1] - turns[int(node)][0] for node in nodes}
+
+    def score(mapping: dict[str, str]) -> float:
+        return _graph_partition_score(nodes, mapping, edges)
+
+    def group_seconds(mapping: dict[str, str], label: str) -> float:
+        return sum(duration[n] for n, lab in mapping.items() if lab == label)
+
+    best_score = score(assignment)
+    applied: list[str] = []
+
+    for _ in range(max_speakers):
+        groups: dict[str, list[str]] = {}
+        for node, label in assignment.items():
+            groups.setdefault(label, []).append(node)
+        candidates: list[tuple[float, str, dict[str, str]]] = []
+
+        # Merge candidates: every pair of groups.
+        if len(groups) > 2:
+            group_labels = sorted(groups)
+            for i in range(len(group_labels)):
+                for j in range(i + 1, len(group_labels)):
+                    keep, drop = group_labels[i], group_labels[j]
+                    trial = {
+                        node: (keep if label == drop else label)
+                        for node, label in assignment.items()
+                    }
+                    candidates.append((score(trial), f"merged {drop} into {keep}", trial))
+
+        # Split candidates: any group whose own turns divide into two voices.
+        if len(groups) < max_speakers:
+            for label, members in groups.items():
+                if len(members) < _SPLIT_MIN_TURNS_PER_VOICE * 2:
+                    continue
+                partition = _two_voice_partition(
+                    [node_embeddings[node] for node in members],
+                    min_per_group=_SPLIT_MIN_TURNS_PER_VOICE,
+                    min_separation=_SPLIT_MIN_SEPARATION,
+                )
+                if partition is None:
+                    continue
+                groups_of, _separation = partition
+                primary = groups_of[0]
+                new_label = f"{label}__graph_voice_{len(groups)}"
+                trial = dict(assignment)
+                for node, community in zip(members, groups_of):
+                    if community != primary:
+                        trial[node] = new_label
+                # A new voice must own real speech, not a couple of scraps.
+                if min(
+                    group_seconds(trial, label), group_seconds(trial, new_label)
+                ) < min_split_seconds:
+                    continue
+                candidates.append((score(trial), f"split {label}", trial))
+
+        if not candidates:
+            break
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        gain = candidates[0][0] - best_score
+        if gain < min_gain:
+            break
+        best_score, description, assignment = candidates[0]
+        applied.append(description)
+
+    if not applied:
+        return turns, None
+    # Turns without a usable embedding never moved; they keep their label.
+    refined = [
+        (start, end, assignment.get(str(index), label))
+        for index, (start, end, label) in enumerate(turns)
+    ]
+    summary = "; ".join(applied)
+    print(
+        f"Sortformer: turn-graph partition {len(labels)} → "
+        f"{len({lab for _, _, lab in refined})} speakers ({summary})",
+        file=sys.stderr,
+    )
+    return refined, summary
+
+
 def _expected_speakers_from_calendar(calendar_context) -> int | None:
     """Expected speaker count from the recording's calendar event, if any.
 
@@ -1479,12 +1628,22 @@ def diarize(
     whisper_segments: list[dict],
     n_speakers: int | None = None,
     calendar_context=None,
+    *,
+    pinned_intervals: list[tuple[float, float]] | None = None,
+    two_sided_partition: bool = _TWO_SIDED_PARTITION_DEFAULT,
+    refine_assignments: bool = _REFINE_ASSIGNMENTS_DEFAULT,
 ) -> dict:
     """Diarize with NeMo Sortformer.
 
     Signature and return shape match `shared.diarize_lite.diarize` so
     callers can swap backends without code changes. `n_speakers` is
     accepted but Sortformer caps at 4; the hint is informational only.
+
+    `pinned_intervals` are stretches whose speaker a human has already
+    confirmed; refinement never moves them. `two_sided_partition` and
+    `refine_assignments` gate the graph search and the reassignment loop so
+    `shared.diarisation_eval` can measure each against the reviewed corpus
+    instead of them being switched on by assertion.
     """
     from shared.audio_utils import load_audio
     from shared.diarize_lite import (
@@ -1636,6 +1795,22 @@ def diarize(
             f"at speaker count {effective_n_speakers}",
             file=sys.stderr,
         )
+    elif two_sided_partition:
+        # No external count to trust, so search the partition in both directions
+        # on a fixed turn-level graph. Replaces the merge-only label-graph pass,
+        # which could never correct the under-counting the harness measured.
+        refined_turns, partition_summary = _refine_partition_by_turn_graph(
+            audio, renamed_turns,
+        )
+        if partition_summary:
+            renamed_turns = refined_turns
+            surviving = {lab for _, _, lab in renamed_turns}
+            # A split introduces labels that were never in internal_labels.
+            internal_labels = [lab for lab in internal_labels if lab in surviving] + [
+                lab for lab in dict.fromkeys(l for _, _, l in renamed_turns)
+                if lab not in internal_labels
+            ]
+            count_strategy = "turn-graph-two-sided"
     elif len(internal_labels) > 2:
         graph_turns, graph_count, graph_score = _auto_merge_labels_by_graph(
             renamed_turns, label_embs,
@@ -1698,6 +1873,16 @@ def diarize(
     renamed_turns = absorbed_turns
     surviving = {lab for _, _, lab in renamed_turns}
     internal_labels = [lab for lab in internal_labels if lab in surviving]
+
+    # With the speaker set settled, revisit individual turns against the pooled
+    # voice of each cluster. Confirmed stretches are pinned so a re-diarisation
+    # can never move speech a human has already signed off.
+    if refine_assignments:
+        renamed_turns, _moved = _reassign_turns_to_pooled_voices(
+            audio, renamed_turns, pinned_intervals=pinned_intervals,
+        )
+        surviving = {lab for _, _, lab in renamed_turns}
+        internal_labels = [lab for lab in internal_labels if lab in surviving]
     # Every structural change above (count merge, graph merge, micro absorption)
     # is now settled, so re-derive identity from each surviving cluster's pooled
     # audio rather than from whichever single label survived.

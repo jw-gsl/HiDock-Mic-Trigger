@@ -82,11 +82,17 @@ def diarize(
     whisper_segments: list[dict],
     n_speakers: int | None = None,
     calendar_context=None,
+    **backend_options,
 ) -> dict:
     """Dispatch to the user-selected diarization backend.
 
     Returns the same shape regardless of backend:
         {"segments": [{"start", "end", "text", "speaker", ...}], ...}
+
+    `backend_options` carries Sortformer-only refinements (`pinned_intervals`,
+    `two_sided_partition`, `refine_assignments`). They are dropped for the lite
+    backend rather than forwarded, so a caller opting into refinement never
+    crashes on whichever backend the user happens to have selected.
     """
     backend = _active("diarization", "lite")
     if backend == "sortformer":
@@ -100,6 +106,7 @@ def diarize(
             whisper_segments,
             n_speakers=n_speakers,
             calendar_context=calendar_context,
+            **backend_options,
         )
     from shared.diarize_lite import diarize as lite_diarize
     return lite_diarize(

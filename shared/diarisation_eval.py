@@ -335,6 +335,7 @@ def run_eval(
     *,
     max_seconds: float | None = 600.0,
     n_speakers_from_truth: bool = False,
+    backend_options: dict | None = None,
     progress=None,
 ) -> dict:
     """Re-diarise each case and score it. Requires audio and a diarisation backend.
@@ -354,7 +355,9 @@ def run_eval(
             continue
         hint = case.truth_speakers if n_speakers_from_truth else None
         try:
-            predicted = diarize(str(case.audio), asr, n_speakers=hint)
+            predicted = diarize(
+                str(case.audio), asr, n_speakers=hint, **(backend_options or {}),
+            )
         except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
             results.append({"file": case.sidecar.name, "error": str(exc)})
             continue
@@ -373,6 +376,7 @@ def run_eval(
         "config": {
             "max_seconds": max_seconds,
             "n_speakers_from_truth": n_speakers_from_truth,
+            "backend_options": dict(backend_options or {}),
             "cases_requested": len(cases),
         },
         "summary": aggregate(scored),
@@ -413,6 +417,10 @@ def main(argv: list[str] | None = None) -> int:
                              "assignment quality from count selection")
     parser.add_argument("--out", help="Write the JSON report here")
     parser.add_argument("--baseline", help="Compare against a previous report")
+    parser.add_argument("--two-sided-partition", action="store_true",
+                        help="Enable the two-sided turn-graph partition search")
+    parser.add_argument("--refine-assignments", action="store_true",
+                        help="Enable the bounded turn-reassignment loop")
     parser.add_argument("--list", action="store_true",
                         help="Only list the corpus; do not diarise")
     args = parser.parse_args(argv)
@@ -440,10 +448,19 @@ def main(argv: list[str] | None = None) -> int:
               f"truth={score['truth_speakers']} pred={score['predicted_speakers']} "
               f"confusion={score['confusion_rate']}")
 
+    backend_options = {}
+    if args.two_sided_partition:
+        backend_options["two_sided_partition"] = True
+    if args.refine_assignments:
+        backend_options["refine_assignments"] = True
+    if backend_options:
+        print(f"backend options: {backend_options}")
+
     report = run_eval(
         chosen,
         max_seconds=args.max_seconds or None,
         n_speakers_from_truth=args.n_speakers_from_truth,
+        backend_options=backend_options,
         progress=progress,
     )
     print("\nsummary:", json.dumps(report["summary"], indent=2))
