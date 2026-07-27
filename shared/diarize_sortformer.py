@@ -780,6 +780,157 @@ def _resolve_speaker_names(
     return info
 
 
+def _label_speech_seconds(turns: list[tuple[float, float, str]]) -> dict[str, float]:
+    """Total speaking time per label."""
+    speech: dict[str, float] = {}
+    for start, end, label in turns:
+        speech[label] = speech.get(label, 0.0) + max(0.0, end - start)
+    return speech
+
+
+def _pooled_embedding(members: list[str], speaker_info: dict, speech: dict) -> list | None:
+    """Duration-weighted, L2-normalised mean of members' embeddings.
+
+    A merged cluster's voice is better represented by all of its audio than by
+    whichever member happened to survive. Weighting by speaking time keeps a
+    noisy few-second fragment from dragging the centroid off a well-evidenced
+    voice.
+    """
+    vectors, weights = [], []
+    for member in members:
+        embedding = (speaker_info.get(member) or {}).get("embedding")
+        if embedding is None:
+            continue
+        vectors.append(np.asarray(embedding, dtype=np.float32))
+        weights.append(max(speech.get(member, 0.0), 1e-6))
+    if not vectors:
+        return None
+    dimension = len(vectors[0])
+    if any(len(vector) != dimension for vector in vectors):
+        return None
+    stacked = np.asarray(vectors, dtype=np.float32)
+    pooled = np.average(stacked, axis=0, weights=np.asarray(weights, dtype=np.float32))
+    norm = float(np.linalg.norm(pooled))
+    if norm <= 1e-10:
+        return None
+    return [float(value) for value in (pooled / norm)]
+
+
+def _label_groups(
+    before_turns: list[tuple[float, float, str]],
+    after_turns: list[tuple[float, float, str]],
+) -> dict[str, list[str]]:
+    """Which original labels ended up under each surviving label.
+
+    Relies on the reconciliation passes preserving turn order and count, which
+    they all do — they rewrite a label per turn and never add or drop turns.
+    """
+    groups: dict[str, list[str]] = {}
+    for (_, _, before), (_, _, after) in zip(before_turns, after_turns):
+        members = groups.setdefault(after, [])
+        if before not in members:
+            members.append(before)
+    return groups
+
+
+def _repool_merged_speakers(
+    speaker_info: dict,
+    before_turns: list[tuple[float, float, str]],
+    after_turns: list[tuple[float, float, str]],
+    surviving_labels: list[str],
+    *,
+    allowed_names=None,
+) -> dict:
+    """Re-derive identity for any label that absorbed others.
+
+    Names, confidences, and embeddings are resolved once *before* the count
+    reconciliation, per stitched label. Every merge therefore inherited the
+    surviving member's identity and threw the rest away — including a confident
+    voice-library match on the member with most of the speech, and the pooled
+    audio evidence that would have made the persisted embedding trustworthy.
+    (That embedding matters beyond display: `rematch` re-identifies from it
+    without touching audio, so a fragment's vector poisons every later pass.)
+
+    For each merged cluster this pools the members' embeddings by speaking time
+    and re-runs the library match on the pooled vector. If the library is
+    unavailable the pooled embedding is still stored, and identity falls back to
+    the best-evidenced member rather than the surviving label's own.
+    """
+    groups = _label_groups(before_turns, after_turns)
+    speech = _label_speech_seconds(before_turns)
+    merged = {
+        label: members
+        for label, members in groups.items()
+        if label in surviving_labels and len(members) > 1
+    }
+    if not merged:
+        return speaker_info
+
+    identify = scores_for = None
+    try:
+        from shared.voice_library_lite import identify_speaker as identify
+        from shared.voice_library_lite import library_scores as scores_for
+    except Exception as exc:  # noqa: BLE001 - pooling still helps without it
+        print(f"Sortformer: pooled re-match unavailable ({exc})", file=sys.stderr)
+
+    updated = dict(speaker_info)
+    for label, members in merged.items():
+        best_member = max(members, key=lambda m: speech.get(m, 0.0))
+        pooled = _pooled_embedding(members, speaker_info, speech)
+        # Start from the best-evidenced member: already better than inheriting
+        # whichever label survived, and the only option without a library.
+        info = dict(speaker_info.get(best_member) or speaker_info.get(label) or {})
+        info.setdefault("name", label)
+        info.setdefault("source", "generic")
+        info.setdefault("confidence", None)
+        if pooled is not None:
+            info["embedding"] = pooled
+        if pooled is not None and identify is not None:
+            try:
+                matched, confidence = identify(
+                    pooled, threshold=0.65, allowed_names=allowed_names,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"Sortformer: pooled re-match failed for {label}: {exc}", file=sys.stderr)
+            else:
+                if matched:
+                    info.update(
+                        name=matched, source="auto", confidence=float(confidence),
+                    )
+                    print(
+                        f"  Pooled re-match {label} ({len(members)} labels, "
+                        f"{speech.get(best_member, 0.0):.0f}s best) → {matched} "
+                        f"({confidence:.0%})",
+                        file=sys.stderr,
+                    )
+                elif info.get("source") == "auto":
+                    # No match. Only treat that as evidence *against* the name if
+                    # the library actually had candidates to compare: it returns
+                    # zero scores when it is empty or the embedding dimension
+                    # does not match its model, and demoting on that would throw
+                    # away a good match for an unrelated reason.
+                    comparable = False
+                    try:
+                        comparable = bool(scores_for(pooled, allowed_names=allowed_names))
+                    except Exception:  # noqa: BLE001 - treat as "cannot tell"
+                        comparable = False
+                    if comparable:
+                        # Forcing two people together is the likely cause, so
+                        # demote for review rather than asserting a name.
+                        print(
+                            f"  Pooled voice for {label} no longer matches "
+                            f"'{info.get('name')}'; demoting to review",
+                            file=sys.stderr,
+                        )
+                        info.update(name=label, source="generic", confidence=None)
+        # A generic identity must carry the surviving label's own name, not the
+        # absorbed member's, or the transcript shows a speaker that no longer exists.
+        if info.get("source") == "generic":
+            info["name"] = label
+        updated[label] = info
+    return updated
+
+
 def _merge_labels_to_count(
     turns: list[tuple[float, float, str]],
     label_embeddings: dict,
@@ -794,6 +945,13 @@ def _merge_labels_to_count(
     the human-supplied count is the guardrail that makes aggressive merging
     correct here. Labels without embeddings are never force-merged; if too
     many remain, the merge stops short rather than guessing.
+
+    The surviving label of each cluster is its **longest-speaking** member, not
+    the earliest one. Identity travels with the surviving label downstream, so
+    picking by first appearance let a four-second fragment absorb a
+    six-minute speaker and donate its name, confidence, and persisted
+    embedding to the result. Ties keep the earliest member, so the choice stays
+    deterministic.
     """
     labels: list[str] = []
     for _, _, lab in turns:
@@ -801,6 +959,7 @@ def _merge_labels_to_count(
             labels.append(lab)
     if count < 1 or len(labels) <= count:
         return turns
+    speech = _label_speech_seconds(turns)
 
     clusters: list[list[str]] = [[lab] for lab in labels]
     while len(clusters) > count:
@@ -825,7 +984,11 @@ def _merge_labels_to_count(
         clusters[i].extend(clusters[j])
         del clusters[j]
 
-    mapping = {member: cluster[0] for cluster in clusters for member in cluster}
+    mapping = {}
+    for cluster in clusters:
+        survivor = max(cluster, key=lambda lab: (speech.get(lab, 0.0), -labels.index(lab)))
+        for member in cluster:
+            mapping[member] = survivor
     return [(s, e, mapping[lab]) for s, e, lab in turns]
 
 
@@ -1310,6 +1473,10 @@ def diarize(
         label: (speaker_info.get(label) or {}).get("embedding")
         for label in internal_labels
     }
+    # Identity is resolved above, per stitched label. The reconciliation passes
+    # below rewrite labels, so keep the pre-reconciliation turns to re-pool
+    # evidence for any label that ends up absorbing others.
+    pre_reconcile_turns = list(renamed_turns)
 
     # Honour an explicitly requested speaker count post-hoc: Sortformer's
     # inference API is fixed-topology, but the stitched global labels can be
@@ -1404,6 +1571,16 @@ def diarize(
     renamed_turns = absorbed_turns
     surviving = {lab for _, _, lab in renamed_turns}
     internal_labels = [lab for lab in internal_labels if lab in surviving]
+    # Every structural change above (count merge, graph merge, micro absorption)
+    # is now settled, so re-derive identity from each surviving cluster's pooled
+    # audio rather than from whichever single label survived.
+    speaker_info = _repool_merged_speakers(
+        speaker_info,
+        pre_reconcile_turns,
+        renamed_turns,
+        internal_labels,
+        allowed_names=getattr(calendar_context, "candidate_names", None),
+    )
     display_names = {label: speaker_info[label]["name"] for label in internal_labels}
 
     # Assign speakers per Whisper segment. Word-level alignment when
