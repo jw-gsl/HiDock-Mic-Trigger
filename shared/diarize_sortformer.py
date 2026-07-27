@@ -85,6 +85,16 @@ _SPLIT_MIN_TURN_SECONDS = 1.5      # shorter turns give unusable embeddings
 _SPLIT_MIN_TURNS_PER_VOICE = 2     # a single turn is not a participant
 _SPLIT_MIN_SEPARATION = 0.05       # below this the two groups are one voice
 
+# Turn reassignment. A turn's speaker is otherwise decided once, by overlap with
+# Sortformer's output, and never revisited against the voice evidence that
+# accumulates as clusters take shape. This is a bounded Lloyd/EM refinement:
+# reassign turns to the closest pooled cluster voice, re-pool, repeat.
+# Hysteresis is what makes it safe — a turn moves only when it beats its current
+# cluster by a clear margin, so the loop cannot oscillate between two near-ties.
+_REASSIGN_MAX_ITERATIONS = 5
+_REASSIGN_MIN_MARGIN = 0.04
+_REASSIGN_MIN_TURN_SECONDS = 1.5
+
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     na = float(np.linalg.norm(a))
@@ -1079,32 +1089,9 @@ def _split_labels_to_count(
     if count < 2 or len(labels) >= count:
         return turns, 0
 
-    linker = _CrossWindowLinker(audio)
-    session = linker._session_or_none()
-    if session is None:
+    turn_embedding = _turn_embedder(audio, turns, min_seconds=_SPLIT_MIN_TURN_SECONDS)
+    if turn_embedding is None:
         return turns, 0
-    try:
-        from shared.audio_utils import extract_embedding
-    except Exception:
-        return turns, 0
-
-    cache: dict[int, np.ndarray | None] = {}
-
-    def turn_embedding(index: int):
-        if index not in cache:
-            start, end, _ = turns[index]
-            if end - start < _SPLIT_MIN_TURN_SECONDS:
-                cache[index] = None
-            else:
-                sample = audio[int(start * 16000):int(end * 16000)]
-                try:
-                    emb = extract_embedding(sample, sr=16000, onnx_session=session)
-                except Exception:
-                    emb = None
-                if emb is not None and np.linalg.norm(emb) <= 1e-10:
-                    emb = None
-                cache[index] = emb
-        return cache[index]
 
     splits = 0
     while len(labels) < count:
@@ -1152,6 +1139,146 @@ def _split_labels_to_count(
             file=sys.stderr,
         )
     return turns, splits
+
+
+def _turn_embedder(audio: np.ndarray, turns, *, min_seconds: float):
+    """Lazy per-turn embedding lookup, or None if no model is available.
+
+    Shared by the split and reassignment passes so a turn's audio is embedded at
+    most once per diarisation.
+    """
+    linker = _CrossWindowLinker(audio)
+    session = linker._session_or_none()
+    if session is None:
+        return None
+    try:
+        from shared.audio_utils import extract_embedding
+    except Exception:
+        return None
+
+    cache: dict[int, np.ndarray | None] = {}
+
+    def embedding_for(index: int):
+        if index not in cache:
+            start, end, _ = turns[index]
+            if end - start < min_seconds:
+                cache[index] = None
+            else:
+                sample = audio[int(start * 16000):int(end * 16000)]
+                try:
+                    emb = extract_embedding(sample, sr=16000, onnx_session=session)
+                except Exception:
+                    emb = None
+                if emb is not None and float(np.linalg.norm(emb)) <= 1e-10:
+                    emb = None
+                cache[index] = emb
+        return cache[index]
+
+    return embedding_for
+
+
+def _reassign_turns_to_pooled_voices(
+    audio: np.ndarray,
+    turns: list[tuple[float, float, str]],
+    *,
+    pinned_intervals: list[tuple[float, float]] | None = None,
+    max_iterations: int = _REASSIGN_MAX_ITERATIONS,
+    min_margin: float = _REASSIGN_MIN_MARGIN,
+) -> tuple[list[tuple[float, float, str]], int]:
+    """Move turns to the cluster whose pooled voice they actually match.
+
+    Sortformer assigns a turn once, from its own frame-level output; the voice
+    evidence for a *cluster* only exists after stitching and merging, and is
+    never fed back. A turn that was borderline at inference time is therefore
+    stuck, even when the accumulated evidence says otherwise.
+
+    Each iteration pools every cluster's turn embeddings (duration-weighted) and
+    moves a turn only when some other cluster beats its current one by
+    `min_margin`. That hysteresis is what guarantees termination in practice as
+    well as bounding it by `max_iterations`.
+
+    `pinned_intervals` are stretches a human has already confirmed: any turn
+    overlapping one is frozen. Without that, re-diarising a reviewed transcript
+    could quietly move confirmed speech to another speaker — the failure that
+    prompted transcript version history in the first place.
+    """
+    labels = list(dict.fromkeys(label for _, _, label in turns))
+    if len(labels) < 2:
+        return turns, 0
+    embedding_for = _turn_embedder(audio, turns, min_seconds=_REASSIGN_MIN_TURN_SECONDS)
+    if embedding_for is None:
+        return turns, 0
+
+    pinned: set[int] = set()
+    for index, (start, end, _) in enumerate(turns):
+        for p_start, p_end in pinned_intervals or ():
+            if min(end, p_end) - max(start, p_start) > 0:
+                pinned.add(index)
+                break
+
+    movable = [
+        index for index in range(len(turns))
+        if index not in pinned and embedding_for(index) is not None
+    ]
+    if not movable:
+        return turns, 0
+
+    current = list(turns)
+    total_moves = 0
+    for _ in range(max_iterations):
+        pooled: dict[str, np.ndarray] = {}
+        weights: dict[str, float] = {}
+        for index, (start, end, label) in enumerate(current):
+            emb = embedding_for(index)
+            if emb is None:
+                continue
+            weight = max(end - start, 1e-6)
+            norm = float(np.linalg.norm(emb))
+            unit = emb / norm if norm > 1e-10 else emb
+            if label in pooled:
+                pooled[label] = pooled[label] + unit * weight
+            else:
+                pooled[label] = unit * weight
+            weights[label] = weights.get(label, 0.0) + weight
+        centroids = {}
+        for label, vector in pooled.items():
+            norm = float(np.linalg.norm(vector))
+            if norm > 1e-10:
+                centroids[label] = vector / norm
+        if len(centroids) < 2:
+            break
+
+        moves = 0
+        for index in movable:
+            emb = embedding_for(index)
+            start, end, label = current[index]
+            scored = sorted(
+                ((_cosine(emb, centroid), other) for other, centroid in centroids.items()),
+                reverse=True,
+            )
+            best_score, best_label = scored[0]
+            if best_label == label:
+                continue
+            own = next(
+                (score for score, other in scored if other == label), None
+            )
+            # A cluster the turn has left entirely has no centroid to beat; treat
+            # that as a free move rather than skipping it.
+            if own is not None and best_score - own < min_margin:
+                continue
+            current[index] = (start, end, best_label)
+            moves += 1
+        total_moves += moves
+        if moves == 0:
+            break
+
+    if total_moves:
+        print(
+            f"Sortformer: reassigned {total_moves} turn(s) to their closest pooled "
+            f"voice ({len(pinned)} pinned by confirmed labels)",
+            file=sys.stderr,
+        )
+    return current, total_moves
 
 
 def _speaker_affinity_graph(
