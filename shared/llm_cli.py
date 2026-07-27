@@ -20,10 +20,17 @@ from dataclasses import dataclass
 # appended so existing users keep their current auto-resolution.
 _CLI_PRIORITY = ["claude", "codex", "gemini", "ollama", "kimi", "grok"]
 
+# Argv-delivered prompts are bounded by the OS. macOS ARG_MAX is 1 MiB covering
+# argv *and* the environment, so this leaves generous headroom while still
+# accommodating a long meeting transcript. Exceeding it is reported, not risked:
+# the alternative is an opaque E2BIG from deep inside subprocess.
+_ARGV_PROMPT_MAX_BYTES = 256_000
+
 # How to invoke each CLI with a prompt.
 # prompt_via "stdin" (default): prompt piped on stdin (no size limit).
-# prompt_via "argv": prompt appended as a single argv element (the CLI has
-# no stdin mode; long prompts are chunked upstream by the summariser).
+# prompt_via "argv": prompt appended as a single argv element, because the CLI
+# has no stdin mode. Bounded by _ARGV_PROMPT_MAX_BYTES — there is deliberately
+# no chunking here, as splitting a transcript mid-way would change the summary.
 _CLI_CONFIGS: dict[str, dict] = {
     "claude": {
         "command": ["claude", "--print"],
@@ -120,20 +127,51 @@ def list_engines() -> list[dict]:
     ]
 
 
+_KIMI_RESUME_TRAILER = "To resume this session:"
+
+
 def _clean_output(name: str, text: str) -> str:
     """Normalise a CLI's stdout into just the model's answer text.
 
-    Kimi prints "• " bullet markers and a "To resume this session:" trailer
-    around the response; both would leak into summaries and JSON extraction.
+    Kimi writes its answer to stdout as one `•`-prefixed block whose
+    continuation lines are indented two spaces. Its reasoning and the
+    "To resume this session:" trailer go to *stderr*, so they never reach here
+    (verified 2026-07-27 by capturing the two streams separately — merging them
+    with `2>&1` is misleading). Real stdout for a three-item list request:
+
+        • - Apple
+          - Banana
+          - Orange
+
+    Stripping only the bullet, as the previous cleaner did, left the two-space
+    indent in place — so a flat list became a *nested* one, with Banana and
+    Orange rendering as children of Apple. Dedenting the continuation lines is
+    what keeps the answer's own markdown intact.
+
+    This is a heuristic against an unversioned CLI contract: it keeps the last
+    block if a future version emits several, filters the trailer defensively in
+    case it ever moves to stdout, and returns the text unchanged when the
+    expected shape is absent.
     """
     if not text or name != "kimi":
         return text
-    lines = [
-        line for line in text.splitlines()
-        if not line.startswith("To resume this session:")
-    ]
-    cleaned = [re.sub(r"^\s*•\s*", "", line) for line in lines]
-    return "\n".join(cleaned).strip()
+    # Everything from the resume trailer onward is chrome.
+    head = text.split(_KIMI_RESUME_TRAILER, 1)[0]
+    blocks: list[list[str]] = []
+    for line in head.splitlines():
+        if line.lstrip().startswith("•"):
+            # Start a new block, dropping the bullet and any markdown glued to it.
+            blocks.append([re.sub(r"^\s*•\s*", "", line)])
+        elif blocks:
+            blocks[-1].append(line)
+    if not blocks:
+        return head.strip()
+    # Continuation lines are indented two spaces under their bullet; dedent so
+    # the answer's own markdown (lists, code fences) survives intact.
+    answer = "\n".join(
+        line[2:] if line.startswith("  ") else line for line in blocks[-1]
+    )
+    return answer.strip()
 
 
 def get_engine(name: str = "auto") -> LLMEngine | None:
@@ -174,7 +212,10 @@ def query(
 ) -> str | None:
     """Send a prompt to an LLM CLI and return the response.
 
-    The prompt is piped via stdin to avoid OS argument length limits.
+    Most engines take the prompt on stdin, which has no length limit. Kimi and
+    Grok have no stdin mode, so their prompt goes in argv and is bounded by
+    `_ARGV_PROMPT_MAX_BYTES` — an over-long prompt is refused with a clear
+    message rather than failing deep inside `subprocess` with E2BIG.
 
     Args:
         prompt: The full prompt text to send.
@@ -190,6 +231,17 @@ def query(
         return None
 
     argv_prompt = _CLI_CONFIGS.get(engine.name, {}).get("prompt_via") == "argv"
+    if argv_prompt:
+        size = len(prompt.encode("utf-8"))
+        if size > _ARGV_PROMPT_MAX_BYTES:
+            print(
+                f"LLM CLI ({engine.name}) cannot accept a {size:,}-byte prompt: it has "
+                f"no stdin mode and argv is limited to {_ARGV_PROMPT_MAX_BYTES:,} bytes. "
+                "Use a stdin-capable engine (claude, codex, gemini, ollama) for "
+                "transcripts this long.",
+                file=sys.stderr,
+            )
+            return None
     try:
         result = subprocess.run(
             engine.command + ([prompt] if argv_prompt else []),

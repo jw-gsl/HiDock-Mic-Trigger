@@ -631,15 +631,14 @@ def _assign_speakers_word_level(whisper_segments, turns):
         seg_end = float(seg["end"])
         if not words:
             spk = _pick_speaker_by_overlap(seg_start, seg_end, turns) or "Speaker 1"
-            output = {
+            # No `words` key here by definition — this is the segment-level
+            # fallback for a Whisper segment that carried no word timings.
+            out.append({
                 "start": seg_start,
                 "end": seg_end,
                 "text": seg.get("text", "").strip(),
                 "speaker": spk,
-            }
-            if words:
-                output["words"] = words
-            out.append(output)
+            })
             continue
 
         # Build per-word (start, end, text, speaker) then collapse runs

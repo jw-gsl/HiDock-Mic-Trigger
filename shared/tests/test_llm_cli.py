@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from shared.llm_cli import (
     LLMEngine,
+    _clean_output,
     _extract_json,
     detect_engines,
     get_engine,
@@ -167,3 +168,95 @@ class TestNewCliRegistration:
         assert by_id["kimi"]["label"] == "Kimi"
         assert by_id["grok"]["label"] == "Grok"
         assert all(row["description"] for row in rows)
+
+
+class TestKimiOutputCleaning:
+    """Kimi writes its answer to stdout as one `•` block, indented continuations.
+
+    The fixtures are the CLI's real *stdout*, captured 2026-07-27 by redirecting
+    the two streams to separate files. Its reasoning and resume trailer go to
+    stderr, which `query()` never reads for the answer — capturing with `2>&1`
+    conflates them and gives a misleading picture. Keeping the real bytes here
+    means a format change breaks these tests loudly instead of silently
+    mangling summaries.
+    """
+
+    def test_flat_list_does_not_become_a_nested_list(self):
+        # Verbatim stdout for "reply with exactly a markdown bullet list of
+        # three fruits". The old cleaner stripped the bullet but left the
+        # two-space indent, so Banana and Orange rendered as children of Apple.
+        raw = "• - Apple\n  - Banana\n  - Orange"
+        assert _clean_output("kimi", raw) == "- Apple\n- Banana\n- Orange"
+
+    def test_single_sentence_answer_loses_only_the_marker(self):
+        raw = "• Alice confirmed the budget is approved, and Bob asked about the timelines."
+        assert _clean_output("kimi", raw) == (
+            "Alice confirmed the budget is approved, and Bob asked about the timelines."
+        )
+
+    def test_markdown_glued_to_the_bullet_leaves_no_stray_asterisks(self):
+        raw = "•**Answer:** 42"
+        cleaned = _clean_output("kimi", raw)
+        assert cleaned == "**Answer:** 42"
+        assert "•" not in cleaned
+
+    def test_output_without_bullets_is_returned_unchanged(self):
+        raw = "A plain answer with no markers."
+        assert _clean_output("kimi", raw) == "A plain answer with no markers."
+
+    def test_trailer_on_stdout_is_filtered_defensively(self):
+        # Today the trailer only appears on stderr. Filtered anyway so a future
+        # Kimi that moves it to stdout cannot leak a session id into a summary.
+        raw = "• The answer.\n\nTo resume this session: kimi -r session_abc123"
+        assert _clean_output("kimi", raw) == "The answer."
+
+    def test_last_block_wins_if_several_are_emitted(self):
+        # Defensive: stdout carries one block today, but if reasoning ever moved
+        # here the answer would be last and must not be prefixed by thinking.
+        raw = "• thinking out loud\n\n• The answer."
+        assert _clean_output("kimi", raw) == "The answer."
+
+    def test_other_engines_are_untouched(self):
+        raw = "• not kimi chrome\nTo resume this session: x"
+        assert _clean_output("claude", raw) == raw
+
+
+class TestArgvPromptLimit:
+    def test_oversized_argv_prompt_is_refused_before_subprocess(self):
+        from shared.llm_cli import _ARGV_PROMPT_MAX_BYTES
+
+        oversized = "x" * (_ARGV_PROMPT_MAX_BYTES + 1)
+        with patch("shutil.which", return_value="/usr/bin/kimi"), \
+             patch("subprocess.run") as run_mock:
+            result = query(oversized, engine=get_engine("kimi"))
+        assert result is None
+        # The point of the guard: never reach subprocess with a doomed argv.
+        run_mock.assert_not_called()
+
+    def test_prompt_at_the_limit_is_still_sent(self):
+        from shared.llm_cli import _ARGV_PROMPT_MAX_BYTES
+
+        at_limit = "x" * _ARGV_PROMPT_MAX_BYTES
+        with patch("shutil.which", return_value="/usr/bin/kimi"), \
+             patch("subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            run_mock.return_value.stdout = "fine"
+            run_mock.return_value.stderr = ""
+            result = query(at_limit, engine=get_engine("kimi"))
+        run_mock.assert_called_once()
+        assert result == "fine"
+
+    def test_stdin_engines_have_no_length_limit(self):
+        from shared.llm_cli import _ARGV_PROMPT_MAX_BYTES
+
+        huge = "x" * (_ARGV_PROMPT_MAX_BYTES * 2)
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            run_mock.return_value.stdout = "ok"
+            run_mock.return_value.stderr = ""
+            result = query(huge, engine=get_engine("claude"))
+        run_mock.assert_called_once()
+        _args, kwargs = run_mock.call_args
+        assert kwargs["input"] == huge   # piped, not in argv
+        assert result == "ok"
