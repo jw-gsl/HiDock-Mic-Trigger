@@ -950,6 +950,19 @@ def cmd_rediarize(args):
         n_speakers=n_speakers,
         calendar_context=calendar_context,
     )
+    # A diarizer can occasionally return its documented single-speaker
+    # fallback when it failed to obtain any usable speech turns (for example a
+    # decoder hiccup on a split MP3).  That is not a valid "Redetect 4" result
+    # and must never replace a reviewed multi-speaker transcript.
+    previous_speaker_count = len({str(s.get("speaker_id")) for s in data.get("segments", [])})
+    fresh_speaker_count = len({str(s.get("speaker_id")) for s in diarized_result.get("segments", [])})
+    if n_speakers and n_speakers > 1 and previous_speaker_count > 1 and fresh_speaker_count < 2:
+        print(
+            "Rediarization produced only one speaker while more than one was requested; "
+            "keeping the existing transcript unchanged.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     human_anchor_result = _load_human_speaker_anchors(
         Path(audio_path),
         json_path.with_name(json_path.stem.replace("_diarized", "") + ".md"),
@@ -961,6 +974,7 @@ def cmd_rediarize(args):
             diarized_result = preserve_existing_speaker_labels(
                 diarized_result,
                 human_anchor_result,
+                min_speakers=n_speakers,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"Human speaker labels could not be preserved: {exc}", file=sys.stderr)
@@ -970,7 +984,9 @@ def cmd_rediarize(args):
     # unverified auto-matches are intentionally re-evaluated.
     try:
         from shared.merge_speaker_labels import preserve_existing_speaker_labels
-        diarized_result = preserve_existing_speaker_labels(diarized_result, data)
+        diarized_result = preserve_existing_speaker_labels(
+            diarized_result, data, min_speakers=n_speakers,
+        )
     except Exception as exc:  # noqa: BLE001 - label preservation is best effort
         print(f"WARN: could not preserve existing speaker labels: {exc}", file=sys.stderr)
     if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
@@ -1045,7 +1061,11 @@ def cmd_recluster_with_anchors(args):
     from shared.recluster_with_anchors import recluster_with_anchors, SIMILARITY_THRESHOLD
     threshold = args.threshold if args.threshold is not None else SIMILARITY_THRESHOLD
     progress(10)
-    summary = recluster_with_anchors(json_path, similarity_threshold=threshold)
+    summary = recluster_with_anchors(
+        json_path,
+        similarity_threshold=threshold,
+        reviewed_through=args.reviewed_until,
+    )
     progress(95)
     if "error" in summary:
         print(_json.dumps(summary), file=sys.stderr)
@@ -1786,6 +1806,15 @@ def main():
         type=float,
         default=None,
         help="Cosine-similarity threshold (0-1). Below this, segments keep their existing speaker. Defaults to the conservative value tuned in shared.recluster_with_anchors.",
+    )
+    p_recluster.add_argument(
+        "--reviewed-until",
+        type=float,
+        default=None,
+        help=(
+            "Use confirmed labels ending by this timestamp (seconds) as anchors, "
+            "then clear and reassess every later turn against those anchors."
+        ),
     )
     p_recluster.set_defaults(func=cmd_recluster_with_anchors)
 

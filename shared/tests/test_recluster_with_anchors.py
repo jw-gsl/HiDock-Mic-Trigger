@@ -76,3 +76,37 @@ def test_reassignment_merge_preserves_words_and_caps_blocks():
         {"start": 20.1, "end": 40.0, "speaker_id": 0, "text": "second"},
     ])
     assert len(capped) == 2
+
+
+def test_reviewed_until_inherits_short_turn_from_previous_reassigned_speaker(tmp_path, monkeypatch):
+    sidecar = tmp_path / "meeting_diarized.json"
+    sidecar.write_text(json.dumps({
+        "audio_file": str(tmp_path / "meeting.mp3"),
+        "segments": [
+            {"start": 0.0, "end": 3.0, "speaker_id": 0, "speaker": "Alice", "text": "anchor"},
+            {"start": 3.0, "end": 6.0, "speaker_id": 7, "text": "later turn"},
+            {"start": 6.0, "end": 6.4, "speaker_id": 8, "text": "yeah"},
+        ],
+        "speaker_names": {"0": "Alice", "7": "Wrong", "8": "Wrong"},
+        "speaker_meta": {
+            "0": {"source": "user", "verified": True},
+            "7": {"source": "user", "verified": True},
+            "8": {"source": "user", "verified": True},
+        },
+    }), encoding="utf-8")
+    (tmp_path / "meeting.mp3").write_bytes(b"audio")
+
+    monkeypatch.setattr(recluster, "load_audio", lambda *_args, **_kwargs: np.zeros(16_000))
+    monkeypatch.setattr("shared.diarize_lite._load_speaker_embed_model", lambda: object())
+    monkeypatch.setattr(
+        recluster,
+        "_embed_segment",
+        lambda _audio, start, end, _session: None if end - start < 1.5 else np.array([1.0, 0.0]),
+    )
+
+    result = recluster.recluster_with_anchors(sidecar, reviewed_through=3.0)
+    updated = json.loads(sidecar.read_text(encoding="utf-8"))
+
+    assert result["inherited_short"] == 1
+    assert result["reset_unmatched"] == 0
+    assert {segment["speaker_id"] for segment in updated["segments"]} == {0}

@@ -145,6 +145,7 @@ def _merge_consecutive_same_speaker(segments: list[dict]) -> list[dict]:
 def recluster_with_anchors(
     diarized_json_path: Path,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
+    reviewed_through: float | None = None,
 ) -> dict:
     """Re-diarize the transcript at `diarized_json_path` using its
     already-named segments as anchors.
@@ -169,9 +170,12 @@ def recluster_with_anchors(
     if not Path(audio_path).exists():
         return {"error": f"audio file not found: {audio_path}", "audio_file": audio_path}
 
-    # Identify anchors: segments belonging to any user-named speaker.
+    # Identify anchors: segments belonging to any user-named speaker. A
+    # reviewed-until cutoff confines evidence to the trusted opening portion.
     anchor_segments_by_name: dict[str, list[dict]] = defaultdict(list)
     for seg in segments:
+        if reviewed_through is not None and float(seg.get("end", 0.0)) > reviewed_through:
+            continue
         sid = int(seg.get("speaker_id", 0))
         if _is_named_anchor(sid, names, speaker_meta):
             anchor_segments_by_name[names[str(sid)].strip()].append(seg)
@@ -216,34 +220,66 @@ def recluster_with_anchors(
             "audio_file": audio_path,
         }
 
-    # Map each anchor name to a canonical speaker_id (the lowest one
-    # in `names` matching that name — the user might have multiple IDs
-    # collapsed under one name via the existing merge action).
+    # Map each anchor name to an ID that actually occurs in the trusted region.
+    # Later labels are deliberately excluded in cutoff mode: they are the
+    # possibly-wrong assignments we are about to reassess.
     name_to_id: dict[str, int] = {}
-    for sid_str, nm in names.items():
-        try:
-            sid = int(sid_str)
-        except ValueError:
+    for name, anchor_segments in anchor_segments_by_name.items():
+        if name not in centroids:
             continue
-        nm_clean = nm.strip()
-        if nm_clean in centroids:
-            if nm_clean not in name_to_id or sid < name_to_id[nm_clean]:
-                name_to_id[nm_clean] = sid
+        anchor_ids = [int(seg.get("speaker_id", 0)) for seg in anchor_segments]
+        if anchor_ids:
+            name_to_id[name] = min(anchor_ids)
 
-    # Reassign every segment.
+    # Reassign every segment. In reviewed-until mode, the cutoff is a trust
+    # boundary: only fully reviewed turns remain fixed; every later turn is
+    # reassessed even if an earlier auto/manual operation marked it confirmed.
     reassigned = 0
     kept = 0
     skipped_short = 0
-    for seg in segments:
-        # Anchors are evidence, not candidates. Reassigning them can undo a
-        # confirmed correction simply because another anchor has a similar
-        # embedding.
-        if _is_named_anchor(int(seg.get("speaker_id", 0)), names, speaker_meta):
+    reset_unmatched = 0
+    inherited_short = 0
+    next_generic_id = max((int(seg.get("speaker_id", 0)) for seg in segments), default=-1) + 1
+    reset_ids: dict[int, int] = {}
+    anchor_speaker_ids = set(name_to_id.values())
+    for index, seg in enumerate(segments):
+        is_reviewed = (
+            reviewed_through is not None
+            and float(seg.get("end", 0.0)) <= reviewed_through
+        )
+        # Without a cutoff, all named anchors stay fixed. With one, only the
+        # trusted opening portion does; later names are candidate labels.
+        if (reviewed_through is None and _is_named_anchor(
+            int(seg.get("speaker_id", 0)), names, speaker_meta
+        )) or is_reviewed:
             kept += 1
             continue
         emb = _embed_segment(audio, seg["start"], seg["end"], onnx_session)
         if emb is None:
             skipped_short += 1
+            if reviewed_through is not None:
+                # A sub-1.5s acknowledgement has too little audio to identify
+                # safely. It adds no value as a standalone "speaker", so carry
+                # forward the immediately preceding trusted/reassigned person.
+                # If that previous turn is itself unresolved, retain the
+                # generic fallback below instead of inventing a label.
+                previous_id = (
+                    int(segments[index - 1].get("speaker_id", -1))
+                    if index > 0 else -1
+                )
+                if previous_id in anchor_speaker_ids:
+                    if int(seg.get("speaker_id", 0)) != previous_id:
+                        seg["speaker_id"] = previous_id
+                        seg["speaker"] = names.get(str(previous_id))
+                        reassigned += 1
+                    inherited_short += 1
+                    continue
+                original_id = int(seg.get("speaker_id", 0))
+                generic_id = reset_ids.setdefault(original_id, next_generic_id + len(reset_ids))
+                if original_id != generic_id:
+                    seg["speaker_id"] = generic_id
+                    seg.pop("speaker", None)
+                    reset_unmatched += 1
             continue
         norm = np.linalg.norm(emb)
         if norm > 0:
@@ -256,6 +292,13 @@ def recluster_with_anchors(
                 best_name, best_sim = name, sim
         if best_name is None or best_sim < similarity_threshold:
             kept += 1
+            if reviewed_through is not None:
+                original_id = int(seg.get("speaker_id", 0))
+                generic_id = reset_ids.setdefault(original_id, next_generic_id + len(reset_ids))
+                if original_id != generic_id:
+                    seg["speaker_id"] = generic_id
+                    seg.pop("speaker", None)
+                    reset_unmatched += 1
             continue
         new_id = name_to_id.get(best_name, int(seg.get("speaker_id", 0)))
         if int(seg.get("speaker_id", 0)) != new_id:
@@ -293,6 +336,10 @@ def recluster_with_anchors(
         sid = str(int(seg.get("speaker_id", 0)))
         if sid in cleaned_names:
             seg["speaker"] = cleaned_names[sid]
+        else:
+            # A later low-confidence turn was explicitly reset in cutoff mode;
+            # do not leave its old display name attached to the new generic ID.
+            seg.pop("speaker", None)
 
     # Final consecutive-same-speaker merge for clean reading.
     data["segments"] = _merge_consecutive_same_speaker(segments)
@@ -321,4 +368,7 @@ def recluster_with_anchors(
         "kept": kept,
         "skipped_short": skipped_short,
         "skipped_short_anchors": skipped_short_anchors,
+        "reset_unmatched": reset_unmatched,
+        "inherited_short": inherited_short,
+        "reviewed_through": reviewed_through,
     }

@@ -275,3 +275,65 @@ def test_preserve_re_resolves_name_collisions_from_anchor_auto_mix():
 
     names = list(result["speaker_names"].values())
     assert names.count("James Whiting") == 1
+
+
+def _split_case():
+    """One confirmed speaker whose audio a rediarize has split into two
+    clusters. Both clusters overlap the same anchor, so by default they
+    collapse back into one person."""
+    previous = {
+        "segments": [
+            {"start": 0, "end": 10, "speaker_id": 0, "speaker": "Alice"},
+            {"start": 10, "end": 20, "speaker_id": 1, "speaker": "Bob"},
+        ],
+        "speaker_names": {"0": "Alice", "1": "Bob"},
+        "speaker_meta": {
+            "0": {"source": "user", "verified": True},
+            "1": {"source": "user", "verified": True},
+        },
+    }
+    fresh = {
+        "segments": [
+            # Two clusters inside Alice's stretch: 0 holds most of it.
+            {"start": 0, "end": 8, "speaker_id": 0},
+            {"start": 8, "end": 10, "speaker_id": 1},
+            {"start": 10, "end": 20, "speaker_id": 2},
+        ],
+        "speaker_names": {"0": "Speaker 1", "1": "Speaker 2", "2": "Speaker 3"},
+        "speaker_meta": {
+            "0": {"source": "generic", "verified": False},
+            "1": {"source": "generic", "verified": False},
+            "2": {"source": "generic", "verified": False},
+        },
+    }
+    return fresh, previous
+
+
+def test_duplicate_name_claims_collapse_without_a_floor():
+    fresh, previous = _split_case()
+    result = preserve_existing_speaker_labels(fresh, previous)
+    # Default behaviour: the two Alice-matching clusters are one person again.
+    assert sorted(result["speaker_names"].values()) == ["Alice", "Bob"]
+    assert [segment["speaker"] for segment in result["segments"]] == [
+        "Alice", "Alice", "Bob",
+    ]
+
+
+def test_min_speakers_keeps_a_newly_separated_voice_apart():
+    fresh, previous = _split_case()
+    result = preserve_existing_speaker_labels(fresh, previous, min_speakers=3)
+    # The user asked for three speakers, so the weaker Alice claim stays its
+    # own unconfirmed voice rather than being folded back in.
+    assert len(result["speaker_names"]) == 3
+    speakers = [segment["speaker"] for segment in result["segments"]]
+    assert speakers[0] == "Alice"      # strongest overlap keeps the name
+    assert speakers[2] == "Bob"
+    assert speakers[1] not in ("Alice", "Bob")
+    assert result["speaker_meta"]["0"]["verified"] is True
+
+
+def test_min_speakers_still_collapses_when_the_floor_allows_it():
+    fresh, previous = _split_case()
+    # Only two speakers requested, so collapsing to Alice + Bob is fine.
+    result = preserve_existing_speaker_labels(fresh, previous, min_speakers=2)
+    assert sorted(result["speaker_names"].values()) == ["Alice", "Bob"]

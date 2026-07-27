@@ -85,6 +85,8 @@ def _confirmed_anchors(
 def preserve_existing_speaker_labels(
     diarized_result: dict,
     previous_result: dict,
+    *,
+    min_speakers: int | None = None,
 ) -> dict:
     """Carry trustworthy labels from an older sidecar onto new clusters.
 
@@ -93,6 +95,13 @@ def preserve_existing_speaker_labels(
     rerun. Explicitly verified labels are preserved, as are non-generic names
     from legacy sidecars that predate ``speaker_meta``. Unverified auto-match
     labels are deliberately not anchors: they should be re-evaluated.
+
+    By default two fresh clusters that both match the same old name collapse
+    into one speaker — that is the cross-window duplicate-label repair. Pass
+    ``min_speakers`` when the caller has been given an explicit speaker count:
+    collapsing then stops at that floor, so the cluster with the strongest
+    overlap keeps the name and a genuinely newly-separated voice survives as
+    its own unconfirmed speaker instead of being folded back in.
     """
     previous_names = previous_result.get("speaker_names") or {}
     previous_meta = previous_result.get("speaker_meta") or {}
@@ -158,6 +167,18 @@ def preserve_existing_speaker_labels(
     if not cluster_to_name:
         return diarized_result
 
+    # With an explicit floor, a name belongs to whichever cluster overlaps its
+    # anchors most; rival claims on the same name keep their own identity for as
+    # long as collapsing them would push the result under the floor.
+    name_owner: dict[str, str] = {}
+    if min_speakers is not None:
+        for name in set(cluster_to_name.values()):
+            claimants = [c for c in cluster_order if cluster_to_name.get(c) == name]
+            name_owner[name] = max(
+                claimants, key=lambda c: cluster_scores.get(c, {}).get(name, 0.0)
+            )
+    projected_speakers = len(cluster_order)
+
     next_id = 0
     name_to_id: dict[str, int] = {}
     cluster_to_id: dict[str, int] = {}
@@ -167,10 +188,20 @@ def preserve_existing_speaker_labels(
     lineage: dict[str, dict] = {}
     for cluster in cluster_order:
         name = cluster_to_name.get(cluster)
+        if (
+            name is not None
+            and min_speakers is not None
+            and name in name_to_id
+            and cluster != name_owner.get(name)
+            and projected_speakers - 1 < min_speakers
+        ):
+            name = None  # keep this voice separate rather than break the floor
         if name is not None:
             new_id = name_to_id.setdefault(name, next_id)
             if new_id == next_id:
                 next_id += 1
+            else:
+                projected_speakers -= 1
             new_names[str(new_id)] = name
             new_meta[str(new_id)] = cluster_to_meta[cluster]
         else:
