@@ -300,13 +300,23 @@ struct HiDockSyncRecordingEntry: Identifiable {
     /// (tagged wins). Drives the blue question-mark icon; does NOT nag.
     var speakersAutoMatched: Bool = false
     var summaryPath: String? = nil
+    /// Confirmed calendar event title loaded from the recording's optional
+    /// `_calendar.json` sidecar. Kept on the row so the table need not read
+    /// files while rendering hundreds of recordings.
+    var calendarMeetingTitle: String? = nil
+    var calendarMeetingStart: Date? = nil
+    /// A likely event found before transcription. Unlike calendarMeetingTitle
+    /// it is not pipeline evidence until the reviewer confirms it.
+    var calendarSuggestionTitle: String? = nil
+    var calendarSuggestionStart: Date? = nil
+    var calendarSuggestionAttendeeCount: Int = 0
     /// User explicitly opted out of transcribing this recording. The file
     /// is downloaded but they don't want it in the transcription queue.
     /// Independent of `transcribed` — if false and skipped is true, the
     /// UI shows "Skipped" and auto-transcribe filters it out.
     var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, speakersAutoMatched: Bool = false, summaryPath: String? = nil, transcriptionSkipped: Bool = false) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, speakersAutoMatched: Bool = false, summaryPath: String? = nil, calendarMeetingTitle: String? = nil, calendarMeetingStart: Date? = nil, calendarSuggestionTitle: String? = nil, calendarSuggestionStart: Date? = nil, calendarSuggestionAttendeeCount: Int = 0, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -318,6 +328,11 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.speakersTagged = speakersTagged
         self.speakersAutoMatched = speakersAutoMatched
         self.summaryPath = summaryPath
+        self.calendarMeetingTitle = calendarMeetingTitle
+        self.calendarMeetingStart = calendarMeetingStart
+        self.calendarSuggestionTitle = calendarSuggestionTitle
+        self.calendarSuggestionStart = calendarSuggestionStart
+        self.calendarSuggestionAttendeeCount = calendarSuggestionAttendeeCount
         self.transcriptionSkipped = transcriptionSkipped
     }
 
