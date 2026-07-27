@@ -256,18 +256,43 @@ def extract_mfcc(
 def extract_neural_embedding(
     audio: np.ndarray,
     sr: int,
-    session,  # onnxruntime.InferenceSession
+    session,  # onnxruntime.InferenceSession, or a session-like wrapper
 ) -> np.ndarray:
-    """Extract a neural speaker embedding using the TitaNet ONNX model.
+    """Extract a neural speaker embedding using the configured model.
 
     Args:
         audio: 1-D float32 audio array at the given sample rate.
         sr: Sample rate (should be 16000).
-        session: ONNX Runtime InferenceSession for the TitaNet model.
+        session: An ONNX Runtime InferenceSession, or any object exposing its own
+            `extract_embedding(audio, sr=...)` (ReDimNet2 is a Torch model
+            wrapped to look like a session, so it has no ONNX graph to inspect).
 
     Returns:
         1-D unit-normalized embedding vector (192-dim for TitaNet Small).
     """
+    # Not every "session" is an ONNX graph. `_ReDimNet2Session` wraps a Torch
+    # model and exposes only `extract_embedding`, so probing `get_inputs()`
+    # raised AttributeError — and because every caller in diarize_sortformer
+    # treats a failed embedding as "no evidence available", the whole
+    # embedding-driven half of diarisation went quietly dead once ReDimNet2
+    # became the selected model.
+    #
+    # Test the ONNX shape positively rather than looking for `extract_embedding`:
+    # duck-typing on the wrapper's method is what a MagicMock accidentally
+    # satisfies, and silently taking the wrong branch here is exactly the class
+    # of failure being fixed.
+    looks_like_onnx = callable(getattr(session, "get_inputs", None)) and callable(
+        getattr(session, "run", None)
+    )
+    if not looks_like_onnx:
+        delegate = getattr(session, "extract_embedding", None)
+        if not callable(delegate):
+            raise TypeError(
+                f"{type(session).__name__} is neither an ONNX session nor exposes "
+                "extract_embedding()"
+            )
+        return delegate(audio, sr=sr)
+
     if len(audio) < 1600:
         # Too short — pad to at least 100ms
         audio = np.pad(audio, (0, 1600 - len(audio)))
