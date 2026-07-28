@@ -417,10 +417,16 @@ def main(argv: list[str] | None = None) -> int:
                              "assignment quality from count selection")
     parser.add_argument("--out", help="Write the JSON report here")
     parser.add_argument("--baseline", help="Compare against a previous report")
-    parser.add_argument("--two-sided-partition", action="store_true",
-                        help="Enable the two-sided turn-graph partition search")
-    parser.add_argument("--refine-assignments", action="store_true",
-                        help="Enable the bounded turn-reassignment loop")
+    # Both refinements now default to on in the backend, so an A/B needs to be
+    # able to force either state explicitly rather than only opting in.
+    parser.add_argument("--two-sided-partition", action="store_true", default=None,
+                        help="Force the two-sided turn-graph partition search on")
+    parser.add_argument("--no-two-sided-partition", dest="two_sided_partition",
+                        action="store_false", help="Force it off")
+    parser.add_argument("--refine-assignments", action="store_true", default=None,
+                        help="Force the bounded turn-reassignment loop on")
+    parser.add_argument("--no-refine-assignments", dest="refine_assignments",
+                        action="store_false", help="Force it off")
     parser.add_argument("--list", action="store_true",
                         help="Only list the corpus; do not diarise")
     args = parser.parse_args(argv)
@@ -449,10 +455,10 @@ def main(argv: list[str] | None = None) -> int:
               f"confusion={score['confusion_rate']}")
 
     backend_options = {}
-    if args.two_sided_partition:
-        backend_options["two_sided_partition"] = True
-    if args.refine_assignments:
-        backend_options["refine_assignments"] = True
+    if args.two_sided_partition is not None:
+        backend_options["two_sided_partition"] = args.two_sided_partition
+    if args.refine_assignments is not None:
+        backend_options["refine_assignments"] = args.refine_assignments
     if backend_options:
         print(f"backend options: {backend_options}")
 

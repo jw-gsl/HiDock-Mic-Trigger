@@ -23,6 +23,75 @@ SILERO_VAD_URL = (
 )
 
 # Speaker embedding models — configurable (from minutes v0.10.0)
+# Licence provenance for speaker-embedding models.
+#
+# This matters in a way it does not for most model choices: the strongest model
+# available here (ReDimNet2-B6 `vb2+vox2`) is trained on VoxBlink2 and carries
+# CC BY-NC-SA 4.0, so it is fine for personal local use and must never ship in a
+# distributed build. Recording that per model — rather than in a doc someone has
+# to remember to read — is what lets the app tell the user which choice is safe.
+#
+# `distributable` is the field to check before shipping. `licence_source` cites
+# where the claim comes from; anything unverified says so rather than guessing.
+SPEAKER_EMBED_LICENCES = {
+    "redimnet2_b6": {
+        "licence": "CC BY-NC-SA 4.0 (VoxBlink2-derived checkpoint; code is MIT)",
+        "distributable": False,
+        "notes": "Local benchmark/review/personal use only. Strongest measured "
+                 "separation on this user's data.",
+        "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
+    },
+    "wespeaker_resnet293": {
+        "licence": "CC BY 4.0 (VoxCeleb-trained)",
+        "distributable": True,
+        "notes": "The bake-off names the VoxCeleb-trained class (ResNet221-LM or "
+                 "CAM++) as the shippable alternative; ResNet293-LM is the same "
+                 "class. Confirm the specific checkpoint's terms before shipping.",
+        "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
+    },
+    "campp": {
+        "licence": "CC BY 4.0 (3D-Speaker CAM++)",
+        "distributable": True,
+        "notes": "Named in the bake-off as a shippable alternative.",
+        "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
+    },
+    "titanet": {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified — NeMo TitaNet Small via sherpa-onnx. Measured as "
+                 "saturated on this user's data (every enrolled voice 0.97-0.99 "
+                 "against any speaker), so it is a poor naming choice regardless.",
+        "licence_source": None,
+    },
+    "eres2net": {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified.",
+        "licence_source": None,
+    },
+    "wavlm_base_plus_sv": {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified.",
+        "licence_source": None,
+    },
+}
+
+
+def speaker_embed_licence(model_key: str) -> dict:
+    """Licence facts for a speaker-embedding model.
+
+    An unknown model is reported as unverified rather than assumed safe: for a
+    shipping decision, "we do not know" and "it is fine" must not look alike.
+    """
+    return SPEAKER_EMBED_LICENCES.get(model_key) or {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified — not in the licence registry.",
+        "licence_source": None,
+    }
+
+
 SPEAKER_EMBED_MODELS = {
     "titanet": {
         "filename": "speaker_embedding.onnx",

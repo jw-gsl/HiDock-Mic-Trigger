@@ -22,6 +22,7 @@ selecting the Lite diarizer stays functional in envs without NeMo.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -748,14 +749,90 @@ def _collect_speaker_audio(audio: np.ndarray, turns, label: str, sr: int = 16000
     return np.concatenate(pieces).astype(np.float32)
 
 
+def _naming_backend():
+    """(session, match_fn, label) for automatic speaker naming, or None.
+
+    Naming used TitaNet against the main library unconditionally. On this user's
+    data that space is saturated — every enrolled voice sits at 0.97–0.99 cosine
+    to any speaker — so `identify_speaker`'s margin rule almost never fires and
+    measured name recall was 2%. When a stronger candidate model is active *and*
+    has been promoted out of review-only, name from that library instead, using
+    the threshold, margin, and scorer it was calibrated with.
+
+    `match_fn(embedding) -> (name | None, confidence)`.
+    """
+    try:
+        from shared.voice_candidate_review import _rank_library, load_candidate_config
+        from shared.voice_library_lite import _get_speaker_embed_session
+
+        config = load_candidate_config()
+        if (
+            config.get("available")
+            and not config.get("review_only", True)
+            and config.get("model_path")
+            and config.get("library_path")
+        ):
+            from pathlib import Path as _Path
+            session = _get_speaker_embed_session(
+                str(config.get("model_key")), _Path(config["model_path"])
+            )
+            if session is not None:
+                library = json.loads(
+                    _Path(config["library_path"]).read_text(encoding="utf-8")
+                )
+                threshold = float(config.get("threshold", 0.5))
+                margin = float(config.get("min_margin", 0.23))
+                scorer = str(config.get("scorer", "top3_median"))
+
+                def match(embedding, allowed_names=None):
+                    ranked = _rank_library(library, embedding, scorer)
+                    if allowed_names:
+                        allowed = {str(n) for n in allowed_names}
+                        ranked = [r for r in ranked if r["name"] in allowed] or ranked
+                    if not ranked:
+                        return None, 0.0
+                    best = ranked[0]
+                    runner_up = ranked[1]["score"] if len(ranked) > 1 else -1.0
+                    if best["score"] >= threshold and best["score"] - runner_up >= margin:
+                        return best["name"], float(best["score"])
+                    return None, 0.0
+
+                return session, match, str(config.get("model_key"))
+    except Exception as exc:  # noqa: BLE001 - never block diarisation on naming
+        print(f"Sortformer: candidate naming unavailable ({exc})", file=sys.stderr)
+
+    try:
+        import onnxruntime as ort
+
+        from shared.models import ensure_speaker_embed
+        from shared.voice_library_lite import identify_speaker
+
+        session = ort.InferenceSession(
+            str(ensure_speaker_embed()), providers=["CPUExecutionProvider"]
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Sortformer: TitaNet load failed ({exc}); using generic labels", file=sys.stderr)
+        return None
+
+    def match(embedding, allowed_names=None):
+        return identify_speaker(embedding, threshold=0.65, allowed_names=allowed_names)
+
+    return session, match, "titanet"
+
+
 def _resolve_speaker_names(
     audio: np.ndarray,
     turns,
     internal_labels: list[str],
     sr: int = 16000,
     allowed_names=None,
-) -> dict[str, dict]:
+) -> tuple[dict[str, dict], str]:
     """Try to match each Sortformer speaker against the voice library.
+
+    Returns `(info, model_key)`. The model key travels with the result because
+    the embeddings it produced are persisted, and two of the available models are
+    both 192-dim — a consumer that compares across their cosine spaces gets
+    confident-looking nonsense rather than a dimension error.
 
     Returns a mapping from internal label ("Speaker 1", "Speaker 2", …) to a
     per-speaker info dict:
@@ -774,19 +851,15 @@ def _resolve_speaker_names(
     }
     try:
         from shared.audio_utils import extract_embedding
-        from shared.voice_library_lite import identify_speaker
-        from shared.models import ensure_speaker_embed
-        import onnxruntime as ort
     except Exception as e:
         print(f"Sortformer: voice library hooks unavailable ({e}); using generic labels", file=sys.stderr)
-        return fallback
+        return fallback, "unknown"
 
-    try:
-        model_path = ensure_speaker_embed()
-        session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-    except Exception as e:
-        print(f"Sortformer: TitaNet load failed ({e}); using generic labels", file=sys.stderr)
-        return fallback
+    backend = _naming_backend()
+    if backend is None:
+        return fallback, "unknown"
+    session, identify_speaker, naming_model = backend
+    print(f"Sortformer: naming speakers via {naming_model}", file=sys.stderr)
 
     info: dict[str, dict] = {}
     for label in internal_labels:
@@ -799,11 +872,7 @@ def _resolve_speaker_names(
             norm = float(np.linalg.norm(emb))
             if norm > 1e-10:
                 emb = (emb / norm).astype(np.float32)
-            matched, confidence = identify_speaker(
-                emb,
-                threshold=0.65,
-                allowed_names=allowed_names,
-            )
+            matched, confidence = identify_speaker(emb, allowed_names=allowed_names)
             emb_list = [float(x) for x in emb]
         except Exception as e:
             print(f"Sortformer: embed/match failed for {label}: {e}", file=sys.stderr)
@@ -816,7 +885,7 @@ def _resolve_speaker_names(
         else:
             info[label] = {"name": label, "source": "generic",
                            "confidence": None, "embedding": emb_list}
-    return info
+    return info, naming_model
 
 
 def _label_speech_seconds(turns: list[tuple[float, float, str]]) -> dict[str, float]:
@@ -1797,7 +1866,7 @@ def diarize(
     # their longest turns and try identify_speaker against the user's
     # enrolled library. Adds enrolled-name auto-tagging parity with the
     # lite path (PLAN-diarization-improvements.md, step 10 in lite).
-    speaker_info = _resolve_speaker_names(
+    speaker_info, naming_model = _resolve_speaker_names(
         audio,
         renamed_turns,
         internal_labels,
@@ -2055,6 +2124,10 @@ def diarize(
         "speaker_names": speaker_names,
         "speaker_meta": speaker_meta,
         "speaker_embeddings": speaker_embeddings,
+        # Which model produced those vectors. TitaNet and ReDimNet2 are both
+        # 192-dim, so without this a consumer can compare across two unrelated
+        # cosine spaces and get confident-looking nonsense rather than an error.
+        "speaker_embedding_model": naming_model,
         "backend": "sortformer",
         "speaker_count_strategy": count_strategy,
     }

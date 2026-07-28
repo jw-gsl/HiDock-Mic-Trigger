@@ -456,6 +456,23 @@ def record_rematch_correction(
     return event
 
 
+def _active_library_space() -> str:
+    """Model key whose cosine space the active voice library lives in.
+
+    Naming reads from the promoted candidate library when one is active, and from
+    the legacy TitaNet library otherwise. Callers compare this against a
+    sidecar's `speaker_embedding_model` before trusting stored vectors.
+    """
+    try:
+        from shared.voice_candidate_review import load_candidate_config
+        config = load_candidate_config()
+        if config.get("available") and not config.get("review_only", True):
+            return str(config.get("model_key") or "titanet")
+    except Exception:  # noqa: BLE001 - fall back to the legacy space
+        pass
+    return "titanet"
+
+
 def rematch_diarized(data: dict, threshold: float = _MATCH_THRESHOLD,
                      audio_fallback: bool = True) -> dict:
     """Re-identify still-generic speakers against the current voice library.
@@ -480,6 +497,21 @@ def rematch_diarized(data: dict, threshold: float = _MATCH_THRESHOLD,
     meta = ensure_speaker_meta(data)
     embeddings: dict = data.get("speaker_embeddings")
     if not isinstance(embeddings, dict):
+        embeddings = {}
+
+    # Stored vectors are only comparable to the library that shares their space.
+    # TitaNet and ReDimNet2 are both 192-dim, so a mismatch produces no error —
+    # just meaningless cosines that can name the wrong person confidently. A
+    # sidecar written before this tag existed predates the second model, so an
+    # absent tag is treated as the legacy TitaNet space.
+    sidecar_space = str(data.get("speaker_embedding_model") or "titanet")
+    library_space = _active_library_space()
+    if sidecar_space != library_space:
+        print(
+            f"rematch: sidecar embeddings are {sidecar_space} but the library is "
+            f"{library_space}; ignoring stored vectors and re-deriving from audio",
+            file=sys.stderr,
+        )
         embeddings = {}
 
     # Which speakers can we try? Still-generic and not verified.

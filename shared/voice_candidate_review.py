@@ -102,7 +102,17 @@ def load_candidate_config(path: str | Path = ACTIVE_CANDIDATE_CONFIG) -> dict:
     return {
         **raw,
         "available": not missing,
-        "review_only": True,
+        # Honour the config instead of pinning this on. It was hardcoded True
+        # while the candidate model was being trialled, which made the flag in
+        # active.json decorative — promoting a candidate to automatic naming
+        # needed a code change nobody would think to look for.
+        #
+        # The default stays True, so a config that says nothing is still
+        # review-only. Promotion is a deliberate act, and worth being deliberate
+        # about: check `shared.models.speaker_embed_licence(model_key)` first,
+        # because the strongest model here is CC BY-NC-SA and must not ship in a
+        # distributed build.
+        "review_only": bool(raw.get("review_only", True)),
         "reason": None if not missing else "candidate_unavailable: " + ", ".join(missing),
         "config_path": str(config_path),
         "candidate_dir": str(candidate_dir),
