@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from shared.asr_sidecar import find_raw_asr, raw_asr_write_path
+from shared.asr_sidecar import raw_asr_write_path
 
 from shared.speaker_meta import is_generic_name
 from shared.srt_writer import srt_path_for, write_srt
