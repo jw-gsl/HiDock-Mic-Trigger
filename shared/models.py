@@ -291,6 +291,36 @@ MODEL_REGISTRY = {
         "review_only": True,
         "description": "English VoxCeleb speaker-identity model selected by the local verified benchmark. It proposes evidence-backed names in the transcript review panel but never applies them automatically.",
     },
+    # pyannote community-1 — candidate replacement for Sortformer as the
+    # diarizer. Architecturally different in the way that matters here: it
+    # segments, embeds, then clusters *globally*, so speaker count is an outcome
+    # of clustering rather than a fixed per-window prediction capped at four
+    # speakers. The harness measured Sortformer at a -1.25 speaker-count bias,
+    # and Rec79 Part 2 showed why: a participant speaking 3.8% of a meeting,
+    # straddling a 300 s window boundary, never got a cluster of its own.
+    #
+    # Licence is the other reason to care. Unlike ReDimNet2 (CC BY-NC-SA, local
+    # use only) pyannote's pipeline and models are MIT and free for commercial
+    # use, so this is a path to a *shippable* build. The HF gate is usage
+    # tracking, not payment — but it does mean an accepted licence and a token.
+    "pyannote_community_1": {
+        "name": "pyannote community-1 (diarization)",
+        "filename": "pyannote-speaker-diarization-community-1",
+        "url": "https://huggingface.co/pyannote/speaker-diarization-community-1",
+        "size_mb": 0,          # fetched and cached by huggingface_hub, not by us
+        "required": False,
+        "stage": "diarization",
+        "stage_label": "Diarization (Who Spoke When)",
+        "category": "pipeline",
+        "backend_key": "pyannote",
+        "gated": True,
+        "gate_note": "Accept the licence on huggingface.co and set HF_TOKEN. "
+                     "Free for research and commercial use.",
+        "licence": "MIT (pipeline and models)",
+        "distributable": True,
+        "planned": False,
+        "description": "Clusters speaker embeddings globally rather than predicting a fixed per-window speaker set, so it has no 4-speaker cap and speaker count is an outcome of clustering. Reported to improve speaker assignment and counting over pyannote 3.1. MIT — usable in a distributed build, unlike the CC BY-NC-SA identity model.",
+    },
     # PalabraAI ReDimNet2-B6 — current bake-off winner on the local verified
     # benchmark (docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md): 96.65%
     # archive top-1, zero false accepts on archive and recent sets, 82.9%

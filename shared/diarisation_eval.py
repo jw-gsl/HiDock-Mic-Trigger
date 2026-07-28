@@ -336,6 +336,7 @@ def run_eval(
     max_seconds: float | None = 600.0,
     n_speakers_from_truth: bool = False,
     backend_options: dict | None = None,
+    diarization_backend: str | None = None,
     progress=None,
 ) -> dict:
     """Re-diarise each case and score it. Requires audio and a diarisation backend.
@@ -345,6 +346,20 @@ def run_eval(
     for telling which half of a regression moved.
     """
     from shared.pipeline_dispatch import diarize
+
+    # Override the *selected* backend for this run only. A/B-ing a diarizer must
+    # not require editing pipeline_backends.json, which is live user config.
+    restore = None
+    if diarization_backend:
+        import shared.pipeline_dispatch as dispatch
+
+        original = dispatch._active
+
+        def forced(stage, default):
+            return diarization_backend if stage == "diarization" else original(stage, default)
+
+        dispatch._active = forced
+        restore = lambda: setattr(dispatch, "_active", original)  # noqa: E731
 
     results: list[dict] = []
     for index, case in enumerate(cases, 1):
@@ -371,9 +386,12 @@ def run_eval(
         results.append(score)
         if progress:
             progress(index, len(cases), score)
+    if restore:
+        restore()
     scored = [row for row in results if "error" not in row]
     return {
         "config": {
+            "diarization_backend": diarization_backend or "as configured",
             "max_seconds": max_seconds,
             "n_speakers_from_truth": n_speakers_from_truth,
             "backend_options": dict(backend_options or {}),
@@ -427,6 +445,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Force the bounded turn-reassignment loop on")
     parser.add_argument("--no-refine-assignments", dest="refine_assignments",
                         action="store_false", help="Force it off")
+    parser.add_argument("--backend", choices=("sortformer", "pyannote", "lite"),
+                        help="Force a diarization backend for this run only; "
+                             "your pipeline_backends.json is left alone")
     parser.add_argument("--list", action="store_true",
                         help="Only list the corpus; do not diarise")
     args = parser.parse_args(argv)
@@ -467,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         max_seconds=args.max_seconds or None,
         n_speakers_from_truth=args.n_speakers_from_truth,
         backend_options=backend_options,
+        diarization_backend=args.backend,
         progress=progress,
     )
     print("\nsummary:", json.dumps(report["summary"], indent=2))
