@@ -91,7 +91,10 @@ def load_pipeline(model_id: str | None = None):
             # rather than raising — which is easy to mistake for success.
             print(
                 f"pyannote: {candidate} is gated and no token grants access. "
-                "Accept the licence on huggingface.co and set HF_TOKEN.",
+                "Two steps, both required: accept the licence at "
+                f"https://huggingface.co/{candidate} , then store a read token "
+                "(Models page → Hugging Face access, or set HF_TOKEN). "
+                "Free for research and commercial use.",
                 file=sys.stderr,
             )
             continue
@@ -146,8 +149,11 @@ def diarize(
     pipeline = load_pipeline()
     if pipeline is None:
         raise RuntimeError(
-            "pyannote pipeline unavailable — accept the model licence on "
-            "huggingface.co and set HF_TOKEN, or select another diarization backend"
+            "pyannote pipeline unavailable. Accept the licence at "
+            "https://huggingface.co/pyannote/speaker-diarization-community-1 and "
+            "store a Hugging Face read token (Models page → Hugging Face access, "
+            "or set HF_TOKEN), or select another diarization backend. Both the "
+            "licence and the token are needed — either one missing gives a 401."
         )
 
     audio = load_audio(audio_path, sr=16000)

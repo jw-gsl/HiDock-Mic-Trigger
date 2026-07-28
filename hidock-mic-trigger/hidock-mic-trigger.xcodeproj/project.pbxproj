@@ -35,6 +35,7 @@
 		9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */; };
 		9C9AC2D1761397E2D6138BEC /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B035CBE2580FAE9A62ACD9 /* ModelsTests.swift */; };
 		9F88469E24E4E75401A1B681 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 651E9570959AB1B72306DFE9 /* MainWindowView.swift */; };
+		A2CBB53693C6E15A60AE604D /* HuggingFaceToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8BA1C16C1E7AF997CB2B48 /* HuggingFaceToken.swift */; };
 		A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */; };
 		A7C42193D21B6814A6E0CE83 /* LEDMatrix.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCF782CB9A8B025C303FDF5D /* LEDMatrix.swift */; };
 		AC57E3CA0C77C0F9F234F8A8 /* DeviceManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 073D5356B516B86E1A36D08A /* DeviceManagerView.swift */; };
@@ -65,6 +66,7 @@
 
 /* Begin PBXFileReference section */
 		073D5356B516B86E1A36D08A /* DeviceManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceManagerView.swift; sourceTree = "<group>"; };
+		0B8BA1C16C1E7AF997CB2B48 /* HuggingFaceToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuggingFaceToken.swift; sourceTree = "<group>"; };
 		145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceLibraryView.swift; sourceTree = "<group>"; };
 		22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsTableView.swift; sourceTree = "<group>"; };
 		2588C13D72780DEF82479DD3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
@@ -150,6 +152,7 @@
 				640A7BCEAB107C1993E023E0 /* AppDelegate.swift */,
 				2588C13D72780DEF82479DD3 /* Helpers.swift */,
 				9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */,
+				0B8BA1C16C1E7AF997CB2B48 /* HuggingFaceToken.swift */,
 				A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */,
 				49F3C693C50E57C2B0A55EEE /* LEDFont.swift */,
 				CCF782CB9A8B025C303FDF5D /* LEDMatrix.swift */,
@@ -348,6 +351,7 @@
 				E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */,
 				D0DA62924A664A5011685A7A /* Helpers.swift in Sources */,
 				8F4F17F9FC81801F1A855275 /* HiDockViewModel.swift in Sources */,
+				A2CBB53693C6E15A60AE604D /* HuggingFaceToken.swift in Sources */,
 				4DAF4865542482004C90F074 /* ImportedRecordings.swift in Sources */,
 				3D3FC97E0F944B74D4C6AA02 /* LEDFont.swift in Sources */,
 				A7C42193D21B6814A6E0CE83 /* LEDMatrix.swift in Sources */,

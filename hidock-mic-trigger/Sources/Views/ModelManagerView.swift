@@ -183,6 +183,15 @@ struct ModelManagerView: View {
 
             Divider()
 
+            // Hugging Face access — required only for *gated* models. pyannote's
+            // diarizer is gated: accepting the licence grants your account
+            // access, but a download still has to authenticate as you, so a
+            // token is needed as well. Stored in the Keychain, never on disk,
+            // and handed to the pipeline through the subprocess environment.
+            huggingFaceSection
+
+            Divider()
+
             // Calendar provider — meeting context (attendees) used for
             // speaker merging and suggestion narrowing.
             VStack(alignment: .leading, spacing: 4) {
@@ -242,8 +251,96 @@ struct ModelManagerView: View {
     /// backend choices; supporting stages hold infrastructure models
     /// that those backends depend on. Each category renders as a
     /// bold section header with a one-line explainer.
+    @State private var huggingFaceTokenEntry: String = ""
+    @State private var huggingFaceStatus: String = ""
+
     private let pipelineStageOrder = ["transcription", "diarization"]
     private let supportingStageOrder = ["vad", "embedding", "identity_review"]
+
+
+    // MARK: - Hugging Face access (gated models)
+
+    /// Two steps, in the order they must happen: accept the licence, then store
+    /// a token. Showing both explicitly matters because either one missing
+    /// produces the same 401, and the failure otherwise looks like a bug.
+    @ViewBuilder
+    private var huggingFaceSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "key.horizontal").foregroundColor(.orange)
+                Text("Hugging Face access").fontWeight(.medium)
+                Spacer()
+                if HuggingFaceToken.isConfigured {
+                    Label(HuggingFaceToken.redacted() ?? "stored", systemImage: "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundColor(.green)
+                } else {
+                    Label("not set", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Text("Only needed for gated models. pyannote's diarizer requires both steps below — accepting the licence is free for research and commercial use.")
+                .font(.caption).foregroundColor(.secondary)
+
+            HStack(spacing: 8) {
+                Text("1.").font(.caption.monospaced()).foregroundColor(.secondary)
+                Button {
+                    NSWorkspace.shared.open(HuggingFaceToken.licenceURL)
+                } label: {
+                    Label("Accept the model licence", systemImage: "arrow.up.forward.square")
+                }
+                .help("Opens the pyannote community-1 model page — accept the terms with your Hugging Face account")
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                Text("2.").font(.caption.monospaced()).foregroundColor(.secondary)
+                Button {
+                    NSWorkspace.shared.open(HuggingFaceToken.tokenSettingsURL)
+                } label: {
+                    Label("Create a read token", systemImage: "arrow.up.forward.square")
+                }
+                .help("A read-scoped token is sufficient")
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                Text("3.").font(.caption.monospaced()).foregroundColor(.secondary)
+                // SecureField so the credential is never rendered, screenshotted,
+                // or captured in a screen recording.
+                SecureField("hf_…", text: $huggingFaceTokenEntry)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 260)
+                Button("Save") {
+                    do {
+                        try HuggingFaceToken.save(huggingFaceTokenEntry)
+                        huggingFaceTokenEntry = ""
+                        huggingFaceStatus = "Token saved to your Keychain."
+                    } catch {
+                        huggingFaceStatus = error.localizedDescription
+                    }
+                }
+                .disabled(huggingFaceTokenEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if HuggingFaceToken.isConfigured {
+                    Button("Remove") {
+                        HuggingFaceToken.delete()
+                        huggingFaceStatus = "Token removed."
+                    }
+                }
+                Spacer()
+            }
+
+            if !huggingFaceStatus.isEmpty {
+                Text(huggingFaceStatus)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+    }
 
     /// Explainer under the Calendar provider picker — honest about the app
     /// not being able to start the provider's sign-in itself.

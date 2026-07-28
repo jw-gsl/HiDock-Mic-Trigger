@@ -4810,6 +4810,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var env = ProcessInfo.processInfo.environment
             env["HOME"] = NSHomeDirectory()
             env["PYTHONPATH"] = self.repoRoot
+            // Gated models (pyannote) authenticate with this; absent otherwise.
+            HuggingFaceToken.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
@@ -8689,6 +8691,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var env = ProcessInfo.processInfo.environment
             let home = NSHomeDirectory()
             env["HOME"] = home
+            // A gated diarization model needs the token to download; harmless
+            // when none is stored, and never written to disk.
+            HuggingFaceToken.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
