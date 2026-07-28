@@ -863,6 +863,7 @@ def _repool_merged_speakers(
     surviving_labels: list[str],
     *,
     allowed_names=None,
+    also_resolve: set[str] | None = None,
 ) -> dict:
     """Re-derive identity for any label that absorbed others.
 
@@ -881,10 +882,13 @@ def _repool_merged_speakers(
     """
     groups = _label_groups(before_turns, after_turns)
     speech = _label_speech_seconds(before_turns)
+    # A label that absorbed others needs re-deriving; so does one the partition
+    # search invented, which has a pooled voice but no name yet.
+    extra = also_resolve or set()
     merged = {
         label: members
         for label, members in groups.items()
-        if label in surviving_labels and len(members) > 1
+        if label in surviving_labels and (len(members) > 1 or label in extra)
     }
     if not merged:
         return speaker_info
@@ -899,10 +903,19 @@ def _repool_merged_speakers(
     updated = dict(speaker_info)
     for label, members in merged.items():
         best_member = max(members, key=lambda m: speech.get(m, 0.0))
-        pooled = _pooled_embedding(members, speaker_info, speech)
-        # Start from the best-evidenced member: already better than inheriting
-        # whichever label survived, and the only option without a library.
-        info = dict(speaker_info.get(best_member) or speaker_info.get(label) or {})
+        own = speaker_info.get(label) or {}
+        if label in extra:
+            # A split-off voice must not inherit the name of the cluster it was
+            # separated from — that name belongs to the other half. Use the
+            # pooled voice the partition search computed for this group and let
+            # the library speak for itself.
+            pooled = own.get("embedding") or _pooled_embedding(members, speaker_info, speech)
+            info = dict(own)
+        else:
+            pooled = _pooled_embedding(members, speaker_info, speech)
+            # Start from the best-evidenced member: already better than inheriting
+            # whichever label survived, and the only option without a library.
+            info = dict(speaker_info.get(best_member) or own or {})
         info.setdefault("name", label)
         info.setdefault("source", "generic")
         info.setdefault("confidence", None)
@@ -1438,10 +1451,10 @@ def _refine_partition_by_turn_graph(
     """
     labels = list(dict.fromkeys(label for _, _, label in turns))
     if not labels:
-        return turns, None
+        return turns, None, {}
     embedding_for = _turn_embedder(audio, turns, min_seconds=_SPLIT_MIN_TURN_SECONDS)
     if embedding_for is None:
-        return turns, None
+        return turns, None, {}
 
     node_embeddings: dict[str, np.ndarray] = {}
     for index in range(len(turns)):
@@ -1449,10 +1462,10 @@ def _refine_partition_by_turn_graph(
         if emb is not None:
             node_embeddings[str(index)] = emb
     if len(node_embeddings) < _SPLIT_MIN_TURNS_PER_VOICE * 2:
-        return turns, None
+        return turns, None, {}
     edges = _turn_affinity_graph(node_embeddings)
     if not edges:
-        return turns, None
+        return turns, None, {}
 
     nodes = list(node_embeddings)
     assignment = {node: turns[int(node)][2] for node in nodes}
@@ -1521,19 +1534,39 @@ def _refine_partition_by_turn_graph(
         applied.append(description)
 
     if not applied:
-        return turns, None
+        return turns, None, {}
     # Turns without a usable embedding never moved; they keep their label.
     refined = [
         (start, end, assignment.get(str(index), label))
         for index, (start, end, label) in enumerate(turns)
     ]
+    # A split invents a label that never went through name resolution, so hand
+    # back each resulting group's pooled voice. Without it the caller has no
+    # embedding for the new speaker and no way to name or persist it.
+    pooled_by_label: dict[str, list] = {}
+    grouped: dict[str, list[str]] = {}
+    for node, label in assignment.items():
+        grouped.setdefault(label, []).append(node)
+    for label, members in grouped.items():
+        weights = np.asarray([duration[n] for n in members], dtype=np.float32)
+        stacked = np.asarray(
+            [
+                node_embeddings[n] / max(float(np.linalg.norm(node_embeddings[n])), 1e-10)
+                for n in members
+            ],
+            dtype=np.float32,
+        )
+        centroid = np.average(stacked, axis=0, weights=np.maximum(weights, 1e-6))
+        norm = float(np.linalg.norm(centroid))
+        if norm > 1e-10:
+            pooled_by_label[label] = [float(v) for v in (centroid / norm)]
     summary = "; ".join(applied)
     print(
         f"Sortformer: turn-graph partition {len(labels)} → "
         f"{len({lab for _, _, lab in refined})} speakers ({summary})",
         file=sys.stderr,
     )
-    return refined, summary
+    return refined, summary, pooled_by_label
 
 
 def _expected_speakers_from_calendar(calendar_context) -> int | None:
@@ -1763,6 +1796,8 @@ def diarize(
     # below rewrite labels, so keep the pre-reconciliation turns to re-pool
     # evidence for any label that ends up absorbing others.
     pre_reconcile_turns = list(renamed_turns)
+    # Labels invented by the partition search, which need naming from scratch.
+    split_labels: set[str] = set()
 
     # Honour an explicitly requested speaker count post-hoc: Sortformer's
     # inference API is fixed-topology, but the stitched global labels can be
@@ -1799,7 +1834,7 @@ def diarize(
         # No external count to trust, so search the partition in both directions
         # on a fixed turn-level graph. Replaces the merge-only label-graph pass,
         # which could never correct the under-counting the harness measured.
-        refined_turns, partition_summary = _refine_partition_by_turn_graph(
+        refined_turns, partition_summary, partition_voices = _refine_partition_by_turn_graph(
             audio, renamed_turns,
         )
         if partition_summary:
@@ -1810,6 +1845,19 @@ def diarize(
                 lab for lab in dict.fromkeys(l for _, _, l in renamed_turns)
                 if lab not in internal_labels
             ]
+            # A split creates a label that never went through name resolution.
+            # Seed it from the group's pooled voice so it has an embedding to be
+            # named and persisted from; re-pooling below does the matching.
+            for new_label in internal_labels:
+                if new_label in speaker_info:
+                    continue
+                speaker_info[new_label] = {
+                    "name": new_label,
+                    "source": "generic",
+                    "confidence": None,
+                    "embedding": partition_voices.get(new_label),
+                }
+                split_labels.add(new_label)
             count_strategy = "turn-graph-two-sided"
     elif len(internal_labels) > 2:
         graph_turns, graph_count, graph_score = _auto_merge_labels_by_graph(
@@ -1892,6 +1940,7 @@ def diarize(
         renamed_turns,
         internal_labels,
         allowed_names=getattr(calendar_context, "candidate_names", None),
+        also_resolve=split_labels,
     )
     display_names = {label: speaker_info[label]["name"] for label in internal_labels}
 
