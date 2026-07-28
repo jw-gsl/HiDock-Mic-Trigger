@@ -103,6 +103,15 @@ _REASSIGN_MIN_TURN_SECONDS = 1.5
 _PARTITION_MIN_GAIN = 0.01
 _SPLIT_MIN_NEW_VOICE_SECONDS = 20.0
 
+# Anchor-seeded extraction. A human-confirmed segment says where a voice *is*,
+# which is the one thing two-means splitting cannot work out for a participant
+# who barely speaks. Calibrated against the Rec79 Part 2 measurements: the
+# confirmed speaker self-matched at 0.888 while sitting at most 0.335 from anyone
+# else, so a 0.55 floor is comfortably clear of the between-person range on this
+# data without being so loose that a neighbouring voice gets claimed.
+_ANCHOR_EXTRACT_MIN_SIMILARITY = 0.55
+_ANCHOR_EXTRACT_MIN_MARGIN = 0.10
+
 # Both refinements change every diarisation, so their defaults come from what
 # `shared.diarisation_eval` measures on the reviewed corpus, not from how
 # convincing the reasoning sounds.
@@ -1111,6 +1120,126 @@ def _merge_labels_to_count(
         for member in cluster:
             mapping[member] = survivor
     return [(s, e, mapping[lab]) for s, e, lab in turns]
+
+
+def _extract_anchored_voice(
+    audio: np.ndarray,
+    turns: list[tuple[float, float, str]],
+    anchors: list[tuple[float, float, str]],
+    *,
+    min_similarity: float = _ANCHOR_EXTRACT_MIN_SIMILARITY,
+    min_margin: float = _ANCHOR_EXTRACT_MIN_MARGIN,
+) -> tuple[list[tuple[float, float, str]], dict[str, int]]:
+    """Pull a confirmed speaker's turns out of whatever cluster swallowed them.
+
+    Two-means splitting cannot recover a quiet participant. It looks *within* a
+    label for two balanced voices, so 128 s of one person hidden inside a label
+    holding ~1,000 s of another never separates — the clusters are far too
+    lopsided. Measured on Rec79 Part 2: Jeevan Dulai spoke 3.8% of a 56-minute
+    meeting and no amount of splitting or threshold tuning found him, even though
+    he is the *most* acoustically distinct voice present (≤0.335 cosine to anyone
+    else, where the two speakers that did separate sit at 0.449).
+
+    A human-confirmed segment removes the discovery problem: it says exactly
+    where the voice is. This builds a centroid from those segments and claims any
+    turn that matches it clearly — a plain similarity floor plus a margin over the
+    turn's current cluster, so a turn only moves on positive evidence for the
+    anchored speaker rather than mere absence of evidence for its current one.
+
+    Anchored turns themselves are never reassigned; they are ground truth.
+    Returns the turns and a per-anchor-label count of how many were claimed.
+    """
+    if not anchors:
+        return turns, {}
+    embedding_for = _turn_embedder(audio, turns, min_seconds=_SPLIT_MIN_TURN_SECONDS)
+    if embedding_for is None:
+        return turns, {}
+
+    # Anchor centroids, duration-weighted so a long confirmed stretch counts more.
+    centroids: dict[str, np.ndarray] = {}
+    for name in sorted({label for _, _, label in anchors}):
+        spans = [
+            (start, end) for start, end, label in anchors
+            if label == name and end - start >= _SPLIT_MIN_TURN_SECONDS
+        ]
+        if not spans:
+            continue
+        pooled = _pooled_span_embedding(
+            audio, spans, [end - start for start, end in spans],
+        )
+        if pooled is not None:
+            centroids[name] = pooled
+    if not centroids:
+        return turns, {}
+
+    anchored_indices = {
+        index for index, (start, end, _) in enumerate(turns)
+        if any(min(end, a_end) - max(start, a_start) > 0 for a_start, a_end, _ in anchors)
+    }
+
+    claimed: dict[str, int] = {}
+    out = list(turns)
+    for index, (start, end, label) in enumerate(turns):
+        if index in anchored_indices:
+            continue
+        emb = embedding_for(index)
+        if emb is None:
+            continue
+        scored = sorted(
+            ((_cosine(emb, centroid), name) for name, centroid in centroids.items()),
+            reverse=True,
+        )
+        best_score, best_name = scored[0]
+        if best_score < min_similarity or best_name == label:
+            continue
+        # Require a clear lead over the cluster the turn currently sits in, so a
+        # turn is claimed on evidence *for* the anchored voice.
+        own = centroids.get(label)
+        if own is not None and best_score - _cosine(emb, own) < min_margin:
+            continue
+        out[index] = (start, end, best_name)
+        claimed[best_name] = claimed.get(best_name, 0) + 1
+
+    for name, count in claimed.items():
+        print(
+            f"Sortformer: anchor '{name}' claimed {count} turn(s) from other clusters",
+            file=sys.stderr,
+        )
+    return out, claimed
+
+
+def _pooled_span_embedding(
+    audio: np.ndarray,
+    spans: list[tuple[float, float]],
+    weights: list[float],
+) -> np.ndarray | None:
+    """Duration-weighted centroid over arbitrary audio spans."""
+    from shared.audio_utils import extract_embedding
+
+    linker = _CrossWindowLinker(audio)
+    session = linker._session_or_none()
+    if session is None:
+        return None
+    vectors, used = [], []
+    for (start, end), weight in zip(spans, weights):
+        sample = audio[int(start * 16000):int(end * 16000)]
+        try:
+            emb = extract_embedding(sample, sr=16000, onnx_session=session)
+        except Exception:
+            continue
+        norm = float(np.linalg.norm(emb))
+        if norm <= 1e-10:
+            continue
+        vectors.append(emb / norm)
+        used.append(max(weight, 1e-6))
+    if not vectors:
+        return None
+    pooled = np.average(
+        np.asarray(vectors, dtype=np.float32), axis=0,
+        weights=np.asarray(used, dtype=np.float32),
+    )
+    norm = float(np.linalg.norm(pooled))
+    return None if norm <= 1e-10 else pooled / norm
 
 
 def _two_voice_partition(
