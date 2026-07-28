@@ -987,6 +987,10 @@ final class HiDockViewModel: ObservableObject {
     var onTranscribeWithSpeakerCount: (String, Int) -> Void = { _, _ in }
     var onConfirmCalendarSuggestion: (String) -> Void = { _ in }
     var onRejectCalendarSuggestion: (String) -> Void = { _ in }
+    /// Look up the calendar for one recording on demand. The automatic gate only
+    /// runs once, just after transcription, so historic recordings have no way to
+    /// acquire a meeting without this.
+    var onLookupCalendarForRecording: (String) -> Void = { _ in }
     /// Delete the locally-downloaded MP3 for a recording (keeps the device
     /// copy intact). Next device refresh will show it as "On device" again.
     var onDeleteLocalCopy: (String) -> Void = { _ in }

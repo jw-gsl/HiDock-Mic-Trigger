@@ -76,11 +76,35 @@ targets:
             fi
             echo "note: Local build approved; deployment remains disabled (CI=true)"
           else
-            # Local builds replace the installed app, terminate the running
-            # process, and can interrupt recording/transcription. Cancel is
-            # the safe default.
+            # Deployment kills the running app and its children, so it can
+            # abort a transcription, a re-diarisation, or a download mid-flight.
+            #
+            # The warning used to be unconditional prose — it always claimed the
+            # deploy "may interrupt active work", which reads like a detection
+            # and is therefore ignored. On 2026-07-28 a deploy silently killed an
+            # in-flight re-diarisation while that same dialog gave no specific
+            # signal. So actually look, and say what is running.
+            BUSY_LIST=""
+            add_busy() {
+              if /usr/bin/pgrep -f "$1" > /dev/null 2>&1; then
+                BUSY_LIST="${BUSY_LIST}${BUSY_LIST:+, }$2"
+              fi
+            }
+            add_busy "transcribe(_parakeet|_cpp)?\.py" "transcription / re-diarisation"
+            add_busy "usb-extractor.*extractor\.py" "a device download"
+            add_busy "ffmpeg.*HiDock" "an audio conversion"
+            add_busy "voice_training\.py" "voice-library training"
+
+            if [ -n "$BUSY_LIST" ]; then
+              DIALOG_TEXT="HiDock is BUSY: ${BUSY_LIST}. Replacing the app now will kill it mid-run and the work will be lost. Wait, or replace anyway?"
+              DEFAULT_BUTTON="Cancel"
+            else
+              DIALOG_TEXT="No transcription, download or conversion is running. Replacing the app will close and relaunch it — safe to proceed."
+              DEFAULT_BUTTON="Replace App"
+            fi
+
             DEPLOY_APPROVED=$(/usr/bin/osascript \
-              -e 'display dialog "A HiDock build is ready to replace the installed app and relaunch it. This will close the current app and may interrupt active work." buttons {"Cancel", "Replace App"} default button "Cancel" cancel button "Cancel" with title "Approve HiDock app replacement"' \
+              -e "display dialog \"$DIALOG_TEXT\" buttons {\"Cancel\", \"Replace App\"} default button \"$DEFAULT_BUTTON\" cancel button \"Cancel\" with title \"Approve HiDock app replacement\"" \
               -e 'button returned of the result' 2>/dev/null || true)
             if [ "$DEPLOY_APPROVED" != "Replace App" ]; then
               echo "note: Deployment cancelled; the installed app was not changed"
