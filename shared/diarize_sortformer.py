@@ -111,7 +111,18 @@ _SPLIT_MIN_NEW_VOICE_SECONDS = 20.0
 # 1.19 → 0.44, bias -1.06 → -0.31, confusion 19.0% → 8.9%. 11 of 16 exact versus
 # 6, with no case's count getting worse.
 _TWO_SIDED_PARTITION_DEFAULT = True
-_REFINE_ASSIGNMENTS_DEFAULT = False
+# Turn reassignment: ON. Measured on top of the two-sided search — count exactly
+# right 68.8% → 81.3%, MAE 0.44 → 0.31, confusion 8.9% → 6.2%.
+#
+# Its effect is indirect and worth understanding before touching it. Reassignment
+# can only move a turn between labels that already exist, so it cannot raise the
+# label count — yet the *output* speaker count does rise, because turns lacking a
+# usable embedding keep their original label and labels owning no Whisper segment
+# are dropped by `_prune_empty_speakers`. Redistributing turns lets a
+# would-be-pruned voice acquire segments. Bias moves -0.31 → +0.31: the residual
+# error is now mild over-counting rather than mild under-counting, at lower
+# absolute error either way.
+_REFINE_ASSIGNMENTS_DEFAULT = True
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
