@@ -23,7 +23,74 @@ import subprocess
 from pathlib import Path
 
 HISTORY_DIR_NAME = ".hidock-transcript-history"
-_GIT = "/usr/bin/git"
+
+# Resolving git is not as simple as picking a path. On macOS `/usr/bin/git` is
+# Apple's shim: the file always exists, but running it only works when Xcode
+# Command Line Tools are installed — otherwise it exits non-zero with
+# "invalid active developer path". A fresh Mac therefore has a git that is
+# present and broken, which is the worst case for a best-effort snapshot: the
+# failure is swallowed and the user silently has no rollback points.
+#
+# So probe by *running* each candidate, and prefer a real git on PATH.
+_GIT_CANDIDATES = ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git")
+_resolved_git: str | None | object = None  # None = unavailable; object() = unprobed
+_UNPROBED = object()
+_resolved_git = _UNPROBED
+
+
+def _probe(path: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and "git version" in (completed.stdout or "")
+
+
+def git_path() -> str | None:
+    """A git executable that actually runs, or None. Probed once per process."""
+    global _resolved_git
+    if _resolved_git is not _UNPROBED:
+        return _resolved_git  # type: ignore[return-value]
+    found: str | None = None
+    for candidate in _GIT_CANDIDATES:
+        if Path(candidate).exists() and _probe(candidate):
+            found = candidate
+            break
+    if found is None:
+        from shutil import which
+        discovered = which("git")
+        if discovered and _probe(discovered):
+            found = discovered
+    _resolved_git = found
+    return found
+
+
+def git_availability() -> dict:
+    """Whether transcript rollback can work, and what to tell the user if not.
+
+    The app surfaces this at onboarding and before any destructive edit: without
+    git there are no rollback points, and the user should learn that up front
+    rather than discover it when they need to undo something.
+    """
+    path = git_path()
+    if path:
+        return {"available": True, "git_path": path, "reason": None, "remedy": None}
+    return {
+        "available": False,
+        "git_path": None,
+        "reason": "No working git found. Transcript edits cannot be versioned, "
+                  "so there will be no rollback points.",
+        "remedy": "Install Apple's Command Line Tools with `xcode-select --install`, "
+                  "or install git (e.g. `brew install git`).",
+    }
+
+
+def reset_git_probe() -> None:
+    """Forget the cached probe. For tests, and for after a user installs git."""
+    global _resolved_git
+    _resolved_git = _UNPROBED
 
 
 def _recording_stem(diarized_path: Path) -> str:
@@ -39,9 +106,12 @@ def history_artifacts(diarized_path: str | Path) -> list[str]:
 
 def _run_git(root: Path, arguments: list[str]) -> tuple[int, str]:
     repository = root / HISTORY_DIR_NAME
+    git = git_path()
+    if git is None:
+        return -1, "no working git"
     try:
         completed = subprocess.run(
-            [_GIT, "--git-dir", str(repository), "--work-tree", str(root), *arguments],
+            [git, "--git-dir", str(repository), "--work-tree", str(root), *arguments],
             capture_output=True,
             text=True,
         )
@@ -61,8 +131,11 @@ def ensure_repository(diarized_path: str | Path) -> Path | None:
             # later `--git-dir <path>` call fails with "not in a git directory".
             # That is not theoretical: it is exactly how the Swift original
             # silently never took a single snapshot.
+            git = git_path()
+            if git is None:
+                return None
             completed = subprocess.run(
-                [_GIT, "init", "--bare", "--quiet", str(repository)],
+                [git, "init", "--bare", "--quiet", str(repository)],
                 capture_output=True, text=True,
             )
         except OSError:
@@ -85,6 +158,14 @@ def snapshot(diarized_path: str | Path, reason: str) -> bool:
     loss of protection is visible.
     """
     path = Path(diarized_path)
+    if git_path() is None:
+        # Say so once, loudly. A missing rollback point is exactly the failure
+        # that must not be silent — that is how Rec79 Part 2 was lost.
+        print(
+            "transcript-history: WARNING no working git, so this edit has no "
+            "rollback point. " + (git_availability().get("remedy") or "")
+        )
+        return False
     root = ensure_repository(path)
     if root is None:
         return False

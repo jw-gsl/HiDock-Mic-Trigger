@@ -124,3 +124,59 @@ def test_history_lives_beside_the_transcript_with_no_remote(transcript):
 
 def test_versions_is_empty_before_any_snapshot(transcript):
     assert versions(transcript) == []
+
+
+# --- git availability --------------------------------------------------------
+
+class TestGitAvailability:
+    """Rollback depends on git, and on macOS git can be present *and* broken.
+
+    `/usr/bin/git` is Apple's shim: the file always exists, but running it only
+    works when Command Line Tools are installed. A fresh Mac therefore has a git
+    that resolves and fails — the worst case for a best-effort snapshot, because
+    the failure is swallowed and the user silently loses every rollback point.
+    """
+
+    def test_a_present_but_broken_git_is_treated_as_unavailable(self, monkeypatch):
+        from shared import transcript_history as th
+
+        th.reset_git_probe()
+        monkeypatch.setattr(th.Path, "exists", lambda self: True)
+        # Mimic the CLT shim: it runs, and fails.
+        monkeypatch.setattr(th, "_probe", lambda path: False)
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        try:
+            assert th.git_path() is None
+            status = th.git_availability()
+            assert status["available"] is False
+            assert "rollback" in status["reason"]
+            # The remedy has to be actionable, not just a complaint.
+            assert "xcode-select --install" in status["remedy"]
+        finally:
+            th.reset_git_probe()
+
+    def test_a_working_git_is_reported_with_its_path(self, monkeypatch):
+        from shared import transcript_history as th
+
+        th.reset_git_probe()
+        monkeypatch.setattr(th, "_probe", lambda path: path == "/usr/local/bin/git")
+        monkeypatch.setattr(th.Path, "exists", lambda self: str(self) == "/usr/local/bin/git")
+        try:
+            status = th.git_availability()
+            assert status["available"] is True
+            assert status["git_path"] == "/usr/local/bin/git"
+        finally:
+            th.reset_git_probe()
+
+    def test_snapshot_warns_instead_of_failing_silently(self, transcript, monkeypatch, capsys):
+        from shared import transcript_history as th
+
+        th.reset_git_probe()
+        monkeypatch.setattr(th, "git_path", lambda: None)
+        try:
+            assert th.snapshot(transcript, "Before re-diarisation") is False
+        finally:
+            th.reset_git_probe()
+        printed = capsys.readouterr().out
+        assert "no rollback point" in printed
+        assert "xcode-select --install" in printed
