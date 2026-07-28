@@ -4530,6 +4530,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Each transcript directory gets a private local Git repository.  We add
     /// only lightweight text artifacts by explicit filename—never recordings,
     /// voice-library samples, credentials, or any remote origin.
+    /// A git executable that actually runs, or nil.
+    ///
+    /// `/usr/bin/git` is Apple's shim: the file is always present, but invoking
+    /// it only works when Xcode Command Line Tools are installed — otherwise it
+    /// exits non-zero with "invalid active developer path". A fresh Mac
+    /// therefore has a git that resolves and fails, which is the worst case for
+    /// a best-effort snapshot: the failure is swallowed and the user silently
+    /// has no rollback points. So probe by running it, and prefer a real git.
+    private static var cachedGitPath: String?? = nil
+    private func resolvedGitPath() -> String? {
+        if let cached = AppDelegate.cachedGitPath { return cached }
+        let candidates = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
+        var found: String? = nil
+        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
+            let probe = Process()
+            probe.executableURL = URL(fileURLWithPath: candidate)
+            probe.arguments = ["--version"]
+            let sink = Pipe()
+            probe.standardOutput = sink
+            probe.standardError = sink
+            do {
+                try probe.run()
+                _ = sink.fileHandleForReading.readDataToEndOfFile()
+                probe.waitUntilExit()
+                if probe.terminationStatus == 0 { found = candidate; break }
+            } catch { continue }
+        }
+        AppDelegate.cachedGitPath = .some(found)
+        if found == nil {
+            log("Transcript history unavailable: no working git found. "
+                + "Install Command Line Tools (xcode-select --install) or `brew install git`. "
+                + "Speaker edits will have no rollback points until then.")
+        }
+        return found
+    }
+
+    /// True when transcript edits can be versioned. Surfaced in onboarding and
+    /// before destructive edits, so a missing rollback point is never a surprise.
+    var transcriptHistoryAvailable: Bool { resolvedGitPath() != nil }
+
     private func transcriptHistoryRepository(for diarizedPath: String) -> URL {
         URL(fileURLWithPath: diarizedPath)
             .deletingLastPathComponent()
@@ -4547,7 +4587,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @discardableResult
     private func runTranscriptGit(root: URL, arguments: [String]) -> (status: Int32, output: String) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        guard let git = resolvedGitPath() else { return (-1, "no working git") }
+        process.executableURL = URL(fileURLWithPath: git)
         let repository = root.appendingPathComponent(".hidock-transcript-history", isDirectory: true)
         process.arguments = ["--git-dir", repository.path, "--work-tree", root.path] + arguments
         let output = Pipe()
@@ -4569,8 +4610,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let repository = transcriptHistoryRepository(for: diarizedPath)
         if !FileManager.default.fileExists(atPath: repository.path) {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["init", "--quiet", repository.path]
+            guard let git = resolvedGitPath() else { return nil }
+            process.executableURL = URL(fileURLWithPath: git)
+            // `--bare` is load-bearing. `git init <path>` puts the repository in
+            // <path>/.git, so every subsequent `--git-dir <path>` call failed
+            // with "not in a git directory" — which made every snapshot a silent
+            // no-op and left the History list permanently empty. Verified
+            // 2026-07-28 by replicating this sequence on the command line.
+            process.arguments = ["init", "--bare", "--quiet", repository.path]
             do {
                 try process.run()
                 process.waitUntilExit()
