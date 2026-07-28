@@ -1654,6 +1654,28 @@ def _refine_partition_by_turn_graph(
     return refined, summary, pooled_by_label
 
 
+def _count_reconciliation_plan(
+    effective_n_speakers: int | None,
+    label_count: int,
+    two_sided_enabled: bool,
+) -> str:
+    """Which count-reconciliation pass should run: the precedence, isolated.
+
+    Returns "merge-down", "two-sided", "legacy-graph", or "none".
+
+    Worth being a function rather than an if/elif chain, because the precedence
+    is the part that goes wrong. An external count is an *answer*: reconcile down
+    to it and otherwise leave the labels alone. Running the partition search when
+    a count was supplied re-litigates it — that is how "Redetect at 4" came back
+    with 3, the search having merged the fresh split back down.
+    """
+    if effective_n_speakers is not None:
+        return "merge-down" if label_count > effective_n_speakers else "none"
+    if two_sided_enabled:
+        return "two-sided"
+    return "legacy-graph" if label_count > 2 else "none"
+
+
 def _expected_speakers_from_calendar(calendar_context) -> int | None:
     """Expected speaker count from the recording's calendar event, if any.
 
@@ -1905,9 +1927,14 @@ def diarize(
                 f"Sortformer: calendar expects {effective_n_speakers} attendees",
                 file=sys.stderr,
             )
-    if effective_n_speakers is not None and len(internal_labels) > effective_n_speakers:
+    plan = _count_reconciliation_plan(
+        effective_n_speakers, len(internal_labels), two_sided_partition
+    )
+    if plan == "merge-down":
         before = len(internal_labels)
-        renamed_turns = _merge_labels_to_count(renamed_turns, label_embs, effective_n_speakers)
+        renamed_turns = _merge_labels_to_count(
+            renamed_turns, label_embs, effective_n_speakers
+        )
         surviving = {lab for _, _, lab in renamed_turns}
         internal_labels = [lab for lab in internal_labels if lab in surviving]
         print(
@@ -1915,7 +1942,7 @@ def diarize(
             f"at speaker count {effective_n_speakers}",
             file=sys.stderr,
         )
-    elif two_sided_partition:
+    elif plan == "two-sided":
         # No external count to trust, so search the partition in both directions
         # on a fixed turn-level graph. Replaces the merge-only label-graph pass,
         # which could never correct the under-counting the harness measured.
@@ -1944,7 +1971,7 @@ def diarize(
                 }
                 split_labels.add(new_label)
             count_strategy = "turn-graph-two-sided"
-    elif len(internal_labels) > 2:
+    elif plan == "legacy-graph":
         graph_turns, graph_count, graph_score = _auto_merge_labels_by_graph(
             renamed_turns, label_embs,
         )

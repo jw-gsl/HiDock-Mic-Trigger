@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+
+from shared.asr_sidecar import find_raw_asr, raw_asr_write_path
 from typing import Any
 
 
@@ -87,7 +89,7 @@ def write_split_artifacts(
 
     source_stem = source_audio.stem
     diarized_path = transcript_dir / f"{source_stem}_diarized.json"
-    whisper_path = transcript_dir / f"{source_stem}_whisper.json"
+    whisper_path = find_raw_asr(transcript_dir / f"{source_stem}.json")
     diarized = json.loads(diarized_path.read_text()) if diarized_path.exists() else None
     whisper = json.loads(whisper_path.read_text()) if whisper_path.exists() else None
 
@@ -99,7 +101,8 @@ def write_split_artifacts(
         if d:
             (transcript_dir / f"{stem}_diarized.json").write_text(json.dumps(d, indent=2) + "\n")
         if w:
-            (transcript_dir / f"{stem}_whisper.json").write_text(json.dumps(w, indent=2) + "\n")
+            raw_asr_write_path(transcript_dir / f"{stem}.json").write_text(
+                json.dumps(w, indent=2) + "\n")
         if not d and not w:
             outputs.append(None)
             continue

@@ -13,6 +13,8 @@ import fcntl
 import json
 import signal
 import sys
+from shared.asr_sidecar import find_raw_asr, raw_asr_write_path
+from shared.transcript_history import snapshot as snapshot_transcript
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -501,7 +503,7 @@ def transcribe_file(
         # Save the original Whisper micro-segments (for re-diarization)
         import json as _json
         whisper_raw_path = transcript_path.with_name(
-            transcript_path.stem + "_whisper.json"
+            raw_asr_write_path(transcript_path).name
         )
         whisper_raw_segs = []
         for seg in result.get("segments", []):
@@ -905,6 +907,7 @@ def cmd_rediarize(args):
         print(f"File not found: {json_path}", file=sys.stderr)
         sys.exit(1)
 
+    snapshot_transcript(json_path, "Before re-diarisation (CLI)")
     data = _json.loads(json_path.read_text(encoding="utf-8"))
     audio_path = data.get("audio_file", "")
     if not Path(audio_path).exists():
@@ -924,16 +927,14 @@ def cmd_rediarize(args):
         print(f"Calendar context unavailable; continuing without it: {exc}", file=sys.stderr)
 
     # Try to load the original Whisper micro-segments for better diarization
-    whisper_raw_path = json_path.with_name(
-        json_path.stem.replace("_diarized", "_whisper") + ".json"
-    )
-    if whisper_raw_path.exists():
+    whisper_raw_path = find_raw_asr(json_path)
+    if whisper_raw_path is not None:
         whisper_data = _json.loads(whisper_raw_path.read_text(encoding="utf-8"))
         segments = whisper_data.get("segments", [])
         print(f"Using original Whisper segments: {len(segments)}", file=sys.stderr)
     else:
         segments = data.get("segments", [])
-        print(f"No _whisper.json found, using existing {len(segments)} segments", file=sys.stderr)
+        print(f"No raw-ASR sidecar found, using existing {len(segments)} segments", file=sys.stderr)
     progress(5)
 
     # Route through the dispatcher so rediarize respects the active
@@ -1057,6 +1058,7 @@ def cmd_recluster_with_anchors(args):
     if not json_path.exists():
         print(f"File not found: {json_path}", file=sys.stderr)
         sys.exit(1)
+    snapshot_transcript(json_path, "Before re-clustering with anchors (CLI)")
     progress(5)
     from shared.recluster_with_anchors import recluster_with_anchors, SIMILARITY_THRESHOLD
     threshold = args.threshold if args.threshold is not None else SIMILARITY_THRESHOLD
@@ -1266,7 +1268,8 @@ def cmd_rewrite_md(args):
 
     Used by the desktop app after Confirm / Clear / rename so the on-disk
     transcript matches publishable names (Speaker N until confirmed). Does not
-    alter the JSON.
+    alter the JSON, but it does overwrite a versioned artifact, so it snapshots
+    like any other rewrite.
     """
     import json as _json
     json_path = Path(args.json_path).resolve()
@@ -1510,7 +1513,7 @@ def cmd_merge_rediarize(args):
     stitched_segments: list[dict] = []
     cumulative_offset = 0.0
     for piece_path, piece_dur in zip(pieces, durations):
-        wjson = transcripts_dir / f"{piece_path.stem}_whisper.json"
+        wjson = find_raw_asr(transcripts_dir / f"{piece_path.stem}.json")
         if not wjson.exists():
             print(f"Missing per-piece whisper JSON for {piece_path.name}: {wjson}", file=sys.stderr)
             sys.exit(1)
@@ -1536,7 +1539,7 @@ def cmd_merge_rediarize(args):
     # Persist the stitched whisper.json so a future rediarize can reuse it.
     merged_stem = merged_audio.stem
     merged_md = transcripts_dir / f"{merged_stem}.md"
-    merged_whisper_json = transcripts_dir / f"{merged_stem}_whisper.json"
+    merged_whisper_json = raw_asr_write_path(transcripts_dir / f"{merged_stem}.json")
     merged_diarized_json = transcripts_dir / f"{merged_stem}_diarized.json"
     merged_whisper_json.write_text(
         _json.dumps({"audio_file": str(merged_audio), "segments": stitched_segments},

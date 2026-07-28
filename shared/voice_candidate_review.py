@@ -600,7 +600,7 @@ def list_candidate_speakers(
 def _meeting_key(source_path: str) -> str:
     """Reduce a sample source path to the recording/meeting name used by the app."""
     stem = Path(source_path).stem
-    for suffix in ("_diarized", "_whisper"):
+    for suffix in ("_diarized", "_asr", "_whisper"):
         if stem.endswith(suffix):
             stem = stem[: -len(suffix)]
     return stem

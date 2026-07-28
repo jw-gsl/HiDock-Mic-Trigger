@@ -258,3 +258,42 @@ def test_split_off_voice_does_not_inherit_the_other_half_name():
     assert out["Speaker 1__graph_voice_2"]["name"] != "Jeevan"
     # And it keeps its own pooled voice, not the other half's.
     assert out["Speaker 1__graph_voice_2"]["embedding"] == [0.0, 1.0]
+
+
+# --- count-reconciliation precedence ----------------------------------------
+
+class TestCountReconciliationPlan:
+    """Which pass runs, isolated from the passes themselves.
+
+    The precedence is the part that went wrong: the partition search used to run
+    whenever an explicit count happened to already fit, so "Redetect at 4" came
+    back with 3 — the search had merged the fresh split back down.
+    """
+
+    def plan(self, count, labels, two_sided=True):
+        from shared.diarize_sortformer import _count_reconciliation_plan
+        return _count_reconciliation_plan(count, labels, two_sided)
+
+    def test_explicit_count_merges_down_when_there_are_too_many(self):
+        assert self.plan(3, 7) == "merge-down"
+
+    def test_explicit_count_is_respected_not_re_searched(self):
+        # Asked for 4, got 3: leave it. Searching here would undo the split that
+        # produced the count in the first place.
+        assert self.plan(4, 3) == "none"
+
+    def test_explicit_count_exactly_met_is_left_alone(self):
+        assert self.plan(4, 4) == "none"
+
+    def test_the_search_runs_only_without_an_external_count(self):
+        assert self.plan(None, 5) == "two-sided"
+
+    def test_legacy_graph_is_the_fallback_when_the_search_is_disabled(self):
+        assert self.plan(None, 5, two_sided=False) == "legacy-graph"
+
+    def test_nothing_runs_on_a_trivial_label_set_without_the_search(self):
+        assert self.plan(None, 2, two_sided=False) == "none"
+
+    def test_the_search_still_runs_on_a_small_label_set(self):
+        # It can split, so unlike the legacy merge-only pass it is useful at 2.
+        assert self.plan(None, 2) == "two-sided"

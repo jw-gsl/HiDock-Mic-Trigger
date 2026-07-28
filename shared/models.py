@@ -309,8 +309,16 @@ MODEL_REGISTRY = {
         "category": "supporting",
         "used_by": "Transcript speaker verification (suggestions only)",
         "backend_key": "redimnet2_b6",
-        "review_only": True,
-        "description": "Strongest speaker-identity model on the local verified benchmark (96.65% archive top-1, zero false accepts, 82.9% safe-gate coverage). Proposes evidence-backed names in the review panel but never applies them automatically. Local use only (CC BY-NC-SA 4.0).",
+        # Whether this only suggests, or also names speakers automatically, is
+        # read live from ~/HiDock/Voice Library Candidates/active.json
+        # (`review_only`). It is deliberately NOT hardcoded here: it was, and a
+        # stale True made this description promise something untrue the moment the
+        # model was promoted.
+        "review_only_source": "voice_library_candidates_active_json",
+        "licence": "CC BY-NC-SA 4.0 (VoxBlink2-derived checkpoint; code is MIT)",
+        "distributable": False,
+        "licence_note": "Personal local use only — must not ship in a distributed build.",
+        "description": "Strongest speaker-identity model on the local verified benchmark (96.65% archive top-1, zero false accepts, 82.9% safe-gate coverage). Measured 62% correct automatic naming vs 2.1% for TitaNet. Personal local use only — CC BY-NC-SA 4.0, not for distribution.",
     },
     # W2V-BERT 2.0 via WeSpeaker's new official support — PLANNED,
     # review-only. Meta's facebook/w2v-bert-2.0 SSL frontend (580M params)
