@@ -102,10 +102,15 @@ _REASSIGN_MIN_TURN_SECONDS = 1.5
 _PARTITION_MIN_GAIN = 0.01
 _SPLIT_MIN_NEW_VOICE_SECONDS = 20.0
 
-# Both refinements start off. They change every diarisation, so the defaults are
-# set from what `shared.diarisation_eval` measures on the reviewed corpus, not
-# from how convincing the reasoning sounds.
-_TWO_SIDED_PARTITION_DEFAULT = False
+# Both refinements change every diarisation, so their defaults come from what
+# `shared.diarisation_eval` measures on the reviewed corpus, not from how
+# convincing the reasoning sounds.
+#
+# Two-sided partition: ON. Measured on 16 reviewed meetings (420 s each), against
+# the same run with it off — speaker count exactly right 37.5% → 68.8%, MAE
+# 1.19 → 0.44, bias -1.06 → -0.31, confusion 19.0% → 8.9%. 11 of 16 exact versus
+# 6, with no case's count getting worse.
+_TWO_SIDED_PARTITION_DEFAULT = True
 _REFINE_ASSIGNMENTS_DEFAULT = False
 
 
