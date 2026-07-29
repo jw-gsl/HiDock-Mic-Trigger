@@ -23,6 +23,7 @@ selecting the Lite diarizer stays functional in envs without NeMo.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -142,6 +143,9 @@ _TWO_SIDED_PARTITION_DEFAULT = False
 # so which of the two is responsible is not yet separated — that is the next
 # experiment, not an assumption to ship.
 _REFINE_ASSIGNMENTS_DEFAULT = False
+
+
+_GENERIC_LABEL = re.compile(r"Speaker \d+")
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -1360,6 +1364,17 @@ def _split_labels_to_count(
             if partition is None:
                 continue
             groups, separation = partition
+            # Both halves must own real speech. Without this, "make it 2 speakers"
+            # could satisfy itself with a scrap: Rec82 was given a second speaker
+            # holding a single zero-duration segment ("to"), because a calendar
+            # attendee count of 2 was treated as proof that two people spoke.
+            # An invitee who says nothing is still an invitee.
+            seconds = {0: 0.0, 1: 0.0}
+            for index, group in zip(indices, groups):
+                start, end, _ = turns[index]
+                seconds[group] += max(0.0, end - start)
+            if min(seconds.values()) < _SPLIT_MIN_NEW_VOICE_SECONDS:
+                continue
             if best is None or separation > best[0]:
                 best = (separation, label, dict(zip(indices, groups)))
         if best is None:
@@ -1838,6 +1853,91 @@ def _expected_speakers_from_calendar(calendar_context) -> int | None:
     return None
 
 
+def _renumber_speakers(
+    speaker_names: dict,
+    speaker_meta: dict,
+    speaker_embeddings: dict,
+    segments: list[dict],
+) -> tuple[dict, dict, dict]:
+    """Make speaker ids contiguous from 0, and keep generic names in step.
+
+    Ids and display names are assigned *before* pruning, so a label that ends up
+    owning no segments leaves a hole: Rec82 came out of a calendar-triggered
+    re-diarisation with ids {0, 2} and names {"0": "Speaker 1", "2": "Speaker 4"}.
+    Id 2 being called "Speaker 4" is not merely untidy — a reviewer sees a speaker
+    numbered for a cluster that no longer exists, and anything keyed by a dense
+    0..n-1 range disagrees with the sidecar about who is present.
+
+    Real names are never touched; only generic "Speaker N" labels are restated to
+    match the new id. Provenance and embeddings move with their speaker.
+    """
+    used = sorted({str(seg.get("speaker_id")) for seg in segments}, key=lambda k: int(k) if k.isdigit() else 1 << 30)
+    remap = {old: index for index, old in enumerate(used)}
+    if all(old == str(new) for old, new in remap.items()):
+        return speaker_names, speaker_meta, speaker_embeddings
+
+    for seg in segments:
+        old = str(seg.get("speaker_id"))
+        if old in remap:
+            seg["speaker_id"] = remap[old]
+
+    new_names, new_meta, new_embeddings = {}, {}, {}
+    for old, new in remap.items():
+        key = str(new)
+        name = speaker_names.get(old, f"Speaker {new + 1}")
+        # A generic label names its own id, so it has to be restated on a move.
+        new_names[key] = f"Speaker {new + 1}" if _GENERIC_LABEL.fullmatch(str(name).strip()) else name
+        if old in speaker_meta:
+            new_meta[key] = speaker_meta[old]
+        if old in speaker_embeddings:
+            new_embeddings[key] = speaker_embeddings[old]
+
+    for seg in segments:
+        key = str(seg.get("speaker_id"))
+        if key in new_names:
+            seg["speaker"] = new_names[key]
+    return new_names, new_meta, new_embeddings
+
+
+def _absorb_degenerate_segments(segments: list[dict]) -> int:
+    """Give zero-length segments to a real neighbour instead of a new speaker.
+
+    Word-level alignment can emit a segment whose start equals its end — a single
+    word with no duration. That is not a participant, but it is enough to create
+    one: Rec82 came out of a calendar-triggered re-diarisation reading
+    "1 word is Speaker 2, all the rest Speaker 1", where Speaker 2's entire
+    existence was the zero-duration word "to".
+
+    Pruning the speaker map alone does not fix it — the segment still carries the
+    orphaned id, and renumbering then recreates the speaker from it. So repair the
+    segment: keep the word, and attribute it to the nearest speaker that actually
+    spoke. Returns the number of segments moved.
+    """
+    def duration(seg: dict) -> float:
+        try:
+            return float(seg.get("end", 0.0)) - float(seg.get("start", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    substantive = [index for index, seg in enumerate(segments) if duration(seg) > 0.0]
+    if not substantive:
+        return 0
+    moved = 0
+    for index, seg in enumerate(segments):
+        if duration(seg) > 0.0:
+            continue
+        # Nearest substantive segment by position, preferring the one before so a
+        # trailing fragment stays with the speaker who was talking.
+        nearest = min(substantive, key=lambda other: (abs(other - index), other > index))
+        donor = segments[nearest]
+        if seg.get("speaker_id") != donor.get("speaker_id"):
+            seg["speaker_id"] = donor.get("speaker_id")
+            if donor.get("speaker") is not None:
+                seg["speaker"] = donor["speaker"]
+            moved += 1
+    return moved
+
+
 def _prune_empty_speakers(
     speaker_names: dict,
     speaker_meta: dict,
@@ -1852,7 +1952,25 @@ def _prune_empty_speakers(
     Ids are left as-is (sparse str keys are fine downstream) — nothing is
     renumbered, so stored embeddings keep matching their sidecar ids.
     """
-    used = {str(seg.get("speaker_id")) for seg in segments}
+    # "Owns a segment" is not the same as "spoke". Rec82 kept a speaker whose only
+    # segment was zero-duration, which is a phantom participant in the UI and in
+    # every downstream count.
+    owners: set[str] = set()
+    spoken: dict[str, float] = {}
+    for seg in segments:
+        key = str(seg.get("speaker_id"))
+        owners.add(key)
+        if "start" not in seg or "end" not in seg:
+            continue
+        try:
+            duration = float(seg["end"]) - float(seg["start"])
+        except (TypeError, ValueError):
+            continue
+        spoken[key] = spoken.get(key, 0.0) + max(0.0, duration)
+    # Drop a speaker only when its segments *are* timed and sum to nothing.
+    # Absent timing means unknown, not silent — punishing missing metadata would
+    # delete real speakers from any caller that omits it.
+    used = {key for key in owners if spoken.get(key, None) is None or spoken[key] > 0.0}
     return (
         {k: v for k, v in speaker_names.items() if k in used},
         {k: v for k, v in speaker_meta.items() if k in used},
@@ -2156,7 +2274,16 @@ def diarize(
     # micro threshold, and letting absorption run would hand back the very
     # "asked for 4, got 3, no changes" result this count is meant to fix.
     absorbed_count = len({lab for _, _, lab in absorbed_turns})
-    if n_speakers is not None and absorbed_count < n_speakers <= len(talk_seconds):
+    # Only defend a requested count when the labels it would keep are real. A
+    # requested count is evidence about the *meeting*, not proof that every
+    # attendee spoke, so it must never justify keeping a scrap of audio as a
+    # participant.
+    substantive = sum(1 for secs in talk_seconds.values() if secs >= _MICRO_LABEL_MAX_SECONDS)
+    if (
+        n_speakers is not None
+        and absorbed_count < n_speakers <= len(talk_seconds)
+        and substantive >= n_speakers
+    ):
         print(
             f"Sortformer: skipped micro-label absorption — it would drop to "
             f"{absorbed_count} speakers below the requested {n_speakers}",
@@ -2268,9 +2395,25 @@ def diarize(
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
     segments_out = _split_long_segments(segments_out, max_duration=_MAX_MERGED_SEGMENT_SECONDS)
 
+    # A zero-duration segment is a word-timing artifact, not a speaker. Repair
+    # those first, or pruning removes the name while the orphaned id survives on
+    # the segment and renumbering recreates the phantom from it.
+    degenerate = _absorb_degenerate_segments(segments_out)
+    if degenerate:
+        print(
+            f"Sortformer: reattached {degenerate} zero-length segment(s) to a "
+            "speaker that actually spoke",
+            file=sys.stderr,
+        )
+
     # Labels whose segments all got filtered out would show as phantom
     # people in the app — drop them from the speaker maps.
     speaker_names, speaker_meta, speaker_embeddings = _prune_empty_speakers(
+        speaker_names, speaker_meta, speaker_embeddings, segments_out
+    )
+    # Pruning leaves holes in the id space; close them so the sidecar presents a
+    # dense 0..n-1 set of speakers whose generic names match their ids.
+    speaker_names, speaker_meta, speaker_embeddings = _renumber_speakers(
         speaker_names, speaker_meta, speaker_embeddings, segments_out
     )
 

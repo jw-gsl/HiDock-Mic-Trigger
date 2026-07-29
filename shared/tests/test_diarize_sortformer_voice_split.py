@@ -86,11 +86,13 @@ def canned_voices(monkeypatch):
 
 
 def test_split_reaches_requested_count(canned_voices):
+    # Turns are long enough that both halves clear the "a new voice must own real
+    # speech" floor — see the Rec82 regression test below for why that exists.
     turns = [
-        (0.0, 5.0, "0"),
-        (10.0, 15.0, "0"),
-        (20.0, 25.0, "0"),
-        (30.0, 35.0, "0"),
+        (0.0, 40.0, "0"),
+        (50.0, 90.0, "0"),
+        (100.0, 140.0, "0"),
+        (150.0, 190.0, "0"),
     ]
     # Turns 0/1 are one voice, turns 2/3 another — two people under one label.
     canned_voices({0: A, 1: A + _vec(0, 0, 0.02), 2: B, 3: B + _vec(0, 0, 0.02)})
@@ -125,3 +127,22 @@ def test_short_turns_are_never_split(canned_voices):
     out, splits = _split_labels_to_count(_audio_for(turns), turns, 2)
     assert splits == 0
     assert out == turns
+
+
+def test_split_refuses_a_requested_count_it_cannot_evidence(canned_voices):
+    """A requested count is evidence about the meeting, not proof everyone spoke.
+
+    Rec82: a calendar event with two attendees produced `--n-speakers 2`, and the
+    split satisfied it with a second "speaker" owning a single zero-duration
+    segment containing the word "to". An invitee who says nothing is still an
+    invitee, so the count must not manufacture a participant.
+    """
+    turns = [
+        (0.0, 40.0, "0"), (50.0, 90.0, "0"), (100.0, 140.0, "0"),
+        # Two scraps of a genuinely different voice — real, but not a participant.
+        (200.0, 202.0, "0"), (210.0, 212.0, "0"),
+    ]
+    canned_voices({0: A, 1: A, 2: A, 3: B, 4: B})
+    out, splits = _split_labels_to_count(_audio_for(turns), turns, 2)
+    assert splits == 0
+    assert len({label for _, _, label in out}) == 1
