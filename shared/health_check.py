@@ -60,6 +60,7 @@ def run_health_check(hidock_root: Path | None = None) -> dict:
     checks.extend(_check_orphans(root))
     checks.append(_check_llm_engines())
     checks.append(_check_models(root))
+    checks.append(_check_voice_library_sync())
     checks.append(_check_transcription_state(root))
     checks.append(_check_disk_space(root))
     checks.append(_check_recent_errors(root))
@@ -281,6 +282,58 @@ def _check_models(root: Path) -> CheckResult:
         )
     except Exception as e:
         return CheckResult("models", "warning", f"Could not check models: {e}")
+
+
+def _check_voice_library_sync() -> CheckResult:
+    """Report identities the naming library cannot reach.
+
+    Speaker names are confirmed into the live library, but automatic naming ranks
+    against the promoted candidate library, and only the review path writes there.
+    A person enrolled live but absent from the naming library is silently
+    unnameable — the app cannot tell that from an ordinary non-match, which is how
+    eight people (Jenny Helland among them) went unnoticed. `_has_active_sample`
+    catches the quieter variant: enrolled, but every exemplar archived on quality.
+    """
+    try:
+        from shared.voice_library_sync import diff_libraries
+        report = diff_libraries()
+        if not report.get("available"):
+            return CheckResult(
+                "voice_library_sync", "ok",
+                f"No candidate naming library configured ({report.get('reason')})",
+            )
+        missing = report["missing_from_naming"]
+        inert = report["present_but_unnameable"]
+        details = {
+            "live_count": report["main_count"],
+            "naming_count": report["candidate_count"],
+            "missing_from_naming": missing,
+            "present_but_unnameable": inert,
+            "candidate_only": report["candidate_only"],
+        }
+        if missing or inert:
+            parts = []
+            if missing:
+                parts.append(f"{len(missing)} enrolled but absent from naming "
+                             f"({', '.join(missing[:4])}{'…' if len(missing) > 4 else ''})")
+            if inert:
+                parts.append(f"{len(inert)} present with no active sample "
+                             f"({', '.join(inert[:4])}{'…' if len(inert) > 4 else ''})")
+            return CheckResult(
+                "voice_library_sync", "warning",
+                "Cannot be auto-named: " + "; ".join(parts)
+                + ". Fix with: python3 -m shared.voice_library_sync backfill",
+                details,
+            )
+        return CheckResult(
+            "voice_library_sync", "ok",
+            f"All {report['main_count']} enrolled voices are reachable by naming",
+            details,
+        )
+    except Exception as e:  # noqa: BLE001 - a health check must never raise
+        return CheckResult(
+            "voice_library_sync", "warning", f"Could not compare voice libraries: {e}",
+        )
 
 
 def _check_transcription_state(root: Path) -> CheckResult:
