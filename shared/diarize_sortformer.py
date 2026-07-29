@@ -1097,6 +1097,18 @@ def _merge_labels_to_count(
     six-minute speaker and donate its name, confidence, and persisted
     embedding to the result. Ties keep the earliest member, so the choice stays
     deterministic.
+
+    **The count is measured against the labels that can actually merge.** A
+    label with no embedding is one whose longest turn is under a second
+    (`_collect_speaker_audio`), and no amount of merging can move it — so
+    counting it against the budget does not restrain the merge, it forces the
+    real voices below the requested count. Rec82 was the worst case: six labels,
+    a requested count of 2, and two unembeddable scraps (0.4 s and 3.4 s)
+    holding both slots. The four embeddable labels were driven into a single
+    cluster, the last merge joining James at 2920 s to Jenny at 666 s across a
+    cosine of **0.054** — two orthogonal voices fused into one speaker, from a
+    diarisation that had separated them correctly. Scraps are cleaned up by
+    `_absorb_micro_labels` downstream; they must not spend a speaker slot here.
     """
     labels: list[str] = []
     for _, _, lab in turns:
@@ -1106,24 +1118,23 @@ def _merge_labels_to_count(
         return turns
     speech = _label_speech_seconds(turns)
 
-    clusters: list[list[str]] = [[lab] for lab in labels]
+    mergeable = [lab for lab in labels if label_embeddings.get(lab) is not None]
+    if len(mergeable) <= count:
+        return turns
+
+    clusters: list[list[str]] = [[lab] for lab in mergeable]
     while len(clusters) > count:
         best = None
         for i in range(len(clusters)):
             for j in range(i + 1, len(clusters)):
-                sims = [
+                sim = max(
                     _cosine(label_embeddings[a], label_embeddings[b])
                     for a in clusters[i]
                     for b in clusters[j]
-                    if label_embeddings.get(a) is not None
-                    and label_embeddings.get(b) is not None
-                ]
-                if not sims:
-                    continue
-                sim = max(sims)
+                )
                 if best is None or sim > best[0]:
                     best = (sim, i, j)
-        if best is None:
+        if best is None:  # pragma: no cover - two clusters always yield a pair
             break
         _, i, j = best
         clusters[i].extend(clusters[j])
@@ -1134,7 +1145,8 @@ def _merge_labels_to_count(
         survivor = max(cluster, key=lambda lab: (speech.get(lab, 0.0), -labels.index(lab)))
         for member in cluster:
             mapping[member] = survivor
-    return [(s, e, mapping[lab]) for s, e, lab in turns]
+    # Labels with no embedding were never candidates, so they pass through.
+    return [(s, e, mapping.get(lab, lab)) for s, e, lab in turns]
 
 
 def _extract_anchored_voice(
@@ -1995,24 +2007,47 @@ def _absorb_micro_labels(
     misheard interjection — are not real participants, but their short audio
     makes embeddings too noisy for the margin rule used in cross-window
     linking. Absorption uses a plain threshold against full-size labels
-    only; a fragment that matches nothing keeps its own label, and anything
-    without an embedding is left untouched.
+    only; a fragment that matches nothing keeps its own label.
+
+    A fragment with **no** embedding is absorbed by proximity instead. It used
+    to be left untouched, which quietly manufactured participants: its label had
+    no voice evidence to match on, so it could never be absorbed, and Rec82's
+    two sub-second scraps survived every pass to present a two-person call as
+    four speakers. Time is the only evidence left for such a fragment, and this
+    is the same reasoning `_absorb_degenerate_segments` already applies one stage
+    later — attribute it to the nearest speaker who actually spoke.
     """
     micro = {lab for lab, secs in talk_seconds.items() if secs < max_seconds}
     full = [lab for lab in talk_seconds if lab not in micro]
     if not micro or not full:
         return turns
+    full_turns = [row for row in turns if row[2] not in micro]
+
+    def nearest_in_time(span_start: float, span_end: float) -> str | None:
+        if not full_turns:
+            return None
+        mid = (span_start + span_end) / 2.0
+        def distance(row):
+            start, end, _ = row
+            # Zero while the fragment sits inside a real turn, otherwise the
+            # silence between them. Ties prefer the speaker already talking.
+            return (max(0.0, start - mid, mid - end), start > mid)
+        return min(full_turns, key=distance)[2]
+
     out: list[tuple[float, float, str]] = []
     for s, e, lab in turns:
         if lab not in micro:
             out.append((s, e, lab))
             continue
         emb = label_embeddings.get(lab)
+        if emb is None:
+            out.append((s, e, nearest_in_time(s, e) or lab))
+            continue
         best_label = None
         best_sim = threshold
         for cand in full:
             cand_emb = label_embeddings.get(cand)
-            if emb is None or cand_emb is None:
+            if cand_emb is None:
                 continue
             sim = _cosine(emb, cand_emb)
             if sim >= best_sim:
