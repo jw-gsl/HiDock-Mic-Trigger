@@ -42,9 +42,10 @@ Remove with `git worktree remove` when the A/B below is read.
 | [#66](https://github.com/jw-gsl/HiDock-Mic-Trigger/pull/66) | HF token, calendar no-match, Meeting column controls, app fixes | open, green, **UI never clicked through** |
 | `feature/rec82-merge-count-budget` | **Rec82 merge bug + voice-library naming sync** | **no PR yet**, green |
 
-**Test checklist: `docs/PLAN-test-checklist-prs-62-to-66-2026-07-28.md`** — 56 checks.
-Start with **5.18–5.24** and **5.17** (start a transcription, then rebuild — the dialog
-must say BUSY).
+**Test checklist: `docs/PLAN-test-checklist-prs-62-to-66-2026-07-28.md`** — 49 checks
+for open PRs #62–#66, plus 7 Rec82 checks for the unsubmitted follow-on branch.
+For the open PR stack, start with **5.17** (start a transcription, then rebuild — the
+dialog must say BUSY). Once the follow-on branch is its own PR, start with **6.1–6.7**.
 
 Verification commands:
 ```bash
@@ -53,11 +54,14 @@ transcription-pipeline/.venv/bin/python3 -m pytest shared/tests/ -q             
 (cd usb-extractor && ../transcription-pipeline/.venv/bin/python3 -m pytest tests/ -q)  # 157
 transcription-pipeline/.venv/bin/python3 -m ruff check --select E,F,W --ignore E501,E402,E741 .
 cd hidock-mic-trigger && xcodegen generate && \
-  GITHUB_ACTIONS=true xcodebuild -project hidock-mic-trigger.xcodeproj \
-  -scheme hidock-mic-trigger -configuration Debug -derivedDataPath /tmp/hidock-check
+  GITHUB_ACTIONS=true xcodebuild test -project hidock-mic-trigger.xcodeproj \
+  -scheme hidock-mic-trigger -configuration Debug -derivedDataPath /tmp/hidock-check \
+  -destination 'platform=macOS'                                                     # 58 XCTest
 ```
 `xcodegen generate` is **mandatory** before building — the project and `Info.plist` are
-generated, and a hand-edit to `Info.plist` is silently discarded.
+generated, and a hand-edit to `Info.plist` is silently discarded. `xcodebuild test`
+starts the app test host; `GITHUB_ACTIONS=true` prevents deployment, but only run it
+while no real transcription or download is active.
 
 ## Rec82 — RESOLVED (commit 5f547b3)
 
@@ -159,26 +163,55 @@ bulk build. **Do not infer aliases from shared provenance** — `Adam` and `Andy
 transcripts with `Emma Thorne` merely by attending the same meetings. Embedding
 similarity is the only trustworthy signal, which is why the guard uses it.
 
-## IN FLIGHT — the A/B that must be read before this branch merges
+## The A/B is done — the fix is measured, broad-based, and regression-free
 
-Two detached worktrees are running `diarisation_eval`, 24 meetings, **full length**,
-started ~11:05, roughly **4.3 min/meeting → ~3.4 h for both arms** (expect ~14:30):
+`diarisation_eval`, **24 meetings, full length**, `--n-speakers-from-truth`, run from two
+detached worktrees (9f7f610 pre-fix, 5f547b3 post-fix) on the identical seeded sample.
+
+| metric | before | after | delta |
+|---|---|---|---|
+| **count exact** | 45.8% | **70.8%** | **+25.0 pts** |
+| count MAE | 0.708 | **0.375** | −0.333 |
+| count bias | −0.625 | **−0.292** | +0.333 (less under-counting, no overshoot) |
+| confusion | 13.26% | **11.08%** | −2.18 pts |
+| **name recall** | 50.7% | **61.8%** | **+11.1 pts** |
+
+Per-case, which is how the earlier reversal was caught:
 
 ```
-/private/tmp/.../scratchpad/eval-before.json   # 9f7f610, pre-fix
-/private/tmp/.../scratchpad/eval-after.json    # 5f547b3, post-fix
-                            eval-before.log / eval-after.log
+COUNT      better  7   worse 0   unchanged 17
+RECALL     better  8   worse 0
+CONFUSION  better  6   worse 1
 ```
 
-**The default eval does not exercise the merge path at all** — it passes
-`n_speakers=None`, so `_merge_labels_to_count` never runs. `--n-speakers-from-truth` is
-the arm that measures this change, and that is what is running.
+**Zero count or recall regressions.** The wins are the Rec82 class — meetings whose
+speakers had been collapsed:
 
-Judge it on **count error and name recall above confusion.** Confusion rate is a trap:
-with a one-to-one truth mapping, extra clusters make each *mapped* cluster purer while
-the transcript degrades. Expect the fix to leave *more* labels surviving the merge than
-before, so watch count bias for over-splitting. If counts regressed, the likely cause is
-the micro-label absorption, which can be reverted independently of the budget fix.
+```
+2025Dec04-101300-HiD10   truth 2   1 -> 2   confusion 0.214 -> 0.000   recall 0.00 -> 1.00
+2025Apr11-161500-HiD81   truth 2   1 -> 2   confusion 0.071 -> 0.000   recall 0.00 -> 0.50
+2025Oct24-122500-HiD95   truth 3   2 -> 3   confusion 0.213 -> 0.011   recall 0.67 -> 0.67
+2025Nov11-140000-HiD53   truth 6   4 -> 6   confusion 0.216 -> 0.247   recall 0.50 -> 0.50
+```
+
+The single confusion regression is that last one, and it is the correct trade: two
+recovered speakers raised confusion slightly on a meeting whose count went from 4 to the
+true 6. Count bias moved toward zero without crossing it, so the over-splitting risk did
+not materialise — meaning the micro-label absorption does **not** need reverting.
+
+Two notes for whoever repeats this:
+
+- **The default eval does not exercise the merge path at all** — it passes
+  `n_speakers=None`, so `_merge_labels_to_count` never runs. `--n-speakers-from-truth`
+  is the only arm that measures it.
+- Judge on **count error and name recall above confusion.** Confusion rate is a trap:
+  with a one-to-one truth mapping, extra clusters make each *mapped* cluster purer while
+  the transcript degrades. Here all three moved together, so no trade had to be made.
+
+The worktrees can now be removed:
+```bash
+git worktree remove /tmp/rec82-before && git worktree remove /tmp/rec82-after
+```
 
 ## Prior measurement context (still valid)
 
@@ -222,7 +255,6 @@ which is why naming moved to ReDimNet2 (**CC BY-NC-SA, `distributable: False`** 
 
 | # | Item | Why it matters |
 |---|---|---|
-| — | **Read the A/B above** | Gates merging `feature/rec82-merge-count-budget` |
 | — | **Deploy the Swift change** | Confirmations do not teach the naming library until then |
 | — | Decide `merge_candidate_speakers("Emma", "Emma Thorne")` | Alias proven at cosine 1.0 |
 | — | Name Rec82's Speaker 2 as Jenny (after deploy) | Gives her a clean 666 s exemplar |
