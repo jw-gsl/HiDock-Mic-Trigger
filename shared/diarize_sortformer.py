@@ -116,23 +116,32 @@ _ANCHOR_EXTRACT_MIN_MARGIN = 0.10
 # `shared.diarisation_eval` measures on the reviewed corpus, not from how
 # convincing the reasoning sounds.
 #
-# Two-sided partition: ON. Measured on 16 reviewed meetings (420 s each), against
-# the same run with it off — speaker count exactly right 37.5% → 68.8%, MAE
-# 1.19 → 0.44, bias -1.06 → -0.31, confusion 19.0% → 8.9%. 11 of 16 exact versus
-# 6, with no case's count getting worse.
-_TWO_SIDED_PARTITION_DEFAULT = True
-# Turn reassignment: ON. Measured on top of the two-sided search — count exactly
-# right 68.8% → 81.3%, MAE 0.44 → 0.31, confusion 8.9% → 6.2%.
+# Two-sided partition: OFF, reverted 2026-07-29 on evidence.
 #
-# Its effect is indirect and worth understanding before touching it. Reassignment
-# can only move a turn between labels that already exist, so it cannot raise the
-# label count — yet the *output* speaker count does rise, because turns lacking a
-# usable embedding keep their original label and labels owning no Whisper segment
-# are dropped by `_prune_empty_speakers`. Redistributing turns lets a
-# would-be-pruned voice acquire segments. Bias moves -0.31 → +0.31: the residual
-# error is now mild over-counting rather than mild under-counting, at lower
-# absolute error either way.
-_REFINE_ASSIGNMENTS_DEFAULT = True
+# It was enabled on 16 meetings x 420 s, which showed exact counts 37.5% -> 68.8%
+# and confusion 19.0% -> 8.9%. A 60-meeting, FULL-LENGTH run contradicted that:
+#
+#     exact        28.3% -> 33.3%   (+5 pts, not +31)
+#     count MAE    1.683 -> 1.483
+#     count bias  -0.483 -> +1.150  (over-counting, and badly)
+#     name recall  35.4% -> 7.8%    (collapsed)
+#
+# Counts got *more* wrong in 28/60 meetings and name recall fell in 39/60. The
+# splitting runs away on long audio: a 3-speaker meeting was given 17 speakers,
+# a 4-speaker one 10. The 420 s window had masked it — a short window physically
+# limits how many speakers can appear.
+#
+# Confusion still improved (16.1% -> 7.0%), which is why this looked good: with a
+# one-to-one mapping, extra clusters can make each mapped cluster purer while the
+# transcript as a whole becomes unusable. Confusion alone was the wrong headline;
+# count error and name recall are what the user actually sees.
+_TWO_SIDED_PARTITION_DEFAULT = False
+# Turn reassignment: OFF, reverted with the above. Suspected as the main driver
+# of the over-counting: it lets a label that owned no segments acquire some, so it
+# rescues clusters that pruning would otherwise have removed. Measured together,
+# so which of the two is responsible is not yet separated — that is the next
+# experiment, not an assumption to ship.
+_REFINE_ASSIGNMENTS_DEFAULT = False
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
