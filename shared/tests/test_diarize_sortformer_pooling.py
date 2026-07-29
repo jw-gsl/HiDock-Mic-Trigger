@@ -172,14 +172,43 @@ def test_repool_rematches_on_the_pooled_vector(library_says):
     assert out["Speaker 2"]["source"] == "auto"
 
 
-def test_repool_demotes_when_the_pooled_voice_no_longer_matches(library_says):
-    # Forcing two different people together should not keep asserting one's name.
+def _balanced_merged_case():
+    """Two speakers of comparable length merged — neither dominates."""
+    before = [(0.0, 200.0, "Speaker 1"), (200.0, 400.0, "Speaker 2")]
+    after = [(0.0, 200.0, "Speaker 2"), (200.0, 400.0, "Speaker 2")]
+    info = {
+        "Speaker 1": {"name": "Someone Else", "source": "auto", "confidence": 0.7,
+                      "embedding": [0.0, 1.0]},
+        "Speaker 2": {"name": "Jeevan", "source": "auto", "confidence": 0.82,
+                      "embedding": [1.0, 0.0]},
+    }
+    return info, before, after
+
+
+def test_repool_demotes_when_a_balanced_merge_no_longer_matches(library_says):
+    # Forcing two comparable speakers together should not keep asserting one's
+    # name — the pooled voice is genuinely no longer either of them.
     library_says(None, 0.0)
-    info, before, after = _merged_case()
+    info, before, after = _balanced_merged_case()
     out = _repool_merged_speakers(info, before, after, ["Speaker 2"])
     assert out["Speaker 2"]["source"] == "generic"
     assert out["Speaker 2"]["name"] == "Speaker 2"
     assert out["Speaker 2"]["confidence"] is None
+
+
+def test_repool_keeps_the_name_when_one_member_dominates(library_says):
+    """A cluster its donor overwhelmingly dominates *is* that person.
+
+    Rec82: Speaker 1 held 3,594 s of a 3,650 s recording and was matched to James
+    Whiting at 83%, then lost the name because pooling with a 0.4 s and a 3.4 s
+    fragment moved the centroid below threshold. Discarding a strong match on that
+    basis is worse than keeping it.
+    """
+    library_says(None, 0.0)
+    info, before, after = _merged_case()   # 390 s vs 4 s
+    out = _repool_merged_speakers(info, before, after, ["Speaker 2"])
+    assert out["Speaker 2"]["name"] == "Jeevan"
+    assert out["Speaker 2"]["source"] == "auto"
 
 
 def test_repool_leaves_untouched_labels_alone(library_says):

@@ -962,12 +962,22 @@ def cmd_rediarize(args):
     previous_speaker_count = len({str(s.get("speaker_id")) for s in data.get("segments", [])})
     fresh_speaker_count = len({str(s.get("speaker_id")) for s in diarized_result.get("segments", [])})
     if n_speakers and n_speakers > 1 and previous_speaker_count > 1 and fresh_speaker_count < 2:
-        print(
-            "Rediarization produced only one speaker while more than one was requested; "
-            "keeping the existing transcript unchanged.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        # Not an error: the recording genuinely has one speaker. Reporting it as a
+        # failure put raw stderr diagnostics in front of the user ("Calendar
+        # context: …", "Using original Whisper segments: 466") as if those were
+        # the cause. An attendee count is evidence about the meeting, not proof
+        # everyone spoke — so say what happened and leave the file alone.
+        print(_json.dumps({
+            "status": "unchanged",
+            "reason": "single_speaker",
+            "requested_speakers": n_speakers,
+            "message": (
+                f"Only one speaker was found, but {n_speakers} were requested "
+                "(likely an invitee who did not speak). The transcript was left "
+                "unchanged."
+            ),
+        }))
+        return
     human_anchor_result = _load_human_speaker_anchors(
         Path(audio_path),
         json_path.with_name(json_path.stem.replace("_diarized", "") + ".md"),

@@ -3540,8 +3540,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
-        viewModel.syncStatus = "Re-diarizing…"
-        viewModel.syncStatusLevel = .secondary
+        // The sidecar reports its own progress in place ("Re-diarising… the
+        // transcript will update here when it finishes"), so repeating it in the
+        // main window is noise — the same message twice on one screen.
+        let viewerShowsProgress = isTranscriptViewerOpen(diarizedPath: jsonPath)
+        if !viewerShowsProgress {
+            viewModel.syncStatus = "Re-diarizing…"
+            viewModel.syncStatusLevel = .secondary
+        }
+        // The row spinner stays either way: it is the only cue in the table that
+        // a confirmation started work, and the sidecar cannot show that.
+        viewModel.speakerWorkFile = recordingFileName(forTranscript: jsonPath)
+        viewModel.speakerWorkStage = nSpeakers.map { "Matching \($0) speakers…" } ?? "Matching speakers…"
         syncViewModelState()
 
         snapshotTranscriptArtifacts(jsonPath, reason: "Before re-diarisation")
@@ -3566,10 +3576,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 let summary = self.rediarizeSummary(before: before, after: after)
                 self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
-                self.viewModel.syncStatus = summary.hasChanges
-                    ? "Re-diarization complete — \(summary.changedSegmentAssignments) segment assignments changed"
-                    : "Re-diarization complete — no changes"
-                self.viewModel.syncStatusLevel = .success
+                if !viewerShowsProgress {
+                    self.viewModel.syncStatus = summary.hasChanges
+                        ? "Re-diarization complete — \(summary.changedSegmentAssignments) segment assignments changed"
+                        : "Re-diarization complete — no changes"
+                    self.viewModel.syncStatusLevel = .success
+                }
                 onUpdate(.completed(summary, after))
             case .failure(let error):
                 self.log("Re-diarization failed: \(error.localizedDescription)")
@@ -3577,8 +3589,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.syncStatusLevel = .error
                 onUpdate(.failed(error.localizedDescription))
             }
+            self.viewModel.speakerWorkFile = nil
+            self.viewModel.speakerWorkStage = ""
             self.refreshTranscriptionState()
             self.syncViewModelState()
+            // An open viewer holds a snapshot from before this rewrite. Without a
+            // reload the user sees stale speakers and no sign anything happened —
+            // which is exactly what a calendar confirmation triggers.
+            self.reloadOpenTranscriptViewer(diarizedPath: jsonPath)
+        }
+    }
+
+    /// The recording filename a transcript belongs to, for row-level busy state.
+    private func recordingFileName(forTranscript jsonPath: String) -> String? {
+        let stem = URL(fileURLWithPath: jsonPath)
+            .deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "_diarized", with: "")
+        return syncEntries.first {
+            URL(fileURLWithPath: $0.recording.outputPath)
+                .deletingPathExtension().lastPathComponent == stem
+        }?.recording.outputName
+    }
+
+    /// Whether the transcript viewer is currently showing this transcript.
+    private func isTranscriptViewerOpen(diarizedPath: String) -> Bool {
+        let mdPath = diarizedPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+        return viewModel.detailTabs.contains { $0.id == "transcript:\(mdPath)" }
+    }
+
+    /// Re-open the transcript viewer if it is showing the file just rewritten.
+    private func reloadOpenTranscriptViewer(diarizedPath: String) {
+        let mdPath = diarizedPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+        guard isTranscriptViewerOpen(diarizedPath: diarizedPath) else { return }
+        log("Reloading open transcript viewer after speaker work: \((mdPath as NSString).lastPathComponent)")
+        DispatchQueue.main.async { [weak self] in
+            self?.openTranscriptViewer(transcriptMdPath: mdPath)
         }
     }
 

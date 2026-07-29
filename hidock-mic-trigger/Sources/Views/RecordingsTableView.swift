@@ -490,19 +490,27 @@ struct RecordingsTableView: View {
             // state rather than an outstanding question. A dash here would invite
             // the same decision a second time.
             HStack(spacing: 5) {
-                Label("Ad-hoc call", systemImage: "person.wave.2")
+                // Orange calendar-with-minus: a calendar question that has been
+                // *answered* ("no meeting"), which is different from one still
+                // waiting. Grey read as "nothing here yet" and a person glyph did
+                // not say the answer came from the calendar at all.
+                Image(systemName: "calendar.badge.minus")
+                    .foregroundColor(.orange)
+                Text("Ad-hoc call")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Button {
                     viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
                 } label: {
-                    Image(systemName: "calendar.badge.questionmark")
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.secondary.opacity(0.7))
                 .help("Check the calendar again — a meeting may have been added since")
                 Spacer(minLength: 0)
             }
+            .help("No calendar meeting — you marked this as an ad-hoc call")
         } else if entry.recording.localExists {
             // The automatic gate fires once, just after transcription, so a
             // historic or later-imported recording can never acquire a meeting on

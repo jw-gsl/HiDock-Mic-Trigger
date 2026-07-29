@@ -1057,7 +1057,16 @@ def _repool_merged_speakers(
                         comparable = bool(scores_for(pooled, allowed_names=allowed_names))
                     except Exception:  # noqa: BLE001 - treat as "cannot tell"
                         comparable = False
-                    if comparable:
+                    # A cluster its donor overwhelmingly dominates *is* that
+                    # person: Rec82's Speaker 1 held 3,594 s of a 3,650 s
+                    # recording, was auto-matched to James Whiting at 83%, and
+                    # then lost the name because pooling with two fragments
+                    # (0.4 s and 3.4 s) moved the centroid below threshold.
+                    # Discarding a strong match on that basis is worse than
+                    # keeping it.
+                    total = sum(speech.get(m, 0.0) for m in members) or 1.0
+                    dominant = speech.get(best_member, 0.0) / total >= 0.9
+                    if comparable and not dominant:
                         # Forcing two people together is the likely cause, so
                         # demote for review rather than asserting a name.
                         print(
@@ -1066,6 +1075,12 @@ def _repool_merged_speakers(
                             file=sys.stderr,
                         )
                         info.update(name=label, source="generic", confidence=None)
+                    elif comparable:
+                        print(
+                            f"  Kept '{info.get('name')}' for {label}: it owns "
+                            f"{speech.get(best_member, 0.0) / total:.0%} of the cluster",
+                            file=sys.stderr,
+                        )
         # A generic identity must carry the surviving label's own name, not the
         # absorbed member's, or the transcript shows a speaker that no longer exists.
         if info.get("source") == "generic":

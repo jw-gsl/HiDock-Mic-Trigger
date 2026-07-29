@@ -284,7 +284,9 @@ struct SpeakerScore: Codable {
     var margin: Double?         // score - runnerUpScore (negative ⇒ another voice fits better)
 }
 
-/// A no-write identity proposal from the isolated WeSpeaker candidate library.
+/// A no-write identity proposal from the isolated candidate voice library.
+/// Which model backs it is configurable (WeSpeaker, then ReDimNet2), so nothing
+/// user-facing names a specific one — that label went stale once already.
 /// The app only displays this evidence; a user action is required before a
 /// transcript name or voice profile can change.
 struct SpeakerSuggestion: Codable {
@@ -777,7 +779,7 @@ struct TranscriptViewerView: View {
     /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
     /// so older call-sites keep compiling.
     var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
-    /// Re-embed unverified speakers with the isolated WeSpeaker candidate and
+    /// Re-embed unverified speakers with the isolated candidate model and
     /// return review-only proposals. The callback never mutates the sidecar.
     var onSuggestSpeakers: ((String, @escaping ([String: SpeakerSuggestion]) -> Void) -> Void)?
     /// Record the explicit human outcome and, for a confirmation, teach the
@@ -2388,7 +2390,7 @@ struct TranscriptViewerView: View {
             if !verified, let suggestion = liveSuggestions["\(id)"] {
                 compactSuggestionEvidence(suggestion)
             } else if !verified && suggestionsLoading {
-                Text("Checking WeSpeaker…")
+                Text("Checking voice model…")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -2465,12 +2467,12 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// One compact, informational treatment of WeSpeaker output. The primary
+    /// One compact, informational treatment of candidate-model output. The primary
     /// decision is rendered separately at the far right of the row.
     @ViewBuilder
     private func compactSuggestionEvidence(_ suggestion: SpeakerSuggestion) -> some View {
         if suggestion.decision == "hold" {
-            Text("WeSpeaker: manual review")
+            Text("Voice model: manual review")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .help(suggestionHelp(suggestion))
@@ -3088,12 +3090,25 @@ struct TranscriptViewerView: View {
     /// Ask the isolated candidate model for evidence. Missing configuration,
     /// a recording in progress, or any inference failure simply yields no
     /// proposals and leaves the established review screen unchanged.
+    ///
+    /// That last promise used to be false: the result was assigned wholesale, so
+    /// an empty reply *erased* the suggestions already on screen. Reported as
+    /// "the 'sounds like' person shows, then disappears once the model loads" —
+    /// two passes run per open, and a second pass with no opinion wiped the
+    /// first pass's proposal.
+    ///
+    /// An empty inference result means "no opinion", not "not this person".
+    /// Only an explicit reject or clear removes a suggestion, and those call
+    /// `removeValue` directly.
     private func refreshSuggestions() {
         guard !suggestionsLoading, let onSuggestSpeakers else { return }
         suggestionsLoading = true
         onSuggestSpeakers(filePath) { suggestions in
-            self.liveSuggestions = suggestions
-            self.suggestionsLoading = false
+            defer { self.suggestionsLoading = false }
+            guard !suggestions.isEmpty else { return }
+            // Merge so a pass that only has an opinion about one speaker cannot
+            // silently drop the evidence held for the others.
+            self.liveSuggestions.merge(suggestions) { _old, new in new }
         }
     }
 
@@ -3157,12 +3172,24 @@ struct TranscriptViewerView: View {
         let meetingMatches = meetingMappedNames
             .filter { browse || $0.lowercased().contains(q) }
             .filter { $0.lowercased() != current }
-        let remainingSlots = max(0, 8 - meetingMatches.count)
+        // Calendar invitees who are not already mapped. The event is the single
+        // best prior for who is in the room, so they belong above the rest of the
+        // library — this picker previously ignored them entirely, and only the
+        // text-selection picker prioritised invitees.
+        let alreadyShown = Set(meetingMatches.map { $0.lowercased() })
+        let invitedMatches = calendarInvitedLibraryNames
+            .filter { !alreadyShown.contains($0.lowercased()) }
+            .filter { $0.lowercased() != current }
+            .filter { browse || $0.lowercased().contains(q) }
+
+        let invitedKeys = Set(invitedMatches.map { $0.lowercased() })
+        let remainingSlots = max(0, 8 - meetingMatches.count - invitedMatches.count)
         let libraryMatches = otherVoiceLibraryNames
+            .filter { !invitedKeys.contains($0.lowercased()) }
             .filter { browse || $0.lowercased().contains(q) }
             .prefix(remainingSlots)
 
-        if !meetingMatches.isEmpty || !libraryMatches.isEmpty {
+        if !meetingMatches.isEmpty || !invitedMatches.isEmpty || !libraryMatches.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 if !meetingMatches.isEmpty {
                     Text("Already mapped in this meeting")
@@ -3173,12 +3200,21 @@ struct TranscriptViewerView: View {
                     suggestionRows(meetingMatches, speakerId: id)
                 }
 
-                if !libraryMatches.isEmpty {
-                    Text(meetingMatches.isEmpty ? "Voice Library" : "Other voices")
+                if !invitedMatches.isEmpty {
+                    Text("Invited to this meeting")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 8)
                         .padding(.top, meetingMatches.isEmpty ? 4 : 8)
+                    suggestionRows(invitedMatches, speakerId: id)
+                }
+
+                if !libraryMatches.isEmpty {
+                    Text(meetingMatches.isEmpty && invitedMatches.isEmpty ? "Voice Library" : "Other voices")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, (meetingMatches.isEmpty && invitedMatches.isEmpty) ? 4 : 8)
                     suggestionRows(Array(libraryMatches), speakerId: id)
                 }
             }
