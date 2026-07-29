@@ -3612,9 +3612,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Whether the transcript viewer is currently showing this transcript.
+    ///
+    /// The tab is keyed by the *_diarized.json* path (see `openTranscriptViewer`),
+    /// not the .md path. Keying this off .md meant it never matched, so both
+    /// callers below silently did nothing: the main window kept duplicating the
+    /// sidecar's progress message, and the viewer never reloaded after a
+    /// background re-diarisation.
     private func isTranscriptViewerOpen(diarizedPath: String) -> Bool {
-        let mdPath = diarizedPath.replacingOccurrences(of: "_diarized.json", with: ".md")
-        return viewModel.detailTabs.contains { $0.id == "transcript:\(mdPath)" }
+        viewModel.detailTabs.contains { $0.id == "transcript:\(diarizedPath)" }
     }
 
     /// Re-open the transcript viewer if it is showing the file just rewritten.
