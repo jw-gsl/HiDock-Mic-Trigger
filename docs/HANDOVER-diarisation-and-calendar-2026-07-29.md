@@ -12,12 +12,17 @@ and `<repo>/shared/*.py` as they are on disk *right now*. Editing Python changes
 running app immediately, and switching git branches changes it too. Swift only changes
 on rebuild.
 
-**2. Deploy needed for the Swift change.** `TranscriptViewerView.swift` changed on this
-branch (naming-library write gate). It compiles clean but the **installed app does not
-have it** — speaker confirmations will keep failing to teach the naming library until
-someone rebuilds and deploys. The deploy dialog is approval-gated and genuinely
-busy-checks; do not deploy while a transcription is running. Compile-only check:
-`GITHUB_ACTIONS=true xcodebuild …` (exits before deployment, dialog never shown).
+**2. Confirm the Swift change is actually deployed.** `TranscriptViewerView.swift`
+changed on this branch (naming-library write gate) and was later refactored further in
+the working tree. The installed binary is dated 12:00:48, i.e. built from a tree that
+contained the change, so it probably has it — but this is **unverified**: private Swift
+methods are not exported, so the binary cannot be grepped for it, and no in-app speaker
+confirmation has happened since 10:54 to demonstrate it. To check, confirm a speaker in
+the viewer and look for a `proposed_name: null` row in
+`Voice Library Candidates/<active>/review-events.jsonl` — the old code could not emit
+one. The deploy dialog is approval-gated and genuinely busy-checks; do not deploy while
+a transcription is running. Compile-only check: `GITHUB_ACTIONS=true xcodebuild …`
+(exits before deployment, dialog never shown).
 
 **3. `docs/PLAN-*.md` is gitignored** by repo policy, so the analysis docs below are
 local-only on James's machine. This HANDOVER file is tracked.
@@ -149,13 +154,23 @@ State after the run — **3 people genuinely recovered**, 5 still unreachable:
 |---|---|
 | Hanna Ha, Rebecca Nemaric, Theo Moss | **nameable now** |
 | Garry Clarke | enrolled but **inert** — his only clip was archived on quality (0.507), and `_rank_library` drops identities with no active sample, so he is as invisible as before |
-| Jenny Helland, Adam Mohamedally, Johan Nystrom | every clip rejected as contaminated — need a clean sample |
+| Adam Mohamedally, Johan Nystrom | every clip rejected as contaminated — need a clean sample |
 | Emma Thorne | **alias, not contamination.** Scores **1.0** against candidate-library `Emma`, and both are built from the same two transcripts (HiD33, HiD41). Awaiting James's decision on `merge_candidate_speakers("Emma", "Emma Thorne")` |
 
-**Jenny's clean path is now open** and is the recommended next step: Rec82 is correctly
-diarised, so naming its Speaker 2 in the viewer produces an uncontaminated 666 s
-exemplar — but only *after* the Swift deploy, or the confirmation will go to the live
-library and not the naming one.
+**Jenny is now fixed, and the loop closed the way it was meant to.** She was named on
+the corrected Rec82 in the viewer at 11:54, which enrolled a clean 30 s clip from her
+666 s of speech (quality 0.971, active). Rec82's `speaker_names` is now
+`{"0": "James Whiting", "1": "Jenny Helland"}`, and her embedding scores **0.902**
+against her own entry with the runner-up at 0.500 — a margin of 0.402 against a
+requirement of 0.23, so she will auto-name in future meetings. The contaminated Rec62
+clip was never used; the guard refused it and the clean path replaced it.
+
+Worth noting *how* that write reached the naming library: the model had proposed
+"Heather Kincaid" at 0.500, James corrected it to Jenny, and the correction counted as a
+review outcome — so the **pre-existing** gate fired. It only worked because a wrong
+proposal happened to clear the 0.5 threshold. Had nothing reached it there would have
+been no suggestion, the old gate would have stayed shut, and she would still be stuck.
+That is the case the Swift change covers.
 
 Note `candidate_only` holds 20 names the live library lacks, mostly pre-canonicalisation
 first-name forms (`Adam`, `Andy`, `Emma`, `John`, `Lucy R`, `Oster`) from the 25 July
@@ -255,9 +270,8 @@ which is why naming moved to ReDimNet2 (**CC BY-NC-SA, `distributable: False`** 
 
 | # | Item | Why it matters |
 |---|---|---|
-| — | **Deploy the Swift change** | Confirmations do not teach the naming library until then |
+| — | **Verify the Swift change is deployed** | Unproven; see trap 2 for the one-step check |
 | — | Decide `merge_candidate_speakers("Emma", "Emma Thorne")` | Alias proven at cosine 1.0 |
-| — | Name Rec82's Speaker 2 as Jenny (after deploy) | Gives her a clean 666 s exemplar |
 | — | Audit the live library for more mixed-block contamination | Jenny's was human-verified and still wrong |
 | — | Give `Garry Clarke` a usable exemplar | Enrolled but inert; no active sample |
 | — | **Evaluate pyannote community-1** | Licence-clean, addresses count/assignment; needs the HF token (Models page → Hugging Face access, stored in Keychain) |
