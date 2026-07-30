@@ -101,6 +101,7 @@ struct MainWindowView: View {
 
     private func detailTabChip(id: String, title: String, icon: String, onClose: @escaping () -> Void) -> some View {
         let active = viewModel.activeDetailTabId == id
+        let isTranscript = id.hasPrefix("transcript:")
         // Select + close are separate Buttons. A single HStack with
         // `.onTapGesture` + an inner close Button was unreliable on macOS
         // (clicks often did nothing, so the side pane never switched).
@@ -110,7 +111,13 @@ struct MainWindowView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: icon).font(.system(size: 10))
-                    Text(title).font(.caption).lineLimit(1)
+                    Text(title)
+                        .font(.caption)
+                        .lineLimit(1)
+                        // If an unusually long recording title still has to be
+                        // shortened, retain the meaningful end: `…-Rec89` is
+                        // far more useful for switching meetings than its date.
+                        .truncationMode(isTranscript ? .head : .tail)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -133,7 +140,10 @@ struct MainWindowView: View {
         .padding(.vertical, 4)
         .background(active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.08),
                     in: RoundedRectangle(cornerRadius: 6))
-        .frame(maxWidth: 170)
+        // A normal transcript stem is roughly 22 characters. Reserve enough
+        // room for it (and the close control) so the Rec number is visible;
+        // the enclosing strip scrolls when several tabs are open.
+        .frame(minWidth: isTranscript ? 220 : 0, maxWidth: isTranscript ? 240 : 170)
     }
 
     @ViewBuilder private var detailContent: some View {

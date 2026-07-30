@@ -441,34 +441,41 @@ struct RecordingsTableView: View {
     @ViewBuilder
     private func meetingCell(_ entry: HiDockSyncRecordingEntry) -> some View {
         if let meeting = entry.calendarMeetingTitle, !meeting.isEmpty {
-            VStack(alignment: .leading, spacing: 1) {
-                Label(meeting, systemImage: "calendar.badge.checkmark")
+            HStack(spacing: 4) {
+                Image(systemName: "calendar.badge.checkmark")
+                Text(meeting)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .layoutPriority(1)
                 if let start = entry.calendarMeetingStart {
-                    Text(Self.meetingDateFormatter.string(from: start))
+                    Text("· \(Self.meetingDateFormatter.string(from: start))")
                         .font(.caption2.monospacedDigit())
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
             .font(.caption)
             .foregroundColor(.green)
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
             .help("Confirmed calendar meeting: \(meeting)")
         } else if let suggestion = entry.calendarSuggestionTitle, !suggestion.isEmpty {
             HStack(spacing: 5) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Label(suggestion, systemImage: "calendar.badge.clock")
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let start = entry.calendarSuggestionStart {
-                        Text(Self.meetingDateFormatter.string(from: start))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("Confirm or reject")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
+                Image(systemName: "calendar.badge.clock")
+                Text(suggestion)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+                if let start = entry.calendarSuggestionStart {
+                    Text("· \(Self.meetingDateFormatter.string(from: start))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                } else {
+                    Text("· Confirm")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 Spacer(minLength: 2)
                 Button { viewModel.onConfirmCalendarSuggestion(entry.recording.outputPath) } label: {
@@ -477,14 +484,16 @@ struct RecordingsTableView: View {
                 .buttonStyle(.plain)
                 .help("Confirm meeting and start speaker matching")
                 Button { viewModel.onRejectCalendarSuggestion(entry.recording.outputPath) } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundColor(.red)
+                    Image(systemName: "calendar.badge.minus").foregroundColor(.orange)
                 }
                 .buttonStyle(.plain)
-                .help("Not this meeting — start speaker matching without calendar context")
+                .help("Mark as an ad-hoc call — dismiss this calendar suggestion and keep the detected speakers")
             }
             .font(.caption)
             .foregroundColor(.green)
-            .help("Raw transcript is ready — confirm or reject before speaker matching")
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .help("Detected speakers are ready — confirm the meeting to refine them with attendee context, or mark this an ad-hoc call")
         } else if entry.calendarRejected {
             // The user already answered "not this meeting", so this is a settled
             // state rather than an outstanding question. A dash here would invite
@@ -515,15 +524,26 @@ struct RecordingsTableView: View {
             // The automatic gate fires once, just after transcription, so a
             // historic or later-imported recording can never acquire a meeting on
             // its own. This is the manual route.
-            Button {
-                viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
-            } label: {
-                Label("Check calendar", systemImage: "calendar.badge.questionmark")
-                    .font(.caption)
+            HStack(spacing: 5) {
+                Button {
+                    viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
+                } label: {
+                    Image(systemName: "calendar.badge.questionmark")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Look up a calendar meeting for this recording now")
+
+                Button {
+                    viewModel.onRejectCalendarSuggestion(entry.recording.outputPath)
+                } label: {
+                    Image(systemName: "calendar.badge.minus")
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+                .help("Mark as an ad-hoc call instead of checking the calendar")
             }
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-            .help("Look up a calendar meeting for this recording now")
         } else {
             Text("—")
                 .foregroundColor(.secondary.opacity(0.5))
