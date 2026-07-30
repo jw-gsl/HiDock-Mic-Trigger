@@ -627,6 +627,8 @@ private struct CalendarAssistantMessage: Identifiable {
 struct TranscriptViewerView: View {
     @State var transcript: DiarizedTranscript
     @State var editingSpeakerId: Int? = nil
+    /// Invitee pill whose "map to which speaker" popover is open.
+    @State private var mappingAttendee: String? = nil
     @State var editingName: String = ""
     /// Which pill location owns the active edit ("legend" / "verify"), so the
     /// TextField only appears where you clicked, not on every pill for that id.
@@ -1508,6 +1510,8 @@ struct TranscriptViewerView: View {
             Spacer()
         }
         .padding(.horizontal, 16)
+
+        invitedAttendeesLine
 
         if calendarAssistantExpanded {
             calendarAssistantPanel
@@ -2939,6 +2943,142 @@ struct TranscriptViewerView: View {
     /// Load the enrolled voice names for the rename autocomplete.
     private func refreshLibraryNames() {
         onListVoiceNames?() { names in self.libraryNames = names }
+    }
+
+    /// Who was invited, on the row under the meeting title — as pills you can map
+    /// straight onto a speaker.
+    ///
+    /// The attendee list used to be visible only by opening the calendar popover,
+    /// which hid the most useful context for naming speakers during exactly the task
+    /// it helps with. Making each name a pill also gives the mapping a second
+    /// direction: the editor answers "who is Speaker 3?", and this answers "which
+    /// speaker is Ellen?" — much the better question when you recognise the invitee
+    /// list but not which cluster is whom.
+    ///
+    /// Accent colour means the person has an enrolled voice, so automatic naming can
+    /// reach them; a checkmark means they are already mapped in this meeting. Picking
+    /// a speaker for someone with no profile is still worthwhile — it enrols this
+    /// meeting's audio as their first one.
+    @ViewBuilder
+    private var invitedAttendeesLine: some View {
+        let invited = calendarInvitedNames
+        if !invited.isEmpty {
+            let enrolled = Set(calendarInvitedLibraryNames.map { $0.lowercased() })
+            let assigned = Set(uniqueSpeakerIds.map { speakerName(for: $0).lowercased() })
+            HStack(alignment: .top, spacing: 4) {
+                Image(systemName: "person.2")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.top, 3)
+                FlowLayout(spacing: 4) {
+                    ForEach(invited, id: \.self) { name in
+                        attendeePill(
+                            name,
+                            isEnrolled: enrolled.contains(name.lowercased()),
+                            isAssigned: assigned.contains(name.lowercased())
+                        )
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private func attendeePill(_ name: String, isEnrolled: Bool, isAssigned: Bool) -> some View {
+        let tint: Color = isAssigned ? .green : (isEnrolled ? .accentColor : .secondary)
+        return Button {
+            mappingAttendee = name
+        } label: {
+            HStack(spacing: 3) {
+                if isAssigned {
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 8))
+                }
+                Text(name).font(.caption2)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.14))
+            .foregroundColor(tint)
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(
+            isAssigned ? "\(name) is already mapped in this meeting — click to move them"
+            : isEnrolled ? "\(name) has an enrolled voice — click to map them to a speaker"
+            : "\(name) has no voice profile yet — mapping them enrols this meeting's audio"
+        )
+        .popover(
+            isPresented: Binding(
+                get: { mappingAttendee == name },
+                set: { presented in
+                    if !presented, mappingAttendee == name { mappingAttendee = nil }
+                }
+            ),
+            arrowEdge: .bottom
+        ) {
+            speakerMappingRows(for: name)
+                .frame(minWidth: 240, alignment: .leading)
+                .padding(6)
+        }
+    }
+
+    /// The speakers this invitee could be, longest-talking first.
+    ///
+    /// Ordered by talk time because the question being answered is "which of these
+    /// clusters is this person", and the substantial clusters are the ones worth
+    /// deciding about; a two-second fragment at the top would just be noise.
+    @ViewBuilder
+    private func speakerMappingRows(for attendee: String) -> some View {
+        let ids = uniqueSpeakerIds.sorted { talkSeconds(for: $0) > talkSeconds(for: $1) }
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Map \(attendee) to")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 2)
+            ForEach(ids, id: \.self) { id in
+                let current = speakerName(for: id)
+                Button {
+                    mappingAttendee = nil
+                    // Same path the name editor uses, so this inherits merge
+                    // detection when the name already belongs to another speaker,
+                    // the enrolment, and the naming-library write.
+                    editingName = attendee
+                    commitRename(speakerId: id)
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(colorForSpeaker(id))
+                            .frame(width: 8, height: 8)
+                        Text(current).font(.caption)
+                        Text(formatTime(seconds: talkSeconds(for: id)))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                        Spacer(minLength: 8)
+                        if current.caseInsensitiveCompare(attendee) == .orderedSame {
+                            Image(systemName: "checkmark")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Attributed speaking time for one speaker, used to order the mapping list.
+    private func talkSeconds(for speakerId: Int) -> Double {
+        transcript.segments.reduce(0.0) { total, segment in
+            segment.speakerId == speakerId
+                ? total + max(0, segment.end - segment.start)
+                : total
+        }
     }
 
     /// Calendar invitees, kept in meeting order and de-duplicated for the
