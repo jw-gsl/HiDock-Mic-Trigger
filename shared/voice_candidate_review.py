@@ -365,6 +365,14 @@ def suggest_for_transcript(
                 segment_start=selected["segment_start"],
                 segment_end=selected["segment_end"],
             )
+            # Resolved before the crowd check, which now depends on it.
+            in_calendar = None
+            runner_up_in_calendar = None
+            if calendar_candidates:
+                in_calendar = best["name"].casefold() in calendar_candidates
+                if runner_up is not None:
+                    runner_up_in_calendar = runner_up["name"].casefold() in calendar_candidates
+
             reasons = []
             robust = best["scorer"] == "top3_median"
             if not robust:
@@ -375,22 +383,22 @@ def suggest_for_transcript(
                 reasons.append("below_similarity_threshold")
             if margin < config["min_margin"]:
                 reasons.append("ambiguous_runner_up")
-            if meeting_speaker_count > _MAX_REVIEW_MEETING_SPEAKERS:
+            # A crowded meeting is a hold because a wrong name becomes likelier as
+            # the field of plausible library candidates grows. A confirmed invitee
+            # collapses that field, so the attendee list is *more* decisive in a big
+            # meeting, not less — gating on speaker count alone had it backwards and
+            # switched naming off for exactly the meetings that need it most. With no
+            # calendar (`in_calendar is None`) the guard still applies in full.
+            if meeting_speaker_count > _MAX_REVIEW_MEETING_SPEAKERS and not in_calendar:
                 reasons.append("crowded_meeting")
             acoustic_quality = quality.get("acoustic_quality")
             if acoustic_quality is not None and float(acoustic_quality) < _MIN_ACOUSTIC_QUALITY:
                 reasons.append("low_audio_cleanliness")
-            in_calendar = None
-            runner_up_in_calendar = None
-            if calendar_candidates:
-                in_calendar = best["name"].casefold() in calendar_candidates
-                if runner_up is not None:
-                    runner_up_in_calendar = runner_up["name"].casefold() in calendar_candidates
-                if not in_calendar:
-                    # The event's attendee list does not support this name.
-                    # It may still be a genuine guest, so this is a review
-                    # hold, not a rejection — but it must not pass strong.
-                    reasons.append("not_in_calendar")
+            if in_calendar is False:
+                # The event's attendee list does not support this name. It may
+                # still be a genuine guest, so this is a review hold, not a
+                # rejection — but it must not pass strong.
+                reasons.append("not_in_calendar")
             strong = robust and not reasons
             suggestions[speaker_id] = {
                 "current_name": name,
