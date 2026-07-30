@@ -266,6 +266,48 @@ TitaNet's space is saturated on this data (every enrolled voice 0.97–0.99 to a
 which is why naming moved to ReDimNet2 (**CC BY-NC-SA, `distributable: False`** — see
 `shared/models.speaker_embed_licence`; pyannote/CAM++/WeSpeaker are the shippable ones).
 
+## Large meetings (Rec88, 9 people) — 2026-07-30
+
+**The 8-speaker cap was in the app, not the pipeline.**
+`TranscriptViewerView.rediarizeSpeakerRange` was `2...max(8, uniqueSpeakerIds.count)`, and
+the ceiling only rose above 8 for a transcript that *already* had more than 8 speakers —
+unreachable if you cannot request them. Raised to 20. `_split_labels_to_count` has no cap
+and already ends with `no voice evidence to reach N speakers; keeping M`.
+
+Also fixed: the speaker-name editor pre-filled the current name and took focus but never
+**selected** it, so typing extended the name instead of searching the library
+(`selectPrefilledName`). `nameSuggestions` already had a browse mode for the unchanged
+name, so selection was the only missing piece.
+
+**Both Swift fixes are in the working tree, NOT committed** — the file also carries an
+unrelated in-progress refactor, so committing it would have swept that up too.
+
+Measured on `2026Jul29-135954-Rec88` (`rediarize --n-speakers 9` on a copy): 15 stitched
+labels merged to 9 → **8 plausible voices plus one 0.6 s scrap**. Good, for a backend that
+predicts only 4 speakers per 300 s window.
+
+**At this size diarisation is not the bottleneck — naming is. Eight voices found, one
+named:** the calendar listed 4 attendees of whom 2 were in the library, `Jeff Chow` was
+matched at 51% then lost by the merge, and `Chris Wildsmith` matched **two** labels (84%
+and 87%) — a dominant speaker over-split while quiet people went undetected.
+
+**Two hard-coded 6-speaker gates disable naming before 9 is reached:**
+
+- `shared/voice_candidate_review.py:378` — appends `crowded_meeting` to `reasons`, and
+  `strong = robust and not reasons`, so no suggestion can ever be strong above 6 speakers.
+- `shared/speaker_meta.py:406` — `rematch_preflight` holds every candidate for the same
+  reason.
+
+Both are backwards with respect to the calendar: the attendee list is the best prior for
+who is present and becomes *more* decisive as a meeting grows. The risk `crowded_meeting`
+guards against is a wrong name from a large field of candidates, which being a confirmed
+invitee collapses.
+
+**Diagnostic gap:** the app logs Python stderr for rediarize only on *failure*. Both Rec82
+and Rec88 were diagnosed from those lines (`merged N labels down to M`, `talk per label:`),
+so the successful runs had to be reproduced on a copy to see anything. Capturing stderr on
+success would have saved an hour each time.
+
 ## Outstanding work
 
 | # | Item | Why it matters |
@@ -274,7 +316,10 @@ which is why naming moved to ReDimNet2 (**CC BY-NC-SA, `distributable: False`** 
 | — | Decide `merge_candidate_speakers("Emma", "Emma Thorne")` | Alias proven at cosine 1.0 |
 | — | Audit the live library for more mixed-block contamination | Jenny's was human-verified and still wrong |
 | — | Give `Garry Clarke` a usable exemplar | Enrolled but inert; no active sample |
-| — | **Evaluate pyannote community-1** | Licence-clean, addresses count/assignment; needs the HF token (Models page → Hugging Face access, stored in Keychain) |
+| — | Waive `crowded_meeting` for calendar invitees | Rec88: 8 voices found, 1 named. Cheapest high-value fix for large meetings |
+| — | Stop micro-labels consuming the requested-count budget | Rec88's 0.6 s scrap took one of 9 slots, denying a real voice a cluster — the Rec82 defect in a new guise. **Needs an A/B**: it changes behaviour whenever a genuinely quiet participant exists |
+| — | Commit the two Swift fixes | Uncommitted, mixed with an in-progress refactor in the same file |
+| — | **Evaluate pyannote community-1** | Licence-clean. **Rec88 is the real argument** — the fixed 4-speakers-per-window topology is the ceiling there. Note Rec82 was *not* evidence for this. Needs the HF token (Models page → Hugging Face access, Keychain) |
 | #11 | Per-model threshold calibration | **Rec82 is now the concrete argument.** Even with the budget fixed, a wrong external count can force a merge across cosine 0.054. A similarity floor is only safe once thresholds are per-model: the "no fixed threshold is safe" reasoning is right for TitaNet (0.94 between *different* people) and wrong for ReDimNet2 (0.024) |
 | #14 | Partition search scores labels that cannot reach the output | Correctness of shipped code |
 | #10 | Stage 4: surface ambiguity as a confirm/reject decision | The Jeevan/Jenny case is the argument |
