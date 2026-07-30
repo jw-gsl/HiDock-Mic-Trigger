@@ -271,58 +271,6 @@ struct SpeakerMeta: Codable {
     var verified: Bool
 }
 
-/// Margin-based voice-match result for one speaker (from the `speaker-confidence`
-/// CLI). The margin — how clearly the assigned name beats the next-best enrolled
-/// voice — is the real signal; a raw cosine looks high even when wrong.
-struct SpeakerScore: Codable {
-    var assigned: String?
-    var score: Double?          // cosine to the assigned voice (nil if not enrolled)
-    var best: String?           // closest enrolled voice overall
-    var bestScore: Double?
-    var runnerUp: String?       // best enrolled voice other than the assigned name
-    var runnerUpScore: Double?
-    var margin: Double?         // score - runnerUpScore (negative ⇒ another voice fits better)
-}
-
-/// A no-write identity proposal from the isolated candidate voice library.
-/// Which model backs it is configurable (WeSpeaker, then ReDimNet2), so nothing
-/// user-facing names a specific one — that label went stale once already.
-/// The app only displays this evidence; a user action is required before a
-/// transcript name or voice profile can change.
-struct SpeakerSuggestion: Codable {
-    var currentName: String?
-    var proposedName: String?
-    var similarity: Double?
-    var runnerUp: String?
-    var runnerUpSimilarity: Double?
-    var margin: Double?
-    var scorer: String?
-    var supportingMeetings: Int?
-    var decision: String
-    var reviewOnly: Bool
-    var reasons: [String]
-    var acousticQuality: Double?
-    var audioReason: String?
-    /// Calendar-event support for the proposed name (nil = no calendar data).
-    var inCalendar: Bool?
-
-    enum CodingKeys: String, CodingKey {
-        case currentName = "current_name"
-        case proposedName = "proposed_name"
-        case similarity
-        case runnerUp = "runner_up"
-        case runnerUpSimilarity = "runner_up_similarity"
-        case margin, scorer
-        case supportingMeetings = "supporting_meetings"
-        case decision
-        case reviewOnly = "review_only"
-        case reasons
-        case acousticQuality = "acoustic_quality"
-        case audioReason = "audio_reason"
-        case inCalendar = "in_calendar"
-    }
-}
-
 struct DiarizedTranscript: Codable {
     var version: Int
     var audioFile: String
@@ -687,11 +635,6 @@ struct TranscriptViewerView: View {
     /// window commits the edit and deselects it (the field otherwise stays
     /// active with no way to dismiss it).
     @FocusState private var nameFieldFocused: Bool
-    /// Live per-speaker confidence (id-string → 0–1) from the background CLI:
-    /// how well each speaker's voice matches the enrolled voice of its name.
-    @State private var liveConfidence: [String: SpeakerScore] = [:]
-    @State private var liveSuggestions: [String: SpeakerSuggestion] = [:]
-    @State private var suggestionsLoading = false
     /// A rename that collided with another speaker's name — pending the user's
     /// choice to merge the two speakers or cancel.
     @State private var pendingMerge: PendingMerge?
@@ -702,9 +645,6 @@ struct TranscriptViewerView: View {
     /// maps the speaker to that exact enrolled voice (so confirming reinforces
     /// the same centroid instead of fragmenting into near-duplicate names).
     @State private var libraryNames: [String] = []
-    /// Weak ("closest voice") candidates stay hidden behind a click so they
-    /// can't anchor the reviewer's judgement; this set tracks reveals.
-    @State private var revealedWeakSuggestions: Set<String> = []
     /// When every speaker is verified the panel collapses to a one-line done
     /// state; this re-expands it for inspection.
     @State private var verifyPanelExpanded = false
@@ -745,6 +685,13 @@ struct TranscriptViewerView: View {
     @State private var linkedCalendarEvent: CalendarMeetingCandidate?
     @State private var suggestedCalendarEvent: CalendarMeetingCandidate?
     @State private var calendarCheckRejected = false
+    /// Prevent a legacy raw-ASR sidecar from triggering more than one catch-up
+    /// diarisation while this viewer is open.
+    @State private var requestedInitialDiarization = false
+    /// "Find another" is a targeted, user-led lookup rather than a second
+    /// attempt to show the same automatic time-overlap suggestion.
+    @State private var showingAlternativeCalendarSearch = false
+    @State private var alternativeCalendarQuery = ""
     /// A result the reviewer has highlighted in the picker. Highlighting is
     /// deliberately separate from linking: calendar context affects speaker
     /// handling, so it always gets an explicit Confirm meeting action.
@@ -775,13 +722,6 @@ struct TranscriptViewerView: View {
     /// jsonPath, speakerId) — a far better voiceprint than one short segment.
     /// Falls back to onEnrollSpeaker (audio) when nil.
     var onEnrollSpeakerFromDiarized: ((String, String, Int) -> Void)?
-    /// Score each speaker's voice against its assigned name in the library
-    /// (background CLI). Returns {speaker-id-string: confidence 0–1}. Optional
-    /// so older call-sites keep compiling.
-    var onScoreSpeakers: ((String, @escaping ([String: SpeakerScore]) -> Void) -> Void)?
-    /// Re-embed unverified speakers with the isolated candidate model and
-    /// return review-only proposals. The callback never mutates the sidecar.
-    var onSuggestSpeakers: ((String, @escaping ([String: SpeakerSuggestion]) -> Void) -> Void)?
     /// Record the explicit human outcome and, for a confirmation, teach the
     /// isolated candidate library from the confirmed audio evidence.
     var onRecordSpeakerSuggestion: ((String, Int, String, String?, String?) -> Void)?
@@ -807,10 +747,15 @@ struct TranscriptViewerView: View {
     /// Search the user's locally synced macOS calendar around this recording.
     var onFindCalendarEvents: ((String, Double, @escaping ([CalendarMeetingCandidate]) -> Void) -> Void)?
     /// Query the already-authenticated Microsoft 365 MCP configured in Claude.
-    var onFindClaudeCalendarEvents: ((String, Double, @escaping ([CalendarMeetingCandidate]) -> Void) -> Void)? = nil
+    /// A non-empty query asks for nearby, user-directed alternatives rather
+    /// than the automatic exact-overlap suggestion.
+    var onFindClaudeCalendarEvents: ((String, Double, String?, @escaping ([CalendarMeetingCandidate]) -> Void) -> Void)? = nil
     /// A previously saved automatic match.  It remains a suggestion until the
     /// reviewer confirms it in this view.
     var onLoadCalendarSuggestion: ((String) -> CalendarMeetingCandidate?)? = nil
+    /// Discard an automatic suggestion without treating it as a "no meeting"
+    /// decision. This lets the reviewer look for another event safely.
+    var onDismissCalendarSuggestion: ((String) -> Void)? = nil
     /// A reviewer explicitly rejected the saved suggestion.  This suppresses
     /// background MCP checks until they choose to check again.
     var onLoadCalendarRejection: ((String) -> Bool)? = nil
@@ -823,8 +768,8 @@ struct TranscriptViewerView: View {
     var onLinkCalendarEvent: ((String, Double, CalendarMeetingCandidate, Bool) -> Void)?
     /// Remove a previously confirmed calendar-context sidecar.
     var onRemoveCalendarEvent: ((String) -> Void)? = nil
-    /// Reject the saved pending suggestion and continue with speaker matching
-    /// without calendar context.  This is shared with the table action.
+    /// Explicitly settle the recording as an ad-hoc call, dismissing a pending
+    /// suggestion without disturbing its existing speaker detection.
     var onRejectCalendarSuggestion: ((String) -> Void)? = nil
     /// Open the in-app terminal with MCP calendar onboarding instructions.
     var onOpenCalendarMCPOnboarding: (() -> Void)?
@@ -837,10 +782,18 @@ struct TranscriptViewerView: View {
     }
 
     /// The re-detection control starts at the number of speakers in the
-    /// transcript currently on screen. Keep the existing generous upper bound
-    /// for recordings where the user wants to try a larger count.
+    /// transcript currently on screen.
+    ///
+    /// The ceiling used to be 8, which made a 9-person meeting unaskable: the
+    /// bound only grew past 8 for a transcript that *already* had more than 8
+    /// speakers, and you could not get there without requesting them. Nothing
+    /// downstream needed the limit — `_split_labels_to_count` has no cap, tries
+    /// each round's most convincingly divisible label, and stops with
+    /// "no voice evidence to reach N speakers; keeping M" when it runs out. So
+    /// the honest bound is one high enough not to constrain a real meeting and
+    /// let the pipeline report how far it actually got.
     private var rediarizeSpeakerRange: ClosedRange<Int> {
-        2...max(8, uniqueSpeakerIds.count)
+        2...max(20, uniqueSpeakerIds.count)
     }
 
     private var isRediarizing: Bool {
@@ -872,8 +825,24 @@ struct TranscriptViewerView: View {
     }
 
     private var hasSpeakers: Bool {
-        // Non-diarized transcripts have all speaker_id=0 and empty speaker_names
-        uniqueSpeakerIds.count > 1 || !transcript.speakerNames.isEmpty
+        // Every transcript segment belongs to a speaker slot, even before a
+        // calendar link (or automatic diarisation) has split that slot into
+        // multiple people. Keep the review and Redetect controls available for
+        // that single Speaker 1: otherwise an ad-hoc meeting has no way to
+        // reach speaker verification at all.
+        !transcript.segments.isEmpty
+    }
+
+    /// Detect legacy raw-ASR sidecars created before diarisation became part
+    /// of initial transcription. A genuine one-person diarisation has backend
+    /// or speaker metadata; this narrow check avoids reprocessing it merely
+    /// because a calendar suggestion happens to be pending.
+    private var requiresInitialDiarization: Bool {
+        uniqueSpeakerIds.count == 1
+            && isGenericName(speakerName(for: uniqueSpeakerIds[0]))
+            && transcript.backend == nil
+            && transcript.speakerMeta == nil
+            && transcript.speakerEmbeddings == nil
     }
 
     private func speakerName(for id: Int) -> String {
@@ -1058,7 +1027,7 @@ struct TranscriptViewerView: View {
             // expanded when needed without pushing the transcript off-screen.
             // Once nothing needs review, the panel collapses to a one-line
             // done state instead of vanishing mid-interaction.
-            if uniqueSpeakerIds.count > 1 {
+            if hasSpeakers {
                 if needsVerification || verifyPanelExpanded {
                     VSplitView {
                         speakerVerifyPanel
@@ -1112,9 +1081,15 @@ struct TranscriptViewerView: View {
         }
         .onAppear {
             syncRediarizeSpeakerCount()
-            refreshConfidence()
-            refreshSuggestions()
             refreshLibraryNames()
+            // Recover transcripts made by the short-lived raw-ASR-first flow.
+            // Meeting matching is deliberately not involved: the initial pass
+            // establishes the real speaker count first, then a confirmed
+            // calendar event can refine that result with attendee context.
+            if requiresInitialDiarization, !requestedInitialDiarization, onRediarize != nil {
+                requestedInitialDiarization = true
+                startRediarize(speakers: nil)
+            }
             // Calendar matching should be a quiet background suggestion when
             // a transcript opens, not a separate task the reviewer must
             // remember to start.  It remains unlinked until confirmed.
@@ -1266,7 +1241,6 @@ struct TranscriptViewerView: View {
         // diarizer centroid yet.
         enrollConfirmed(trimmed, speakerId: newId)
         self.selection = nil
-        refreshConfidence()
         refreshLibraryNames()
     }
 
@@ -1274,7 +1248,11 @@ struct TranscriptViewerView: View {
     private func selectionPersonPicker(selection: SegmentSelection) -> some View {
         let query = selectionPersonQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let invitedLibraryNames = calendarInvitedLibraryNames
-        let orderedNames = invitedLibraryNames + libraryNames.filter { !invitedLibraryNames.contains($0) }
+        let invitedNewNames = calendarInvitedNewNames
+        let invitedKeys = Set((invitedLibraryNames + invitedNewNames).map { $0.lowercased() })
+        let orderedNames = invitedLibraryNames
+            + invitedNewNames
+            + libraryNames.filter { !invitedKeys.contains($0.lowercased()) }
         let matches = orderedNames
             .filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }
             .prefix(12)
@@ -1285,7 +1263,9 @@ struct TranscriptViewerView: View {
             TextField("Search Voice Library or enter a name", text: $selectionPersonQuery)
                 .textFieldStyle(.roundedBorder)
             if !matches.isEmpty {
-                Text(invitedLibraryNames.isEmpty ? "Voice Library" : "Invited people in Voice Library first")
+                Text(invitedLibraryNames.isEmpty && invitedNewNames.isEmpty
+                    ? "Voice Library"
+                    : "Meeting invitees first — new people are added when you confirm them")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 ForEach(Array(matches), id: \.self) { name in
@@ -1513,18 +1493,17 @@ struct TranscriptViewerView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Confirm suggested meeting: \(suggested.title)")
+            }
+            if linkedCalendarEvent == nil, !calendarCheckRejected {
                 Button {
-                    onRejectCalendarSuggestion?(audioPath)
-                    suggestedCalendarEvent = nil
-                    calendarCheckRejected = true
-                    selectedCalendarCandidate = nil
-                    showCalendarPicker = true
+                    markAsAdHocCall()
                 } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.red)
+                    Label("Ad-hoc call", systemImage: "calendar.badge.minus")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.orange)
                 }
-                .buttonStyle(.plain)
-                .help("This is not the right meeting — choose another or ask Calendar Assistant")
+                .buttonStyle(.borderless)
+                .help("Skip calendar matching and mark this recording as an ad-hoc call")
             }
             Spacer()
         }
@@ -1720,7 +1699,7 @@ struct TranscriptViewerView: View {
         }
     }
 
-    private func loadCalendarCandidates() {
+    private func loadCalendarCandidates(query: String? = nil) {
         guard !calendarLoading else { return }
         calendarLoading = true
         calendarCandidates = []
@@ -1733,8 +1712,16 @@ struct TranscriptViewerView: View {
             calendarLoading = false
             return
         }
-        search(audioPath, Double(transcriptDurationSeconds)) { events in
+        let requestedAlternative = query?.trimmingCharacters(in: .whitespacesAndNewlines)
+        search(audioPath, Double(transcriptDurationSeconds), requestedAlternative) { events in
             DispatchQueue.main.async {
+                // The reviewer may have chosen Ad-hoc call while this async
+                // lookup was still in flight. Never resurrect a calendar
+                // suggestion after that explicit decision.
+                if calendarCheckRejected {
+                    calendarLoading = false
+                    return
+                }
                 calendarCandidates = events.sorted { $0.start < $1.start }
                 // Existing links created before attendee enrichment may have
                 // only a title/time saved.  Refresh their visible invitees
@@ -1756,7 +1743,9 @@ struct TranscriptViewerView: View {
                 // A single time-overlapping result is useful as a suggestion,
                 // never as an automatic link. Multiple possibilities keep the
                 // neutral Match meeting label until the reviewer chooses one.
-                if events.count == 1, linkedCalendarEvent == nil {
+                if requestedAlternative?.isEmpty != false,
+                   events.count == 1,
+                   linkedCalendarEvent == nil {
                     suggestedCalendarEvent = events[0]
                 }
                 calendarLoading = false
@@ -1778,6 +1767,20 @@ struct TranscriptViewerView: View {
         } else {
             startRediarize(speakers: event.attendeeCount >= 2 ? event.attendeeCount : nil)
         }
+        showCalendarPicker = false
+    }
+
+    /// Explicitly settle this recording as an ad-hoc call. This is deliberately
+    /// immediate and reversible: “Check calendar again” remains available from
+    /// the settled state. It does not disturb the speaker detection already on
+    /// screen.
+    private func markAsAdHocCall() {
+        onRejectCalendarSuggestion?(audioPath)
+        suggestedCalendarEvent = nil
+        calendarCheckRejected = true
+        selectedCalendarCandidate = nil
+        calendarCandidates = []
+        showingAlternativeCalendarSearch = false
         showCalendarPicker = false
     }
 
@@ -1840,15 +1843,63 @@ struct TranscriptViewerView: View {
                         Button("Confirm meeting") { confirmCalendarMeeting(suggested) }
                             .buttonStyle(.borderedProminent)
                         Button("Find another") {
+                            // This suggestion was explicitly rejected as the
+                            // wrong event. Drop its persisted pending state so
+                            // reopening the transcript does not resurrect it.
+                            onDismissCalendarSuggestion?(audioPath)
                             suggestedCalendarEvent = nil
                             selectedCalendarCandidate = nil
+                            calendarCandidates = []
+                            alternativeCalendarQuery = ""
+                            showingAlternativeCalendarSearch = true
+                            // Retry the precise overlap search immediately.
+                            // The manual field remains available only if the
+                            // reviewer wants to widen the search by title,
+                            // attendee, or approximate time.
+                            loadCalendarCandidates()
                         }
+                        Button("Ad-hoc call") {
+                            markAsAdHocCall()
+                        }
+                        .foregroundColor(.orange)
                     }
-                    Text("Confirmation saves this event as context and starts the speaker pass using its attendee hint.")
+                    Text("Confirmation saves this event as context and refines speaker detection using its attendee hint.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Divider().padding(.top, 1)
                 }
+            }
+            if showingAlternativeCalendarSearch {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Find another meeting")
+                        .font(.caption.weight(.semibold))
+                    Text("Search by a meeting title, attendee, or approximate time. Results are suggestions until you confirm one.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    HStack(spacing: 6) {
+                        TextField("e.g. project name or 4pm", text: $alternativeCalendarQuery)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit {
+                                let query = alternativeCalendarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !query.isEmpty else { return }
+                                selectedCalendarCandidate = nil
+                                loadCalendarCandidates(query: query)
+                            }
+                        Button("Search") {
+                            let query = alternativeCalendarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !query.isEmpty else { return }
+                            selectedCalendarCandidate = nil
+                            loadCalendarCandidates(query: query)
+                        }
+                        .disabled(calendarLoading || alternativeCalendarQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Cancel") {
+                            showingAlternativeCalendarSearch = false
+                            alternativeCalendarQuery = ""
+                            calendarCandidates = []
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
             }
             if calendarLoading {
                 HStack(spacing: 6) {
@@ -1874,7 +1925,7 @@ struct TranscriptViewerView: View {
                     }
                     .buttonStyle(.bordered)
                 } else {
-                    Text("No matching event found.")
+                    Text(showingAlternativeCalendarSearch ? "No alternate meeting found yet." : "No matching event found.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -2037,7 +2088,6 @@ struct TranscriptViewerView: View {
         selection = nil
         editingSpeakerId = nil
         syncRediarizeSpeakerCount()
-        refreshConfidence()
         refreshLibraryNames()
     }
 
@@ -2115,23 +2165,6 @@ struct TranscriptViewerView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                if strongSuggestionIds.count >= 2 {
-                    Button {
-                        // Snapshot first: each confirmation mutates liveSuggestions.
-                        let batch = strongSuggestionIds
-                        for id in batch {
-                            if let s = liveSuggestions["\(id)"] {
-                                confirmCandidateSuggestion(id, suggestion: s)
-                            }
-                        }
-                    } label: {
-                        Label("Confirm \(strongSuggestionIds.count) strong", systemImage: "checkmark.circle.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .tint(.green)
-                    .help("Accept every gate-passing suggestion in one click. Weaker closest-voice candidates still need individual review.")
-                }
                 // Bulk undo for bad auto-matches — only when 2+ unverified
                 // speakers can be cleared (single-row × is enough otherwise).
                 if clearable.count >= 2 {
@@ -2190,13 +2223,14 @@ struct TranscriptViewerView: View {
                         .foregroundColor(.accentColor)
                         .help("Back to the one-line verified summary")
                 }
-                if suggestionsLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Checking voices…")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+            }
+            if requiresInitialDiarization {
+                Label(
+                    "Detecting speakers in this older transcript — calendar matching is optional.",
+                    systemImage: "person.2.wave.2"
+                )
+                .font(.caption2)
+                .foregroundColor(.secondary)
             }
             // The surrounding VSplitView controls the panel's height. Keep the
             // rows scrollable within that user-sized pane for larger meetings.
@@ -2212,18 +2246,6 @@ struct TranscriptViewerView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color.blue.opacity(0.04))
-    }
-
-    /// Unverified speakers whose suggestion passed the conservative gate —
-    /// the ones the bulk-confirm button accepts in one click.
-    private var strongSuggestionIds: [Int] {
-        uniqueSpeakerIds.filter { id in
-            guard !(speakerMeta(for: id)?.verified ?? false),
-                  let s = liveSuggestions["\(id)"],
-                  s.decision == "strong_review",
-                  s.proposedName != nil else { return false }
-            return true
-        }
     }
 
     private var speakerVerifyPanelMaximumHeight: CGFloat { 260 }
@@ -2374,27 +2396,6 @@ struct TranscriptViewerView: View {
                     .foregroundColor(prov.color)
             }
 
-            // Live voice-match confidence against the enrolled voice of this name.
-            // Once a person is confirmed, their identity is the decision — a
-            // competing "sounds like" hint is noise and can undermine it.
-            if !verified, !isGenericName(name), let badge = confidenceBadge(for: id) {
-                Text(badge.text)
-                    .font(.caption2.weight(.medium))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(badge.color.opacity(0.15), in: Capsule())
-                    .foregroundColor(badge.color)
-                    .help("How closely this speaker's voice matches the enrolled voice for \(speakerName(for: id)).")
-            }
-
-            if !verified, let suggestion = liveSuggestions["\(id)"] {
-                compactSuggestionEvidence(suggestion)
-            } else if !verified && suggestionsLoading {
-                Text("Checking voice model…")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
             Spacer()
 
             // Listen to just this speaker to check the voice is really theirs.
@@ -2437,13 +2438,6 @@ struct TranscriptViewerView: View {
                 Label("Verified", systemImage: "checkmark.seal.fill")
                     .font(.caption2)
                     .foregroundColor(.green)
-            } else if let suggestion = liveSuggestions["\(id)"], suggestion.proposedName != nil {
-                Button("Confirm this name") {
-                    confirmCandidateSuggestion(id, suggestion: suggestion)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("You are confirming this identity. The model cannot apply it by itself.")
             } else if !isGenericName(name) {
                 Button {
                     confirmSpeaker(id)
@@ -2467,33 +2461,6 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// One compact, informational treatment of candidate-model output. The primary
-    /// decision is rendered separately at the far right of the row.
-    @ViewBuilder
-    private func compactSuggestionEvidence(_ suggestion: SpeakerSuggestion) -> some View {
-        if suggestion.decision == "hold" {
-            Text("Voice model: manual review")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .help(suggestionHelp(suggestion))
-        } else if let proposed = suggestion.proposedName {
-            HStack(spacing: 4) {
-                Image(systemName: "person.crop.circle.badge.questionmark")
-                    .font(.caption2)
-                    .foregroundColor(suggestion.decision == "strong_review" ? .green : .blue)
-                Text(proposed)
-                    .font(.caption.weight(.semibold))
-                calendarBadge(suggestion.inCalendar)
-                if let score = suggestion.similarity {
-                    Text("\(Int((score * 100).rounded()))%")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundColor(.secondary)
-                }
-            }
-            .help(suggestionHelp(suggestion))
-        }
-    }
-
     /// Secondary per-speaker actions behind a ⋯ menu, so each row carries a
     /// single primary action instead of a row of competing buttons.
     private func speakerActionsMenu(id: Int) -> some View {
@@ -2507,124 +2474,6 @@ struct TranscriptViewerView: View {
         .fixedSize()
         .foregroundColor(.secondary)
         .help("More actions for \(speakerName(for: id))")
-    }
-
-    /// Calendar support for a proposed name: plain calendar when the event's
-    /// attendee list includes them, warning mark when it doesn't.
-    private func calendarBadge(_ inCalendar: Bool?) -> some View {
-        Group {
-            if let inCalendar {
-                Image(systemName: inCalendar ? "calendar" : "calendar.badge.exclamationmark")
-                    .font(.caption2)
-                    .foregroundColor(inCalendar ? .accentColor : .orange)
-                    .help(inCalendar
-                        ? "In the meeting's calendar event"
-                        : "Not in the meeting's attendee list — held for your review")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func speakerSuggestionRow(id: Int, suggestion: SpeakerSuggestion) -> some View {
-        if suggestion.decision == "hold" {
-            HStack(spacing: 6) {
-                Image(systemName: "waveform.badge.exclamationmark")
-                    .foregroundColor(.secondary)
-                Text("WeSpeaker held this speaker for manual review")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.leading, 26)
-        } else if let proposed = suggestion.proposedName {
-            if suggestion.decision == "strong_review" {
-                // Gate-passing suggestion: name + confidence + confirm. Margin,
-                // meetings, and runner-up stay in the tooltip (suggestionHelp).
-                HStack(spacing: 7) {
-                    Image(systemName: "person.crop.circle.badge.questionmark.fill")
-                        .foregroundColor(.green)
-                    Text(proposed)
-                        .font(.caption.weight(.semibold))
-                    calendarBadge(suggestion.inCalendar)
-                    if let score = suggestion.similarity {
-                        Text("\(Int((score * 100).rounded()))%")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button("Confirm suggestion") {
-                        confirmCandidateSuggestion(id, suggestion: suggestion)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("You are confirming this identity. The model cannot apply it by itself.")
-                }
-                .padding(.leading, 26)
-                .help(suggestionHelp(suggestion))
-            } else {
-                // Weak candidates stay hidden until asked for — an unverified
-                // name on screen can anchor the reviewer into confirming it.
-                // Exception: when the quick library guess on this row names
-                // someone DIFFERENT, the contradiction is exactly what the
-                // reviewer needs to see, so show it (and the badge is
-                // suppressed, leaving one name on screen).
-                let contradictsLibraryGuess: Bool = {
-                    guard let best = liveConfidence["\(id)"]?.best else { return false }
-                    return best.caseInsensitiveCompare(proposed) != .orderedSame
-                }()
-                if contradictsLibraryGuess || revealedWeakSuggestions.contains("\(id)") {
-                    HStack(spacing: 7) {
-                        Image(systemName: "person.crop.circle.badge.questionmark")
-                            .foregroundColor(.blue)
-                        Text(proposed)
-                            .font(.caption.weight(.semibold))
-                        calendarBadge(suggestion.inCalendar)
-                        if let score = suggestion.similarity {
-                            Text("\(Int((score * 100).rounded()))%")
-                                .font(.caption2.monospacedDigit())
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button("Confirm this name") {
-                            confirmCandidateSuggestion(id, suggestion: suggestion)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .help("You are confirming this identity. The model cannot apply it by itself.")
-                    }
-                    .padding(.leading, 26)
-                    .help(suggestionHelp(suggestion))
-                } else {
-                    HStack(spacing: 6) {
-                        Image(systemName: "person.crop.circle.badge.questionmark")
-                            .foregroundColor(.blue)
-                        Button("Closest match found — view") {
-                            revealedWeakSuggestions.insert("\(id)")
-                        }
-                        .font(.caption2)
-                        .buttonStyle(.borderless)
-                        .foregroundColor(.accentColor)
-                    }
-                    .padding(.leading, 26)
-                    .help("Did not pass the conservative gate. Reveal the candidate only if you want it — it is hidden so it cannot anchor your judgement.")
-                }
-            }
-        }
-    }
-
-    private func suggestionHelp(_ suggestion: SpeakerSuggestion) -> String {
-        var parts = [suggestion.decision == "strong_review"
-                     ? "Passed the conservative review gate — no name has been applied."
-                     : "Did not pass the conservative gate; shown only as the closest candidate for manual review."]
-        if let runnerUp = suggestion.runnerUp {
-            parts.append("Runner-up: \(runnerUp).")
-        }
-        if !suggestion.reasons.isEmpty {
-            parts.append("Warnings: \(suggestion.reasons.joined(separator: ", ")).")
-        }
-        if let reason = suggestion.audioReason {
-            parts.append("Audio: \(reason).")
-        }
-        return parts.joined(separator: " ")
     }
 
     @ViewBuilder
@@ -2652,7 +2501,10 @@ struct TranscriptViewerView: View {
                     .frame(width: 140)
                     .controlSize(.small)
                     .focused($nameFieldFocused)
-                    .onAppear { nameFieldFocused = true }
+                    .onAppear {
+                        nameFieldFocused = true
+                        selectPrefilledName()
+                    }
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -2779,10 +2631,33 @@ struct TranscriptViewerView: View {
 
     // MARK: - Actions
 
+    /// Select the pre-filled name so the first keystroke replaces it.
+    ///
+    /// The editor opens with the speaker's current name already in the field, and
+    /// SwiftUI leaves the caret inside that text with no selection API of its own.
+    /// So typing extended the existing name instead of starting a search — every
+    /// rename needed a manual select-all first, and the field could not be used to
+    /// filter the library or enter a new name the way it looks like it should.
+    /// `nameSuggestions` already treats the unchanged current name as browse mode,
+    /// so selecting the text was the only piece missing.
+    ///
+    /// Deferred a tick because `.focused` propagates on SwiftUI's update cycle:
+    /// the field is not first responder yet when `onAppear` runs. Guarded on the
+    /// responder actually being a text view and bounded to a few attempts, so a
+    /// mistimed call is a no-op rather than clearing someone else's selection.
+    private func selectPrefilledName(attempt: Int = 0) {
+        DispatchQueue.main.async {
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                editor.selectAll(nil)
+            } else if attempt < 3 {
+                selectPrefilledName(attempt: attempt + 1)
+            }
+        }
+    }
+
     private func commitRename(speakerId: Int) {
         let previousName = speakerName(for: speakerId)
         let previousMeta = speakerMeta(for: speakerId)
-        let suggestion = liveSuggestions["\(speakerId)"]
         let trimmed = editingName.trimmingCharacters(in: .whitespaces)
         // Empty, or unchanged from the current name → just close the editor
         // (no save/enroll). Unchanged matters because clicking off to deselect
@@ -2818,8 +2693,7 @@ struct TranscriptViewerView: View {
         enrollConfirmed(trimmed, speakerId: speakerId, previousName: renameFrom)
 
         saveTranscript()
-        recordConfirmationForNaming(speakerId: speakerId, name: trimmed, suggestion: suggestion)
-        refreshConfidence()
+        recordConfirmationForNaming(speakerId: speakerId, name: trimmed)
         refreshLibraryNames()
     }
 
@@ -2834,19 +2708,11 @@ struct TranscriptViewerView: View {
     /// auto-tagging was promoted to the candidate model. Jenny Helland was
     /// confirmed repeatedly and stayed unnameable; eight people had drifted out.
     ///
-    /// With no suggestion to compare against, the outcome is a plain "confirmed":
-    /// the reviewer typed this name, and nothing was proposed to reject.
-    private func recordConfirmationForNaming(
-        speakerId: Int,
-        name: String,
-        suggestion: SpeakerSuggestion?
-    ) {
-        let proposed = suggestion?.proposedName
-        let action = proposed.map {
-            $0.caseInsensitiveCompare(name) == .orderedSame ? "confirmed" : "rejected"
-        } ?? "confirmed"
-        onRecordSpeakerSuggestion?(filePath, speakerId, action, proposed, name)
-        liveSuggestions.removeValue(forKey: "\(speakerId)")
+    /// The reviewer chose this name directly, so it is unambiguous positive
+    /// evidence for the naming library rather than an outcome of an ephemeral
+    /// on-screen model proposal.
+    private func recordConfirmationForNaming(speakerId: Int, name: String) {
+        onRecordSpeakerSuggestion?(filePath, speakerId, "confirmed", nil, name)
     }
 
     // MARK: - Speaker verification (provenance + confirm loop)
@@ -2910,10 +2776,12 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// Any multi-speaker meeting with an unverified speaker still to review, or
-    /// one where two speakers share a name (a duplicate to merge).
+    /// Any transcript with an unverified speaker still to review, or one where
+    /// two speakers share a name (a duplicate to merge). A one-speaker result
+    /// is still reviewable: it may be a genuine solo recording or an ad-hoc
+    /// meeting that needs Redetect before its people can be separated.
     private var needsVerification: Bool {
-        guard uniqueSpeakerIds.count > 1 else { return false }
+        guard hasSpeakers else { return false }
         if hasDuplicateNames { return true }
         return uniqueSpeakerIds.contains { !(speakerMeta(for: $0)?.verified ?? false) }
     }
@@ -2952,42 +2820,21 @@ struct TranscriptViewerView: View {
     private func confirmSpeaker(_ id: Int) {
         let name = speakerName(for: id)
         guard !isGenericName(name) else { return }   // nothing to confirm without a name
-        let suggestion = liveSuggestions["\(id)"]
         let existingSource = speakerMeta(for: id)?.source
         setMeta(id, source: existingSource == "user" ? "user" : "auto",
                 verified: true, confidence: speakerMeta(for: id)?.confidence)
         enrollConfirmed(name, speakerId: id)
         saveTranscript()
-        recordConfirmationForNaming(speakerId: id, name: name, suggestion: suggestion)
-        refreshConfidence()
-        refreshLibraryNames()
-    }
-
-    /// Apply a candidate name only after the reviewer presses the explicit
-    /// confirmation button. Both the live TitaNet library and the isolated
-    /// WeSpeaker library learn from that human-confirmed identity.
-    private func confirmCandidateSuggestion(_ id: Int, suggestion: SpeakerSuggestion) {
-        guard let proposed = suggestion.proposedName, !isGenericName(proposed) else { return }
-        transcript.speakerNames["\(id)"] = proposed
-        setMeta(id, source: "user", verified: true, confidence: suggestion.similarity)
-        enrollConfirmed(proposed, speakerId: id)
-        saveTranscript()
-        onRecordSpeakerSuggestion?(filePath, id, "confirmed", proposed, proposed)
-        liveSuggestions.removeValue(forKey: "\(id)")
-        refreshConfidence()
+        recordConfirmationForNaming(speakerId: id, name: name)
         refreshLibraryNames()
     }
 
     /// Acknowledge a speaker the user genuinely can't name — counts as reviewed
     /// but is NOT enrolled into the voice library.
     private func markUnknown(_ id: Int) {
-        let suggestion = liveSuggestions["\(id)"]
         setMeta(id, source: "unknown", verified: true, confidence: nil)
         saveTranscript()
-        if let proposed = suggestion?.proposedName {
-            onRecordSpeakerSuggestion?(filePath, id, "unknown", proposed, nil)
-            liveSuggestions.removeValue(forKey: "\(id)")
-        }
+        onRecordSpeakerSuggestion?(filePath, id, "unknown", nil, nil)
     }
 
     /// True when there's something to clear: a non-generic name and/or
@@ -2995,7 +2842,6 @@ struct TranscriptViewerView: View {
     private func canClearSpeaker(_ id: Int) -> Bool {
         if !isGenericName(speakerName(for: id)) { return true }
         if let m = speakerMeta(for: id), m.source != "generic" { return true }
-        if liveConfidence["\(id)"] != nil { return true }
         return false
     }
 
@@ -3007,13 +2853,12 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// Undo assignment: name → "Speaker N", meta → generic/unverified, drop
-    /// confidence chip. Does not enroll and does not count as reviewed.
+    /// Undo assignment: name → "Speaker N", meta → generic/unverified. Does
+    /// not enroll and does not count as reviewed.
     private func clearSpeakerAssignment(_ id: Int, save: Bool = true) {
         let generic = "Speaker \(id + 1)"
         transcript.speakerNames["\(id)"] = generic
         setMeta(id, source: "generic", verified: false, confidence: nil)
-        liveConfidence.removeValue(forKey: "\(id)")
         if speakerFilter == id { speakerFilter = nil }
         if editingSpeakerId == id {
             editingSpeakerId = nil
@@ -3068,7 +2913,6 @@ struct TranscriptViewerView: View {
                 || speakerMeta(for: id)?.verified != true {
                 transcript.speakerNames["\(id)"] = generic
                 setMeta(id, source: "unknown", verified: true, confidence: nil)
-                liveConfidence.removeValue(forKey: "\(id)")
                 changed = true
             }
         }
@@ -3089,41 +2933,7 @@ struct TranscriptViewerView: View {
         setMeta(merge.to, source: "user", verified: true, confidence: nil)
         enrollConfirmed(merge.name, speakerId: merge.to, previousName: previousName)
         saveTranscript()
-        refreshConfidence()
         refreshLibraryNames()
-    }
-
-    /// Ask the background CLI to score each speaker's voice against its assigned
-    /// name in the voice library, and cache the result for the verify chips.
-    private func refreshConfidence() {
-        onScoreSpeakers?(filePath) { scores in
-            self.liveConfidence = scores
-        }
-    }
-
-    /// Ask the isolated candidate model for evidence. Missing configuration,
-    /// a recording in progress, or any inference failure simply yields no
-    /// proposals and leaves the established review screen unchanged.
-    ///
-    /// That last promise used to be false: the result was assigned wholesale, so
-    /// an empty reply *erased* the suggestions already on screen. Reported as
-    /// "the 'sounds like' person shows, then disappears once the model loads" —
-    /// two passes run per open, and a second pass with no opinion wiped the
-    /// first pass's proposal.
-    ///
-    /// An empty inference result means "no opinion", not "not this person".
-    /// Only an explicit reject or clear removes a suggestion, and those call
-    /// `removeValue` directly.
-    private func refreshSuggestions() {
-        guard !suggestionsLoading, let onSuggestSpeakers else { return }
-        suggestionsLoading = true
-        onSuggestSpeakers(filePath) { suggestions in
-            defer { self.suggestionsLoading = false }
-            guard !suggestions.isEmpty else { return }
-            // Merge so a pass that only has an opinion about one speaker cannot
-            // silently drop the evidence held for the others.
-            self.liveSuggestions.merge(suggestions) { _old, new in new }
-        }
     }
 
     /// Load the enrolled voice names for the rename autocomplete.
@@ -3131,15 +2941,40 @@ struct TranscriptViewerView: View {
         onListVoiceNames?() { names in self.libraryNames = names }
     }
 
-    /// Confirmed/suggested calendar people who have an enrolled voice. These
-    /// are promoted in the selected-text person picker without excluding the
-    /// rest of the library, so calendar evidence guides rather than dictates.
-    private var calendarInvitedLibraryNames: [String] {
+    /// Calendar invitees, kept in meeting order and de-duplicated for the
+    /// person pickers. The calendar establishes who could be in the room, but
+    /// never assigns a voice by itself.
+    private var calendarInvitedNames: [String] {
         let invited = (linkedCalendarEvent ?? suggestedCalendarEvent)?.attendeeNames ?? []
-        guard !invited.isEmpty else { return [] }
+        var seen = Set<String>()
+        return invited.compactMap { rawName in
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = name.lowercased()
+            guard !name.isEmpty, seen.insert(key).inserted else { return nil }
+            return name
+        }
+    }
+
+    /// Calendar invitees who already have an enrolled voice. These are promoted
+    /// without excluding the rest of the library, so calendar evidence guides
+    /// rather than dictates.
+    private var calendarInvitedLibraryNames: [String] {
+        guard !calendarInvitedNames.isEmpty else { return [] }
         return libraryNames.filter { libraryName in
-            invited.contains { invitedName in
+            calendarInvitedNames.contains { invitedName in
                 libraryName.caseInsensitiveCompare(invitedName) == .orderedSame
+            }
+        }
+    }
+
+    /// Invitees with no profile yet. They are deliberately suggestions in the
+    /// human picker, never automatic speaker labels: an invite does not prove a
+    /// person spoke. Choosing one is an explicit confirmation and enrols this
+    /// meeting's audio as that person's first voice profile.
+    private var calendarInvitedNewNames: [String] {
+        calendarInvitedNames.filter { invitedName in
+            !libraryNames.contains {
+                $0.caseInsensitiveCompare(invitedName) == .orderedSame
             }
         }
     }
@@ -3196,14 +3031,22 @@ struct TranscriptViewerView: View {
             .filter { $0.lowercased() != current }
             .filter { browse || $0.lowercased().contains(q) }
 
-        let invitedKeys = Set(invitedMatches.map { $0.lowercased() })
-        let remainingSlots = max(0, 8 - meetingMatches.count - invitedMatches.count)
+        // A calendar attendee without a profile (for example Gavin in Rec85)
+        // cannot be auto-matched acoustically yet, but should be immediately
+        // available for a reviewer to confirm after listening to the cluster.
+        let invitedNewMatches = calendarInvitedNewNames
+            .filter { !alreadyShown.contains($0.lowercased()) }
+            .filter { $0.lowercased() != current }
+            .filter { browse || $0.lowercased().contains(q) }
+
+        let invitedKeys = Set((invitedMatches + invitedNewMatches).map { $0.lowercased() })
+        let remainingSlots = max(0, 8 - meetingMatches.count - invitedMatches.count - invitedNewMatches.count)
         let libraryMatches = otherVoiceLibraryNames
             .filter { !invitedKeys.contains($0.lowercased()) }
             .filter { browse || $0.lowercased().contains(q) }
             .prefix(remainingSlots)
 
-        if !meetingMatches.isEmpty || !invitedMatches.isEmpty || !libraryMatches.isEmpty {
+        if !meetingMatches.isEmpty || !invitedMatches.isEmpty || !invitedNewMatches.isEmpty || !libraryMatches.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 if !meetingMatches.isEmpty {
                     Text("Already mapped in this meeting")
@@ -3223,12 +3066,21 @@ struct TranscriptViewerView: View {
                     suggestionRows(invitedMatches, speakerId: id)
                 }
 
-                if !libraryMatches.isEmpty {
-                    Text(meetingMatches.isEmpty && invitedMatches.isEmpty ? "Voice Library" : "Other voices")
+                if !invitedNewMatches.isEmpty {
+                    Text("New invited people — confirm after listening")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 8)
                         .padding(.top, (meetingMatches.isEmpty && invitedMatches.isEmpty) ? 4 : 8)
+                    suggestionRows(invitedNewMatches, speakerId: id)
+                }
+
+                if !libraryMatches.isEmpty {
+                    Text(meetingMatches.isEmpty && invitedMatches.isEmpty && invitedNewMatches.isEmpty ? "Voice Library" : "Other voices")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, (meetingMatches.isEmpty && invitedMatches.isEmpty && invitedNewMatches.isEmpty) ? 4 : 8)
                     suggestionRows(Array(libraryMatches), speakerId: id)
                 }
             }
@@ -3265,42 +3117,6 @@ struct TranscriptViewerView: View {
             }
             .buttonStyle(.plain)
         }
-    }
-
-    /// A voice-match badge based on the MARGIN over other enrolled voices, not a
-    /// raw cosine (which looks high even when the match is wrong). Flags the case
-    /// the user hit — another enrolled voice fits better than the assigned name.
-    private func confidenceBadge(for id: Int) -> (text: String, color: Color)? {
-        // One name per speaker: when WeSpeaker proposes something different
-        // from the quick library guess, its suggestion row carries the naming
-        // decision and this badge stays out of the way (the two models
-        // disagreeing on screen was read as one confused signal).
-        if let suggestion = liveSuggestions["\(id)"],
-           let proposed = suggestion.proposedName,
-           let best = liveConfidence["\(id)"]?.best,
-           best.caseInsensitiveCompare(proposed) != .orderedSame {
-            return nil
-        }
-        guard let s = liveConfidence["\(id)"] else { return nil }
-        // Assigned name isn't enrolled yet — hint at the closest known voice.
-        guard let assignedScore = s.score else {
-            if let best = s.best { return ("sounds like \(best)", .secondary) }
-            return nil
-        }
-        // Another enrolled voice matches better than the assigned name → suspect.
-        if let best = s.best, best != s.assigned,
-           let bestScore = s.bestScore, bestScore > assignedScore + 0.02 {
-            return ("looks more like \(best)", .red)
-        }
-        // Assigned IS the closest — how clearly does it beat the runner-up?
-        guard let margin = s.margin else {
-            return ("only voice enrolled", .secondary)   // nothing to compare against
-        }
-        if margin >= 0.08 { return ("clear match", .green) }
-        if let ru = s.runnerUp {
-            return margin >= 0.03 ? ("close vs \(ru)", .orange) : ("ambiguous vs \(ru)", .red)
-        }
-        return ("weak match", .orange)
     }
 
     private func copyAllToClipboard() {

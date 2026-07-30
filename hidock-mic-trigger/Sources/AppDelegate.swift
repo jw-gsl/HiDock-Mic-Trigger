@@ -3440,61 +3440,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// Background voice-match scoring for the transcript viewer's verify panel.
-    /// Runs the fast `speaker-confidence` verb (no audio/model load) and returns
-    /// {speaker-id-string: confidence 0–1}. Best-effort — empty map on any error.
-    private func scoreSpeakers(jsonPath: String, completion: @escaping ([String: SpeakerScore]) -> Void) {
-        guard ensureTranscriptionReady() else { completion([:]); return }
-        runTranscription(arguments: ["speaker-confidence", jsonPath]) { result in
-            var map: [String: SpeakerScore] = [:]
-            if case .success(let data) = result,
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let conf = obj["confidence"],
-               let confData = try? JSONSerialization.data(withJSONObject: conf),
-               let decoded = try? JSONDecoder().decode([String: SpeakerScore].self, from: confData) {
-                map = decoded
-            }
-            DispatchQueue.main.async { completion(map) }
-        }
-    }
-
-    /// Run the benchmark-selected identity model only as a no-write review aid.
-    /// It is deliberately paused while the HiDock is recording so a background
-    /// model load cannot compete with the active capture path.
-    private func suggestSpeakers(
-        jsonPath: String,
-        completion: @escaping ([String: SpeakerSuggestion]) -> Void
-    ) {
-        guard !viewModel.hidockRecordingActive else {
-            log("Deferred WeSpeaker review while HiDock recording is active")
-            completion([:])
-            return
-        }
-        guard ensureTranscriptionReady() else { completion([:]); return }
-        runTranscription(
-            arguments: ["speaker-suggestions", jsonPath],
-            timeout: 300
-        ) { [weak self] result in
-            var suggestions: [String: SpeakerSuggestion] = [:]
-            if case .success(let data) = result,
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let raw = object["suggestions"],
-               let suggestionData = try? JSONSerialization.data(withJSONObject: raw),
-               let decoded = try? JSONDecoder().decode(
-                    [String: SpeakerSuggestion].self, from: suggestionData
-               ) {
-                suggestions = decoded
-            } else if case .failure(let error) = result {
-                self?.log("WeSpeaker review unavailable: \(error.localizedDescription)")
-            }
-            DispatchQueue.main.async { completion(suggestions) }
-        }
-    }
-
     /// Record an explicit reviewer decision. Confirmed/corrected names teach
-    /// only the isolated WeSpeaker candidate library; unknowns are audit-only.
-    /// Paused while the HiDock is recording, like the suggestion path, so a
-    /// background model load cannot compete with the active capture path.
+    /// the naming-candidate library; unknowns are audit-only. Paused while the
+    /// HiDock is recording so an embedding pass cannot compete with capture.
     private func recordSpeakerSuggestion(
         jsonPath: String,
         speakerId: Int,
@@ -3503,7 +3451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         finalName: String?
     ) {
         guard !viewModel.hidockRecordingActive else {
-            log("Deferred WeSpeaker review recording while HiDock recording is active")
+            log("Deferred speaker-review recording while HiDock recording is active")
             return
         }
         guard ensureTranscriptionReady() else { return }
@@ -3521,9 +3469,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         runTranscription(arguments: arguments, timeout: 300) { [weak self] result in
             switch result {
             case .success:
-                self?.log("Recorded WeSpeaker review for speaker \(speakerId): \(action)")
+                self?.log("Recorded speaker review for speaker \(speakerId): \(action)")
             case .failure(let error):
-                self?.log("Could not record WeSpeaker review: \(error.localizedDescription)")
+                self?.log("Could not record speaker review: \(error.localizedDescription)")
             }
         }
     }
@@ -3867,12 +3815,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Transcript Viewer
 
+    /// Keep the timezone in which the recorder's wall-clock filename was
+    /// created. HiDock filenames have no offset of their own, so reusing the
+    /// Mac's *current* timezone later (after travel or a DST change) can shift
+    /// a calendar search into the neighbouring meeting.
+    private func recordingTimeContextURL(for audioPath: String) -> URL {
+        let audio = URL(fileURLWithPath: audioPath)
+        return audio.deletingLastPathComponent()
+            .appendingPathComponent("\(audio.deletingPathExtension().lastPathComponent)_recording_time.json")
+    }
+
+    private func recordingTimeZone(for audioPath: String) -> TimeZone {
+        let sidecar = recordingTimeContextURL(for: audioPath)
+        if let data = try? Data(contentsOf: sidecar),
+           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let identifier = payload["time_zone_identifier"] as? String,
+           let timeZone = TimeZone(identifier: identifier) {
+            return timeZone
+        }
+        // Legacy recordings predate the durable context. Use the Mac's local
+        // timezone rather than a hard-coded city; the first lookup below
+        // persists this choice for future searches.
+        return TimeZone.current
+    }
+
+    private func captureRecordingTimeZone(for audioPath: String) {
+        let sidecar = recordingTimeContextURL(for: audioPath)
+        guard !FileManager.default.fileExists(atPath: sidecar.path) else { return }
+        let timeZone = TimeZone.current
+        let payload: [String: Any] = [
+            "time_zone_identifier": timeZone.identifier,
+            "captured_at": ISO8601DateFormatter().string(from: Date()),
+            "source": "mac_time_zone_at_download",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return }
+        do {
+            try data.write(to: sidecar, options: .atomic)
+            log("Saved recording timezone \(timeZone.identifier) for \((audioPath as NSString).lastPathComponent)")
+        } catch {
+            log("Could not save recording timezone for \((audioPath as NSString).lastPathComponent): \(error.localizedDescription)")
+        }
+    }
+
     private func calendarRecordingStart(for audioPath: String) -> Date? {
         let stem = URL(fileURLWithPath: audioPath).deletingPathExtension().lastPathComponent
         guard stem.count >= 16 else { return nil }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "Europe/London")
+        formatter.timeZone = recordingTimeZone(for: audioPath)
         formatter.dateFormat = "yyyyMMMdd-HHmmss"
         return formatter.date(from: String(stem.prefix(16)))
     }
@@ -3882,6 +3872,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         duration: Double,
         completion: @escaping ([CalendarMeetingCandidate]) -> Void
     ) {
+        captureRecordingTimeZone(for: audioPath)
         guard let start = calendarRecordingStart(for: audioPath) else {
             completion([])
             return
@@ -3899,7 +3890,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 .map { event -> CalendarMeetingCandidate in
                     var names = (event.attendees ?? []).compactMap { attendee -> String? in
                         guard attendee.participantStatus != .declined else { return nil }
-                        return attendee.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return self.displayName(for: attendee)
                     }
                     if let organiser = event.organizer?.name?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !organiser.isEmpty,
@@ -3936,13 +3927,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// A usable display name for a calendar participant.
+    ///
+    /// `EKParticipant.name` is nil whenever EventKit cannot resolve the participant
+    /// against Contacts, which is the normal case for Exchange/Teams invitees. We
+    /// were returning that nil straight into a `compactMap`, so unresolved invitees
+    /// were dropped in silence: the 16-person "Business Transformation Team - All
+    /// Hands Q&A" reached the pipeline as **4** attendees. That is not cosmetic —
+    /// `_resolve_speaker_names` restricts matching to `allowed_names`, so those 4
+    /// names (2 of them in the voice library) were the only identities 8 detected
+    /// voices could possibly be given.
+    ///
+    /// The mailto: URL is always present, so fall back to the address: prefer the
+    /// local part turned back into a name ("ellen.barss" -> "Ellen Barss"), which is
+    /// how these corporate addresses are formed and what the voice library keys on.
+    /// Anything else keeps the raw address, which is still a stable identifier for a
+    /// human reviewer and still counts as an attendee.
+    private func displayName(for attendee: EKParticipant) -> String? {
+        if let resolved = attendee.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !resolved.isEmpty,
+           // EventKit hands back the address itself as `name` for some accounts;
+           // run those through the same tidy-up rather than storing an email.
+           !resolved.contains("@") {
+            return resolved
+        }
+        let address = attendee.url.absoluteString
+            .replacingOccurrences(of: "mailto:", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else {
+            return attendee.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let local = address.split(separator: "@").first.map(String.init) ?? address
+        let words = local
+            .replacingOccurrences(of: "_", with: ".")
+            .split(separator: ".")
+            .filter { !$0.isEmpty }
+        // A single opaque token ("jw", "r.smith2") is not a name; keep the address
+        // so it is obviously an unresolved invitee rather than a wrong guess.
+        guard words.count >= 2 else { return address }
+        return words.map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
+            .joined(separator: " ")
+    }
+
     private func linkCalendarEvent(
         audioPath: String,
         duration: Double,
         event: CalendarMeetingCandidate,
         rediarizeAfterLink: Bool = true
     ) {
+        captureRecordingTimeZone(for: audioPath)
         guard let recordingStart = calendarRecordingStart(for: audioPath) else { return }
+        let recordingTimeZone = recordingTimeZone(for: audioPath)
         let iso = ISO8601DateFormatter()
         let payload: [String: Any] = [
             "source": "macos-eventkit",
@@ -3951,8 +3987,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             "value": [[
                 "id": event.id,
                 "subject": event.title,
-                "start": ["dateTime": iso.string(from: event.start), "timeZone": "Europe/London"],
-                "end": ["dateTime": iso.string(from: event.end), "timeZone": "Europe/London"],
+                "start": ["dateTime": iso.string(from: event.start), "timeZone": recordingTimeZone.identifier],
+                "end": ["dateTime": iso.string(from: event.end), "timeZone": recordingTimeZone.identifier],
                 "attendees": event.attendeeNames.map {
                     ["emailAddress": ["name": $0], "response": "accepted"]
                 },
@@ -3983,10 +4019,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                entry.transcribed, let transcriptPath = entry.transcriptPath {
                 let diarized = transcriptPath.replacingOccurrences(of: ".md", with: "_diarized.json")
                 if transcriptHasUnconfirmedSpeakers(at: diarized) {
-                    rediarizeTranscript(
-                        jsonPath: diarized,
-                        nSpeakers: event.attendeeCount >= 2 ? event.attendeeCount : nil
-                    ) { _ in }
+                    // Deliberately no explicit count. The saved `_calendar.json`
+                    // already carries the attendee list, and the pipeline treats a
+                    // calendar count as a **downward-only** soft cap
+                    // (`_expected_speakers_from_calendar` merges down to it and never
+                    // splits up, "because invitees who never speak would otherwise
+                    // manufacture empty participants"). Passing it as `--n-speakers`
+                    // laundered it into the *explicit* path, which does split up —
+                    // harmless while EventKit was silently losing most invitees, but
+                    // now that all 16 are resolved it would try to manufacture 16
+                    // speakers out of a meeting where 9 people spoke.
+                    rediarizeTranscript(jsonPath: diarized, nSpeakers: nil) { _ in }
                 } else {
                     log("Calendar linked without re-diarising \(audioURL.lastPathComponent): all speakers are confirmed")
                     viewModel.syncStatus = "Calendar linked — confirmed speakers unchanged"
@@ -4086,6 +4129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         query: String? = nil,
         completion: @escaping ([CalendarMeetingCandidate]) -> Void
     ) {
+        captureRecordingTimeZone(for: audioPath)
         guard let start = calendarRecordingStart(for: audioPath) else {
             completion([])
             return
@@ -4101,16 +4145,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let end = start.addingTimeInterval(max(1, duration))
         let iso = ISO8601DateFormatter()
+        let recordingTimeZone = recordingTimeZone(for: audioPath)
+        let localFormatter = DateFormatter()
+        localFormatter.locale = Locale(identifier: "en_US_POSIX")
+        localFormatter.timeZone = recordingTimeZone
+        localFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
+        let localStart = localFormatter.string(from: start)
+        let localEnd = localFormatter.string(from: end)
         let requestedMeeting = query?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let queryClause = (requestedMeeting?.isEmpty == false) ? " The user is looking for a meeting matching: \(requestedMeeting!)." : ""
+        let isAlternativeSearch = requestedMeeting?.isEmpty == false
+        let searchStartedAt = Date()
+        let searchKind = isAlternativeSearch ? "alternative" : "automatic"
+        let searchStart = isAlternativeSearch ? start.addingTimeInterval(-2 * 60 * 60) : start
+        let searchEnd = isAlternativeSearch ? end.addingTimeInterval(2 * 60 * 60) : end
+        let searchInstruction: String
+        let noMatchInstruction: String
+        if let requestedMeeting, !requestedMeeting.isEmpty {
+            searchInstruction = """
+            The automatic suggestion was rejected. The recording's actual local window is \(localStart) to \(localEnd). Search from \(localFormatter.string(from: searchStart)) to \(localFormatter.string(from: searchEnd)) for up to six likely alternatives matching “\(requestedMeeting)”. Include nearby events only when they match that request. Return every candidate in the schema below so the reviewer can explicitly choose one.
+            """
+            noMatchInstruction = "If no event matches that requested title, attendee, or time, reply with exactly NO_MATCH on its own line and nothing else."
+        } else {
+            searchInstruction = """
+            The recording's actual local wall-clock window is \(localStart) to \(localEnd) in \(recordingTimeZone.identifier) (UTC: \(iso.string(from: start)) to \(iso.string(from: end))). List calendar events strictly overlapping that LOCAL window. Do not treat the UTC clock values as local times. Return only genuine overlaps, never an adjacent event.
+            """
+            noMatchInstruction = "If no event overlaps that window, reply with exactly NO_MATCH on its own line and nothing else. Do not offer the nearest or adjacent event."
+        }
+        log("Calendar search started [\(searchKind)] for \((audioPath as NSString).lastPathComponent), local recording \(localStart)–\(localEnd)\(requestedMeeting.map { ", query=\($0)" } ?? "")")
         let prompt = """
-        Use the connected Microsoft 365 calendar MCP only. List calendar events overlapping \(iso.string(from: start)) to \(iso.string(from: end)) in Europe/London.\(queryClause) For the best matching event, fetch the event DETAILS before answering. Return exactly these separate lines (display names only, no email addresses):
+        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses):
         Title: <event title>
         Time: <HH:mm> – <HH:mm>
         Organiser: <display name>
         Invitees: <name 1>; <name 2>; <name 3>
         Never omit Invitees: use `Invitees: unavailable` only if the MCP details response truly has no attendee data. Keep the answer concise.
-        If no event overlaps that window, reply with exactly NO_MATCH on its own line and nothing else. Do not offer the nearest or adjacent event.
+        \(noMatchInstruction)
         """
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -4129,7 +4198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard process.terminationStatus == 0,
                       let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else {
-                    self?.log("Claude Calendar MCP search did not return a result")
+                    let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no usable result")
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
@@ -4153,7 +4223,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     "could not find", "couldn\'t find", "did not find",
                 ]
                 if negativeSignals.contains(where: { lowered.contains($0) }) {
-                    self?.log("Calendar search: no overlapping event for \((audioPath as NSString).lastPathComponent)")
+                    let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no match for \((audioPath as NSString).lastPathComponent)")
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
@@ -4170,7 +4241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     pattern: #"(?s)\*\*(.+?)\*\*[\s\S]{0,180}?(\d{1,2}:\d{2})\s*[—–-]\s*(\d{1,2}:\d{2})"#
                 )
                 var calendar = Calendar(identifier: .gregorian)
-                calendar.timeZone = TimeZone(identifier: "Europe/London")!
+                calendar.timeZone = recordingTimeZone
                 let day = calendar.dateComponents([.year, .month, .day], from: start)
                 func dateAt(_ time: String) -> Date? {
                     let bits = time.split(separator: ":").compactMap { Int($0) }
@@ -4239,10 +4310,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                                       start: eventStart, end: eventEnd, attendeeNames: attendeeNames)
                     }
                 }
-                self?.log("Claude Calendar MCP returned \(events.count) event(s): \(answer.prefix(240))")
+                // Calendar MCPs occasionally offer the event immediately before
+                // a recording despite the prompt saying "overlap". Do not turn
+                // that model lapse into a destructive diarisation hint. The
+                // deliberate user-led alternative search is broader, but still
+                // requires an explicit confirmation in the picker.
+                if !isAlternativeSearch {
+                    let reported = events.count
+                    events = events.filter { $0.start < end && $0.end > start }
+                    if events.count != reported {
+                        self?.log("Discarded \(reported - events.count) non-overlapping calendar candidate(s) for \((audioPath as NSString).lastPathComponent)")
+                    }
+                }
+                let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
+                self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with \(events.count) event(s): \(answer.prefix(240))")
                 DispatchQueue.main.async { completion(events.sorted { $0.start < $1.start }) }
             } catch {
-                self?.log("Claude Calendar MCP search failed: \(error.localizedDescription)")
+                let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
+                self?.log("Calendar search failed [\(searchKind)] after \(seconds)s: \(error.localizedDescription)")
                 DispatchQueue.main.async { completion([]) }
             }
         }
@@ -4305,6 +4390,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
         findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
             guard let self else { return }
+            guard !self.hasCalendarRejection(for: audioPath) else {
+                self.log("Calendar suggestion suppressed for \((audioPath as NSString).lastPathComponent): marked ad-hoc while lookup was running")
+                return
+            }
             if events.count == 1, let event = events.first {
                 // A manual check clears a previous decline: the user is asking
                 // again, so the old "not this meeting" answer no longer applies.
@@ -4362,6 +4451,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updateCalendarSuggestion(title: event.title, start: event.start, attendeeCount: event.attendeeCount, for: audioPath)
     }
 
+    /// Drop an automatic calendar suggestion while the reviewer searches for a
+    /// different event. This is intentionally not a rejection: it preserves
+    /// the already-detected speaker result while the reviewer searches.
+    private func dismissCalendarSuggestion(for audioPath: String) {
+        try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
+        updateCalendarSuggestion(title: nil, for: audioPath)
+    }
+
     private func suggestedCalendarEvent(for audioPath: String) -> CalendarMeetingCandidate? {
         guard let data = try? Data(contentsOf: calendarSuggestionURL(for: audioPath)),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -4390,30 +4487,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func rejectCalendarSuggestion(for audioPath: String) {
         saveCalendarRejection(for: audioPath)
         try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
-        updateCalendarSuggestion(title: nil, for: audioPath)
-        rediarizeAfterCalendarCheck(audioPath)
+        // The table renders cached calendar fields rather than reading sidecars
+        // for every row.  Refresh them now: clearing only the suggestion used to
+        // leave `calendarRejected` false until an unrelated sync refresh, so the
+        // row briefly (and sometimes indefinitely) reverted to "Check Calendar"
+        // instead of the settled "Ad-hoc call" outcome.
+        refreshCalendarFields()
+        viewModel.syncEntries = syncEntries
+        // This is a calendar decision, not a speaker-work prerequisite. The
+        // initial transcription has already detected voices, so declining a
+        // meeting must leave that useful result intact rather than starting a
+        // redundant second pass without any new evidence.
+        log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
     }
 
-    /// Raw ASR is always written first.  This is the second, speaker-only
-    /// stage: it reuses the raw sidecar and never runs ASR again.
-    private func rediarizeAfterCalendarCheck(_ audioPath: String) {
-        let audio = URL(fileURLWithPath: audioPath)
-        let diarized = syncEntries.first(where: { $0.recording.outputPath == audioPath })?
-            .transcriptPath?
-            .replacingOccurrences(of: ".md", with: "_diarized.json")
-            ?? (syncTranscriptFolder.map(URL.init(fileURLWithPath:)) ?? audio.deletingLastPathComponent())
-                .appendingPathComponent("\(audio.deletingPathExtension().lastPathComponent)_diarized.json")
-                .path
-        guard FileManager.default.fileExists(atPath: diarized) else {
-            log("Calendar decision waiting for raw transcript: \(audio.lastPathComponent)")
-            return
-        }
-        rediarizeTranscript(jsonPath: diarized, nSpeakers: nil) { _ in }
-    }
-
-    /// Search only after the transcript is safely written.  The result is a
-    /// suggestion sidecar, never active diarisation evidence: the user must
-    /// explicitly confirm it in the transcript before it is linked.
+    /// Search only after the transcript is safely written. The result is a
+    /// suggestion sidecar, never a prerequisite for speaker detection: the
+    /// user must explicitly confirm it before its attendee data refines an
+    /// already-diarised transcript.
     private func suggestCalendarMeeting(afterTranscriptionOf audioPath: String) {
         // A confirmed meeting is the answer this search would be looking for.
         // Re-running it costs an MCP/EventKit round-trip and, on the no-match
@@ -4428,10 +4519,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self else { return }
             if events.count == 1, let event = events.first {
                 self.saveCalendarSuggestion(event, for: audioPath)
-                self.log("Calendar gate pending confirmation for \((audioPath as NSString).lastPathComponent) → \(event.title)")
+                self.log("Calendar suggestion pending confirmation for \((audioPath as NSString).lastPathComponent) → \(event.title)")
             } else {
-                self.log("No unambiguous calendar match for \((audioPath as NSString).lastPathComponent); starting speaker matching without calendar context")
-                self.rediarizeAfterCalendarCheck(audioPath)
+                self.log("No unambiguous calendar match for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
             }
         }
     }
@@ -4558,12 +4648,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
                 self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)
             },
-            onScoreSpeakers: { [weak self] jsonPath, completion in
-                self?.scoreSpeakers(jsonPath: jsonPath, completion: completion)
-            },
-            onSuggestSpeakers: { [weak self] jsonPath, completion in
-                self?.suggestSpeakers(jsonPath: jsonPath, completion: completion)
-            },
             onRecordSpeakerSuggestion: { [weak self] jsonPath, speakerId, action, proposed, final in
                 self?.recordSpeakerSuggestion(
                     jsonPath: jsonPath,
@@ -4601,11 +4685,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.findMacCalendarEvents(audioPath: audioPath, duration: duration, completion: completion)
                     ?? completion([])
             },
-            onFindClaudeCalendarEvents: { [weak self] audioPath, duration, completion in
-                self?.findClaudeCalendarEvents(audioPath: audioPath, duration: duration, completion: completion)
+            onFindClaudeCalendarEvents: { [weak self] audioPath, duration, query, completion in
+                self?.findClaudeCalendarEvents(
+                    audioPath: audioPath,
+                    duration: duration,
+                    query: query,
+                    completion: completion
+                )
                     ?? completion([])
             },
             onLoadCalendarSuggestion: { [weak self] audioPath in self?.suggestedCalendarEvent(for: audioPath) },
+            onDismissCalendarSuggestion: { [weak self] audioPath in
+                self?.dismissCalendarSuggestion(for: audioPath)
+            },
             onLoadCalendarRejection: { [weak self] audioPath in self?.hasCalendarRejection(for: audioPath) ?? false },
             onClearCalendarRejection: { [weak self] audioPath in self?.clearCalendarRejection(for: audioPath) },
             onLoadCalendarEvent: { [weak self] audioPath in self?.calendarLinkedEvent(for: audioPath) },
@@ -4634,7 +4726,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         // Host as a tab in the right pane (one per transcript — re-opening the
         // same meeting focuses its existing tab).
-        let title = (transcript.audioFile as NSString).lastPathComponent
+        // The tab bar is a compact way to switch recordings, so use the stable
+        // recording stem (including its Rec number) rather than a full path or
+        // a redundant audio extension such as ".mp3".
+        let title = URL(fileURLWithPath: transcript.audioFile)
+            .deletingPathExtension()
+            .lastPathComponent
         showDetailTab(id: "transcript:\(diarizedPath)", title: title, icon: "waveform", view: viewer)
     }
 
@@ -8449,6 +8546,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     completion(.failure(error))
                     return
                 }
+                // Capture the Mac timezone while the recording is first saved;
+                // the filename itself contains only a wall-clock time.
+                self?.captureRecordingTimeZone(for: payload.outputPath)
                 self?.downloadSyncRecordings(Array(remaining.dropFirst()), completed: completed + [payload], completion: completion)
             case .failure(let error):
                 completion(.failure(error))
@@ -8616,6 +8716,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     }
                     deviceDownloaded = payload.downloaded.count
                     devicePayloads = payload.downloaded
+                    // Preserve the Mac timezone for every newly downloaded
+                    // device file before a later calendar lookup needs it.
+                    payload.downloaded.forEach { self.captureRecordingTimeZone(for: $0.outputPath) }
                     // NOTE: deliberately do NOT change the device/status filters
                     // here. Filters only ever change in response to an explicit
                     // user action (filter button / device card), never as a
@@ -8820,6 +8923,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Log the interesting part of a successful subprocess's stderr.
+    ///
+    /// Raw stderr is mostly noise — NeMo banners and config dumps, tqdm progress
+    /// bars, libmpg123 frame warnings, and the STAGE:/PROGRESS: control lines the
+    /// reader above has already consumed. What is left is the pipeline explaining
+    /// itself, which is exactly what a diarisation question needs. Filtering by
+    /// known noise rather than an allowlist of wanted prefixes means a new
+    /// diagnostic line shows up in the log without anyone remembering to add it.
+    private func logSubprocessDiagnostics(_ stderr: Data, command: String, maxLines: Int = 80) {
+        guard let text = String(data: stderr, encoding: .utf8) else { return }
+        let noise: [(String) -> Bool] = [
+            { $0.hasPrefix("[NeMo") },
+            { $0.hasPrefix("[src/lib") },
+            { $0.hasPrefix("Note:") },
+            { $0.hasPrefix("W0") },
+            { $0.hasPrefix("STAGE:") },
+            { $0.hasPrefix("PROGRESS:") },
+            { $0.hasPrefix("    ") },            // NeMo dumps its configs indented
+            { $0.contains("Diarizing:") },
+            { $0.contains("it/s]") },
+            { $0.contains("UserWarning") },
+        ]
+        var kept: [String] = []
+        var suppressed = 0
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || noise.contains(where: { $0(line) }) { continue }
+            if kept.count < maxLines { kept.append(line) } else { suppressed += 1 }
+        }
+        guard !kept.isEmpty else { return }
+        // Say what was dropped rather than letting a truncated tail read as the
+        // whole story.
+        let tail = suppressed > 0 ? " (+\(suppressed) more line(s) suppressed)" : ""
+        log("\(command) diagnostics\(tail):\n  " + kept.joined(separator: "\n  "))
+    }
+
     private func runTranscription(arguments: [String], timeout: TimeInterval = 600, stdin: String? = nil, onProgress: ((Int) -> Void)? = nil, onStage: ((Int, Int, String) -> Void)? = nil, onLine: ((String) -> Void)? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
         // Single chokepoint for the summarisation provider: when a run asks to
         // summarise and the user picked a specific engine, pass it through.
@@ -8974,6 +9113,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let finalErr = errQueue.sync { stderrData }
 
                 if process.terminationStatus == 0 {
+                    // Log the pipeline's own diagnostics on success, not only on
+                    // failure. Its stderr is where the diarisation decisions are
+                    // explained ("merged N labels down to M", "talk per label:",
+                    // "no voice evidence to reach N speakers"), and discarding it
+                    // when the run *worked* meant every question about a result had
+                    // to be answered by reproducing the run on a copy. That cost an
+                    // hour each on the Rec82 and Rec88 investigations.
+                    self.logSubprocessDiagnostics(finalErr, command: arguments.first ?? "python")
                     DispatchQueue.main.async { completion(.success(finalOut)) }
                 } else if weKilledIt {
                     let error = NSError(domain: "HiDockTranscription", code: -1, userInfo: [
@@ -9018,10 +9165,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
         log("Starting transcription for \(filename)")
 
-        // First pass is deliberately raw ASR only.  Calendar confirmation (or
-        // an unambiguous no-match) starts the separate speaker pass after the
-        // raw text has safely been written and is available in the sidecar.
+        // A recording must be diarised as soon as it is transcribed. Calendar
+        // matching enriches that result later; it must never decide whether the
+        // reviewer can see how many voices were actually detected.
         var transcribeArgs = ["transcribe", mp3Path]
+        if diarizeEnabled { transcribeArgs.append("--diarize") }
         // Always pass --summarize; transcribe.py gracefully skips if no LLM
         // CLI (claude/codex/gemini/ollama) is on PATH. Leaves action_items /
         // decisions / key_points / tags filled when claude is authed.
@@ -9369,9 +9517,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "TRANSCRIBING \(filename)"))
-        // ASR is phase one. `suggestCalendarMeeting` below gates phase two
-        // (speaker matching/re-diarisation) without ever re-running ASR.
+        // Diarisation belongs to this initial transcription. The calendar
+        // lookup below is optional enrichment: a confirmed meeting may trigger
+        // a second, attendee-informed pass, but a pending meeting must already
+        // show its detected speaker count.
         var args = ["transcribe", item.path]
+        if diarizeEnabled { args.append("--diarize") }
         args.append("--summarize")  // see transcribeFileDirect for rationale
         // Prefer duration from the HiDock catalogue / import metadata; falls
         // back to file-size probing for edge cases where duration is unknown.
