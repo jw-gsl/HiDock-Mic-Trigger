@@ -56,15 +56,8 @@ jobs:
       - run: pip install pytest numpy scipy soundfile mutagen
       - run: python -m pytest shared/tests/ -v
 
-  # No Swift unit tests live in this project — the `hidock-mic-trigger`
-  # target is an app target with no associated test target, so
-  # `xcodebuild test` would fail with "Scheme is not currently configured
-  # for the test action". Until a test target is added, this job
-  # verifies the app compiles cleanly under Debug as a smoke test —
-  # which `build-macos.yml` also does for Release. Keeping it here
-  # so Tests-workflow status reflects Swift health and so future
-  # additions of XCTest can flip this back to `xcodebuild test`
-  # without re-adding the whole job.
+  # The app has an XCTest target. Keep this as a test action rather than a
+  # compile-only smoke check, so the Tests workflow exercises it on every PR.
   swift-build:
     runs-on: macos-15
     steps:
@@ -75,7 +68,7 @@ jobs:
         run: |
           cd hidock-mic-trigger
           xcodegen generate
-      - name: Build Swift app (Debug)
+      - name: Test Swift app (Debug)
         env:
           CI: "true"
         run: |
@@ -84,7 +77,7 @@ jobs:
           # ("destination implies architecture, architecture must not also be
           # specified"). The macos-15 runner is arm64 so platform alone is
           # enough.
-          xcodebuild build \
+          xcodebuild test \
             -project hidock-mic-trigger.xcodeproj \
             -scheme hidock-mic-trigger \
             -configuration Debug \

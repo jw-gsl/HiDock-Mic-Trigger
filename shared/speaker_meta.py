@@ -371,10 +371,15 @@ def rematch_preflight(
     names = data.get("speaker_names", {}) or {}
     meta = data.get("speaker_meta", {}) or {}
     embeddings = data.get("speaker_embeddings", {}) or {}
+    # Accepted invitees only. "Invited" is not "in the room": Rec88 invited 16 and
+    # about 9 spoke, so on a large optional-heavy invite the crowd rule was being
+    # waived for seven people who were never there. A sidecar written before the
+    # response status was preserved has no `calendar_accepted_names` key, and an
+    # unknown status must not read as acceptance — so those meetings keep the hold.
     calendar_candidates = {
         str(person).casefold()
         for person in (
-            (data.get("calendar_context") or {}).get("calendar_candidate_names") or []
+            (data.get("calendar_context") or {}).get("calendar_accepted_names") or []
         )
         if str(person).strip()
     }

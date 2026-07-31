@@ -8,6 +8,29 @@ private struct RecordingsRowFramesKey: PreferenceKey {
     }
 }
 
+/// The part of a recording's filename the Created column does not already show.
+///
+/// Device files are named `2026Jul31-150744-Rec99.mp3`, and that date and time is
+/// repeated verbatim two columns along — so 220pt of table was spent restating
+/// Created to show one Rec number. Only the trailing label is kept, which lets the
+/// column shrink to 96pt and gives the Meeting column room to stay on screen.
+///
+/// A file with a name of its own keeps it: nothing else in the table shows it, so
+/// truncating there would lose information rather than duplicate it.
+func compactRecordingLabel(_ fileName: String) -> String {
+    let stem = (fileName as NSString).deletingPathExtension
+    // `<yyyy><Mon><dd>-<HHmmss>-<label>` — the device's own convention.
+    let pattern = #"^\d{4}[A-Za-z]{3}\d{1,2}-\d{4,6}-(.+)$"#
+    guard let expression = try? NSRegularExpression(pattern: pattern),
+          let match = expression.firstMatch(
+              in: stem, range: NSRange(stem.startIndex..., in: stem)
+          ),
+          let labelRange = Range(match.range(at: 1), in: stem)
+    else { return stem }
+    let label = String(stem[labelRange]).trimmingCharacters(in: .whitespaces)
+    return label.isEmpty ? stem : label
+}
+
 struct RecordingsTableView: View {
     @ObservedObject var viewModel: HiDockViewModel
     /// Track whether we've programmatically restored the initial position for
@@ -25,7 +48,9 @@ struct RecordingsTableView: View {
     /// Hide the lower-priority columns (Transcribed date, Size) when the detail
     /// pane is open so the narrowed list fits without much horizontal scrolling.
     private var showExtraColumns: Bool { !viewModel.detailPaneVisible }
-    /// Table's natural width — Transcribed(140) + Size(70) drop out when hidden.
+    /// Table's natural width — Size(70) drops out when hidden. The Transcribed
+    /// date column was removed: the Status cascade already says whether a
+    /// recording is transcribed, and the date itself was never acted on.
     var body: some View {
         tableBody
         .overlay(
@@ -48,16 +73,13 @@ struct RecordingsTableView: View {
                 // needs tagging ⚠), not whether the file is transcribed.
                 // Transcribed is now part of the main Status cascade:
                 // On device → Downloaded → Transcribed.
-                headerButton("Tagged", key: nil, width: 90)
+                headerButton("Tagged", key: nil, width: 56)
                 // Summary column — mirrors Tagged: a tick that opens the
                 // generated summary. No sort key (summary state isn't a
                 // sortable scalar the way name/date are).
-                headerButton("Summary", key: nil, width: 80)
-                headerButton("Recording", key: "name", width: 220)
+                headerButton("Summary", key: nil, width: 62)
+                headerButton("Recording", key: "name", width: 96)
                 headerButton("Created", key: "created", width: 155)
-                if showExtraColumns {
-                    headerButton("Transcribed", key: "transcribed", width: 140)
-                }
                 headerButton("Length", key: "duration", width: 70)
                 if showExtraColumns {
                     headerButton("Size", key: "size", width: 70)
@@ -269,37 +291,31 @@ struct RecordingsTableView: View {
 
             // Transcription state for merged file
             mergeTranscriptionIndicator(group: group)
-                .frame(width: 90, alignment: .leading)
+                .frame(width: 56, alignment: .leading)
 
             // Summary column placeholder — merge groups don't carry a
             // per-entry summaryPath; dash keeps the columns aligned with
             // the regular rows.
-            Text("—")
-                .foregroundColor(.secondary.opacity(0.5))
-                .frame(width: 80, alignment: .leading)
+            HStack(spacing: 4) {
+                Color.clear.frame(width: Self.meetingIconWidth, height: 1)
+                Text("—")
+                    .foregroundColor(.secondary.opacity(0.5))
+            }
+                .frame(width: 62, alignment: .leading)
 
             // Recording name — truncate to match regular row length
             let displayName = group.outputName.count > 30
                 ? String(group.outputName.prefix(28)) + "…"
                 : group.outputName
-            Text(displayName)
+            Text(compactRecordingLabel(displayName))
                 .lineLimit(1)
-                .frame(width: 220, alignment: .leading)
+                .frame(width: 96, alignment: .leading)
                 .clipped()
 
             // Created (earliest child)
             Text(earliestDate)
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
-
-            // Transcribed — the merged file's transcript mtime.
-            if showExtraColumns {
-                let mergedTranscriptPath = viewModel.mergedFileTranscriptPaths[(group.outputPath as NSString).lastPathComponent]
-                Text(transcribedDateString(forPath: mergedTranscriptPath))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(mergedTranscriptPath == nil ? .secondary.opacity(0.5) : .primary)
-                    .frame(width: 140, alignment: .leading)
-            }
 
             // Length (total)
             Text(formatRecordingDuration(group.totalDuration))
@@ -336,15 +352,20 @@ struct RecordingsTableView: View {
             }
             .frame(width: 70, alignment: .leading)
 
-            // Meeting — merge parents carry no calendar link of their own.
-            Text("—")
-                .foregroundColor(.secondary.opacity(0.5))
+            // Meeting. A merge parent used to show a hardcoded dash on the reasoning
+            // that it "carries no calendar link of its own" — but the merged file is
+            // the one that gets transcribed, so it is the row that most needs a
+            // meeting. It is a real local file; it simply has no `syncEntries` row,
+            // so its calendar state lives in `mergedFileCalendarTitles` the same way
+            // its transcript lives in `mergedFileTranscriptPaths`.
+            mergeParentMeetingCell(group)
                 .frame(width: 260, alignment: .leading)
 
             Spacer(minLength: 0)
         }
         .font(.system(size: 12))
         .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -438,37 +459,121 @@ struct RecordingsTableView: View {
         return formatter
     }()
 
+    /// Fixed width for the leading glyph of every meeting cell.
+    ///
+    /// `calendar.badge.*` symbols are not all the same width, so letting them size
+    /// themselves left the meeting titles starting at a different x on every row.
+    /// Reserving one width aligns the text column regardless of which state a row is
+    /// in — and keeps it aligned with rows whose leading glyph is a button.
+    private static let meetingIconWidth: CGFloat = 15
+
+    /// Blue calendar-with-magnifying-glass: "search the calendar for this meeting".
+    ///
+    /// Composed rather than named, because `calendar.badge.magnifyingglass` does not
+    /// exist as an SF Symbol — and neither does `calendar.badge.questionmark`, which
+    /// this replaces. `Image(systemName:)` renders a missing symbol as nothing, so
+    /// the lookup button in this column has been **invisible**: those rows appeared
+    /// to hold only the orange ad-hoc icon, and the absent glyph was part of why the
+    /// column looked misaligned.
+    private var calendarSearchIcon: some View {
+        Image(systemName: "calendar")
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 7, weight: .bold))
+                    .padding(1)
+                    .background(
+                        Circle().fill(Color(nsColor: .windowBackgroundColor))
+                    )
+                    .offset(x: 3, y: 3)
+            }
+            .foregroundColor(.blue)
+    }
+
     @ViewBuilder
-    private func meetingCell(_ entry: HiDockSyncRecordingEntry) -> some View {
-        if let meeting = entry.calendarMeetingTitle, !meeting.isEmpty {
-            VStack(alignment: .leading, spacing: 1) {
-                Label(meeting, systemImage: "calendar.badge.checkmark")
+    private func mergeParentMeetingCell(_ group: MergeGroup) -> some View {
+        if let title = viewModel.mergedFileCalendarTitles[group.outputName] {
+            HStack(spacing: 4) {
+                Image(systemName: "calendar.badge.checkmark")
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
+                Text(title)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                if let start = entry.calendarMeetingStart {
-                    Text(Self.meetingDateFormatter.string(from: start))
+                    .layoutPriority(1)
+                if let start = viewModel.mergedFileCalendarStarts[group.outputName] {
+                    Text("· \(Self.meetingDateFormatter.string(from: start))")
                         .font(.caption2.monospacedDigit())
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
             .font(.caption)
             .foregroundColor(.green)
+            .lineLimit(1)
+            .help("Confirmed calendar meeting: \(title)")
+        } else {
+            HStack(spacing: 4) {
+                Button {
+                    viewModel.onLookupCalendarForRecording(group.outputPath)
+                } label: {
+                    calendarSearchIcon
+                        .font(.caption)
+                        .frame(width: Self.meetingIconWidth, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .help("Search the calendar for a meeting matching this merged recording")
+
+                Button {
+                    viewModel.onRejectCalendarSuggestion(group.outputPath)
+                } label: {
+                    Image(systemName: "calendar.badge.minus")
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+                .help("Mark this merged recording as an ad-hoc call")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func meetingCell(_ entry: HiDockSyncRecordingEntry) -> some View {
+        if let meeting = entry.calendarMeetingTitle, !meeting.isEmpty {
+            HStack(spacing: 4) {
+                Image(systemName: "calendar.badge.checkmark")
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
+                Text(meeting)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+                if let start = entry.calendarMeetingStart {
+                    Text("· \(Self.meetingDateFormatter.string(from: start))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.green)
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
             .help("Confirmed calendar meeting: \(meeting)")
         } else if let suggestion = entry.calendarSuggestionTitle, !suggestion.isEmpty {
-            HStack(spacing: 5) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Label(suggestion, systemImage: "calendar.badge.clock")
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let start = entry.calendarSuggestionStart {
-                        Text(Self.meetingDateFormatter.string(from: start))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("Confirm or reject")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
+            HStack(spacing: 4) {
+                Image(systemName: "calendar.badge.clock")
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
+                Text(suggestion)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+                if let start = entry.calendarSuggestionStart {
+                    Text("· \(Self.meetingDateFormatter.string(from: start))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                } else {
+                    Text("· Confirm")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 Spacer(minLength: 2)
                 Button { viewModel.onConfirmCalendarSuggestion(entry.recording.outputPath) } label: {
@@ -477,37 +582,42 @@ struct RecordingsTableView: View {
                 .buttonStyle(.plain)
                 .help("Confirm meeting and start speaker matching")
                 Button { viewModel.onRejectCalendarSuggestion(entry.recording.outputPath) } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundColor(.red)
+                    Image(systemName: "calendar.badge.minus").foregroundColor(.orange)
                 }
                 .buttonStyle(.plain)
-                .help("Not this meeting — start speaker matching without calendar context")
+                .help("Mark as an ad-hoc call — dismiss this calendar suggestion and keep the detected speakers")
             }
             .font(.caption)
             .foregroundColor(.green)
-            .help("Raw transcript is ready — confirm or reject before speaker matching")
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .help("Detected speakers are ready — confirm the meeting to refine them with attendee context, or mark this an ad-hoc call")
         } else if entry.calendarRejected {
             // The user already answered "not this meeting", so this is a settled
             // state rather than an outstanding question. A dash here would invite
             // the same decision a second time.
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 // Orange calendar-with-minus: a calendar question that has been
                 // *answered* ("no meeting"), which is different from one still
                 // waiting. Grey read as "nothing here yet" and a person glyph did
                 // not say the answer came from the calendar at all.
                 Image(systemName: "calendar.badge.minus")
                     .foregroundColor(.orange)
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
                 Text("Ad-hoc call")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Button {
                     viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.caption2)
+                    // Same action as the lookup button on an unanswered row, so it
+                    // gets the same glyph. `arrow.clockwise` said "retry" without
+                    // saying what would be retried.
+                    calendarSearchIcon
+                        .font(.caption)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.secondary.opacity(0.7))
-                .help("Check the calendar again — a meeting may have been added since")
+                .help("Search the calendar again — a meeting may have been added since")
                 Spacer(minLength: 0)
             }
             .help("No calendar meeting — you marked this as an ad-hoc call")
@@ -515,15 +625,26 @@ struct RecordingsTableView: View {
             // The automatic gate fires once, just after transcription, so a
             // historic or later-imported recording can never acquire a meeting on
             // its own. This is the manual route.
-            Button {
-                viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
-            } label: {
-                Label("Check calendar", systemImage: "calendar.badge.questionmark")
-                    .font(.caption)
+            HStack(spacing: 4) {
+                Button {
+                    viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
+                } label: {
+                    calendarSearchIcon
+                        .font(.caption)
+                        .frame(width: Self.meetingIconWidth, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .help("Search the calendar for a meeting matching this recording")
+
+                Button {
+                    viewModel.onRejectCalendarSuggestion(entry.recording.outputPath)
+                } label: {
+                    Image(systemName: "calendar.badge.minus")
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+                .help("Mark as an ad-hoc call instead of checking the calendar")
             }
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-            .help("Look up a calendar meeting for this recording now")
         } else {
             Text("—")
                 .foregroundColor(.secondary.opacity(0.5))
@@ -623,7 +744,7 @@ struct RecordingsTableView: View {
                 onRevealTranscript: viewModel.onRevealTranscript,
                 onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer
             )
-            .frame(width: 90, alignment: .leading)
+            .frame(width: 56, alignment: .leading)
 
             // Summary column — indigo doc tick when a typed summary exists
             // (click opens it), spinner while summarising, dash otherwise.
@@ -646,25 +767,16 @@ struct RecordingsTableView: View {
                         .foregroundColor(.secondary.opacity(0.5))
                 }
             }
-            .frame(width: 80, alignment: .leading)
+            .frame(width: 62, alignment: .leading)
 
-            Text(entry.recording.outputName)
+            Text(compactRecordingLabel(entry.recording.outputName))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(width: 220, alignment: .leading)
+                .frame(width: 96, alignment: .leading)
 
             Text("\(entry.recording.createDate) \(entry.recording.createTime)")
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
-
-            // Transcribed — when the transcription happened (transcript file
-            // mtime). Dash until transcribed.
-            if showExtraColumns {
-                Text(entry.transcribedDate.map { Self.transcribedDateFormatter.string(from: $0) } ?? "—")
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(entry.transcribedDate == nil ? .secondary.opacity(0.5) : .primary)
-                    .frame(width: 140, alignment: .leading)
-            }
 
             // The extractor pre-download estimate is `file_size / 8000`
             // (assumes 64 kbps), which is correct for H1 (16 kHz/64 kbps)

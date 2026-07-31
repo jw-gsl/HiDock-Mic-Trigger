@@ -458,6 +458,13 @@ final class HiDockViewModel: ObservableObject {
     /// per-row `speakersAutoMatched`. Excluded from the "needs tagging" nag.
     @Published var mergedFileAutoMatched: Set<String> = []
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
+    /// Merge-output filename -> linked calendar meeting title.
+    ///
+    /// A merged recording is a real file with its own transcript, but it is not in
+    /// `syncEntries` — the row is synthesised from the `MergeGroup` record. So its
+    /// calendar state needs its own map, exactly as its transcript path does.
+    @Published var mergedFileCalendarTitles: [String: String] = [:]
+    @Published var mergedFileCalendarStarts: [String: Date] = [:]
     /// Merged file mp3 name → its transcript mtime (when it was transcribed).
     /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
     /// on the date its merged transcript was produced.

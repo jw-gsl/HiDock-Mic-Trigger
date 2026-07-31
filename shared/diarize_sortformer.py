@@ -1109,6 +1109,19 @@ def _merge_labels_to_count(
     cosine of **0.054** — two orthogonal voices fused into one speaker, from a
     diarisation that had separated them correctly. Scraps are cleaned up by
     `_absorb_micro_labels` downstream; they must not spend a speaker slot here.
+
+    **A scrap with an embedding is still a scrap.** Restricting the rule to
+    unembeddable labels left the same defect one step away: Rec98 asked for 2,
+    had a 1.2 s label that happened to hold a turn just over a second, and so was
+    embeddable and inside the budget. Single-linkage merges the *most similar*
+    pair each round, and a very short clip's embedding is noisy enough to sit far
+    from everything — so the two real voices were merged into each other and the
+    scrap survived as the second "speaker": James 2105 s, Speaker 4 **1.2 s**, a
+    two-way conversation flattened to one. Anything under
+    `_MICRO_LABEL_MAX_SECONDS` is therefore outside the budget too, whether it can
+    be embedded or not. It stays available as a merge *target* — a fragment that
+    genuinely belongs to a real voice can still be absorbed downstream — it simply
+    cannot occupy a slot that a participant needs.
     """
     labels: list[str] = []
     for _, _, lab in turns:
@@ -1118,7 +1131,11 @@ def _merge_labels_to_count(
         return turns
     speech = _label_speech_seconds(turns)
 
-    mergeable = [lab for lab in labels if label_embeddings.get(lab) is not None]
+    mergeable = [
+        lab for lab in labels
+        if label_embeddings.get(lab) is not None
+        and speech.get(lab, 0.0) >= _MICRO_LABEL_MAX_SECONDS
+    ]
     if len(mergeable) <= count:
         return turns
 
@@ -2040,19 +2057,24 @@ def _absorb_micro_labels(
             out.append((s, e, lab))
             continue
         emb = label_embeddings.get(lab)
-        if emb is None:
-            out.append((s, e, nearest_in_time(s, e) or lab))
-            continue
         best_label = None
         best_sim = threshold
-        for cand in full:
-            cand_emb = label_embeddings.get(cand)
-            if cand_emb is None:
-                continue
-            sim = _cosine(emb, cand_emb)
-            if sim >= best_sim:
-                best_label, best_sim = cand, sim
-        out.append((s, e, best_label if best_label is not None else lab))
+        if emb is not None:
+            for cand in full:
+                cand_emb = label_embeddings.get(cand)
+                if cand_emb is None:
+                    continue
+                sim = _cosine(emb, cand_emb)
+                if sim >= best_sim:
+                    best_label, best_sim = cand, sim
+        # Voice evidence first; time when there is none, or when it decided
+        # nothing. A fragment that matches nobody used to keep its own label on
+        # the theory it might be an extra person — but under
+        # `_MICRO_LABEL_MAX_SECONDS` it cannot be a meaningful participant, and
+        # leaving it manufactured one. Rec98 asked for 2 speakers and got 4: two
+        # real voices plus a 5.0 s and a 1.5 s label whose noisy embeddings
+        # matched nothing above the threshold.
+        out.append((s, e, best_label or nearest_in_time(s, e) or lab))
     return out
 
 

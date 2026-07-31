@@ -198,7 +198,7 @@ def test_rematch_preflight_holds_crowded_meetings_even_with_high_similarity():
     assert "crowded_meeting" in candidate["reasons"]
 
 
-def _crowded_meeting_data(calendar_names=None):
+def _crowded_meeting_data(calendar_names=None, accepted_names=None):
     data = {
         "speaker_names": {str(index): f"Speaker {index + 1}" for index in range(7)},
         "speaker_meta": {str(index): {"source": "generic", "verified": False} for index in range(7)},
@@ -210,45 +210,65 @@ def _crowded_meeting_data(calendar_names=None):
             *[{"speaker_id": index, "start": 20 + index, "end": 21 + index} for index in range(1, 7)],
         ],
     }
-    if calendar_names is not None:
-        data["calendar_context"] = {"calendar_candidate_names": calendar_names}
+    if calendar_names is not None or accepted_names is not None:
+        context = {}
+        if calendar_names is not None:
+            context["calendar_candidate_names"] = calendar_names
+        if accepted_names is not None:
+            context["calendar_accepted_names"] = accepted_names
+        data["calendar_context"] = context
     return data
 
 
-def test_rematch_preflight_waives_crowded_meeting_for_a_calendar_invitee():
-    # The crowd rule exists because a wrong name gets likelier as the field of
-    # plausible library candidates grows. An invitee collapses that field, so the
-    # attendee list is more decisive in a big meeting, not less — gating on speaker
-    # count alone withheld every candidate in exactly those meetings.
-    data = _crowded_meeting_data(calendar_names=["Adam", "Someone Else"])
-    with patch("shared.voice_library_lite.library_scores", return_value=[("Adam", 0.99), ("Chris", 0.8)]):
+def _preflight(data):
+    with patch("shared.voice_library_lite.library_scores",
+               return_value=[("Adam", 0.99), ("Chris", 0.8)]):
         result = rematch_preflight(data)
-
-    candidate = next(
+    return next(
         item for item in result["review_candidates"] + result["hold_candidates"]
         if item["id"] == "0"
     )
+
+
+def test_rematch_preflight_waives_crowded_meeting_for_an_accepted_invitee():
+    # The crowd rule exists because a wrong name gets likelier as the field of
+    # plausible library candidates grows. Someone who accepted collapses that
+    # field, so the attendee list is more decisive in a big meeting, not less.
+    candidate = _preflight(_crowded_meeting_data(
+        calendar_names=["Adam", "Someone Else"], accepted_names=["Adam"],
+    ))
     assert candidate["in_calendar"] is True
     assert "crowded_meeting" not in candidate["reasons"]
 
 
-def test_rematch_preflight_still_holds_a_crowded_non_invitee():
-    data = _crowded_meeting_data(calendar_names=["Someone Else"])
-    with patch("shared.voice_library_lite.library_scores", return_value=[("Adam", 0.99), ("Chris", 0.8)]):
-        result = rematch_preflight(data)
-
-    candidate = next(item for item in result["hold_candidates"] if item["id"] == "0")
+def test_rematch_preflight_holds_an_invitee_who_did_not_accept():
+    # The case this change is for. Rec88 invited 16 people and about nine spoke,
+    # so waiving the guard for anyone merely not-declined handed it to seven who
+    # were never in the room. Being on the invite is not being in the meeting.
+    candidate = _preflight(_crowded_meeting_data(
+        calendar_names=["Adam", "Someone Else"], accepted_names=["Someone Else"],
+    ))
     assert candidate["in_calendar"] is False
     assert "crowded_meeting" in candidate["reasons"]
 
 
-def test_rematch_preflight_keeps_the_crowd_rule_without_a_calendar():
-    # No attendee list means no collapsing evidence, so the guard applies in full.
-    data = _crowded_meeting_data(calendar_names=None)
-    with patch("shared.voice_library_lite.library_scores", return_value=[("Adam", 0.99), ("Chris", 0.8)]):
-        result = rematch_preflight(data)
+def test_rematch_preflight_still_holds_a_crowded_non_invitee():
+    candidate = _preflight(_crowded_meeting_data(
+        calendar_names=["Someone Else"], accepted_names=["Someone Else"],
+    ))
+    assert "crowded_meeting" in candidate["reasons"]
 
-    candidate = next(item for item in result["hold_candidates"] if item["id"] == "0")
+
+def test_rematch_preflight_holds_when_the_sidecar_predates_response_status():
+    # An older sidecar has attendee names but no `calendar_accepted_names`.
+    # Unknown status must not read as acceptance, so the guard still applies —
+    # the waiver is simply inert until the calendar context is regenerated.
+    candidate = _preflight(_crowded_meeting_data(calendar_names=["Adam"]))
+    assert "crowded_meeting" in candidate["reasons"]
+
+
+def test_rematch_preflight_keeps_the_crowd_rule_without_a_calendar():
+    candidate = _preflight(_crowded_meeting_data())
     assert candidate["in_calendar"] is None
     assert "crowded_meeting" in candidate["reasons"]
 
