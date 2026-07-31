@@ -4047,9 +4047,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // re-diarise — and used to say nothing about why. Every branch below
             // now logs, so "I confirmed it and nothing happened" is answerable
             // from the log rather than by reproducing it.
-            if rediarizeAfterLink,
-               let entry = syncEntries.first(where: { $0.recording.outputPath == audioPath }),
-               entry.transcribed, let transcriptPath = entry.transcriptPath {
+            // A merge output has no `syncEntries` row, so resolve its transcript from
+            // the merged map instead — otherwise linking a meeting to a merged
+            // recording saved the context and silently skipped the re-diarisation it
+            // exists to trigger.
+            let mergedTranscript = viewModel.mergedFileTranscriptPaths[
+                (audioPath as NSString).lastPathComponent
+            ]
+            let entryTranscript = syncEntries
+                .first(where: { $0.recording.outputPath == audioPath })
+                .flatMap { $0.transcribed ? $0.transcriptPath : nil }
+            if rediarizeAfterLink, let transcriptPath = entryTranscript ?? mergedTranscript {
                 let diarized = transcriptPath.replacingOccurrences(of: ".md", with: "_diarized.json")
                 if transcriptHasUnconfirmedSpeakers(at: diarized) {
                     // Deliberately no explicit count. The saved `_calendar.json`
@@ -4070,13 +4078,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     syncViewModelState()
                 }
             } else if rediarizeAfterLink {
-                // Reached when the cached row is not marked Transcribed (or has no
-                // transcript path) — the case that made confirming look like a
-                // no-op.
+                // Reached when neither source yields a transcript — the case that
+                // made confirming look like a no-op.
                 let entry = syncEntries.first(where: { $0.recording.outputPath == audioPath })
                 log("Calendar linked but not re-diarised \(audioURL.lastPathComponent): "
                     + "transcribed=\(entry?.transcribed.description ?? "no such row"), "
-                    + "transcript=\(entry?.transcriptPath ?? "none")")
+                    + "entryTranscript=\(entryTranscript ?? "none"), "
+                    + "mergedTranscript=\(mergedTranscript ?? "none")")
             }
         } catch {
             log("Failed to save calendar context: \(error.localizedDescription)")
@@ -4154,7 +4162,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateCalendarMeeting(_ event: CalendarMeetingCandidate?, for audioPath: String) {
-        guard let index = syncEntries.firstIndex(where: { $0.recording.outputPath == audioPath }) else { return }
+        guard let index = syncEntries.firstIndex(where: { $0.recording.outputPath == audioPath }) else {
+            // A merge output has no entry to cache against; its Meeting cell reads
+            // the merged maps instead, so refresh those rather than dropping the
+            // update on the floor.
+            refreshCalendarFields()
+            return
+        }
         syncEntries[index].calendarMeetingTitle = event?.title
         syncEntries[index].calendarMeetingStart = event?.start
         viewModel.syncEntries = syncEntries
@@ -4507,7 +4521,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateCalendarSuggestion(title: String?, start: Date? = nil, attendeeCount: Int = 0, for audioPath: String) {
-        guard let index = syncEntries.firstIndex(where: { $0.recording.outputPath == audioPath }) else { return }
+        guard let index = syncEntries.firstIndex(where: { $0.recording.outputPath == audioPath }) else {
+            // A merge output has no entry to cache against; its Meeting cell reads
+            // the merged maps instead, so refresh those rather than dropping the
+            // update on the floor.
+            refreshCalendarFields()
+            return
+        }
         syncEntries[index].calendarSuggestionTitle = title
         syncEntries[index].calendarSuggestionStart = start
         syncEntries[index].calendarSuggestionAttendeeCount = attendeeCount
@@ -6306,6 +6326,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// `syncEntries` must call this — otherwise a confirmed meeting silently
     /// disappears from the Meeting column on the next device status refresh.
     private func refreshCalendarFields() {
+        // Merge outputs first: they are real local files with their own transcripts,
+        // but they never appear in `syncEntries`, so the per-entry loop below cannot
+        // see them and their Meeting cell had nothing to read.
+        var mergedTitles: [String: String] = [:]
+        var mergedStarts: [String: Date] = [:]
+        for group in mergeGroups {
+            guard let linked = calendarLinkedEvent(for: group.outputPath) else { continue }
+            mergedTitles[group.outputName] = linked.title
+            mergedStarts[group.outputName] = linked.start
+        }
+        viewModel.mergedFileCalendarTitles = mergedTitles
+        viewModel.mergedFileCalendarStarts = mergedStarts
+
         for index in syncEntries.indices where syncEntries[index].recording.localExists {
             let audioPath = syncEntries[index].recording.outputPath
             let linked = calendarLinkedEvent(for: audioPath)

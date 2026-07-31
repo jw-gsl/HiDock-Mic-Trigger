@@ -352,9 +352,13 @@ struct RecordingsTableView: View {
             }
             .frame(width: 70, alignment: .leading)
 
-            // Meeting — merge parents carry no calendar link of their own.
-            Text("—")
-                .foregroundColor(.secondary.opacity(0.5))
+            // Meeting. A merge parent used to show a hardcoded dash on the reasoning
+            // that it "carries no calendar link of its own" — but the merged file is
+            // the one that gets transcribed, so it is the row that most needs a
+            // meeting. It is a real local file; it simply has no `syncEntries` row,
+            // so its calendar state lives in `mergedFileCalendarTitles` the same way
+            // its transcript lives in `mergedFileTranscriptPaths`.
+            mergeParentMeetingCell(group)
                 .frame(width: 260, alignment: .leading)
 
             Spacer(minLength: 0)
@@ -483,6 +487,51 @@ struct RecordingsTableView: View {
                     .offset(x: 3, y: 3)
             }
             .foregroundColor(.blue)
+    }
+
+    @ViewBuilder
+    private func mergeParentMeetingCell(_ group: MergeGroup) -> some View {
+        if let title = viewModel.mergedFileCalendarTitles[group.outputName] {
+            HStack(spacing: 4) {
+                Image(systemName: "calendar.badge.checkmark")
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+                if let start = viewModel.mergedFileCalendarStarts[group.outputName] {
+                    Text("· \(Self.meetingDateFormatter.string(from: start))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.green)
+            .lineLimit(1)
+            .help("Confirmed calendar meeting: \(title)")
+        } else {
+            HStack(spacing: 4) {
+                Button {
+                    viewModel.onLookupCalendarForRecording(group.outputPath)
+                } label: {
+                    calendarSearchIcon
+                        .font(.caption)
+                        .frame(width: Self.meetingIconWidth, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .help("Search the calendar for a meeting matching this merged recording")
+
+                Button {
+                    viewModel.onRejectCalendarSuggestion(group.outputPath)
+                } label: {
+                    Image(systemName: "calendar.badge.minus")
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+                .help("Mark this merged recording as an ad-hoc call")
+            }
+        }
     }
 
     @ViewBuilder
