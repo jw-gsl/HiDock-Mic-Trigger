@@ -198,6 +198,61 @@ def test_rematch_preflight_holds_crowded_meetings_even_with_high_similarity():
     assert "crowded_meeting" in candidate["reasons"]
 
 
+def _crowded_meeting_data(calendar_names=None):
+    data = {
+        "speaker_names": {str(index): f"Speaker {index + 1}" for index in range(7)},
+        "speaker_meta": {str(index): {"source": "generic", "verified": False} for index in range(7)},
+        "speaker_embeddings": {"0": [1.0, 0.0]},
+        "segments": [
+            {"speaker_id": 0, "start": 0, "end": 4},
+            {"speaker_id": 0, "start": 6, "end": 10},
+            {"speaker_id": 0, "start": 12, "end": 16},
+            *[{"speaker_id": index, "start": 20 + index, "end": 21 + index} for index in range(1, 7)],
+        ],
+    }
+    if calendar_names is not None:
+        data["calendar_context"] = {"calendar_candidate_names": calendar_names}
+    return data
+
+
+def test_rematch_preflight_waives_crowded_meeting_for_a_calendar_invitee():
+    # The crowd rule exists because a wrong name gets likelier as the field of
+    # plausible library candidates grows. An invitee collapses that field, so the
+    # attendee list is more decisive in a big meeting, not less — gating on speaker
+    # count alone withheld every candidate in exactly those meetings.
+    data = _crowded_meeting_data(calendar_names=["Adam", "Someone Else"])
+    with patch("shared.voice_library_lite.library_scores", return_value=[("Adam", 0.99), ("Chris", 0.8)]):
+        result = rematch_preflight(data)
+
+    candidate = next(
+        item for item in result["review_candidates"] + result["hold_candidates"]
+        if item["id"] == "0"
+    )
+    assert candidate["in_calendar"] is True
+    assert "crowded_meeting" not in candidate["reasons"]
+
+
+def test_rematch_preflight_still_holds_a_crowded_non_invitee():
+    data = _crowded_meeting_data(calendar_names=["Someone Else"])
+    with patch("shared.voice_library_lite.library_scores", return_value=[("Adam", 0.99), ("Chris", 0.8)]):
+        result = rematch_preflight(data)
+
+    candidate = next(item for item in result["hold_candidates"] if item["id"] == "0")
+    assert candidate["in_calendar"] is False
+    assert "crowded_meeting" in candidate["reasons"]
+
+
+def test_rematch_preflight_keeps_the_crowd_rule_without_a_calendar():
+    # No attendee list means no collapsing evidence, so the guard applies in full.
+    data = _crowded_meeting_data(calendar_names=None)
+    with patch("shared.voice_library_lite.library_scores", return_value=[("Adam", 0.99), ("Chris", 0.8)]):
+        result = rematch_preflight(data)
+
+    candidate = next(item for item in result["hold_candidates"] if item["id"] == "0")
+    assert candidate["in_calendar"] is None
+    assert "crowded_meeting" in candidate["reasons"]
+
+
 def test_record_rematch_correction_appends_immutable_event(tmp_path):
     log = tmp_path / "corrections.jsonl"
     event = record_rematch_correction(

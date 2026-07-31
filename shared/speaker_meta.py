@@ -359,12 +359,25 @@ def rematch_preflight(
     withholds a candidate when the speaker cluster is too short, too fragmented,
     ambiguous against another enrolled person, or comes from a crowded meeting.
     The result is suitable for a human reviewer and does not alter ``data``.
+
+    The crowd rule is waived for a confirmed calendar invitee. It exists because a
+    wrong name becomes likelier as the field of plausible library candidates grows,
+    and an invitee collapses that field — so the attendee list is *more* decisive in
+    a big meeting, not less. Gating on speaker count alone withheld every candidate
+    in exactly the meetings that need the help most.
     """
     from shared.voice_library_lite import library_scores
 
     names = data.get("speaker_names", {}) or {}
     meta = data.get("speaker_meta", {}) or {}
     embeddings = data.get("speaker_embeddings", {}) or {}
+    calendar_candidates = {
+        str(person).casefold()
+        for person in (
+            (data.get("calendar_context") or {}).get("calendar_candidate_names") or []
+        )
+        if str(person).strip()
+    }
     candidates = []
     for speaker_id, name in names.items():
         if not is_generic_name(name) or (meta.get(speaker_id, {}) or {}).get("verified", False):
@@ -403,7 +416,11 @@ def rematch_preflight(
             reasons.append("insufficient_attributable_speech")
         if evidence["turn_count"] < min_turns:
             reasons.append("insufficient_turns")
-        if evidence["meeting_speaker_count"] > max_meeting_speakers:
+        in_calendar = (
+            best_name.casefold() in calendar_candidates if calendar_candidates else None
+        )
+        entry["in_calendar"] = in_calendar
+        if evidence["meeting_speaker_count"] > max_meeting_speakers and not in_calendar:
             reasons.append("crowded_meeting")
         entry["decision"] = "review" if not reasons else "hold"
         entry["reasons"] = reasons

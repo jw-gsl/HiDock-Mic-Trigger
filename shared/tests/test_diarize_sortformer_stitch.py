@@ -376,12 +376,40 @@ def test_absorb_micro_labels_needs_a_full_size_candidate():
     assert [t[2] for t in out] == ["A", "B"]
 
 
-def test_absorb_micro_labels_ignores_unembedded_fragment():
+def test_absorb_micro_labels_absorbs_unembedded_fragment_by_proximity():
+    # A fragment too short to embed has no voice evidence, so it can never clear
+    # the similarity threshold — leaving it alone made it a permanent phantom
+    # participant. Fall back to the nearest speaker who actually spoke.
     from shared.diarize_sortformer import _absorb_micro_labels
 
     turns = [(0.0, 100.0, "A"), (300.0, 303.0, "C")]
     talk = {"A": 100.0, "C": 3.0}
     embs = {"A": _ALICE, "C": None}
+
+    out = _absorb_micro_labels(turns, embs, talk)
+
+    assert [t[2] for t in out] == ["A", "A"]
+
+
+def test_absorb_micro_labels_picks_the_temporally_closest_full_voice():
+    from shared.diarize_sortformer import _absorb_micro_labels
+
+    turns = [(0.0, 100.0, "A"), (500.0, 600.0, "B"), (598.0, 598.4, "C")]
+    talk = {"A": 100.0, "B": 100.0, "C": 0.4}
+    embs = {"A": _ALICE, "B": _BOB, "C": None}
+
+    out = _absorb_micro_labels(turns, embs, talk)
+
+    # Inside B's turn, and nowhere near A's.
+    assert [t[2] for t in out] == ["A", "B", "B"]
+
+
+def test_absorb_micro_labels_leaves_unembedded_fragment_when_nothing_is_full_size():
+    from shared.diarize_sortformer import _absorb_micro_labels
+
+    turns = [(0.0, 3.0, "A"), (10.0, 10.4, "C")]
+    talk = {"A": 3.0, "C": 0.4}
+    embs = {"A": None, "C": None}
 
     out = _absorb_micro_labels(turns, embs, talk)
 
@@ -431,6 +459,57 @@ def test_merge_labels_to_count_never_merges_unembedded():
     embs = {"A": _ALICE, "B": _BOB}  # C has no embedding
     out = _merge_labels_to_count(turns, embs, 1)
     assert [t[2] for t in out] == ["A", "A", "C"]
+
+
+def test_merge_labels_to_count_ignores_unembedded_labels_in_the_budget():
+    """The Rec82 defect: unmergeable scraps must not spend a speaker slot.
+
+    Six labels and a requested count of 2, where two labels are sub-second
+    scraps with no embedding. They can never be merged, so counting them
+    against the budget drove the four embeddable labels into one cluster — the
+    final merge joining the two real, orthogonal voices. James (2920 s) and
+    Jenny (666 s) became a single speaker holding the whole hour.
+    """
+    from shared.diarize_sortformer import _merge_labels_to_count
+
+    turns = [
+        (0.0, 2920.0, "Speaker 1"),      # James
+        (2920.0, 3586.0, "Speaker 2"),   # Jenny — orthogonal to James
+        (3586.0, 3586.4, "Speaker 3"),   # 0.4s scrap, no embedding
+        (3586.4, 3589.8, "Speaker 4"),   # 3.4s scrap, no embedding
+        (3589.8, 3594.6, "Speaker 5"),   # 4.8s, sounds like James
+        (3594.6, 3597.8, "Speaker 6"),   # 3.2s, sounds like James
+    ]
+    embs = {
+        "Speaker 1": _ALICE,
+        "Speaker 2": _BOB,
+        "Speaker 3": None,
+        "Speaker 4": None,
+        "Speaker 5": _ALICE_LIKE,
+        "Speaker 6": _ALICE_LIKE,
+    }
+
+    out = _merge_labels_to_count(turns, embs, 2)
+
+    labels = [t[2] for t in out]
+    # Both real voices survive; the Alice-like fragments join James.
+    assert labels == [
+        "Speaker 1", "Speaker 2", "Speaker 3", "Speaker 4", "Speaker 1", "Speaker 1",
+    ]
+    assert "Speaker 2" in labels, "Jenny must not be absorbed into James"
+
+
+def test_merge_labels_to_count_noop_when_embeddable_labels_are_within_count():
+    # Five labels but only two can merge, so there is nothing to do — the old
+    # code would still have fused those two to chase the count.
+    from shared.diarize_sortformer import _merge_labels_to_count
+
+    turns = [
+        (0.0, 100.0, "A"), (100.0, 200.0, "B"),
+        (200.0, 200.4, "C"), (200.4, 200.8, "D"), (200.8, 201.2, "E"),
+    ]
+    embs = {"A": _ALICE, "B": _BOB, "C": None, "D": None, "E": None}
+    assert _merge_labels_to_count(turns, embs, 2) == turns
 
 
 def test_voice_affinity_graph_merges_window_fragments_without_manual_count():

@@ -2818,16 +2818,35 @@ struct TranscriptViewerView: View {
         enrollConfirmed(trimmed, speakerId: speakerId, previousName: renameFrom)
 
         saveTranscript()
-        if let suggestion, let proposed = suggestion.proposedName {
-            let action = proposed.caseInsensitiveCompare(trimmed) == .orderedSame
-                ? "confirmed" : "rejected"
-            onRecordSpeakerSuggestion?(
-                filePath, speakerId, action, proposed, trimmed
-            )
-            liveSuggestions.removeValue(forKey: "\(speakerId)")
-        }
+        recordConfirmationForNaming(speakerId: speakerId, name: trimmed, suggestion: suggestion)
         refreshConfidence()
         refreshLibraryNames()
+    }
+
+    /// Teach the naming library from a human confirmation.
+    ///
+    /// This used to fire only when the model had already *proposed* a name, which
+    /// was a bootstrapping deadlock: the naming library only learned identities it
+    /// could already suggest, and it can only suggest people already in it. So a
+    /// person absent from it could never be added here however many times they
+    /// were confirmed, while `enrollConfirmed` above kept updating the live
+    /// library — which stopped being the library that names anyone once
+    /// auto-tagging was promoted to the candidate model. Jenny Helland was
+    /// confirmed repeatedly and stayed unnameable; eight people had drifted out.
+    ///
+    /// With no suggestion to compare against, the outcome is a plain "confirmed":
+    /// the reviewer typed this name, and nothing was proposed to reject.
+    private func recordConfirmationForNaming(
+        speakerId: Int,
+        name: String,
+        suggestion: SpeakerSuggestion?
+    ) {
+        let proposed = suggestion?.proposedName
+        let action = proposed.map {
+            $0.caseInsensitiveCompare(name) == .orderedSame ? "confirmed" : "rejected"
+        } ?? "confirmed"
+        onRecordSpeakerSuggestion?(filePath, speakerId, action, proposed, name)
+        liveSuggestions.removeValue(forKey: "\(speakerId)")
     }
 
     // MARK: - Speaker verification (provenance + confirm loop)
@@ -2939,12 +2958,7 @@ struct TranscriptViewerView: View {
                 verified: true, confidence: speakerMeta(for: id)?.confidence)
         enrollConfirmed(name, speakerId: id)
         saveTranscript()
-        if let suggestion, let proposed = suggestion.proposedName {
-            let action = proposed.caseInsensitiveCompare(name) == .orderedSame
-                ? "confirmed" : "rejected"
-            onRecordSpeakerSuggestion?(filePath, id, action, proposed, name)
-            liveSuggestions.removeValue(forKey: "\(id)")
-        }
+        recordConfirmationForNaming(speakerId: id, name: name, suggestion: suggestion)
         refreshConfidence()
         refreshLibraryNames()
     }
