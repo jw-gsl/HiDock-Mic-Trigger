@@ -180,3 +180,76 @@ class TestGitAvailability:
         printed = capsys.readouterr().out
         assert "no rollback point" in printed
         assert "xcode-select --install" in printed
+
+
+class TestRepairingALegacyHistoryDirectory:
+    """The `--bare` fix only ran when the directory was absent.
+
+    A machine that had already run the buggy `git init <path>` kept a directory
+    that existed but resolved to nothing, so `ensure_repository` skipped init
+    forever and every snapshot failed silently. Found 2026-07-31 on a library
+    whose History list had been empty since 2026-07-28.
+    """
+
+    def _break_it(self, root, commit=False):
+        """Recreate exactly what the old non-bare `git init` left behind."""
+        repository = root / HISTORY_DIR_NAME
+        subprocess.run(
+            ["/usr/bin/git", "init", "--quiet", str(repository)],
+            capture_output=True, text=True, check=True,
+        )
+        if commit:
+            inner = repository / ".git"
+            for args in (
+                ["config", "user.name", "t"],
+                ["config", "user.email", "t@t"],
+                ["add", "--", "2026Jul27-113245-Rec79-Part-2_diarized.json"],
+                ["commit", "--quiet", "-m", "legacy snapshot"],
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", "--git-dir", str(inner), "--work-tree", str(root), *args],
+                    capture_output=True, text=True,
+                )
+        return repository
+
+    def test_the_broken_layout_really_is_unusable(self, transcript):
+        """Guard the premise: without repair, git cannot read this directory."""
+        from shared.transcript_history import _is_usable_repository
+
+        repository = self._break_it(transcript.parent)
+        assert repository.exists()
+        assert _is_usable_repository(repository) is False
+
+    def test_snapshots_start_working_again_after_repair(self, transcript):
+        self._break_it(transcript.parent)
+        assert snapshot(transcript, "Before renaming a speaker") is True
+        assert len(versions(transcript)) == 1
+
+    def test_a_legacy_commit_is_not_thrown_away(self, transcript):
+        """Repair promotes the inner repo rather than discarding it."""
+        self._break_it(transcript.parent, commit=True)
+        transcript.write_text(json.dumps({"speaker_names": {"0": "Ellen Barss"}}), encoding="utf-8")
+        assert snapshot(transcript, "Before renaming a speaker") is True
+        labels = [label for _, label in versions(transcript)]
+        assert any("legacy snapshot" in label for label in labels)
+        assert any("Before renaming a speaker" in label for label in labels)
+
+    def test_an_unsalvageable_directory_is_moved_aside_not_deleted(self, transcript):
+        """Anything already there is preserved; the user keeps their files."""
+        root = transcript.parent
+        repository = root / HISTORY_DIR_NAME
+        repository.mkdir()
+        (repository / "not-a-repo.txt").write_text("mystery", encoding="utf-8")
+
+        assert snapshot(transcript, "Before renaming a speaker") is True
+        moved = root / (HISTORY_DIR_NAME + ".broken")
+        assert (moved / "not-a-repo.txt").read_text(encoding="utf-8") == "mystery"
+        assert len(versions(transcript)) == 1
+
+    def test_a_healthy_repository_is_left_alone(self, transcript):
+        """Repair must not fire on a repo that already works."""
+        assert snapshot(transcript, "First") is True
+        transcript.write_text(json.dumps({"speaker_names": {"0": "Ellen Barss"}}), encoding="utf-8")
+        assert snapshot(transcript, "Second") is True
+        assert len(versions(transcript)) == 2
+        assert not (transcript.parent / (HISTORY_DIR_NAME + ".broken")).exists()

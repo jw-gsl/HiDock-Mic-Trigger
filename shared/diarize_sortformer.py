@@ -784,6 +784,7 @@ def _naming_backend():
     `match_fn(embedding) -> (name | None, confidence)`.
     """
     try:
+        from shared.speaker_match_policy import decide as decide_match
         from shared.voice_candidate_review import _rank_library, load_candidate_config
         from shared.voice_library_lite import _get_speaker_embed_session
 
@@ -811,12 +812,18 @@ def _naming_backend():
                     if allowed_names:
                         allowed = {str(n) for n in allowed_names}
                         ranked = [r for r in ranked if r["name"] in allowed] or ranked
-                    if not ranked:
-                        return None, 0.0
-                    best = ranked[0]
-                    runner_up = ranked[1]["score"] if len(ranked) > 1 else -1.0
-                    if best["score"] >= threshold and best["score"] - runner_up >= margin:
-                        return best["name"], float(best["score"])
+                    # A flat margin against the raw runner-up discarded correct
+                    # answers here: alias enrolments of one person ("Adam" /
+                    # "Adam Gardner") competed with each other, and a 0.847 match
+                    # was refused for leading by 0.082. See shared.speaker_match_policy.
+                    decision = decide_match(ranked, threshold, margin)
+                    if decision.matched:
+                        return decision.name, float(decision.confidence)
+                    if decision.near_miss:
+                        print(
+                            f"  Not auto-naming: {decision.reason}",
+                            file=sys.stderr,
+                        )
                     return None, 0.0
 
                 return session, match, str(config.get("model_key"))

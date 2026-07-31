@@ -1268,15 +1268,36 @@ def identify_speaker(
         runner-up by `min_margin`, else (None, 0.0). The margin guard prevents
         an ambiguous voice from becoming a confident-looking auto-tag.
     """
+    name, confidence, _ = identify_speaker_explained(
+        embedding,
+        threshold=threshold,
+        allowed_names=allowed_names,
+        min_margin=min_margin,
+    )
+    return (name, confidence)
+
+
+def identify_speaker_explained(
+    embedding: np.ndarray | list,
+    threshold: float = 0.7,
+    allowed_names: Iterable[str] | None = None,
+    min_margin: float = _MIN_MATCH_MARGIN,
+):
+    """`identify_speaker`, plus the decision that produced the answer.
+
+    Returns `(name | None, confidence, MatchDecision)`. The decision carries the
+    near-miss when a plausible candidate was refused, so a caller can offer it to
+    the user instead of silently returning an unnamed speaker.
+    """
+    from shared.speaker_match_policy import decide
+
     scores = library_scores(embedding, allowed_names=allowed_names)
-    if not scores:
-        return (None, 0.0)
     scores.sort(key=lambda x: x[1], reverse=True)
-    best_name, best_score = scores[0]
-    runner_up_score = scores[1][1] if len(scores) > 1 else -1.0
-    if best_score >= threshold and best_score - runner_up_score >= min_margin:
-        return (best_name, best_score)
-    return (None, 0.0)
+    ranked = [{"name": n, "score": s} for n, s in scores]
+    decision = decide(ranked, threshold, min_margin)
+    if decision.matched:
+        return (decision.name, float(decision.confidence), decision)
+    return (None, 0.0, decision)
 
 
 def identify_speakers(

@@ -8,7 +8,11 @@ import SwiftUI
 struct SyncToolbarSection: View {
     @ObservedObject var viewModel: HiDockViewModel
     @State private var splitTarget: HiDockSyncRecordingEntry?
-    @State private var splitTimestamp = ""
+    // Minutes and seconds are separate fields rather than one "MM:SS" string.
+    // The free-text version made the user type the colon, and silently accepted
+    // anything that did not parse into one.
+    @State private var splitMinutes = ""
+    @State private var splitSeconds = ""
     @State private var splitError = ""
 
     var body: some View {
@@ -55,7 +59,11 @@ struct SyncToolbarSection: View {
                         viewModel.syncCheckedRecordings.contains($0.recording.name) && $0.recording.localExists
                     }) {
                         splitTarget = entry
-                        splitTimestamp = ""
+                        // Default to the midpoint: it is the most common intent
+                        // and makes the two fields self-explanatory on sight.
+                        let midpoint = Int(entry.recording.duration / 2)
+                        splitMinutes = String(midpoint / 60)
+                        splitSeconds = String(format: "%02d", midpoint % 60)
                         splitError = ""
                     }
                 } label: {
@@ -427,8 +435,14 @@ struct SyncToolbarSection: View {
             Text("Split recording").font(.headline)
             Text("Where should the second meeting start?")
                 .font(.caption).foregroundColor(.secondary)
-            TextField("MM:SS", text: $splitTimestamp)
-                .textFieldStyle(.roundedBorder).frame(width: 100)
+            HStack(spacing: 4) {
+                splitField(value: $splitMinutes, unit: "min", range: 0...(Int(entry.recording.duration) / 60))
+                Text(":").font(.body.monospacedDigit()).foregroundColor(.secondary)
+                splitField(value: $splitSeconds, unit: "sec", range: 0...59)
+                Spacer()
+                Text("of \(formatRecordingDuration(entry.recording.duration))")
+                    .font(.caption).foregroundColor(.secondary)
+            }
             if !splitError.isEmpty { Text(splitError).font(.caption).foregroundColor(.red) }
             HStack {
                 Button("Cancel") { splitTarget = nil }
@@ -438,19 +452,43 @@ struct SyncToolbarSection: View {
             }
         }
         .padding()
-        .frame(width: 260)
+        .frame(width: 280)
+    }
+
+    /// One unit of the split time: a typed field with a stepper beside it, so
+    /// the value can be nudged as well as typed and the unit is never in doubt.
+    private func splitField(value: Binding<String>, unit: String, range: ClosedRange<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 2) {
+                TextField("0", text: value)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 46)
+                    .multilineTextAlignment(.trailing)
+                Stepper("") {
+                    let next = min(range.upperBound, (Int(value.wrappedValue) ?? 0) + 1)
+                    value.wrappedValue = unit == "sec" ? String(format: "%02d", next) : String(next)
+                    splitError = ""
+                } onDecrement: {
+                    let next = max(range.lowerBound, (Int(value.wrappedValue) ?? 0) - 1)
+                    value.wrappedValue = unit == "sec" ? String(format: "%02d", next) : String(next)
+                    splitError = ""
+                }
+                .labelsHidden()
+            }
+            Text(unit).font(.caption2).foregroundColor(.secondary)
+        }
     }
 
     private func submitSplit(_ entry: HiDockSyncRecordingEntry) {
-        let fields = splitTimestamp.split(separator: ":").compactMap { Int($0) }
-        let seconds: Double?
-        switch fields.count {
-        case 2: seconds = Double(fields[0] * 60 + fields[1])
-        case 3: seconds = Double(fields[0] * 3600 + fields[1] * 60 + fields[2])
-        default: seconds = nil
+        let minutes = Int(splitMinutes.trimmingCharacters(in: .whitespaces))
+        let secs = Int(splitSeconds.trimmingCharacters(in: .whitespaces))
+        guard let minutes, let secs, minutes >= 0, secs >= 0, secs < 60 else {
+            splitError = "Enter whole numbers — seconds must be under 60."
+            return
         }
-        guard let seconds, seconds > 0, seconds < entry.recording.duration else {
-            splitError = "Use a time between 0:00 and \(formatRecordingDuration(entry.recording.duration))"
+        let seconds = Double(minutes * 60 + secs)
+        guard seconds > 0, seconds < entry.recording.duration else {
+            splitError = "Use a time between 0:01 and \(formatRecordingDuration(entry.recording.duration))"
             return
         }
         splitTarget = nil

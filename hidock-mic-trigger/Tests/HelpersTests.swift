@@ -232,6 +232,38 @@ final class CompactRecordingLabelTests: XCTestCase {
         // Merge outputs are not in the device convention; keep them intact.
         XCTAssertEqual(compactRecordingLabel("merged-2026Jul10-abc.mp3"), "merged-2026Jul10-abc")
     }
+
+    func testMergedOutputShowsTheSpanItCovers() {
+        // The caller used to chop this at 28 characters, landing mid-"Rec01" so
+        // the row read as a recording called "Rec00".
+        XCTAssertEqual(
+            compactRecordingLabel("Merged-2026Apr10-130151-Rec07-to-2026Apr10-130731-Rec09.mp3"),
+            "Rec07→Rec09"
+        )
+    }
+
+    func testMergedSplitPartsKeepTheirPartNumbers() {
+        XCTAssertEqual(
+            compactRecordingLabel(
+                "Merged-2026Jul31-175620-Rec01-Part-1-to-2026Jul31-175620-Rec01-Part-2.mp3"
+            ),
+            "Rec01-Part-1→Rec01-Part-2"
+        )
+    }
+
+    func testMergedOutputNeverShowsARecNumberItDoesNotCover() {
+        let label = compactRecordingLabel(
+            "Merged-2026Jul31-175620-Rec01-Part-1-to-2026Jul31-175620-Rec01-Part-2.mp3"
+        )
+        XCTAssertFalse(label.contains("Rec00"))
+    }
+
+    func testMergeOfOneRecordingWithItselfCollapsesToOneLabel() {
+        XCTAssertEqual(
+            compactRecordingLabel("Merged-2026Apr10-130151-Rec07-to-2026Apr10-130151-Rec07.mp3"),
+            "Rec07"
+        )
+    }
 }
 
 /// EventKit caps this app at four attendees, so a larger meeting's list has to be

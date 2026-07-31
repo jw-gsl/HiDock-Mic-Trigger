@@ -19,6 +19,19 @@ private struct RecordingsRowFramesKey: PreferenceKey {
 /// truncating there would lose information rather than duplicate it.
 func compactRecordingLabel(_ fileName: String) -> String {
     let stem = (fileName as NSString).deletingPathExtension
+    // A merge output is `Merged-<first>-to-<last>`, and neither half starts with
+    // the device date pattern the regex below looks for. Without this branch the
+    // whole 60-character name fell through unshortened and the caller chopped it
+    // at a fixed character count, which is how
+    // `Merged-2026Jul31-175620-Rec01-Part-1-to-…` rendered as "Rec0…" and read
+    // as a recording called Rec00. Show the span instead: "Rec01-Part-1→Part-2".
+    if stem.hasPrefix("Merged-"), let range = stem.range(of: "-to-") {
+        let first = String(stem[stem.index(stem.startIndex, offsetBy: 7)..<range.lowerBound])
+        let last = String(stem[range.upperBound...])
+        let from = compactRecordingLabel(first)
+        let to = compactRecordingLabel(last)
+        return from == to ? from : "\(from)→\(to)"
+    }
     // `<yyyy><Mon><dd>-<HHmmss>-<label>` — the device's own convention.
     let pattern = #"^\d{4}[A-Za-z]{3}\d{1,2}-\d{4,6}-(.+)$"#
     guard let expression = try? NSRegularExpression(pattern: pattern),
@@ -303,13 +316,14 @@ struct RecordingsTableView: View {
             }
                 .frame(width: 62, alignment: .leading)
 
-            // Recording name — truncate to match regular row length
-            let displayName = group.outputName.count > 30
-                ? String(group.outputName.prefix(28)) + "…"
-                : group.outputName
-            Text(compactRecordingLabel(displayName))
+            // Recording name. Shorten by *meaning* (compactRecordingLabel knows
+            // the merge shape), never by character count — a blind prefix cut
+            // turned "…-Rec01-Part-1-to-…" into "Rec0…".
+            Text(compactRecordingLabel(group.outputName))
                 .lineLimit(1)
+                .truncationMode(.middle)
                 .frame(width: 96, alignment: .leading)
+                .help(group.outputName)
                 .clipped()
 
             // Created (earliest child)
@@ -510,6 +524,28 @@ struct RecordingsTableView: View {
             .foregroundColor(.green)
             .lineLimit(1)
             .help("Confirmed calendar meeting: \(title)")
+        } else if viewModel.mergedFileCalendarRejected.contains(group.outputName) {
+            // Settled: the user answered "no meeting". Same treatment as a
+            // regular row, so the answer sticks visibly instead of the button
+            // appearing to do nothing.
+            HStack(spacing: 4) {
+                Image(systemName: "calendar.badge.minus")
+                    .foregroundColor(.orange)
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
+                Text("Ad-hoc call")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button {
+                    viewModel.onLookupCalendarForRecording(group.outputPath)
+                } label: {
+                    calendarSearchIcon
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .help("Search the calendar again — a meeting may have been added since")
+                Spacer(minLength: 0)
+            }
+            .help("No calendar meeting — you marked this merged recording as an ad-hoc call")
         } else {
             HStack(spacing: 4) {
                 Button {

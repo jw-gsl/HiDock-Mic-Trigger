@@ -72,6 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // refreshTranscriptionState, at which point auto-summarise queues them.
     private var pendingAutoSummariseNames: Set<String> = []
     private var mergeGroups: [MergeGroup] = []
+    /// Recordings superseded by a split — see `SplitSourcesStore`.
+    private var splitSources: Set<String> = []
     /// Polls for a deploy-approval request from the build script.
     private var deployApprovalTimer: Timer?
     private let mergeGroupsPath = "\(NSHomeDirectory())/HiDock/merge_groups.json"
@@ -428,6 +430,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.hidockRecordingActive = Self.probeFFmpegHoldingHiDock()
         skippedTranscriptions = SkippedTranscriptionsStore.load()
         log("Loaded \(skippedTranscriptions.count) skipped-transcription filename(s)")
+        splitSources = SplitSourcesStore.load()
+        viewModel.splitSources = splitSources
+        if !splitSources.isEmpty {
+            log("Loaded \(splitSources.count) split source(s) — hidden in favour of their parts")
+        }
         // Backfill duration for any entries imported before duration probing
         // was wired up (duration saved as 0).
         var needsSave = false
@@ -2880,8 +2887,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 DispatchQueue.main.async {
-                    self.viewModel.mergeCandidates = payload.chains
-                    self.log("merge-candidates: \(payload.high_confidence_count) high-conf, \(payload.total_count) total")
+                    // The extractor scans the disk, where a split source still
+                    // sits beside its parts — so it will happily propose merging
+                    // a recording back together with its own halves. Drop any
+                    // chain that touches a superseded source.
+                    let chains = self.splitSources.isEmpty
+                        ? payload.chains
+                        : payload.chains.filter { chain in
+                            !chain.pieces.contains { self.splitSources.contains($0.mp3_path) }
+                        }
+                    let dropped = payload.chains.count - chains.count
+                    self.viewModel.mergeCandidates = chains
+                    self.log("merge-candidates: \(payload.high_confidence_count) high-conf, \(payload.total_count) total"
+                        + (dropped > 0 ? " (\(dropped) skipped — split sources)" : ""))
                 }
             case .failure(let err):
                 self.log("merge-candidates failed: \(err.localizedDescription)")
@@ -3080,6 +3098,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 sourceDeviceName: entry.deviceName, sourceDeviceProductId: entry.deviceProductId))
                         }
                         ImportedRecordingsStore.save(self.importedRecordings)
+                        // Retire the source. Leaving it visible turned a split
+                        // into a duplication: the original and both halves were
+                        // all still selectable, and a later merge combined all
+                        // three, so the merged audio held the conversation
+                        // twice. The file stays on disk (see SplitSourcesStore).
+                        self.splitSources.insert(source.path)
+                        SplitSourcesStore.save(self.splitSources)
+                        self.viewModel.splitSources = self.splitSources
                         self.rebuildSyncEntries()
                         self.viewModel.syncStatus = "Split → \(first.lastPathComponent), \(second.lastPathComponent)"
                         self.viewModel.syncStatusLevel = .success
@@ -5087,10 +5113,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// True when `--git-dir <repository>` actually resolves to a git repository.
+    /// Existence is not the same thing: a directory left behind by the old
+    /// non-bare `git init` exists but resolves to nothing.
+    private func isUsableTranscriptRepository(_ repository: URL) -> Bool {
+        guard let git = resolvedGitPath() else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: git)
+        process.arguments = ["--git-dir", repository.path, "rev-parse", "--git-dir"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Rescue a history directory created by the old non-bare `git init`.
+    ///
+    /// The `--bare` fix below was correct but incomplete: it only runs when the
+    /// directory is *absent*, and a machine that had already run the buggy
+    /// version kept its broken directory forever. Every snapshot then failed
+    /// with "not in a git directory" and was swallowed, so the History list
+    /// stayed empty and nobody could tell the feature had never worked. Found
+    /// 2026-07-31, on a repo broken since 2026-07-28.
+    ///
+    /// Promote the inner repo rather than discarding it, so any commits survive.
+    private func repairTranscriptHistoryRepository(_ repository: URL) -> Bool {
+        guard let git = resolvedGitPath() else { return false }
+        let manager = FileManager.default
+        let inner = repository.appendingPathComponent(".git", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard manager.fileExists(atPath: inner.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              isUsableTranscriptRepository(inner),
+              let entries = try? manager.contentsOfDirectory(atPath: inner.path)
+        else { return false }
+        for name in entries {
+            let target = repository.appendingPathComponent(name)
+            guard !manager.fileExists(atPath: target.path) else { continue }
+            try? manager.moveItem(at: inner.appendingPathComponent(name), to: target)
+        }
+        try? manager.removeItem(at: inner)
+        let config = Process()
+        config.executableURL = URL(fileURLWithPath: git)
+        config.arguments = ["--git-dir", repository.path, "config", "core.bare", "true"]
+        config.standardOutput = FileHandle.nullDevice
+        config.standardError = FileHandle.nullDevice
+        try? config.run()
+        config.waitUntilExit()
+        return isUsableTranscriptRepository(repository)
+    }
+
     private func ensureTranscriptHistoryRepository(for diarizedPath: String) -> URL? {
         let file = URL(fileURLWithPath: diarizedPath)
         let root = file.deletingLastPathComponent()
         let repository = transcriptHistoryRepository(for: diarizedPath)
+        if FileManager.default.fileExists(atPath: repository.path),
+           !isUsableTranscriptRepository(repository) {
+            if repairTranscriptHistoryRepository(repository) {
+                log("Repaired transcript history at \(repository.path) — "
+                    + "it was created by an older build and had never stored a snapshot")
+            } else {
+                var broken = repository.appendingPathExtension("broken")
+                var suffix = 0
+                while FileManager.default.fileExists(atPath: broken.path) {
+                    suffix += 1
+                    broken = repository.appendingPathExtension("broken.\(suffix)")
+                }
+                guard (try? FileManager.default.moveItem(at: repository, to: broken)) != nil else {
+                    log("Transcript history at \(repository.path) is unusable and could not be moved aside")
+                    return nil
+                }
+                log("Transcript history at \(repository.path) was not a usable git repository; "
+                    + "moved it to \(broken.lastPathComponent) and started a new one")
+            }
+        }
         if !FileManager.default.fileExists(atPath: repository.path) {
             let process = Process()
             guard let git = resolvedGitPath() else { return nil }
@@ -6502,13 +6603,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // see them and their Meeting cell had nothing to read.
         var mergedTitles: [String: String] = [:]
         var mergedStarts: [String: Date] = [:]
+        var mergedRejected: Set<String> = []
         for group in mergeGroups {
-            guard let linked = calendarLinkedEvent(for: group.outputPath) else { continue }
+            guard let linked = calendarLinkedEvent(for: group.outputPath) else {
+                // Without this, "Ad-hoc call" on a merged row saved the
+                // rejection but the cell had no state to render it from, so
+                // the click looked like it had done nothing at all.
+                if hasCalendarRejection(for: group.outputPath) {
+                    mergedRejected.insert(group.outputName)
+                }
+                continue
+            }
             mergedTitles[group.outputName] = linked.title
             mergedStarts[group.outputName] = linked.start
         }
         viewModel.mergedFileCalendarTitles = mergedTitles
         viewModel.mergedFileCalendarStarts = mergedStarts
+        viewModel.mergedFileCalendarRejected = mergedRejected
 
         for index in syncEntries.indices where syncEntries[index].recording.localExists {
             let audioPath = syncEntries[index].recording.outputPath
