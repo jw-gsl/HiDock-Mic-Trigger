@@ -7,19 +7,21 @@ import SwiftUI
 /// they belong. This view only hosts pipeline *actions*.
 struct SyncToolbarSection: View {
     @ObservedObject var viewModel: HiDockViewModel
+    @State private var splitTarget: HiDockSyncRecordingEntry?
+    @State private var splitTimestamp = ""
+    @State private var splitError = ""
 
     var body: some View {
         VStack(spacing: 6) {
-            // Action row — everything you DO to selected rows, icon-only to save
-            // space: Import · Merge/Trim/Skip/Remove · Download/Transcribe/
-            // Summarise. Tooltips carry the names. Status counts sit on the right.
+            // Action row — every icon carries a short visible name, with the
+            // full explanation still available as its tooltip.
             HStack(spacing: 6) {
                 Button {
                     viewModel.onImportAudioFile()
                 } label: {
                     Label("Import", systemImage: "square.and.arrow.down")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .help("Import an audio or video file (mp3/wav/m4a/mp4/…) — copies into Recordings and adds it to the table")
 
                 Divider().frame(height: 16)
@@ -29,7 +31,7 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Merge", systemImage: "arrow.triangle.merge")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .help("Merge the selected recordings into one")
                 // Local-file op — don't gate on `syncBusy`. Only block during an
                 // active download or in-flight trim.
@@ -44,16 +46,34 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Trim", systemImage: "scissors")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .help("Trim the selected recording")
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count != 1)
+
+                Button {
+                    if let entry = viewModel.visibleEntries.first(where: {
+                        viewModel.syncCheckedRecordings.contains($0.recording.name) && $0.recording.localExists
+                    }) {
+                        splitTarget = entry
+                        splitTimestamp = ""
+                        splitError = ""
+                    }
+                } label: {
+                    Label("Split", systemImage: "divide")
+                }
+                .labelStyle(ToolbarActionLabelStyle())
+                .help("Split the selected recording into two copies, preserving transcripts")
+                .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count != 1)
+                .popover(item: $splitTarget, arrowEdge: .bottom) { entry in
+                    splitPopover(for: entry)
+                }
 
                 Button {
                     viewModel.onMarkDownloaded()
                 } label: {
                     Label("Skip", systemImage: "forward.fill")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .disabled(viewModel.syncBusy || !viewModel.hasSelection)
                 .help("Skip — mark selected on-device recordings as 'don't download' so they drop out of download-new sweeps")
 
@@ -62,7 +82,7 @@ struct SyncToolbarSection: View {
                 } label: {
                     Label("Remove", systemImage: "trash")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .help("Remove imported files entirely / delete local copies of downloaded HiDock recordings. Device copies are preserved.")
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || !viewModel.hasSelection)
 
@@ -72,10 +92,10 @@ struct SyncToolbarSection: View {
                 Button {
                     viewModel.onDownloadSelected()
                 } label: {
-                    Label(viewModel.selectionIncludesTrimmed ? "Re-download Selected" : "Download Selected",
+                    Label(viewModel.selectionIncludesTrimmed ? "Re-download" : "Download",
                           systemImage: "arrow.down.circle")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .disabled(viewModel.syncBusy || !viewModel.syncPaired || !viewModel.hasSelection)
                 .help(viewModel.selectionIncludesTrimmed
                       ? "Re-download Selected — replaces the trimmed local file with the device original."
@@ -84,18 +104,18 @@ struct SyncToolbarSection: View {
                 Button {
                     viewModel.onTranscribeSelected()
                 } label: {
-                    Label("Transcribe Selected", systemImage: "text.bubble")
+                    Label("Transcribe", systemImage: "text.bubble")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .help("Transcribe the selected recordings")
                 .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
 
                 Button {
                     viewModel.onSummariseSelected()
                 } label: {
-                    Label("Summarise Selected", systemImage: "sparkles")
+                    Label("Summarise", systemImage: "sparkles")
                 }
-                .labelStyle(.iconOnly)
+                .labelStyle(ToolbarActionLabelStyle())
                 .disabled(viewModel.syncDownloading || !viewModel.hasSelection)
                 .help("Summarise (via Claude Code) each selected transcribed recording. Untranscribed selections are skipped.")
 
@@ -400,5 +420,54 @@ struct SyncToolbarSection: View {
         .fixedSize()
         .foregroundColor(selected.isEmpty ? .secondary : .accentColor)
         .help("Filter the list to meetings that include the people you pick (Any or All).")
+    }
+
+    private func splitPopover(for entry: HiDockSyncRecordingEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Split recording").font(.headline)
+            Text("Where should the second meeting start?")
+                .font(.caption).foregroundColor(.secondary)
+            TextField("MM:SS", text: $splitTimestamp)
+                .textFieldStyle(.roundedBorder).frame(width: 100)
+            if !splitError.isEmpty { Text(splitError).font(.caption).foregroundColor(.red) }
+            HStack {
+                Button("Cancel") { splitTarget = nil }
+                Spacer()
+                Button("Split") { submitSplit(entry) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding()
+        .frame(width: 260)
+    }
+
+    private func submitSplit(_ entry: HiDockSyncRecordingEntry) {
+        let fields = splitTimestamp.split(separator: ":").compactMap { Int($0) }
+        let seconds: Double?
+        switch fields.count {
+        case 2: seconds = Double(fields[0] * 60 + fields[1])
+        case 3: seconds = Double(fields[0] * 3600 + fields[1] * 60 + fields[2])
+        default: seconds = nil
+        }
+        guard let seconds, seconds > 0, seconds < entry.recording.duration else {
+            splitError = "Use a time between 0:00 and \(formatRecordingDuration(entry.recording.duration))"
+            return
+        }
+        splitTarget = nil
+        viewModel.onSplitRecording(entry.recording.outputPath, seconds)
+    }
+}
+
+/// Keeps the action icons recognisable while making their meaning visible
+/// without requiring hover.  The full sentence remains in each `.help`.
+private struct ToolbarActionLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(spacing: 1) {
+            configuration.icon
+            configuration.title
+                .font(.system(size: 9))
+                .lineLimit(1)
+        }
+        .frame(minWidth: 38)
     }
 }

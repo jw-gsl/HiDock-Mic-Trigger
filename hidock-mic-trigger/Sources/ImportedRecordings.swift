@@ -21,6 +21,25 @@ struct ImportedRecordingEntry: Codable {
     let createdAt: String
     /// ISO-8601 date the user clicked Import.
     let importedAt: String
+    /// Optional provenance for derived local copies (such as Split). The
+    /// local file is not on that device, but it should retain its source
+    /// device's name/icon in the recordings table.
+    let sourceDeviceName: String?
+    let sourceDeviceProductId: Int?
+
+    init(name: String, outputPath: String, originalPath: String, length: Int,
+         duration: Double, createdAt: String, importedAt: String,
+         sourceDeviceName: String? = nil, sourceDeviceProductId: Int? = nil) {
+        self.name = name
+        self.outputPath = outputPath
+        self.originalPath = originalPath
+        self.length = length
+        self.duration = duration
+        self.createdAt = createdAt
+        self.importedAt = importedAt
+        self.sourceDeviceName = sourceDeviceName
+        self.sourceDeviceProductId = sourceDeviceProductId
+    }
 }
 
 /// Virtual device identifier used for imported recordings. Mirrors the

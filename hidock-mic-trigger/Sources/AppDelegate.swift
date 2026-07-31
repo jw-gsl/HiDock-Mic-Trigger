@@ -436,7 +436,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     importedRecordings[i] = ImportedRecordingEntry(
                         name: e.name, outputPath: e.outputPath, originalPath: e.originalPath,
                         length: e.length, duration: d,
-                        createdAt: e.createdAt, importedAt: e.importedAt
+                        createdAt: e.createdAt, importedAt: e.importedAt,
+                        sourceDeviceName: e.sourceDeviceName, sourceDeviceProductId: e.sourceDeviceProductId
                     )
                     needsSave = true
                     log("Backfilled duration for \(e.name): \(Int(d))s")
@@ -741,6 +742,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         viewModel.onMergeSelected = { [weak self] in self?.mergeSelectedRecordings() }
         viewModel.onTrimRecording = { [weak self] path in self?.showTrimDialog(for: path) }
+        viewModel.onSplitRecording = { [weak self] path, splitAt in
+            guard let self, let entry = self.syncEntries.first(where: { $0.recording.outputPath == path }) else { return }
+            self.splitRecording(entry, at: splitAt)
+        }
         viewModel.onShowTranscriptionQueue = { [weak self] in self?.showTranscriptionQueueWindow() }
         viewModel.onScanMergeCandidates = { [weak self] in self?.scanMergeCandidates() }
         viewModel.onMergeCandidate = { [weak self] cand in self?.executeMergeCandidate(cand) }
@@ -3000,6 +3005,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var trimWindow: NSWindow?
 
+    /// Produces two new local recordings, retaining the source.  A split is
+    /// deliberately modelled as two imported entries: the device still has one
+    /// physical Rec79, while these are local, independently transcribable
+    /// meetings with correct file sizes/durations and copied creation time.
+    private func splitRecording(_ entry: HiDockSyncRecordingEntry, at splitAt: Double) {
+        let source = URL(fileURLWithPath: entry.recording.outputPath)
+        let stem = source.deletingPathExtension().lastPathComponent
+        let dir = source.deletingLastPathComponent()
+        let first = dir.appendingPathComponent("\(stem)-Part-1.mp3")
+        let second = dir.appendingPathComponent("\(stem)-Part-2.mp3")
+        guard !FileManager.default.fileExists(atPath: first.path),
+              !FileManager.default.fileExists(atPath: second.path) else {
+            showError("Split copies already exist for \(source.lastPathComponent). Remove them first if you want to split again.")
+            return
+        }
+        viewModel.trimBusy = true
+        viewModel.syncStatus = "Splitting \(source.lastPathComponent)…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.ffmpegPath)
+            process.arguments = [
+                "-y", "-i", source.path,
+                "-to", String(format: "%.3f", splitAt), "-c:a", "libmp3lame", "-q:a", "2", first.path,
+                "-ss", String(format: "%.3f", splitAt), "-c:a", "libmp3lame", "-q:a", "2", second.path,
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run(); process.waitUntilExit() } catch {
+                DispatchQueue.main.async {
+                    self.viewModel.trimBusy = false; self.viewModel.syncStatus = "Split failed"; self.viewModel.syncStatusLevel = .error
+                    self.showError("Split failed: \(error.localizedDescription)"); self.syncViewModelState()
+                }
+                return
+            }
+            guard process.terminationStatus == 0 else {
+                try? FileManager.default.removeItem(at: first); try? FileManager.default.removeItem(at: second)
+                DispatchQueue.main.async {
+                    self.viewModel.trimBusy = false; self.viewModel.syncStatus = "Split failed"; self.viewModel.syncStatusLevel = .error
+                    self.showError("ffmpeg could not split the recording."); self.syncViewModelState()
+                }
+                return
+            }
+            let transcriptDir = self.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+            self.runTranscription(arguments: ["split-artifacts", source.path, first.path, second.path,
+                                               "--transcript-dir", transcriptDir, "--split-at", String(splitAt)]) { result in
+                DispatchQueue.main.async {
+                    self.viewModel.trimBusy = false
+                    switch result {
+                    case .failure(let error):
+                        // Audio is intact and usable; surface that artifacts need a retry.
+                        self.viewModel.syncStatus = "Split audio; transcript split failed"; self.viewModel.syncStatusLevel = .warning
+                        self.showError("Audio was split, but transcript artifacts could not be split:\n\(error.localizedDescription)")
+                    case .success:
+                        let createdAt = self.isoDate(for: entry.recording) ?? ISO8601DateFormatter().string(from: Date())
+                        let now = ISO8601DateFormatter().string(from: Date())
+                        self.importedRecordings.removeAll { $0.outputPath == first.path || $0.outputPath == second.path }
+                        for (index, output) in [first, second].enumerated() {
+                            let bytes = (try? FileManager.default.attributesOfItem(atPath: output.path)[.size] as? Int) ?? 0
+                            self.importedRecordings.append(ImportedRecordingEntry(name: output.lastPathComponent, outputPath: output.path,
+                                originalPath: source.path, length: bytes, duration: ImportedRecordingsStore.probeDuration(at: output.path),
+                                createdAt: index == 0 ? createdAt : self.adding(splitAt, toISODate: createdAt), importedAt: now,
+                                sourceDeviceName: entry.deviceName, sourceDeviceProductId: entry.deviceProductId))
+                        }
+                        ImportedRecordingsStore.save(self.importedRecordings)
+                        self.rebuildSyncEntries()
+                        self.viewModel.syncStatus = "Split → \(first.lastPathComponent), \(second.lastPathComponent)"
+                        self.viewModel.syncStatusLevel = .success
+                        self.log("Split \(source.lastPathComponent) at \(splitAt)s into two meetings")
+                    }
+                    self.syncViewModelState()
+                }
+            }
+        }
+    }
+
+    private func isoDate(for recording: HiDockSyncRecording) -> String? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy/MM/dd HH:mm:ss"
+        guard let date = formatter.date(from: "\(recording.createDate) \(recording.createTime)") else { return nil }
+        return ISO8601DateFormatter().string(from: date)
+    }
+
+    private func adding(_ seconds: Double, toISODate iso: String) -> String {
+        guard let date = ISO8601DateFormatter().date(from: iso) else { return iso }
+        return ISO8601DateFormatter().string(from: date.addingTimeInterval(seconds))
+    }
+
     private func showTrimDialog(for path: String) {
         guard FileManager.default.fileExists(atPath: ffmpegPath) else {
             showError("ffmpeg not found at \(ffmpegPath).\nInstall with: brew install ffmpeg")
@@ -5097,9 +5194,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let prev = previousByName[rec.name]
             let sync = HiDockSyncRecordingEntry(
                 recording: rec,
-                deviceProductId: stableImportedPid,
+                deviceProductId: entry.sourceDeviceProductId ?? stableImportedPid,
                 deviceId: IMPORTED_DEVICE_ID,
-                deviceName: IMPORTED_DEVICE_NAME,
+                deviceName: entry.sourceDeviceName ?? IMPORTED_DEVICE_NAME,
                 transcribed: prev?.transcribed ?? false,
                 transcriptPath: prev?.transcriptPath,
                 transcribedDate: prev?.transcribedDate,

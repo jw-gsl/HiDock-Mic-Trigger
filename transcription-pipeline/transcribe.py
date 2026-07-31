@@ -1766,6 +1766,24 @@ def cmd_merge_labels(args):
     }))
 
 
+def cmd_split_artifacts(args):
+    """Write rebased transcript artifacts for two already-split audio files."""
+    from shared.split_recording import write_split_artifacts
+
+    source = Path(args.source_audio).resolve()
+    first = Path(args.first_audio).resolve()
+    second = Path(args.second_audio).resolve()
+    if not source.exists() or not first.exists() or not second.exists():
+        raise FileNotFoundError("source and both split audio files must exist")
+    first_md, second_md = write_split_artifacts(
+        source, first, second, Path(args.transcript_dir).resolve(), args.split_at,
+    )
+    print(json.dumps({
+        "first_transcript": str(first_md) if first_md else None,
+        "second_transcript": str(second_md) if second_md else None,
+    }))
+
+
 def main():
     parser = argparse.ArgumentParser(description="HiDock Transcription Pipeline")
     sub = parser.add_subparsers(dest="command")
@@ -1983,6 +2001,17 @@ def main():
         help="Ordered list of child mp3 paths used to create the merged recording",
     )
     p_merge_labels.set_defaults(func=cmd_merge_labels)
+
+    p_split = sub.add_parser(
+        "split-artifacts",
+        help="Split existing JSON/Markdown/SRT transcript artifacts at a timestamp",
+    )
+    p_split.add_argument("source_audio")
+    p_split.add_argument("first_audio")
+    p_split.add_argument("second_audio")
+    p_split.add_argument("--transcript-dir", required=True)
+    p_split.add_argument("--split-at", required=True, type=float)
+    p_split.set_defaults(func=cmd_split_artifacts)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)

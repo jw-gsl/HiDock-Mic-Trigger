@@ -1032,6 +1032,7 @@ final class HiDockViewModel: ObservableObject {
     var onOpenInObsidian: (String) -> Void = { _ in }
     var onMergeSelected: () -> Void = {}
     var onTrimRecording: (String) -> Void = { _ in }
+    var onSplitRecording: (String, Double) -> Void = { _, _ in }
     var onCheckForUpdates: () -> Void = {}
     var onShowVoiceLibrary: () -> Void = {}
     var onShowVoiceTraining: () -> Void = {}
