@@ -22,6 +22,10 @@
 	<string>1</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>HiDock uses your calendar only to match a recording with its meeting and improve speaker diarisation.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>HiDock uses your calendar only to match a recording with its meeting and improve speaker diarisation.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use.</string>
 </dict>

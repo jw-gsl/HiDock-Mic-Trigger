@@ -176,6 +176,11 @@ targets:
         CFBundleVersion: "1"
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
+        # EventKit matches a recording to its meeting. macOS 14+ asks for the
+        # full-access key; the legacy key is still required on earlier systems
+        # because the app falls back to requestAccess(to:) there.
+        NSCalendarsFullAccessUsageDescription: "HiDock uses your calendar only to match a recording with its meeting and improve speaker diarisation."
+        NSCalendarsUsageDescription: "HiDock uses your calendar only to match a recording with its meeting and improve speaker diarisation."
   hidock-mic-trigger-tests:
     type: bundle.unit-test
     platform: macOS

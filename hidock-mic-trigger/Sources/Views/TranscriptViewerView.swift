@@ -516,9 +516,13 @@ struct WordPosition: Hashable {
 }
 
 /// Identifies a word selection that may span multiple diarized segments.
-struct SegmentSelection: Equatable {
+struct SegmentSelection: Equatable, Identifiable {
     let anchor: WordPosition
     var focus: WordPosition
+
+    var id: String {
+        "\(anchor.segmentIndex):\(anchor.wordIndex)-\(focus.segmentIndex):\(focus.wordIndex)"
+    }
 
     var start: WordPosition {
         isBeforeOrEqual(anchor, focus) ? anchor : focus
@@ -627,10 +631,45 @@ struct TranscriptRediarizeSummary {
     }
 }
 
+/// A locally committed transcript snapshot. Audio is never versioned—only
+/// the lightweight transcript/calendar artifacts are eligible for rollback.
+struct TranscriptVersion: Identifiable {
+    let id: String
+    let title: String
+}
+
 enum TranscriptRediarizeStatus {
     case running
     case completed(TranscriptRediarizeSummary, DiarizedTranscript)
+    case skipped(String)
     case failed(String)
+}
+
+private enum ReassignScope: String, CaseIterable, Identifiable {
+    case allMeeting = "All meeting"
+    case reviewedThrough = "Reviewed until…"
+    var id: String { rawValue }
+}
+
+/// A calendar event offered as speaker-count context for this recording.
+struct CalendarMeetingCandidate: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let start: Date
+    let end: Date
+    let attendeeNames: [String]
+
+    var attendeeCount: Int { attendeeNames.count }
+    var attendeeSummary: String {
+        attendeeCount == 0 ? "invitees not returned" : "\(attendeeCount) invited"
+    }
+}
+
+private struct CalendarAssistantMessage: Identifiable {
+    enum Role { case user, assistant }
+    let id = UUID()
+    let role: Role
+    let text: String
 }
 
 // MARK: - TranscriptViewerView
@@ -684,8 +723,39 @@ struct TranscriptViewerView: View {
     /// Layer 1 v2 — currently active word selection, which may span several
     /// diarized segments.
     @State var selection: SegmentSelection? = nil
+    /// A selected range being named through the contextual menu. Keeping this
+    /// separate from `selection` means the picker still acts on exactly the
+    /// words the user right-clicked, even if the view refreshes underneath it.
+    @State private var pendingNamedSelection: SegmentSelection?
+    @State private var selectionPersonQuery = ""
     @State private var transcriptWordFrames: [WordPosition: CGRect] = [:]
     @State private var selectionDragStart: WordPosition? = nil
+    /// Timestamp of the text just edited. Splitting a segment changes its view
+    /// identity, so SwiftUI otherwise reconstructs the scroll view at the top.
+    @State private var pendingTranscriptRestoreTime: Double?
+    @State private var showReassignOptions = false
+    @State private var showSpeakerToolsHelp = false
+    @State private var reassignScope: ReassignScope = .allMeeting
+    @State private var reviewedUntilMinutes = 0
+    @State private var reviewedUntilSeconds = 0
+    @State private var calendarCandidates: [CalendarMeetingCandidate] = []
+    @State private var calendarLoading = false
+    @State private var linkedCalendarEvent: CalendarMeetingCandidate?
+    @State private var suggestedCalendarEvent: CalendarMeetingCandidate?
+    @State private var calendarCheckRejected = false
+    /// A result the reviewer has highlighted in the picker. Highlighting is
+    /// deliberately separate from linking: calendar context affects speaker
+    /// handling, so it always gets an explicit Confirm meeting action.
+    @State private var selectedCalendarCandidate: CalendarMeetingCandidate?
+    @State private var showCalendarPicker = false
+    @State private var calendarAssistantExpanded = false
+    @State private var calendarAssistantDraft = ""
+    @State private var calendarAssistantMessages: [CalendarAssistantMessage] = []
+    @State private var calendarAssistantSessionId: String?
+    @State private var calendarAssistantRunning = false
+    @State private var showTranscriptHistory = false
+    @State private var transcriptVersions: [TranscriptVersion] = []
+    @State private var pendingTranscriptRestore: TranscriptVersion?
     @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
@@ -695,7 +765,7 @@ struct TranscriptViewerView: View {
     /// against the current diarized.json, treating every segment with
     /// a user-edited speaker name as an anchor centroid. Optional so
     /// older call-sites (rediarize-only flow) keep compiling.
-    var onReclusterWithLabels: ((String) -> Void)?
+    var onReclusterWithLabels: ((String, Double?) -> Void)?
     /// Re-match still-generic speakers in THIS transcript against the voice
     /// library (`rematch` verb). Optional so older call-sites keep compiling.
     var onRematch: ((String) -> Void)?
@@ -727,6 +797,38 @@ struct TranscriptViewerView: View {
     /// After the diarized JSON is saved, regenerate the sibling .md so
     /// confirmed-only names hit disk (unconfirmed stay Speaker N).
     var onRewriteMarkdown: ((String) -> Void)?
+    /// Persist the current on-disk artifacts before this view writes a speaker
+    /// edit, so the previous state is always a one-click rollback target.
+    var onSnapshotTranscript: ((String, String) -> Void)? = nil
+    var onListTranscriptVersions: ((String) -> [TranscriptVersion])? = nil
+    var onRestoreTranscriptVersion: ((String, String) -> Void)? = nil
+    /// Search the user's locally synced macOS calendar around this recording.
+    var onFindCalendarEvents: ((String, Double, @escaping ([CalendarMeetingCandidate]) -> Void) -> Void)?
+    /// Query the already-authenticated Microsoft 365 MCP configured in Claude.
+    var onFindClaudeCalendarEvents: ((String, Double, @escaping ([CalendarMeetingCandidate]) -> Void) -> Void)? = nil
+    /// A previously saved automatic match.  It remains a suggestion until the
+    /// reviewer confirms it in this view.
+    var onLoadCalendarSuggestion: ((String) -> CalendarMeetingCandidate?)? = nil
+    /// A reviewer explicitly rejected the saved suggestion.  This suppresses
+    /// background MCP checks until they choose to check again.
+    var onLoadCalendarRejection: ((String) -> Bool)? = nil
+    var onClearCalendarRejection: ((String) -> Void)? = nil
+    /// The durable, already-confirmed calendar link for this recording.
+    var onLoadCalendarEvent: ((String) -> CalendarMeetingCandidate?)? = nil
+    /// Persist a selected event as the recording's calendar-context sidecar.
+    /// The final Boolean lets this view own the visible rediarisation update
+    /// while table confirmation runs the same pass in the background.
+    var onLinkCalendarEvent: ((String, Double, CalendarMeetingCandidate, Bool) -> Void)?
+    /// Remove a previously confirmed calendar-context sidecar.
+    var onRemoveCalendarEvent: ((String) -> Void)? = nil
+    /// Reject the saved pending suggestion and continue with speaker matching
+    /// without calendar context.  This is shared with the table action.
+    var onRejectCalendarSuggestion: ((String) -> Void)? = nil
+    /// Open the in-app terminal with MCP calendar onboarding instructions.
+    var onOpenCalendarMCPOnboarding: (() -> Void)?
+    /// A formatted, multi-turn Claude CLI/MCP calendar conversation. The UI is
+    /// deliberately local to the transcript rather than a raw terminal window.
+    var onCalendarAssistantTurn: ((String, Double, String, String?, @escaping (String, String?) -> Void) -> Void)? = nil
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -867,6 +969,21 @@ struct TranscriptViewerView: View {
                     .help("Undo the last speaker change (merge / re-assign).")
                 }
 
+                Button {
+                    transcriptVersions = onListTranscriptVersions?(filePath) ?? []
+                    showTranscriptHistory = true
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Transcript history and rollback")
+                .popover(isPresented: $showTranscriptHistory, arrowEdge: .bottom) {
+                    transcriptHistoryPicker
+                        .frame(width: 360)
+                        .padding(12)
+                }
+
                 // Icon-only so they always fit the (narrow) pane.
                 Button {
                     copyAllToClipboard()
@@ -996,6 +1113,22 @@ struct TranscriptViewerView: View {
             refreshConfidence()
             refreshSuggestions()
             refreshLibraryNames()
+            // Calendar matching should be a quiet background suggestion when
+            // a transcript opens, not a separate task the reviewer must
+            // remember to start.  It remains unlinked until confirmed.
+            linkedCalendarEvent = onLoadCalendarEvent?(audioPath)
+            suggestedCalendarEvent = linkedCalendarEvent == nil ? onLoadCalendarSuggestion?(audioPath) : nil
+            calendarCheckRejected = linkedCalendarEvent == nil
+                && suggestedCalendarEvent == nil
+                && (onLoadCalendarRejection?(audioPath) ?? false)
+            if linkedCalendarEvent == nil, suggestedCalendarEvent == nil, !calendarCheckRejected {
+                loadCalendarCandidates()
+            }
+        }
+        .popover(item: $pendingNamedSelection, arrowEdge: .bottom) { selected in
+            selectionPersonPicker(selection: selected)
+                .frame(width: 300)
+                .padding(10)
         }
         .confirmationDialog(
             "Merge speakers?",
@@ -1060,6 +1193,21 @@ struct TranscriptViewerView: View {
                         .cornerRadius(12)
                     }
                     .buttonStyle(.plain)
+                    Button {
+                        selectionPersonQuery = ""
+                        pendingNamedSelection = selection
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                            Text("Name new speaker")
+                                .font(.caption.weight(.medium))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.14))
+                        .cornerRadius(12)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -1094,6 +1242,68 @@ struct TranscriptViewerView: View {
             }
         }
         return total
+    }
+
+    /// Assign just the selected words to a fresh speaker ID, then give that
+    /// local speaker the identity explicitly chosen by the reviewer. This is
+    /// intentionally different from renaming a speaker pill, which changes
+    /// every turn currently carrying that speaker ID.
+    private func assignSelectionToNamedSpeaker(_ selection: SegmentSelection, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let newId = nextNewSpeakerId()
+        applySelection(selection: selection, newSpeakerId: newId)
+        guard transcript.segments.contains(where: { $0.speakerId == newId }) else { return }
+        transcript.speakerNames["\(newId)"] = trimmed
+        setMeta(newId, source: "user", verified: true, confidence: nil)
+        saveTranscript()
+        // This was an explicit human identification, so it is trusted training
+        // evidence as well as a correction to this transcript. The sidecar has
+        // just been saved, allowing the enrolment path to use the selected
+        // segment as its fallback when this fresh local speaker has no stored
+        // diarizer centroid yet.
+        enrollConfirmed(trimmed, speakerId: newId)
+        self.selection = nil
+        refreshConfidence()
+        refreshLibraryNames()
+    }
+
+    @ViewBuilder
+    private func selectionPersonPicker(selection: SegmentSelection) -> some View {
+        let query = selectionPersonQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let invitedLibraryNames = calendarInvitedLibraryNames
+        let orderedNames = invitedLibraryNames + libraryNames.filter { !invitedLibraryNames.contains($0) }
+        let matches = orderedNames
+            .filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }
+            .prefix(12)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Name selected text")
+                .font(.headline)
+            TextField("Search Voice Library or enter a name", text: $selectionPersonQuery)
+                .textFieldStyle(.roundedBorder)
+            if !matches.isEmpty {
+                Text(invitedLibraryNames.isEmpty ? "Voice Library" : "Invited people in Voice Library first")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                ForEach(Array(matches), id: \.self) { name in
+                    Button(name) {
+                        assignSelectionToNamedSpeaker(selection, name: name)
+                        pendingNamedSelection = nil
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 3)
+                }
+            }
+            if !query.isEmpty {
+                Divider()
+                Button("Use \"\(query)\" as a new person") {
+                    assignSelectionToNamedSpeaker(selection, name: query)
+                    pendingNamedSelection = nil
+                }
+            }
+        }
     }
 
     /// Assign the selection to a speaker, splitting only the boundary
@@ -1155,6 +1365,7 @@ struct TranscriptViewerView: View {
 
         transcriptHistory.append(transcript)
         transcript.segments = updatedSegments
+        pendingTranscriptRestoreTime = sampleStart
         pruneInactiveSpeakerState()
         syncRediarizeSpeakerCount()
 
@@ -1239,10 +1450,89 @@ struct TranscriptViewerView: View {
     /// it applies, with plain-language tooltips.
     private var speakerToolsBar: some View {
       VStack(alignment: .leading, spacing: 6) {
-        Text("Speakers")
-            .font(.caption.weight(.semibold))
-            .foregroundColor(.secondary)
-            .padding(.horizontal, 16)
+        HStack(spacing: 5) {
+            Text("Speakers")
+                .font(.subheadline.weight(.semibold))
+            Button {
+                showSpeakerToolsHelp = true
+            } label: {
+                Image(systemName: "questionmark.circle")
+                    .font(.subheadline)
+            }
+            .buttonStyle(.plain)
+            .help("What do Refine, Redetect, Rematch, and Reassign do?")
+            .popover(isPresented: $showSpeakerToolsHelp, arrowEdge: .bottom) {
+                speakerToolsHelp
+                    .frame(width: 360)
+                    .padding(12)
+            }
+            if onRediarize != nil {
+                Stepper("\(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
+                    .font(.subheadline.weight(.medium))
+                    .frame(width: 58)
+                    .help("Number of speakers to use when you press Redetect. Adjust it if the detected count is wrong.")
+            }
+            Button {
+                showCalendarPicker = true
+                if calendarCandidates.isEmpty && suggestedCalendarEvent == nil && !calendarCheckRejected {
+                    loadCalendarCandidates()
+                }
+            } label: {
+                Label(
+                    linkedCalendarEvent?.title ?? (suggestedCalendarEvent.map { "Suggested: \($0.title)" }) ?? "Match meeting",
+                    systemImage: linkedCalendarEvent == nil ? "calendar.badge.plus" : "calendar.badge.checkmark"
+                )
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                    .foregroundColor(linkedCalendarEvent == nil ? .primary : .green)
+            }
+            .buttonStyle(.borderless)
+            .help(linkedCalendarEvent == nil ? "Match this recording to a calendar event" : "Calendar: \(linkedCalendarEvent!.title)")
+            .popover(isPresented: $showCalendarPicker, arrowEdge: .bottom) {
+                calendarPicker
+                    .frame(width: 360)
+                    .padding(12)
+            }
+            if calendarLoading {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking calendar…")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .fixedSize()
+            }
+            if let suggested = suggestedCalendarEvent, linkedCalendarEvent == nil {
+                Button { confirmCalendarMeeting(suggested) } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                }
+                .buttonStyle(.plain)
+                .help("Confirm suggested meeting: \(suggested.title)")
+                Button {
+                    onRejectCalendarSuggestion?(audioPath)
+                    suggestedCalendarEvent = nil
+                    calendarCheckRejected = true
+                    selectedCalendarCandidate = nil
+                    showCalendarPicker = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("This is not the right meeting — choose another or ask Calendar Assistant")
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+
+        if calendarAssistantExpanded {
+            calendarAssistantPanel
+                .padding(.horizontal, 16)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+        }
 
         if let rediarizeStatus {
             rediarizeStatusView(rediarizeStatus)
@@ -1274,10 +1564,6 @@ struct TranscriptViewerView: View {
                     .disabled(isRediarizing)
                     .help("Redetect speakers from the audio using the expected count shown in the stepper. Confirmed and legacy-named people are preserved where the timestamps support them; other assignments may change.")
 
-                    Stepper("\(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
-                        .font(.caption)
-                        .frame(width: 70)
-                        .help("Expected speaker count for Redetect. The current transcript has \(uniqueSpeakerIds.count) detected speaker\(uniqueSpeakerIds.count == 1 ? "" : "s").")
                 }
 
                 if onRematch != nil {
@@ -1292,12 +1578,17 @@ struct TranscriptViewerView: View {
 
                 if onReclusterWithLabels != nil, hasAnchorNamedSpeakers {
                     Button {
-                        onReclusterWithLabels?(filePath)
+                        showReassignOptions = true
                     } label: {
                         Label("Reassign", systemImage: "person.crop.circle.badge.checkmark")
                     }
                     .fixedSize()
-                    .help("Reassign remaining unconfirmed turns to the closest confirmed or legacy-named person in this meeting. Named anchors stay fixed; conservative similarity thresholds and a 30-second block cap protect against bad matches.")
+                    .help("Use confirmed people in this meeting to correct unconfirmed turns. Choose the whole meeting or only the reviewed portion as evidence.")
+                    .popover(isPresented: $showReassignOptions, arrowEdge: .bottom) {
+                        reassignOptions
+                            .frame(width: 315)
+                            .padding(12)
+                    }
                 }
             }
             .buttonStyle(.bordered)
@@ -1308,6 +1599,397 @@ struct TranscriptViewerView: View {
       .padding(.vertical, 6)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(Color.secondary.opacity(0.04))
+    }
+
+    private var calendarAssistantPanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "calendar.badge.clock")
+                Text("Calendar assistant")
+                    .font(.subheadline.weight(.semibold))
+                Text("Uses your connected CLI calendar MCP")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button { calendarAssistantExpanded = false } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Hide calendar assistant")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if calendarAssistantMessages.isEmpty {
+                        Text("Ask naturally—for example, “It was the BT Stream Leeds weekly meeting” or “show events around 3pm”.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 4)
+                    }
+                    ForEach(calendarAssistantMessages) { message in
+                        Text(message.text)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .padding(7)
+                            .background(message.role == .user ? Color.accentColor.opacity(0.13) : Color.secondary.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+                    }
+                    if calendarAssistantRunning {
+                        ProgressView("Searching calendar…")
+                            .controlSize(.small)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(height: 155)
+            Divider()
+            HStack(spacing: 6) {
+                TextField("Ask the calendar assistant…", text: $calendarAssistantDraft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+                    .onSubmit { sendCalendarAssistantMessage() }
+                Button(action: sendCalendarAssistantMessage) {
+                    Image(systemName: "arrow.up.circle.fill").font(.title3)
+                }
+                .buttonStyle(.plain)
+                .disabled(calendarAssistantRunning || calendarAssistantDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(8)
+        }
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18)))
+    }
+
+    private func sendCalendarAssistantMessage() {
+        let message = calendarAssistantDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !calendarAssistantRunning, let turn = onCalendarAssistantTurn else { return }
+        calendarAssistantDraft = ""
+        calendarAssistantMessages.append(CalendarAssistantMessage(role: .user, text: message))
+        calendarAssistantRunning = true
+        turn(audioPath, Double(transcriptDurationSeconds), message, calendarAssistantSessionId) { reply, sessionId in
+            DispatchQueue.main.async {
+                calendarAssistantMessages.append(CalendarAssistantMessage(role: .assistant, text: reply))
+                calendarAssistantSessionId = sessionId ?? calendarAssistantSessionId
+                calendarAssistantRunning = false
+            }
+        }
+    }
+
+    private static let timeComponentFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .none
+        formatter.allowsFloats = false
+        formatter.minimum = 0
+        return formatter
+    }()
+
+    private var transcriptDurationSeconds: Int {
+        Int(ceil(transcript.segments.map(\.end).max() ?? 0))
+    }
+
+    private var reviewedUntilValue: Double {
+        Double(reviewedUntilMinutes * 60 + reviewedUntilSeconds)
+    }
+
+    private var reviewedUntilIsValid: Bool {
+        reviewedUntilValue > 0 && reviewedUntilValue <= Double(transcriptDurationSeconds)
+    }
+
+    private var speakerToolsHelp: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Speaker tools")
+                .font(.headline)
+            Text("Refine").font(.subheadline.weight(.semibold))
+            Text("Reruns automatic speaker detection while preserving confirmed labels where possible.")
+                .font(.caption)
+            Text("Redetect").font(.subheadline.weight(.semibold))
+            Text("Reruns detection using the selected expected speaker count. Use only when the speaker breaks themselves need redoing.")
+                .font(.caption)
+            Text("Rematch").font(.subheadline.weight(.semibold))
+            Text("Matches generic speakers against the saved Voice Library; confirmed labels stay unchanged.")
+                .font(.caption)
+            Text("Reassign").font(.subheadline.weight(.semibold))
+            Text("Uses confirmed people in this meeting to correct other turns. In Reviewed until mode, every later label is cleared and reassessed.")
+                .font(.caption)
+        }
+    }
+
+    private func loadCalendarCandidates() {
+        guard !calendarLoading else { return }
+        calendarLoading = true
+        calendarCandidates = []
+        // Microsoft 365 is the source the user connected for this workflow.
+        // The previous dual Mac-Calendar/MCP fan-out could paint the local
+        // empty result while the MCP response was still on its way, hiding a
+        // valid M365 event. Keep one authoritative request for this compact
+        // picker; the assistant remains available for broader searches.
+        guard let search = onFindClaudeCalendarEvents else {
+            calendarLoading = false
+            return
+        }
+        search(audioPath, Double(transcriptDurationSeconds)) { events in
+            DispatchQueue.main.async {
+                calendarCandidates = events.sorted { $0.start < $1.start }
+                // Existing links created before attendee enrichment may have
+                // only a title/time saved.  Refresh their visible invitees
+                // when the popup opens, without changing the user's chosen
+                // meeting or launching another diarisation run.
+                if let linked = linkedCalendarEvent,
+                   let enriched = events.first(where: {
+                       $0.title.caseInsensitiveCompare(linked.title) == .orderedSame
+                           && !$0.attendeeNames.isEmpty
+                   }) {
+                    linkedCalendarEvent = CalendarMeetingCandidate(
+                        id: linked.id,
+                        title: linked.title,
+                        start: linked.start,
+                        end: linked.end,
+                        attendeeNames: enriched.attendeeNames
+                    )
+                }
+                // A single time-overlapping result is useful as a suggestion,
+                // never as an automatic link. Multiple possibilities keep the
+                // neutral Match meeting label until the reviewer chooses one.
+                if events.count == 1, linkedCalendarEvent == nil {
+                    suggestedCalendarEvent = events[0]
+                }
+                calendarLoading = false
+            }
+        }
+    }
+
+    private func confirmCalendarMeeting(_ event: CalendarMeetingCandidate) {
+        linkedCalendarEvent = event
+        suggestedCalendarEvent = event
+        selectedCalendarCandidate = nil
+        if event.attendeeCount >= 2 { rediarizeNSpeakers = event.attendeeCount }
+        // Save the calendar context before the speaker pass.  The sidecar
+        // owns this particular run so its `@State` transcript updates in
+        // place rather than leaving the reviewer with stale speaker blocks.
+        onLinkCalendarEvent?(audioPath, Double(transcriptDurationSeconds), event, false)
+        if allSpeakersConfirmed {
+            rediarizeStatus = .skipped("Calendar linked — all speakers are confirmed, so their assignments were left untouched.")
+        } else {
+            startRediarize(speakers: event.attendeeCount >= 2 ? event.attendeeCount : nil)
+        }
+        showCalendarPicker = false
+    }
+
+    @ViewBuilder
+    private var calendarPicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Match this meeting")
+                .font(.headline)
+            Text("Looking in your connected Microsoft 365 calendar. Attendees are only a speaker-count hint—you stay in control.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if let linked = linkedCalendarEvent {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Meeting confirmed", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.green)
+                    Text(linked.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(linked.start.formatted(date: .omitted, time: .shortened)) – \(linked.end.formatted(date: .omitted, time: .shortened)) · \(linked.attendeeSummary)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if !linked.attendeeNames.isEmpty {
+                        Text("Invited: \(linked.attendeeNames.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                    Button("Change meeting…") {
+                        linkedCalendarEvent = nil
+                        suggestedCalendarEvent = nil
+                        selectedCalendarCandidate = nil
+                    }
+                    .font(.caption)
+                    Button("Remove meeting", role: .destructive) {
+                        onRemoveCalendarEvent?(audioPath)
+                        linkedCalendarEvent = nil
+                        suggestedCalendarEvent = nil
+                        selectedCalendarCandidate = nil
+                    }
+                    .font(.caption)
+                }
+            } else {
+            if let suggested = suggestedCalendarEvent {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("Suggested match", systemImage: "sparkles")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    Text(suggested.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(suggested.start.formatted(date: .omitted, time: .shortened)) – \(suggested.end.formatted(date: .omitted, time: .shortened)) · \(suggested.attendeeSummary)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if !suggested.attendeeNames.isEmpty {
+                        Text("Invited: \(suggested.attendeeNames.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                    HStack {
+                        Button("Confirm meeting") { confirmCalendarMeeting(suggested) }
+                            .buttonStyle(.borderedProminent)
+                        Button("Find another") {
+                            suggestedCalendarEvent = nil
+                            selectedCalendarCandidate = nil
+                        }
+                    }
+                    Text("Confirmation saves this event as context and starts the speaker pass using its attendee hint.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Divider().padding(.top, 1)
+                }
+            }
+            if calendarLoading {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking calendar…")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else if calendarCandidates.isEmpty {
+                if calendarCheckRejected {
+                    Label("Calendar checked — no meeting linked", systemImage: "calendar.badge.exclamationmark")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.secondary)
+                    Text("Speaker matching has already continued without calendar context.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Button("Check calendar again") {
+                        onClearCalendarRejection?(audioPath)
+                        calendarCheckRejected = false
+                        calendarCandidates = []
+                        loadCalendarCandidates()
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Text("No matching event found.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Button("Ask Calendar assistant…") {
+                    showCalendarPicker = false
+                    calendarAssistantExpanded = true
+                }
+            } else {
+                ForEach(calendarCandidates.filter { $0.id != suggestedCalendarEvent?.id }) { event in
+                    Button {
+                        selectedCalendarCandidate = event
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: selectedCalendarCandidate?.id == event.id ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(selectedCalendarCandidate?.id == event.id ? .accentColor : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(event.title.isEmpty ? "Untitled event" : event.title)
+                                    .font(.subheadline.weight(.medium))
+                                Text("\(event.start.formatted(date: .omitted, time: .shortened)) – \(event.end.formatted(date: .omitted, time: .shortened)) · \(event.attendeeSummary)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let chosen = selectedCalendarCandidate {
+                    Divider()
+                    HStack {
+                        Text("Selected: \(chosen.title)")
+                            .font(.caption)
+                            .lineLimit(1)
+                        Spacer()
+                        Button("Confirm meeting") { confirmCalendarMeeting(chosen) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                Divider()
+                Button("Ask Calendar assistant…") {
+                    showCalendarPicker = false
+                    calendarAssistantExpanded = true
+                }
+                .font(.caption)
+            }
+            }
+        }
+        .onAppear {
+            linkedCalendarEvent = onLoadCalendarEvent?(audioPath)
+            suggestedCalendarEvent = linkedCalendarEvent == nil ? onLoadCalendarSuggestion?(audioPath) : nil
+            calendarCheckRejected = linkedCalendarEvent == nil
+                && suggestedCalendarEvent == nil
+                && (onLoadCalendarRejection?(audioPath) ?? false)
+            if linkedCalendarEvent == nil && suggestedCalendarEvent == nil && !calendarCheckRejected && calendarCandidates.isEmpty {
+                loadCalendarCandidates()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var reassignOptions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Reassign unconfirmed turns")
+                .font(.headline)
+            Text("Choose which reviewed labels should guide the rest of this meeting.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Picker("Evidence", selection: $reassignScope) {
+                ForEach(ReassignScope.allCases) { scope in
+                    Text(scope.rawValue).tag(scope)
+                }
+            }
+            .pickerStyle(.radioGroup)
+
+            if reassignScope == .reviewedThrough {
+                HStack(spacing: 6) {
+                    Text("Reviewed until")
+                    TextField("0", value: $reviewedUntilMinutes, formatter: Self.timeComponentFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 38)
+                    Text("min")
+                        .font(.caption)
+                    Stepper("", value: $reviewedUntilMinutes, in: 0...max(0, transcriptDurationSeconds / 60))
+                        .labelsHidden()
+                        .controlSize(.small)
+                    TextField("0", value: $reviewedUntilSeconds, formatter: Self.timeComponentFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 38)
+                    Text("sec")
+                        .font(.caption)
+                    Stepper("", value: $reviewedUntilSeconds, in: 0...59)
+                        .labelsHidden()
+                        .controlSize(.small)
+                }
+                Text("Labels up to this time stay fixed. All later labels are treated as unreviewed, then reassessed against them.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                if !reviewedUntilIsValid {
+                    Text("Choose a time within this recording.")
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { showReassignOptions = false }
+                Button("Reassign") {
+                    let cutoff = reassignScope == .reviewedThrough ? reviewedUntilValue : nil
+                    onReclusterWithLabels?(filePath, cutoff)
+                    showReassignOptions = false
+                }
+                .disabled(reassignScope == .reviewedThrough && !reviewedUntilIsValid)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1333,6 +2015,10 @@ struct TranscriptViewerView: View {
             }
             .font(.caption)
             .foregroundColor(summary.hasChanges ? .green : .secondary)
+        case .skipped(let message):
+            Label(message, systemImage: "checkmark.shield.fill")
+                .font(.caption)
+                .foregroundColor(.green)
         case .failed(let message):
             Label(message.isEmpty ? "Re-diarisation failed" : "Re-diarisation failed: \(message)", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
@@ -1545,7 +2231,7 @@ struct TranscriptViewerView: View {
     /// available in the review panel's own ScrollView.
     private var speakerVerifyPanelIdealHeight: CGFloat {
         let count = max(1, uniqueSpeakerIds.count)
-        let rowHeight: CGFloat = 68
+        let rowHeight: CGFloat = 38
         let rowSpacing: CGFloat = 4
         let headerAndPadding: CGFloat = 54
         return min(
@@ -1586,22 +2272,65 @@ struct TranscriptViewerView: View {
             }
 
             // Segments list (narrowed to one speaker when a filter is active).
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
-                        if speakerFilter == nil || segment.speakerId == speakerFilter {
-                            segmentRow(segmentIndex: idx, segment: segment)
+            // A word-range edit replaces the affected segment(s), invalidating
+            // SwiftUI's native scroll-position retention. Restore to the
+            // edited timestamp rather than unexpectedly jumping to the start.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(transcript.segments.enumerated()), id: \.element.id) { idx, segment in
+                            if speakerFilter == nil || segment.speakerId == speakerFilter {
+                                segmentRow(segmentIndex: idx, segment: segment)
+                                    .id(segment.id)
+                            }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .onPreferenceChange(TranscriptWordFramesKey.self) { frames in
+                        transcriptWordFrames = frames
+                    }
+                    .simultaneousGesture(transcriptSelectionGesture)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .onPreferenceChange(TranscriptWordFramesKey.self) { frames in
-                    transcriptWordFrames = frames
+                .coordinateSpace(name: "transcriptWords")
+                .onChange(of: pendingTranscriptRestoreTime) { restoreTime in
+                    guard let restoreTime else { return }
+                    let visible = transcript.segments.filter {
+                        speakerFilter == nil || $0.speakerId == speakerFilter
+                    }
+                    guard let nearest = visible.min(by: {
+                        abs($0.start - restoreTime) < abs($1.start - restoreTime)
+                    }) else { return }
+                    // Let the split rows enter the layout before scrolling to
+                    // their fresh identity.
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(nearest.id, anchor: .center)
+                        pendingTranscriptRestoreTime = nil
+                    }
                 }
-                .simultaneousGesture(transcriptSelectionGesture)
             }
-            .coordinateSpace(name: "transcriptWords")
+            .contextMenu {
+                if let selected = selection {
+                    Button("New speaker") {
+                        applySelection(selection: selected, newSpeakerId: nextNewSpeakerId())
+                        selection = nil
+                    }
+                    Button("Name new speaker…") {
+                        selectionPersonQuery = ""
+                        pendingNamedSelection = selected
+                    }
+                    Menu("Assign to existing speaker") {
+                        ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
+                            Button(speakerName(for: speakerId)) {
+                                applySelection(selection: selected, newSpeakerId: speakerId)
+                                selection = nil
+                            }
+                        }
+                    }
+                } else {
+                    Text("Select transcript words first")
+                }
+            }
         }
     }
 
@@ -1629,19 +2358,24 @@ struct TranscriptViewerView: View {
         let prov = provenance(for: id)
         let verified = speakerMeta(for: id)?.verified ?? false
 
-        VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 8) {
             speakerPill(speakerId: id, interactive: true, context: "verify")   // tap to rename/correct
 
-            Text(prov.text)
-                .font(.caption2.weight(.medium))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(prov.color.opacity(0.15), in: Capsule())
-                .foregroundColor(prov.color)
+            // "Speaker N" already communicates that this is unnamed; repeating
+            // that as a second chip costs space without adding information.
+            if !isGenericName(name) {
+                Text(prov.text)
+                    .font(.caption2.weight(.medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(prov.color.opacity(0.15), in: Capsule())
+                    .foregroundColor(prov.color)
+            }
 
             // Live voice-match confidence against the enrolled voice of this name.
-            if let badge = confidenceBadge(for: id) {
+            // Once a person is confirmed, their identity is the decision — a
+            // competing "sounds like" hint is noise and can undermine it.
+            if !verified, !isGenericName(name), let badge = confidenceBadge(for: id) {
                 Text(badge.text)
                     .font(.caption2.weight(.medium))
                     .padding(.horizontal, 6)
@@ -1649,6 +2383,14 @@ struct TranscriptViewerView: View {
                     .background(badge.color.opacity(0.15), in: Capsule())
                     .foregroundColor(badge.color)
                     .help("How closely this speaker's voice matches the enrolled voice for \(speakerName(for: id)).")
+            }
+
+            if !verified, let suggestion = liveSuggestions["\(id)"] {
+                compactSuggestionEvidence(suggestion)
+            } else if !verified && suggestionsLoading {
+                Text("Checking WeSpeaker…")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
 
             Spacer()
@@ -1693,6 +2435,13 @@ struct TranscriptViewerView: View {
                 Label("Verified", systemImage: "checkmark.seal.fill")
                     .font(.caption2)
                     .foregroundColor(.green)
+            } else if let suggestion = liveSuggestions["\(id)"], suggestion.proposedName != nil {
+                Button("Confirm this name") {
+                    confirmCandidateSuggestion(id, suggestion: suggestion)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("You are confirming this identity. The model cannot apply it by itself.")
             } else if !isGenericName(name) {
                 Button {
                     confirmSpeaker(id)
@@ -1714,17 +2463,32 @@ struct TranscriptViewerView: View {
                 .help("Acknowledge an unknown/guest speaker — counts as reviewed, not added to your voice library. Rename via the pill if you know who it is.")
             }
         }
-        if !verified, let suggestion = liveSuggestions["\(id)"] {
-            speakerSuggestionRow(id: id, suggestion: suggestion)
-        } else if !verified && suggestionsLoading {
-            // Placeholder while suggestions compute — keeps rows from
-            // jumping when the real evidence arrives.
-            RoundedRectangle(cornerRadius: 3)
-                .fill(.quaternary)
-                .frame(width: 180, height: 12)
-                .padding(.leading, 26)
-                .padding(.vertical, 4)
-        }
+    }
+
+    /// One compact, informational treatment of WeSpeaker output. The primary
+    /// decision is rendered separately at the far right of the row.
+    @ViewBuilder
+    private func compactSuggestionEvidence(_ suggestion: SpeakerSuggestion) -> some View {
+        if suggestion.decision == "hold" {
+            Text("WeSpeaker: manual review")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .help(suggestionHelp(suggestion))
+        } else if let proposed = suggestion.proposedName {
+            HStack(spacing: 4) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.caption2)
+                    .foregroundColor(suggestion.decision == "strong_review" ? .green : .blue)
+                Text(proposed)
+                    .font(.caption.weight(.semibold))
+                calendarBadge(suggestion.inCalendar)
+                if let score = suggestion.similarity {
+                    Text("\(Int((score * 100).rounded()))%")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+            .help(suggestionHelp(suggestion))
         }
     }
 
@@ -1989,6 +2753,7 @@ struct TranscriptViewerView: View {
                     speakerPill(speakerId: segment.speakerId, interactive: true, context: "segment-\(idx)")
                         .frame(width: transcriptSpeakerColumnWidth, alignment: .leading)
                         .clipped()
+
                 }
 
                 WordTokensView(
@@ -2130,6 +2895,15 @@ struct TranscriptViewerView: View {
         guard uniqueSpeakerIds.count > 1 else { return false }
         if hasDuplicateNames { return true }
         return uniqueSpeakerIds.contains { !(speakerMeta(for: $0)?.verified ?? false) }
+    }
+
+    /// Calendar evidence is useful while speaker identity is unresolved. Once
+    /// every active cluster has an explicit human outcome (including an
+    /// intentional Unknown), reclustering could only risk moving confirmed
+    /// turns between those identities, so automatic calendar matching stops.
+    private var allSpeakersConfirmed: Bool {
+        !uniqueSpeakerIds.isEmpty
+            && uniqueSpeakerIds.allSatisfy { speakerMeta(for: $0)?.verified == true }
     }
 
     /// True when a real (non-generic) name is assigned to more than one speaker —
@@ -2328,6 +3102,19 @@ struct TranscriptViewerView: View {
         onListVoiceNames?() { names in self.libraryNames = names }
     }
 
+    /// Confirmed/suggested calendar people who have an enrolled voice. These
+    /// are promoted in the selected-text person picker without excluding the
+    /// rest of the library, so calendar evidence guides rather than dictates.
+    private var calendarInvitedLibraryNames: [String] {
+        let invited = (linkedCalendarEvent ?? suggestedCalendarEvent)?.attendeeNames ?? []
+        guard !invited.isEmpty else { return [] }
+        return libraryNames.filter { libraryName in
+            invited.contains { invitedName in
+                libraryName.caseInsensitiveCompare(invitedName) == .orderedSame
+            }
+        }
+    }
+
     /// Distinct real names already assigned to speakers in this meeting, in
     /// speaker order. These are the most useful mapping targets when correcting
     /// an over-split meeting.
@@ -2524,8 +3311,56 @@ struct TranscriptViewerView: View {
         saveTranscript()
     }
 
+    @ViewBuilder
+    private var transcriptHistoryPicker: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Transcript history")
+                .font(.headline)
+            Text("Snapshots are local to this Mac. Audio is never included.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if transcriptVersions.isEmpty {
+                Text("No earlier snapshot yet. HiDock saves one before each speaker-changing action from now on.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(transcriptVersions) { version in
+                    HStack(spacing: 8) {
+                        Text(version.title)
+                            .font(.caption)
+                            .lineLimit(2)
+                        Spacer()
+                        Button("Restore") {
+                            pendingTranscriptRestore = version
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            }
+        }
+        .confirmationDialog(
+            "Restore this transcript version?",
+            isPresented: Binding(
+                get: { pendingTranscriptRestore != nil },
+                set: { if !$0 { pendingTranscriptRestore = nil } }
+            ),
+            presenting: pendingTranscriptRestore
+        ) { version in
+            Button("Restore", role: .destructive) {
+                onRestoreTranscriptVersion?(filePath, version.id)
+                pendingTranscriptRestore = nil
+                showTranscriptHistory = false
+            }
+            Button("Cancel", role: .cancel) { pendingTranscriptRestore = nil }
+        } message: { version in
+            Text("Restore \(version.title)? The current state is first saved as a new rollback point.")
+        }
+    }
+
     private func saveTranscript() {
         do {
+            onSnapshotTranscript?(filePath, "Before speaker edit")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(transcript)

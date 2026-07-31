@@ -62,7 +62,10 @@ struct RecordingsTableView: View {
                 if showExtraColumns {
                     headerButton("Size", key: "size", width: 70)
                 }
-                Text("").frame(width: 50) // actions
+                Text("").frame(width: 70) // actions
+                // Meeting is last: it is the widest, most variable cell, so
+                // trailing it keeps every fixed-width column aligned.
+                headerButton("Meeting", key: nil, width: 260)
                 Spacer(minLength: 0)
             }
             .font(.caption.weight(.medium))
@@ -333,6 +336,11 @@ struct RecordingsTableView: View {
             }
             .frame(width: 70, alignment: .leading)
 
+            // Meeting — merge parents carry no calendar link of their own.
+            Text("—")
+                .foregroundColor(.secondary.opacity(0.5))
+                .frame(width: 260, alignment: .leading)
+
             Spacer(minLength: 0)
         }
         .font(.system(size: 12))
@@ -424,6 +432,65 @@ struct RecordingsTableView: View {
         return String(format: "%.1f MB", mb)
     }
 
+    private static let meetingDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM · HH:mm"
+        return formatter
+    }()
+
+    @ViewBuilder
+    private func meetingCell(_ entry: HiDockSyncRecordingEntry) -> some View {
+        if let meeting = entry.calendarMeetingTitle, !meeting.isEmpty {
+            VStack(alignment: .leading, spacing: 1) {
+                Label(meeting, systemImage: "calendar.badge.checkmark")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let start = entry.calendarMeetingStart {
+                    Text(Self.meetingDateFormatter.string(from: start))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.green)
+            .help("Confirmed calendar meeting: \(meeting)")
+        } else if let suggestion = entry.calendarSuggestionTitle, !suggestion.isEmpty {
+            HStack(spacing: 5) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Label(suggestion, systemImage: "calendar.badge.clock")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let start = entry.calendarSuggestionStart {
+                        Text(Self.meetingDateFormatter.string(from: start))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Confirm or reject")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer(minLength: 2)
+                Button { viewModel.onConfirmCalendarSuggestion(entry.recording.outputPath) } label: {
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                }
+                .buttonStyle(.plain)
+                .help("Confirm meeting and start speaker matching")
+                Button { viewModel.onRejectCalendarSuggestion(entry.recording.outputPath) } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Not this meeting — start speaker matching without calendar context")
+            }
+            .font(.caption)
+            .foregroundColor(.green)
+            .help("Raw transcript is ready — confirm or reject before speaker matching")
+        } else {
+            Text("—")
+                .foregroundColor(.secondary.opacity(0.5))
+        }
+    }
+
     // MARK: - Recording Row
 
     @ViewBuilder
@@ -496,9 +563,10 @@ struct RecordingsTableView: View {
                 if isDownloadingRow { return "Downloading" }
                 if isTranscribingRow { return "Transcribing" }
                 if isSummarisingRow { return "Summarising" }
+                if entry.calendarMeetingTitle == nil, entry.calendarSuggestionTitle != nil { return "Meeting pending" }
                 return entry.statusText
             }()
-            let badgeLevel: StatusLevel = (isDownloadingRow || isTranscribingRow || isSummarisingRow) ? .warning : entry.statusLevel
+            let badgeLevel: StatusLevel = (isDownloadingRow || isTranscribingRow || isSummarisingRow || (entry.calendarMeetingTitle == nil && entry.calendarSuggestionTitle != nil)) ? .warning : entry.statusLevel
             ClickableStatusBadge(
                 text: badgeText,
                 level: badgeLevel,
@@ -639,6 +707,9 @@ struct RecordingsTableView: View {
                 }
             }
             .frame(width: 70, alignment: .leading)
+
+            meetingCell(entry)
+                .frame(width: 260, alignment: .leading)
 
             // Per-row "Potential merge" toggle for candidate rows. Click
             // ticks the row; once 2+ are ticked, the toolbar surfaces
