@@ -102,11 +102,28 @@ xcodegen generate   # brew install xcodegen — keeps the .xcodeproj in sync wit
 xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug -derivedDataPath /tmp/hidock-build
 ```
 
-(Use `-configuration Release` for optimised production builds. Both configurations use the same approval dialog and deploy to the same location.)
+(Use `-configuration Release` for optimised production builds. Neither configuration deploys unless you ask; both install to the same location when you do.)
 
 ### Deploy
 
-Build/deploy is **approval-gated** — the target's "Deploy to Applications" post-build script shows a native macOS approval for local `xcodebuild` runs. A local validation build with `CI=true` still asks for build approval, then skips deployment; only headless GitHub Actions (`GITHUB_ACTIONS=true`) bypasses the dialog. It:
+**Deployment is opt-in: set `HIDOCK_DEPLOY=1`.** Any build without it compiles and
+leaves `/Applications` untouched, silently — the post-build phase runs on every
+build, so while deploying was the default every incidental build (validation
+compile, test run, IDE build, hook) popped an approval dialog, in bursts.
+
+```bash
+# compile only — no dialog, installed app untouched
+xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug
+
+# actually install it
+HIDOCK_DEPLOY=1 xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug
+```
+
+With `HIDOCK_DEPLOY=1` you are asked to confirm **only when the app is running**,
+because that is the only case where anything gets interrupted — the dialog names
+what is transcribing, downloading, converting or recording and defaults to Cancel
+when something is. `HIDOCK_DEPLOY=force` skips that confirmation; `GITHUB_ACTIONS=true`
+never deploys at all. Once approved it:
 
 1. Kills running `hidock-mic-trigger` processes
 2. Removes stale copies (`/Applications/HiDock Mic Trigger.app`, legacy `HiDock Mic Trigger Dev.app`, old lowercase `hidock-mic-trigger.app`, and any `~/Applications/` duplicates)
