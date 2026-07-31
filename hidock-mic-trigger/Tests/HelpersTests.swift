@@ -202,3 +202,34 @@ final class CalendarAttendeeScopingTests: XCTestCase {
         XCTAssertEqual(names, ["Ian Reay"])
     }
 }
+
+/// The Recording column should not restate the Created column.
+final class CompactRecordingLabelTests: XCTestCase {
+
+    func testDeviceFilenameKeepsOnlyTheRecLabel() {
+        XCTAssertEqual(compactRecordingLabel("2026Jul31-150744-Rec99.mp3"), "Rec99")
+        XCTAssertEqual(compactRecordingLabel("2026Jul29-135954-Rec88.mp3"), "Rec88")
+        XCTAssertEqual(compactRecordingLabel("2025Oct29-130000-HiD08.mp3"), "HiD08")
+    }
+
+    func testNonNumericLabelsSurvive() {
+        XCTAssertEqual(compactRecordingLabel("2026Apr17-130532-AiAccTrans.wav"), "AiAccTrans")
+    }
+
+    func testACustomNameIsKeptWhole() {
+        // Nothing else in the table shows this, so shortening it would lose
+        // information rather than remove a duplicate.
+        let name = "Steve Jobs & Bill Gates- A Conversation.mp3"
+        XCTAssertEqual(compactRecordingLabel(name), "Steve Jobs & Bill Gates- A Conversation")
+    }
+
+    func testExtensionIsAlwaysDropped() {
+        XCTAssertFalse(compactRecordingLabel("2026Jul31-150744-Rec99.mp3").contains(".mp3"))
+        XCTAssertFalse(compactRecordingLabel("something.hda").contains(".hda"))
+    }
+
+    func testMergedOutputNameStillReadable() {
+        // Merge outputs are not in the device convention; keep them intact.
+        XCTAssertEqual(compactRecordingLabel("merged-2026Jul10-abc.mp3"), "merged-2026Jul10-abc")
+    }
+}

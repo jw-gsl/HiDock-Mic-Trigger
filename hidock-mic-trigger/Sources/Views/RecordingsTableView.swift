@@ -8,6 +8,29 @@ private struct RecordingsRowFramesKey: PreferenceKey {
     }
 }
 
+/// The part of a recording's filename the Created column does not already show.
+///
+/// Device files are named `2026Jul31-150744-Rec99.mp3`, and that date and time is
+/// repeated verbatim two columns along — so 220pt of table was spent restating
+/// Created to show one Rec number. Only the trailing label is kept, which lets the
+/// column shrink to 96pt and gives the Meeting column room to stay on screen.
+///
+/// A file with a name of its own keeps it: nothing else in the table shows it, so
+/// truncating there would lose information rather than duplicate it.
+func compactRecordingLabel(_ fileName: String) -> String {
+    let stem = (fileName as NSString).deletingPathExtension
+    // `<yyyy><Mon><dd>-<HHmmss>-<label>` — the device's own convention.
+    let pattern = #"^\d{4}[A-Za-z]{3}\d{1,2}-\d{4,6}-(.+)$"#
+    guard let expression = try? NSRegularExpression(pattern: pattern),
+          let match = expression.firstMatch(
+              in: stem, range: NSRange(stem.startIndex..., in: stem)
+          ),
+          let labelRange = Range(match.range(at: 1), in: stem)
+    else { return stem }
+    let label = String(stem[labelRange]).trimmingCharacters(in: .whitespaces)
+    return label.isEmpty ? stem : label
+}
+
 struct RecordingsTableView: View {
     @ObservedObject var viewModel: HiDockViewModel
     /// Track whether we've programmatically restored the initial position for
@@ -50,12 +73,12 @@ struct RecordingsTableView: View {
                 // needs tagging ⚠), not whether the file is transcribed.
                 // Transcribed is now part of the main Status cascade:
                 // On device → Downloaded → Transcribed.
-                headerButton("Tagged", key: nil, width: 90)
+                headerButton("Tagged", key: nil, width: 56)
                 // Summary column — mirrors Tagged: a tick that opens the
                 // generated summary. No sort key (summary state isn't a
                 // sortable scalar the way name/date are).
-                headerButton("Summary", key: nil, width: 80)
-                headerButton("Recording", key: "name", width: 220)
+                headerButton("Summary", key: nil, width: 62)
+                headerButton("Recording", key: "name", width: 96)
                 headerButton("Created", key: "created", width: 155)
                 headerButton("Length", key: "duration", width: 70)
                 if showExtraColumns {
@@ -268,7 +291,7 @@ struct RecordingsTableView: View {
 
             // Transcription state for merged file
             mergeTranscriptionIndicator(group: group)
-                .frame(width: 90, alignment: .leading)
+                .frame(width: 56, alignment: .leading)
 
             // Summary column placeholder — merge groups don't carry a
             // per-entry summaryPath; dash keeps the columns aligned with
@@ -278,15 +301,15 @@ struct RecordingsTableView: View {
                 Text("—")
                     .foregroundColor(.secondary.opacity(0.5))
             }
-                .frame(width: 80, alignment: .leading)
+                .frame(width: 62, alignment: .leading)
 
             // Recording name — truncate to match regular row length
             let displayName = group.outputName.count > 30
                 ? String(group.outputName.prefix(28)) + "…"
                 : group.outputName
-            Text(displayName)
+            Text(compactRecordingLabel(displayName))
                 .lineLimit(1)
-                .frame(width: 220, alignment: .leading)
+                .frame(width: 96, alignment: .leading)
                 .clipped()
 
             // Created (earliest child)
@@ -338,6 +361,7 @@ struct RecordingsTableView: View {
         }
         .font(.system(size: 12))
         .padding(.vertical, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -671,7 +695,7 @@ struct RecordingsTableView: View {
                 onRevealTranscript: viewModel.onRevealTranscript,
                 onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer
             )
-            .frame(width: 90, alignment: .leading)
+            .frame(width: 56, alignment: .leading)
 
             // Summary column — indigo doc tick when a typed summary exists
             // (click opens it), spinner while summarising, dash otherwise.
@@ -694,12 +718,12 @@ struct RecordingsTableView: View {
                         .foregroundColor(.secondary.opacity(0.5))
                 }
             }
-            .frame(width: 80, alignment: .leading)
+            .frame(width: 62, alignment: .leading)
 
-            Text(entry.recording.outputName)
+            Text(compactRecordingLabel(entry.recording.outputName))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(width: 220, alignment: .leading)
+                .frame(width: 96, alignment: .leading)
 
             Text("\(entry.recording.createDate) \(entry.recording.createTime)")
                 .font(.caption.monospacedDigit())
