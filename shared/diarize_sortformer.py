@@ -57,6 +57,33 @@ _LINK_MARGIN = 0.05
 # matches nothing stays its own label.
 _MICRO_LABEL_MAX_SECONDS = 12.0
 _ABSORB_SIMILARITY_THRESHOLD = 0.70
+# Auto-merging is allowed only when the affinity graph has a clear community
+# structure. A weak graph must surface as an ambiguity, not silently turn a
+# five-person call into a three-person result.
+_GRAPH_AUTOMERGE_MIN_SCORE = 0.15
+
+# A Sortformer turn can occasionally contain an entire conversation (Rec80's
+# opening did): this is *under*-diarisation inside one window, not the more
+# common cross-window duplicate-label problem.  Inspect only very long turns,
+# and split only with strong repeated two-community evidence.  The high bar is
+# important: an uncertain graph must never invent a new participant.
+_MIXED_TURN_MIN_SECONDS = 24.0
+_MIXED_TURN_CHUNK_SECONDS = 4.0
+_MIXED_TURN_MAX_CHUNKS = 48
+_MIXED_TURN_MIN_CHUNKS_PER_COMMUNITY = 3
+_MIXED_TURN_MIN_SEPARATION = 0.14
+
+# Splitting a label back apart when the user asks for MORE speakers than
+# stitching produced. Sortformer under-splits same-channel calls (two people on
+# one phone line share a label), and until now an explicit count could only ever
+# merge labels down — so "Redetect at 4" on a 3-label result did nothing at all.
+# The human-supplied count is the guardrail that makes this safe, exactly as it
+# is for _merge_labels_to_count: we split at the strongest available voice
+# evidence and stop short (with a log line) when there is none, rather than
+# inventing a participant out of noise.
+_SPLIT_MIN_TURN_SECONDS = 1.5      # shorter turns give unusable embeddings
+_SPLIT_MIN_TURNS_PER_VOICE = 2     # a single turn is not a participant
+_SPLIT_MIN_SEPARATION = 0.05       # below this the two groups are one voice
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -65,6 +92,120 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     if na <= 1e-10 or nb <= 1e-10:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
+
+
+def _mixed_turn_graph_partition(embeddings: list[np.ndarray]) -> list[int] | None:
+    """Return a conservative two-community partition for one long turn.
+
+    This is a tiny deterministic voice-affinity graph: nodes are consecutive
+    four-second chunks and edge weight is cosine similarity.  Farthest-pair
+    seeded two-means gives the partition; graph separation and temporal
+    alternation decide whether it represents two people rather than normal
+    within-voice variation.  Kept NumPy-only so it is testable and does not
+    add a clustering dependency to the transcription install.
+    """
+    if len(embeddings) < _MIXED_TURN_MIN_CHUNKS_PER_COMMUNITY * 2:
+        return None
+    vectors = np.asarray(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    if np.any(norms <= 1e-10):
+        return None
+    vectors = vectors / norms
+    affinity = vectors @ vectors.T
+    # Deterministic seeds: least-similar pair in the upper triangle.
+    masked = affinity + np.eye(len(vectors), dtype=np.float32) * 2.0
+    first, second = np.unravel_index(np.argmin(masked), masked.shape)
+    if first == second:
+        return None
+    labels = np.zeros(len(vectors), dtype=np.int8)
+    labels[second] = 1
+    for _ in range(12):
+        centroids = []
+        for group in (0, 1):
+            members = vectors[labels == group]
+            if not len(members):
+                return None
+            center = members.mean(axis=0)
+            length = np.linalg.norm(center)
+            if length <= 1e-10:
+                return None
+            centroids.append(center / length)
+        scores = vectors @ np.stack(centroids).T
+        next_labels = np.argmax(scores, axis=1).astype(np.int8)
+        # Ensure the initial seeds cannot collapse into one arbitrary group.
+        next_labels[first] = 0
+        next_labels[second] = 1
+        if np.array_equal(next_labels, labels):
+            break
+        labels = next_labels
+    counts = np.bincount(labels, minlength=2)
+    if np.any(counts < _MIXED_TURN_MIN_CHUNKS_PER_COMMUNITY):
+        return None
+    same, cross = [], []
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            (same if labels[i] == labels[j] else cross).append(float(affinity[i, j]))
+    if not same or not cross or float(np.mean(same) - np.mean(cross)) < _MIXED_TURN_MIN_SEPARATION:
+        return None
+    # A real blended turn should change communities more than once.  A single
+    # transition is usually one person entering after another, already a
+    # boundary the diarizer may reasonably have missed but too weak to relabel.
+    transitions = int(np.count_nonzero(labels[1:] != labels[:-1]))
+    return labels.tolist() if transitions >= 2 else None
+
+
+def _repair_mixed_turns_with_graph(audio: np.ndarray, turns):
+    """Split grossly overlong Sortformer turns when their local voice graph
+    proves they contain two alternating speakers.  Returns unchanged turns if
+    embeddings are unavailable or evidence is ambiguous."""
+    linker = _CrossWindowLinker(audio)
+    session = linker._session_or_none()
+    if session is None:
+        return turns, 0
+    try:
+        from shared.audio_utils import extract_embedding
+    except Exception:
+        return turns, 0
+    repaired, repairs = [], 0
+    for turn_index, (start, end, label) in enumerate(turns):
+        duration = end - start
+        if duration < _MIXED_TURN_MIN_SECONDS:
+            repaired.append((start, end, label))
+            continue
+        chunk_count = min(_MIXED_TURN_MAX_CHUNKS, int(np.ceil(duration / _MIXED_TURN_CHUNK_SECONDS)))
+        chunk_seconds = duration / chunk_count
+        chunks, embeddings = [], []
+        failed = False
+        for index in range(chunk_count):
+            cs, ce = start + index * chunk_seconds, min(end, start + (index + 1) * chunk_seconds)
+            sample = audio[int(cs * 16000):int(ce * 16000)]
+            try:
+                embedding = extract_embedding(sample, sr=16000, onnx_session=session)
+            except Exception:
+                failed = True
+                break
+            if embedding is None or np.linalg.norm(embedding) <= 1e-10:
+                failed = True
+                break
+            chunks.append((cs, ce))
+            embeddings.append(embedding)
+        partition = None if failed else _mixed_turn_graph_partition(embeddings)
+        if partition is None:
+            repaired.append((start, end, label))
+            continue
+        # Retain the original label for its first community; the second raw
+        # label is normalised later alongside all Sortformer labels.
+        primary = partition[0]
+        alternate = f"{label}__graph_split_{turn_index}"
+        for (cs, ce), community in zip(chunks, partition):
+            repaired.append((cs, ce, label if community == primary else alternate))
+        repairs += 1
+        print(
+            f"Sortformer: graph split mixed {label} turn {start:.1f}-{end:.1f}s "
+            f"into two voice communities",
+            file=sys.stderr,
+        )
+    return repaired, repairs
 
 
 class _CrossWindowLinker:
@@ -689,6 +830,274 @@ def _merge_labels_to_count(
     return [(s, e, mapping[lab]) for s, e, lab in turns]
 
 
+def _two_voice_partition(
+    embeddings: list[np.ndarray],
+    *,
+    min_per_group: int,
+    min_separation: float,
+) -> tuple[list[int], float] | None:
+    """Split `embeddings` into two voice groups, or None if they are one voice.
+
+    Farthest-pair-seeded two-means, the same deterministic core
+    `_mixed_turn_graph_partition` uses on sub-turn chunks. Here the nodes are
+    whole turns, so the temporal-alternation rule does not apply — a person's
+    turns need not interleave with anyone else's. Returns the group per input
+    plus the separation (mean within-group minus mean cross-group similarity),
+    which lets a caller compare split candidates and pick the most convincing.
+    """
+    if len(embeddings) < min_per_group * 2:
+        return None
+    vectors = np.asarray(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    if np.any(norms <= 1e-10):
+        return None
+    vectors = vectors / norms
+    affinity = vectors @ vectors.T
+    masked = affinity + np.eye(len(vectors), dtype=np.float32) * 2.0
+    first, second = np.unravel_index(np.argmin(masked), masked.shape)
+    if first == second:
+        return None
+    labels = np.zeros(len(vectors), dtype=np.int8)
+    labels[second] = 1
+    for _ in range(12):
+        centroids = []
+        for group in (0, 1):
+            members = vectors[labels == group]
+            if not len(members):
+                return None
+            center = members.mean(axis=0)
+            length = np.linalg.norm(center)
+            if length <= 1e-10:
+                return None
+            centroids.append(center / length)
+        scores = vectors @ np.stack(centroids).T
+        next_labels = np.argmax(scores, axis=1).astype(np.int8)
+        next_labels[first] = 0
+        next_labels[second] = 1
+        if np.array_equal(next_labels, labels):
+            break
+        labels = next_labels
+    if np.any(np.bincount(labels, minlength=2) < min_per_group):
+        return None
+    same, cross = [], []
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            (same if labels[i] == labels[j] else cross).append(float(affinity[i, j]))
+    if not same or not cross:
+        return None
+    separation = float(np.mean(same) - np.mean(cross))
+    if separation < min_separation:
+        return None
+    return labels.tolist(), separation
+
+
+def _split_labels_to_count(
+    audio: np.ndarray,
+    turns: list[tuple[float, float, str]],
+    count: int,
+) -> tuple[list[tuple[float, float, str]], int]:
+    """Split global labels up to `count` when the user asked for more speakers
+    than stitching produced.
+
+    Each round scores every existing label by how convincingly its own turns
+    divide into two voices, then splits the single best one. Working at turn
+    granularity means we never invent a boundary inside a turn — genuinely
+    blended turns are already handled by `_repair_mixed_turns_with_graph`
+    upstream. Returns the turns (unchanged if nothing could be split) and the
+    number of splits performed.
+    """
+    def ordered_labels(rows):
+        seen = []
+        for _, _, lab in rows:
+            if lab not in seen:
+                seen.append(lab)
+        return seen
+
+    labels = ordered_labels(turns)
+    if count < 2 or len(labels) >= count:
+        return turns, 0
+
+    linker = _CrossWindowLinker(audio)
+    session = linker._session_or_none()
+    if session is None:
+        return turns, 0
+    try:
+        from shared.audio_utils import extract_embedding
+    except Exception:
+        return turns, 0
+
+    cache: dict[int, np.ndarray | None] = {}
+
+    def turn_embedding(index: int):
+        if index not in cache:
+            start, end, _ = turns[index]
+            if end - start < _SPLIT_MIN_TURN_SECONDS:
+                cache[index] = None
+            else:
+                sample = audio[int(start * 16000):int(end * 16000)]
+                try:
+                    emb = extract_embedding(sample, sr=16000, onnx_session=session)
+                except Exception:
+                    emb = None
+                if emb is not None and np.linalg.norm(emb) <= 1e-10:
+                    emb = None
+                cache[index] = emb
+        return cache[index]
+
+    splits = 0
+    while len(labels) < count:
+        best = None  # (separation, label, {turn index: group})
+        for label in labels:
+            indices = [
+                i for i, (_, _, lab) in enumerate(turns)
+                if lab == label and turn_embedding(i) is not None
+            ]
+            if len(indices) < _SPLIT_MIN_TURNS_PER_VOICE * 2:
+                continue
+            partition = _two_voice_partition(
+                [turn_embedding(i) for i in indices],
+                min_per_group=_SPLIT_MIN_TURNS_PER_VOICE,
+                min_separation=_SPLIT_MIN_SEPARATION,
+            )
+            if partition is None:
+                continue
+            groups, separation = partition
+            if best is None or separation > best[0]:
+                best = (separation, label, dict(zip(indices, groups)))
+        if best is None:
+            print(
+                f"Sortformer: no voice evidence to reach {count} speakers; "
+                f"keeping {len(labels)}",
+                file=sys.stderr,
+            )
+            break
+        separation, label, assignment = best
+        # The first group keeps the original label so any name already resolved
+        # for it stays attached; only the split-off voice gets a new label.
+        new_label = f"{label}__voice_split_{splits + 1}"
+        primary = assignment[min(assignment)]
+        turns = [
+            (s, e, new_label)
+            if i in assignment and assignment[i] != primary
+            else (s, e, lab)
+            for i, (s, e, lab) in enumerate(turns)
+        ]
+        labels = ordered_labels(turns)
+        splits += 1
+        print(
+            f"Sortformer: split {label} into two voices at requested speaker "
+            f"count {count} (separation {separation:.3f})",
+            file=sys.stderr,
+        )
+    return turns, splits
+
+
+def _speaker_affinity_graph(
+    labels: list[str], label_embeddings: dict,
+    neighbours: int = 3,
+) -> dict[tuple[str, str], float]:
+    """Build a sparse voice-affinity graph between provisional labels.
+
+    Long recordings create the same person under new Sortformer labels in
+    different windows.  A complete similarity matrix is dominated by weak,
+    unhelpful cross-person links, so retain only each label's strongest local
+    voice neighbours.  This graph is used to score candidate community counts,
+    never to name a person or override an explicit user count.
+    """
+    edges: dict[tuple[str, str], float] = {}
+    for label in labels:
+        emb = label_embeddings.get(label)
+        if emb is None:
+            continue
+        ranked = sorted(
+            (
+                (_cosine(emb, other_emb), other)
+                for other, other_emb in label_embeddings.items()
+                if other != label and other in labels and other_emb is not None
+            ),
+            reverse=True,
+        )[:neighbours]
+        for similarity, other in ranked:
+            # Below this, an edge carries no more evidence than background
+            # similarity between unrelated speakers.
+            if similarity < 0.50:
+                continue
+            key = tuple(sorted((label, other)))
+            edges[key] = max(edges.get(key, 0.0), similarity)
+    return edges
+
+
+def _graph_partition_score(
+    labels: list[str], mapping: dict[str, str], edges: dict[tuple[str, str], float]
+) -> float:
+    """Weighted modularity of a provisional speaker-community partition."""
+    if not edges:
+        return -1.0
+    degrees = {label: 0.0 for label in labels}
+    for (left, right), weight in edges.items():
+        degrees[left] += weight
+        degrees[right] += weight
+    total_weight = sum(edges.values())
+    if total_weight <= 0:
+        return -1.0
+    communities: dict[str, list[str]] = {}
+    for label in labels:
+        communities.setdefault(mapping.get(label, label), []).append(label)
+    score = 0.0
+    for members in communities.values():
+        member_set = set(members)
+        internal = sum(
+            weight for (left, right), weight in edges.items()
+            if left in member_set and right in member_set
+        )
+        degree_sum = sum(degrees[label] for label in members)
+        score += internal / total_weight - (degree_sum / (2.0 * total_weight)) ** 2
+    return score
+
+
+def _auto_merge_labels_by_graph(
+    turns: list[tuple[float, float, str]],
+    label_embeddings: dict,
+    max_speakers: int = 8,
+) -> tuple[list[tuple[float, float, str]], int | None, float | None]:
+    """Choose a global speaker count from a sparse voice-affinity graph.
+
+    This is deliberately a *count-selection* pass over the already-created
+    Sortformer labels, not repeated diarization. For each feasible community
+    count we apply the existing conservative voice merge and score its partition
+    by graph modularity. Near-ties prefer fewer communities, because the known
+    failure mode is window-label fragmentation rather than under-splitting.
+    """
+    labels = list(dict.fromkeys(label for _, _, label in turns))
+    usable = [label for label in labels if label_embeddings.get(label) is not None]
+    if len(usable) < 3 or len(labels) <= 2:
+        return turns, None, None
+    edges = _speaker_affinity_graph(labels, label_embeddings)
+    if not edges:
+        return turns, None, None
+
+    upper = min(max_speakers, len(usable))
+    candidates: list[tuple[float, int, list[tuple[float, float, str]]]] = []
+    for count in range(2, upper + 1):
+        merged = _merge_labels_to_count(turns, label_embeddings, count)
+        mapping = {}
+        for (_, _, original), (_, _, resolved) in zip(turns, merged):
+            mapping[original] = resolved
+        actual = len({label for _, _, label in merged})
+        # A small penalty breaks modularity's tendency to preserve singleton
+        # communities in sparse graphs. It is intentionally weak: clear voice
+        # evidence still wins over a lower count.
+        score = _graph_partition_score(labels, mapping, edges) - 0.015 * actual
+        candidates.append((score, actual, merged))
+
+    best_score = max(score for score, _, _ in candidates)
+    # Counts within 0.025 modularity are indistinguishable at this signal level;
+    # choose the smaller, safer result instead of exposing window fragments.
+    near_best = [item for item in candidates if item[0] >= best_score - 0.025]
+    _, chosen_count, chosen_turns = min(near_best, key=lambda item: item[1])
+    return chosen_turns, chosen_count, best_score
+
+
 def _expected_speakers_from_calendar(calendar_context) -> int | None:
     """Expected speaker count from the recording's calendar event, if any.
 
@@ -862,6 +1271,22 @@ def diarize(
             merged.append([s, e, spk])
     all_turns = [(m[0], m[1], m[2]) for m in merged]
 
+    # Repair within-window under-splits before labels are normalised and before
+    # any count merge.  A graph can merge duplicate labels later, but it cannot
+    # recover two people hidden inside one label unless we create local voice
+    # nodes at this point.
+    all_turns, mixed_turn_repairs = _repair_mixed_turns_with_graph(audio, all_turns)
+
+    # An explicit count is a two-way instruction, not just a cap. Splitting has
+    # to happen here — before labels are normalised and before names are
+    # resolved — so a split-off voice gets its own "Speaker N" and its own
+    # voice-library lookup. Only an explicit user count splits upward: the
+    # calendar attendee count stays a downward-only soft cap, because invitees
+    # who never speak would otherwise manufacture empty participants.
+    voice_splits = 0
+    if n_speakers is not None:
+        all_turns, voice_splits = _split_labels_to_count(audio, all_turns, n_speakers)
+
     # Normalize raw Sortformer IDs to stable "Speaker 1/2/…" labels in
     # order of first appearance (matches diarize_lite's behaviour).
     label_map: dict[str, str] = {}
@@ -895,9 +1320,15 @@ def diarize(
     # Either way the count is external evidence, which is what makes this
     # aggressive merging safe on same-channel calls.
     effective_n_speakers = n_speakers
+    count_strategy = "manual" if effective_n_speakers is not None else "unconstrained"
+    if mixed_turn_repairs:
+        count_strategy += "+mixed-turn-graph-repair"
+    if voice_splits:
+        count_strategy += "+voice-split-up"
     if effective_n_speakers is None:
         effective_n_speakers = _expected_speakers_from_calendar(calendar_context)
         if effective_n_speakers is not None:
+            count_strategy = "calendar"
             print(
                 f"Sortformer: calendar expects {effective_n_speakers} attendees",
                 file=sys.stderr,
@@ -912,6 +1343,34 @@ def diarize(
             f"at speaker count {effective_n_speakers}",
             file=sys.stderr,
         )
+    elif len(internal_labels) > 2:
+        graph_turns, graph_count, graph_score = _auto_merge_labels_by_graph(
+            renamed_turns, label_embs,
+        )
+        if (
+            graph_count is not None
+            and graph_score is not None
+            and graph_score >= _GRAPH_AUTOMERGE_MIN_SCORE
+            and graph_count < len(internal_labels)
+        ):
+            before = len(internal_labels)
+            renamed_turns = graph_turns
+            surviving = {lab for _, _, lab in renamed_turns}
+            internal_labels = [lab for lab in internal_labels if lab in surviving]
+            count_strategy = "voice-affinity-graph"
+            print(
+                f"Sortformer: voice-affinity graph merged {before} labels down to "
+                f"{len(internal_labels)} communities (score {graph_score:.3f})",
+                file=sys.stderr,
+            )
+        elif graph_count is not None:
+            count_strategy = "voice-affinity-graph-inconclusive"
+            print(
+                f"Sortformer: voice-affinity graph suggests {graph_count} communities "
+                f"but score {graph_score:.3f} is inconclusive; keeping labels for a "
+                "calendar hint or user-selected count",
+                file=sys.stderr,
+            )
 
     # Absorb micro tail-fragments (a few seconds of speech) into their
     # closest full-size voice — a fragment is not a real participant, and
@@ -926,6 +1385,18 @@ def diarize(
         file=sys.stderr,
     )
     absorbed_turns = _absorb_micro_labels(renamed_turns, label_embs, talk_seconds)
+    # Absorption exists to delete tail-fragments, not to overrule the person who
+    # typed the count. A quiet-but-real participant can easily hold under the
+    # micro threshold, and letting absorption run would hand back the very
+    # "asked for 4, got 3, no changes" result this count is meant to fix.
+    absorbed_count = len({lab for _, _, lab in absorbed_turns})
+    if n_speakers is not None and absorbed_count < n_speakers <= len(talk_seconds):
+        print(
+            f"Sortformer: skipped micro-label absorption — it would drop to "
+            f"{absorbed_count} speakers below the requested {n_speakers}",
+            file=sys.stderr,
+        )
+        absorbed_turns = renamed_turns
     for lab in sorted(set(talk_seconds) - {lab for _, _, lab in absorbed_turns}):
         print(
             f"Sortformer: absorbed micro label {lab} ({talk_seconds[lab]:.1f}s) into a fuller voice",
@@ -1032,4 +1503,5 @@ def diarize(
         "speaker_meta": speaker_meta,
         "speaker_embeddings": speaker_embeddings,
         "backend": "sortformer",
+        "speaker_count_strategy": count_strategy,
     }

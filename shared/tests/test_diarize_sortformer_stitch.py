@@ -433,6 +433,26 @@ def test_merge_labels_to_count_never_merges_unembedded():
     assert [t[2] for t in out] == ["A", "A", "C"]
 
 
+def test_voice_affinity_graph_merges_window_fragments_without_manual_count():
+    from shared.diarize_sortformer import _auto_merge_labels_by_graph
+
+    # Two people, each appearing under two independent window labels.
+    turns = [
+        (0.0, 20.0, "A"), (20.0, 40.0, "B"),
+        (300.0, 320.0, "C"), (320.0, 340.0, "D"),
+    ]
+    embs = {
+        "A": _ALICE, "B": _BOB,
+        "C": _ALICE_LIKE, "D": _BOB_LIKE,
+    }
+
+    merged, count, score = _auto_merge_labels_by_graph(turns, embs)
+
+    assert count == 2
+    assert score is not None
+    assert [label for _, _, label in merged] == ["A", "B", "A", "B"]
+
+
 # ── calendar-derived expected speaker count ───────────────────────────────────
 
 
