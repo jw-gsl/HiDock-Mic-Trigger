@@ -113,30 +113,47 @@ targets:
               DEFAULT_BUTTON="Quit and Replace"
             fi
 
-            # A dialog from a process xcodebuild spawned opens without focus, so the
-            # first click is spent activating the window. `tell me to activate` did
-            # not fix that, so the dialog is owned by System Events, which can bring
-            # itself frontmost. If this still needs two clicks, the next step is a
-            # Finder-owned dialog rather than another variant of the same trick.
-            set +e
-            DEPLOY_APPROVED=$(/usr/bin/osascript \
-              -e 'tell application "System Events" to activate' \
-              -e "tell application \"System Events\" to display dialog \"$DIALOG_TEXT\" buttons {\"Cancel\", \"Quit and Replace\"} default button \"$DEFAULT_BUTTON\" cancel button \"Cancel\" with title \"Replace the running HiDock app\"" \
-              -e 'button returned of the result' 2>/tmp/hidock-dialog.err)
-            DIALOG_STATUS=$?
-            set -e
-            if [ "$DEPLOY_APPROVED" != "Quit and Replace" ]; then
-              # Distinguish a decision from a failure. Swallowing both as "cancelled"
-              # meant a dialog that never appeared looked exactly like a deliberate
-              # Cancel, so there was no way to tell whether the approval flow was
-              # even working.
-              if [ "$DIALOG_STATUS" -ne 0 ] && [ -z "$DEPLOY_APPROVED" ]; then
-                echo "note: the approval dialog could not be shown (osascript exit $DIALOG_STATUS); nothing was deployed"
-                echo "note: $(head -c 300 /tmp/hidock-dialog.err 2>/dev/null)"
-                echo "note: use HIDOCK_DEPLOY=force to deploy without the dialog"
-              else
-                echo "note: Deployment cancelled by the reviewer; the installed app was not changed"
+            # Ask the running app, not a dialog of our own.
+            #
+            # An `osascript` dialog owned by whatever spawned the build opens without
+            # focus, so the first click is spent activating its window — every
+            # approval took two clicks, and neither `tell me to activate` nor a
+            # System Events owner fixed it. The app is a real GUI application, so its
+            # own NSAlert takes focus on the first click, and it is the honest owner
+            # of the question: it is the thing about to be quit.
+            REQ="$HOME/HiDock/.deploy-approval-request.json"
+            RES="$HOME/HiDock/.deploy-approval-response.json"
+            REQUEST_ID="$(date +%s)-$$"
+            BUSY_JSON="false"
+            if [ -n "$BUSY_LIST" ]; then BUSY_JSON="true"; fi
+            rm -f "$RES"
+            mkdir -p "$HOME/HiDock"
+            printf '{"id":"%s","busy":%s,"message":"%s"}\n' \
+              "$REQUEST_ID" "$BUSY_JSON" "$DIALOG_TEXT" > "$REQ"
+
+            DECISION=""
+            # 60s: long enough to notice and read the alert, short enough that a
+            # forgotten build does not sit forever.
+            for _ in $(seq 1 120); do
+              if [ -f "$RES" ] && /usr/bin/grep -q "$REQUEST_ID" "$RES"; then
+                DECISION=$(/usr/bin/sed -n 's/.*"decision"[^"]*"\([^"]*\)".*/\1/p' "$RES")
+                break
               fi
+              sleep 0.5
+            done
+            rm -f "$REQ" "$RES"
+
+            if [ "$DECISION" = "cancel" ]; then
+              echo "note: Deployment declined in the app; the installed app was not changed"
+              exit 0
+            fi
+            if [ "$DECISION" != "replace" ]; then
+              # Distinguish silence from refusal. Silence means the running app is an
+              # older build with no approval watcher, or it is wedged — either way it
+              # cannot consent, so nothing is replaced.
+              echo "error: the running HiDock app did not answer the approval request."
+              echo "       It is probably an older build without the approval watcher."
+              echo "       Use HIDOCK_DEPLOY=force to replace it without asking."
               exit 0
             fi
           fi

@@ -72,6 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // refreshTranscriptionState, at which point auto-summarise queues them.
     private var pendingAutoSummariseNames: Set<String> = []
     private var mergeGroups: [MergeGroup] = []
+    /// Polls for a deploy-approval request from the build script.
+    private var deployApprovalTimer: Timer?
     private let mergeGroupsPath = "\(NSHomeDirectory())/HiDock/merge_groups.json"
     private var diarizeEnabled = false
     private var syncSortKey: String = "created"
@@ -399,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.accessory)
+        startDeployApprovalWatcher()
         setupNotifications()
         applyPreferredMicOnStartup()
         setupMainMenu()
@@ -3999,6 +4002,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// list is not cosmetic — it becomes `allowed_names`, which bounds the
     /// identities speaker naming may assign. The MCP has the full list; it is just
     /// slower, so it is only consulted at the cap where truncation is possible.
+    // MARK: - Deploy approval
+
+    /// The deploy script asks *this* app before quitting it.
+    ///
+    /// The approval used to come from an `osascript` dialog owned by whatever
+    /// spawned the build. Such a dialog opens without focus, so the first click was
+    /// spent activating its window and every approval took two clicks — and no
+    /// variant of `activate` fixed it reliably. This app is a real GUI application,
+    /// so its own `NSAlert` takes focus on the first click, and it is also the
+    /// honest owner of the question: it is the thing about to be quit.
+    ///
+    /// Deliberately a file handshake rather than AppleScript or a URL scheme: no
+    /// scripting dictionary to define, no Info.plist registration, and it works
+    /// from a build script that has no idea how to talk to a running app.
+    static var deployApprovalRequestURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("HiDock/.deploy-approval-request.json")
+    }
+    static var deployApprovalResponseURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("HiDock/.deploy-approval-response.json")
+    }
+
+    private func startDeployApprovalWatcher() {
+        // One `fileExists` per second is immaterial next to what this app already
+        // does, and it avoids an FSEvents source on a file that is repeatedly
+        // created and deleted.
+        deployApprovalTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.answerPendingDeployApproval()
+        }
+    }
+
+    private func answerPendingDeployApproval() {
+        let requestURL = Self.deployApprovalRequestURL
+        guard let data = try? Data(contentsOf: requestURL),
+              let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = request["id"] as? String, !id.isEmpty
+        else { return }
+        // Consume the request before showing anything. The alert is modal and the
+        // timer keeps firing, so leaving the file in place would stack a second
+        // identical alert behind the first.
+        try? FileManager.default.removeItem(at: requestURL)
+
+        let busy = (request["busy"] as? Bool) ?? false
+        let detail = (request["message"] as? String) ?? ""
+        log("Deploy approval requested (busy: \(busy))")
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Replace the running HiDock app?"
+        alert.informativeText = detail.isEmpty
+            ? "The app will be quit and relaunched."
+            : detail
+        alert.alertStyle = busy ? .critical : .warning
+        // The first button added is the default. When something is genuinely
+        // mid-flight the safe answer has to be the one the Return key picks.
+        if busy {
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Quit and Replace")
+        } else {
+            alert.addButton(withTitle: "Quit and Replace")
+            alert.addButton(withTitle: "Cancel")
+        }
+        let firstButton = alert.runModal() == .alertFirstButtonReturn
+        let approved = busy ? !firstButton : firstButton
+
+        let response: [String: Any] = ["id": id, "decision": approved ? "replace" : "cancel"]
+        if let payload = try? JSONSerialization.data(withJSONObject: response) {
+            try? payload.write(to: Self.deployApprovalResponseURL, options: .atomic)
+        }
+        log("Deploy approval \(approved ? "granted" : "declined")")
+    }
+
     /// Path to the `claude` CLI, or nil. Same candidate list the calendar search
     /// uses; factored out so both agree on where the CLI lives.
     private func claudeExecutablePath() -> String? {
