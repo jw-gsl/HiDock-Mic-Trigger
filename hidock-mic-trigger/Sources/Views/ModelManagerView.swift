@@ -308,26 +308,49 @@ struct ModelManagerView: View {
 
             HStack(spacing: 8) {
                 Text("3.").font(.caption.monospaced()).foregroundColor(.secondary)
-                // SecureField so the credential is never rendered, screenshotted,
-                // or captured in a screen recording.
-                SecureField("hf_…", text: $huggingFaceTokenEntry)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 260)
-                Button("Save") {
-                    do {
-                        try HuggingFaceToken.save(huggingFaceTokenEntry)
-                        huggingFaceTokenEntry = ""
-                        huggingFaceStatus = "Token saved to your Keychain."
-                    } catch {
-                        huggingFaceStatus = error.localizedDescription
-                    }
-                }
-                .disabled(huggingFaceTokenEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if HuggingFaceToken.isConfigured {
+                    // A stored token is a settled state, so show it as one. An
+                    // always-live entry field invited typing a second token over
+                    // a working one with no indication of which would win —
+                    // Remove first is an explicit, reversible decision.
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(HuggingFaceToken.redacted() ?? "••••••••")
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: 260, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color.secondary.opacity(0.08))
+                    )
+                    .help("Stored in your Keychain. Remove it to enter a different token.")
                     Button("Remove") {
                         HuggingFaceToken.delete()
+                        huggingFaceTokenEntry = ""
                         huggingFaceStatus = "Token removed."
                     }
+                    .help("Delete the stored token from your Keychain so a new one can be entered")
+                } else {
+                    // SecureField so the credential is never rendered, screenshotted,
+                    // or captured in a screen recording.
+                    SecureField("hf_…", text: $huggingFaceTokenEntry)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 260)
+                    Button("Save") {
+                        do {
+                            try HuggingFaceToken.save(huggingFaceTokenEntry)
+                            huggingFaceTokenEntry = ""
+                            huggingFaceStatus = "Token saved to your Keychain."
+                        } catch {
+                            huggingFaceStatus = error.localizedDescription
+                        }
+                    }
+                    .disabled(huggingFaceTokenEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 Spacer()
             }

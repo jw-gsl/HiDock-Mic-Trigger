@@ -120,11 +120,75 @@ def _run_git(root: Path, arguments: list[str]) -> tuple[int, str]:
     return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
 
 
+def _is_usable_repository(repository: Path) -> bool:
+    """True when `--git-dir <repository>` actually resolves to a git repo."""
+    git = git_path()
+    if git is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [git, "--git-dir", str(repository), "rev-parse", "--git-dir"],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _repair_repository(repository: Path) -> bool:
+    """Rescue a history directory left behind by the old non-bare `git init`.
+
+    Existence was the only test before, so a directory created by
+    `git init <path>` — which puts the real repo in `<path>/.git` — was accepted
+    forever, and every `--git-dir <path>` call after it failed with "not in a
+    git directory". Snapshots silently did nothing. Found on 2026-07-31 on a
+    library whose History list had been empty since 2026-07-28.
+
+    Promote the inner repo when there is one, so any commits it holds survive.
+    """
+    git = git_path()
+    if git is None:
+        return False
+    inner = repository / ".git"
+    if inner.is_dir() and _is_usable_repository(inner):
+        for entry in inner.iterdir():
+            target = repository / entry.name
+            if target.exists():
+                continue
+            entry.rename(target)
+        try:
+            inner.rmdir()
+        except OSError:
+            pass  # leftovers are harmless; the repo above is what git reads
+        subprocess.run(
+            [git, "--git-dir", str(repository), "config", "core.bare", "true"],
+            capture_output=True, text=True,
+        )
+        return _is_usable_repository(repository)
+    return False
+
+
 def ensure_repository(diarized_path: str | Path) -> Path | None:
-    """Create the history repo if absent. Returns the transcript directory."""
+    """Create or repair the history repo. Returns the transcript directory."""
     path = Path(diarized_path)
     root = path.parent
     repository = root / HISTORY_DIR_NAME
+    # Presence is not the same as usability — see `_repair_repository`.
+    if repository.exists() and not _is_usable_repository(repository):
+        if not _repair_repository(repository):
+            broken = repository.with_name(HISTORY_DIR_NAME + ".broken")
+            suffix = 0
+            while broken.exists():
+                suffix += 1
+                broken = repository.with_name(f"{HISTORY_DIR_NAME}.broken.{suffix}")
+            try:
+                repository.rename(broken)
+            except OSError:
+                return None
+            print(
+                f"transcript-history: {repository.name} was not a usable git "
+                f"repository; moved it to {broken.name} and started a new one",
+            )
     if not repository.exists():
         try:
             # MUST be --bare. `git init <path>` creates <path>/.git, so every

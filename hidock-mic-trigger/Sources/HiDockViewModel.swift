@@ -141,6 +141,10 @@ final class HiDockViewModel: ObservableObject {
     @Published var heatmapLEDMode: Bool =
         (UserDefaults.standard.string(forKey: "led.defaultView") == "led")
     @Published var mergeGroups: [MergeGroup] = [] { didSet { markDerivedDirty() } }
+    /// Output paths of recordings that have been split into parts. They stay on
+    /// disk but must not appear as rows, or a later merge re-absorbs the source
+    /// alongside its own halves. See `SplitSourcesStore`.
+    @Published var splitSources: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var expandedMergeGroups: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var syncBusy = false
     @Published var syncDownloading = false
@@ -465,6 +469,10 @@ final class HiDockViewModel: ObservableObject {
     /// calendar state needs its own map, exactly as its transcript path does.
     @Published var mergedFileCalendarTitles: [String: String] = [:]
     @Published var mergedFileCalendarStarts: [String: Date] = [:]
+    /// Merge-output filenames the user has marked as ad-hoc calls. The
+    /// merged-row equivalent of `HiDockSyncRecordingEntry.calendarRejected`,
+    /// without which the merged cell could never show a settled answer.
+    @Published var mergedFileCalendarRejected: Set<String> = []
     /// Merged file mp3 name → its transcript mtime (when it was transcribed).
     /// Used for the heatmap's Transcribed date-mode so a merged meeting buckets
     /// on the date its merged transcript was produced.
@@ -630,6 +638,11 @@ final class HiDockViewModel: ObservableObject {
 
     private func computeVisibleEntries(_ filtered: [HiDockSyncRecordingEntry]) -> [HiDockSyncRecordingEntry] {
         var entries = filtered
+        // A split source is represented by its parts now. Showing it too is what
+        // let one recording be merged with its own halves.
+        if !splitSources.isEmpty {
+            entries = entries.filter { !splitSources.contains($0.recording.outputPath) }
+        }
         // Heatmap day-filter: when a day square is locked, the table narrows to
         // that day (the heatmap grid itself keeps using filteredEntriesNoDay).
         if let day = heatmapSelectedDay {

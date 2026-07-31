@@ -3008,19 +3008,65 @@ struct TranscriptViewerView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .padding(.top, 3)
-                FlowLayout(spacing: 4) {
-                    ForEach(invited, id: \.self) { name in
-                        attendeePill(
-                            name,
-                            isEnrolled: enrolled.contains(name.lowercased()),
-                            isAssigned: assigned.contains(name.lowercased()),
-                            hasAccepted: accepted.isEmpty ? nil : accepted.contains(name.lowercased())
-                        )
+                    // The pill colours carry real meaning, and three tints with
+                    // no key is a puzzle. Each pill has its own tooltip; this is
+                    // the one that explains the scheme as a whole.
+                    .help(Self.attendeePillLegend)
+                VStack(alignment: .leading, spacing: 3) {
+                    FlowLayout(spacing: 4) {
+                        ForEach(invited, id: \.self) { name in
+                            attendeePill(
+                                name,
+                                isEnrolled: enrolled.contains(name.lowercased()),
+                                isAssigned: assigned.contains(name.lowercased()),
+                                hasAccepted: accepted.isEmpty ? nil : accepted.contains(name.lowercased())
+                            )
+                        }
                     }
+                    attendeePillKey(showsAcceptance: !accepted.isEmpty)
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 16)
+        }
+    }
+
+    static let attendeePillLegend = """
+        Meeting invitees. Green with a tick: already mapped to a speaker here. \
+        Accent: has an enrolled voice, so automatic naming can reach them. \
+        Grey: no voice profile yet — mapping them enrols this meeting's audio as \
+        their first sample. Faded: did not accept the invite.
+        """
+
+    /// A one-line key beneath the pills. Small, but it turns three unexplained
+    /// colours into a readable state.
+    @ViewBuilder
+    private func attendeePillKey(showsAcceptance: Bool) -> some View {
+        HStack(spacing: 8) {
+            keySwatch(.green, "mapped", filled: true)
+            keySwatch(.accentColor, "has a voice")
+            keySwatch(.secondary, "new")
+            if showsAcceptance {
+                Text("faded = didn't accept")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+        }
+        .help(Self.attendeePillLegend)
+    }
+
+    private func keySwatch(_ tint: Color, _ label: String, filled: Bool = false) -> some View {
+        HStack(spacing: 2) {
+            if filled {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 7))
+                    .foregroundColor(tint)
+            } else {
+                Capsule().fill(tint.opacity(0.35)).frame(width: 10, height: 7)
+            }
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary.opacity(0.7))
         }
     }
 
