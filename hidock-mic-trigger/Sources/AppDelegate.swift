@@ -3993,7 +3993,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .joined(separator: " ")
     }
 
+    /// Ask the connected Microsoft 365 MCP for one known event's attendees.
+    ///
+    /// EventKit caps this app at four (see `eventKitAttendeeCap`), and the attendee
+    /// list is not cosmetic — it becomes `allowed_names`, which bounds the
+    /// identities speaker naming may assign. The MCP has the full list; it is just
+    /// slower, so it is only consulted at the cap where truncation is possible.
+    /// Path to the `claude` CLI, or nil. Same candidate list the calendar search
+    /// uses; factored out so both agree on where the CLI lives.
+    private func claudeExecutablePath() -> String? {
+        let candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
+            + ["\(NSHomeDirectory())/.local/bin/claude",
+               "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private func enrichAttendees(
+        for event: CalendarMeetingCandidate,
+        completion: @escaping ([String]?) -> Void
+    ) {
+        guard let claudePath = claudeExecutablePath() else { completion(nil); return }
+        let iso = ISO8601DateFormatter()
+        let prompt = """
+        Use the connected Microsoft 365 calendar MCP only. Fetch the DETAILS of the \
+        single calendar event titled "\(event.title)" occurring between \
+        \(iso.string(from: event.start)) and \(iso.string(from: event.end)).
+        Reply with one JSON object and nothing else, no prose and no code fence:
+        {"attendees": ["Display Name", "..."]}
+        Include the organiser and every invitee who has not declined, as display \
+        names. If you cannot identify the event, reply {"attendees": []}.
+        """
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: claudePath)
+            process.arguments = ["--print", "--output-format", "json", prompt]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = Pipe()
+            var names: [String]?
+            do {
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if process.terminationStatus == 0,
+                   let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let answer = root["result"] as? String {
+                    names = parseEnrichedAttendees(answer)
+                }
+            } catch {
+                names = nil
+            }
+            DispatchQueue.main.async {
+                if let names {
+                    self?.log("Attendee enrichment for '\(event.title)': "
+                              + "\(event.attendeeCount) -> \(names.count)")
+                } else {
+                    self?.log("Attendee enrichment for '\(event.title)' returned nothing usable; "
+                              + "keeping EventKit's \(event.attendeeCount)")
+                }
+                completion(names)
+            }
+        }
+    }
+
     private func linkCalendarEvent(
+        audioPath: String,
+        duration: Double,
+        event: CalendarMeetingCandidate,
+        rediarizeAfterLink: Bool = true
+    ) {
+        // Enrich *before* writing the sidecar and re-diarising, not after: the
+        // attendee list becomes `allowed_names`, so a re-diarisation kicked off with
+        // the truncated list would be bounded by it and the later correction would
+        // arrive too late to matter.
+        guard event.attendeeCount >= eventKitAttendeeCap else {
+            finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
+                                       event: event, rediarizeAfterLink: rediarizeAfterLink)
+            return
+        }
+        enrichAttendees(for: event) { [weak self] enriched in
+            guard let self else { return }
+            var resolved = event
+            if let enriched, enriched.count > event.attendeeCount {
+                // Keep EventKit's response statuses for the names it knew; the MCP
+                // reply carries names only, and an absent status must read as
+                // unknown rather than as acceptance.
+                resolved = CalendarMeetingCandidate(
+                    id: event.id, title: event.title, start: event.start, end: event.end,
+                    attendeeNames: enriched, attendeeResponses: event.attendeeResponses
+                )
+            }
+            self.finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
+                                            event: resolved, rediarizeAfterLink: rediarizeAfterLink)
+        }
+    }
+
+    private func finishLinkingCalendarEvent(
         audioPath: String,
         duration: Double,
         event: CalendarMeetingCandidate,
@@ -10411,6 +10508,56 @@ final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate {
             onComplete(false, error.localizedDescription)
         }
     }
+}
+
+// MARK: - Attendee enrichment
+
+/// EventKit hands this app at most four attendees.
+///
+/// Measured, not assumed: across every `_calendar.json` written by the EventKit
+/// path the attendee count is 0,1,2,3 or 4 and never more, with four separate
+/// sidecars sitting exactly at 4. Two cases are confirmed truncations against
+/// Outlook — the 16-person "Business Transformation Team - All Hands Q&A" recorded
+/// 4 (the first four in Outlook's order), and the 5-person "[BT] Stream Regroup"
+/// recorded 4.
+///
+/// This matters beyond display: `_resolve_speaker_names` restricts matching to
+/// `allowed_names`, so a truncated list caps which identities speaker naming can
+/// assign — nine voices in the all-hands could only be named from four people.
+///
+/// A count *below* the cap cannot have been truncated, which is what makes
+/// enrichment worth paying for only at the boundary.
+let eventKitAttendeeCap = 4
+
+/// Attendee display names from a strict-JSON assistant reply, or nil.
+///
+/// Deliberately not the line-oriented prose parser used for event discovery. That
+/// one has produced a suggestion titled "No event overlaps that window." and, until
+/// today, gave one event's invitees to another. Asking for the attendees of an event
+/// we have already identified is a much narrower question, so it gets a contract
+/// that either parses or fails rather than one that guesses.
+func parseEnrichedAttendees(_ reply: String) -> [String]? {
+    // Tolerate a fenced block or surrounding chatter by taking the outermost
+    // object; anything less well-formed than that is treated as a failure.
+    guard let start = reply.firstIndex(of: "{"),
+          let end = reply.lastIndex(of: "}"), start < end else { return nil }
+    let json = String(reply[start...end])
+    guard let data = json.data(using: .utf8),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let raw = root["attendees"] as? [Any]
+    else { return nil }
+    var seen = Set<String>()
+    let names: [String] = raw.compactMap { value in
+        guard let text = value as? String else { return nil }
+        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.caseInsensitiveCompare("unavailable") != .orderedSame,
+              seen.insert(name.lowercased()).inserted
+        else { return nil }
+        return name
+    }
+    // An empty list is a valid "nobody listed", but it must not silently replace a
+    // list we already have, so report it as a failure to enrich.
+    return names.isEmpty ? nil : names.sorted()
 }
 
 // MARK: - Calendar assistant reply parsing

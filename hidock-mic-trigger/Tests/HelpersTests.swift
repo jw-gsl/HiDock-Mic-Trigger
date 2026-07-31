@@ -233,3 +233,47 @@ final class CompactRecordingLabelTests: XCTestCase {
         XCTAssertEqual(compactRecordingLabel("merged-2026Jul10-abc.mp3"), "merged-2026Jul10-abc")
     }
 }
+
+/// EventKit caps this app at four attendees, so a larger meeting's list has to be
+/// fetched from the MCP. That reply gets a strict contract, unlike the prose parser
+/// used for event discovery.
+final class EnrichedAttendeeParsingTests: XCTestCase {
+
+    func testParsesAPlainJSONObject() {
+        let reply = #"{"attendees": ["Jeff Chow", "Ellen Barss", "Ian Reay"]}"#
+        XCTAssertEqual(parseEnrichedAttendees(reply), ["Ellen Barss", "Ian Reay", "Jeff Chow"])
+    }
+
+    func testToleratesAFencedBlockAndSurroundingChatter() {
+        let reply = """
+        Here you go:
+        ```json
+        {"attendees": ["Chris Wildsmith", "James Whiting"]}
+        ```
+        """
+        XCTAssertEqual(parseEnrichedAttendees(reply), ["Chris Wildsmith", "James Whiting"])
+    }
+
+    func testDeduplicatesCaseInsensitivelyAndTrims() {
+        let reply = #"{"attendees": ["  Ian Reay ", "ian reay", "Jeff Chow"]}"#
+        XCTAssertEqual(parseEnrichedAttendees(reply), ["Ian Reay", "Jeff Chow"])
+    }
+
+    func testUnavailablePlaceholderIsDropped() {
+        let reply = #"{"attendees": ["unavailable", "Ellen Barss"]}"#
+        XCTAssertEqual(parseEnrichedAttendees(reply), ["Ellen Barss"])
+    }
+
+    func testProseIsRejectedRatherThanGuessedAt() {
+        // The discovery parser's failure mode was promoting prose to data. This one
+        // must fail closed so the caller keeps EventKit's list.
+        XCTAssertNil(parseEnrichedAttendees("No event overlaps that window."))
+        XCTAssertNil(parseEnrichedAttendees("Invitees: Jeff Chow; Ellen Barss"))
+    }
+
+    func testEmptyListIsAFailureNotAReplacement() {
+        // A valid "nobody listed" must not silently wipe a list we already have.
+        XCTAssertNil(parseEnrichedAttendees(#"{"attendees": []}"#))
+        XCTAssertNil(parseEnrichedAttendees(#"{"other": ["x"]}"#))
+    }
+}
