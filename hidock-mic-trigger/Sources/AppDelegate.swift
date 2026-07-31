@@ -4265,30 +4265,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return calendar.date(from: parts)
                 }
                 let range = NSRange(answer.startIndex..<answer.endIndex, in: answer)
-                // Claude emits Markdown list items in practice, e.g.
-                // "- **Organiser:** Jeff Chow" and "- **Attendees:**
-                // Chris Wildsmith, …".  Accept both that format and a
-                // plain heading, then split the display-name list correctly.
-                let organiserExpression = try! NSRegularExpression(
-                    pattern: #"(?im)^\s*(?:[-*•]\s*)?(?:\*\*(?:Organizer|Organiser|Host):\*\*|(?:Organizer|Organiser|Host):)\s*(.+?)\s*$"#
-                )
-                let attendeesExpression = try! NSRegularExpression(
-                    pattern: #"(?im)^\s*(?:[-*•]\s*)?(?:\*\*(?:Attendees|Invitees):\*\*|(?:Attendees|Invitees):)\s*(.+?)\s*$"#
-                )
-                var attendeeNames: [String] = []
-                if let organiser = organiserExpression.firstMatch(in: answer, range: range),
-                   let nameRange = Range(organiser.range(at: 1), in: answer) {
-                    attendeeNames.append(String(answer[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines))
-                }
-                if let block = attendeesExpression.firstMatch(in: answer, range: range),
-                   let namesRange = Range(block.range(at: 1), in: answer) {
-                    attendeeNames += String(answer[namesRange])
-                        .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•"))) }
-                        .filter { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
-                }
-                attendeeNames = Array(Set(attendeeNames)).sorted()
-                var events = expression.matches(in: answer, range: range).compactMap { match -> CalendarMeetingCandidate? in
+                // Attendees are read per event, scoped to that event's own lines.
+                // Searching the whole reply for the *first* Organiser/Invitees
+                // block and handing it to every parsed event gave a 4-person
+                // panel interview the 16 invitees of the all-hands that preceded
+                // it in the same answer — and an inflated invitee list is not
+                // cosmetic, since it feeds `allowed_names` for speaker naming.
+                let answerLength = (answer as NSString).length
+                let titleMatches = expression.matches(in: answer, range: range)
+                var events = titleMatches.enumerated().compactMap { index, match -> CalendarMeetingCandidate? in
                     guard let titleRange = Range(match.range(at: 1), in: answer),
                           let startRange = Range(match.range(at: 2), in: answer),
                           let endRange = Range(match.range(at: 3), in: answer),
@@ -4301,8 +4286,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     // explaining itself, not an event, and must never reach the
                     // Meeting column as something the user can confirm.
                     guard AppDelegate.looksLikeEventTitle(title) else { return nil }
+                    let names = calendarAttendeeNames(
+                        in: answer,
+                        region: regionForEvent(at: index, in: titleMatches, answerLength: answerLength)
+                    )
                     return CalendarMeetingCandidate(id: "\(title)|\(eventStart.timeIntervalSince1970)", title: title,
-                                                  start: eventStart, end: eventEnd, attendeeNames: attendeeNames)
+                                                  start: eventStart, end: eventEnd, attendeeNames: names)
                 }
                 // Prefer the deliberately structured response when the MCP
                 // follows it, while retaining the Markdown parser above for
@@ -4311,7 +4300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     let structured = try! NSRegularExpression(
                         pattern: #"(?ims)^\s*Title:\s*(.+?)\s*$[\s\S]*?^\s*Time:\s*(\d{1,2}:\d{2})\s*[—–-]\s*(\d{1,2}:\d{2})\s*$"#
                     )
-                    events = structured.matches(in: answer, range: range).compactMap { match -> CalendarMeetingCandidate? in
+                    let structuredMatches = structured.matches(in: answer, range: range)
+                    events = structuredMatches.enumerated().compactMap { index, match -> CalendarMeetingCandidate? in
                         guard let titleRange = Range(match.range(at: 1), in: answer),
                               let startRange = Range(match.range(at: 2), in: answer),
                               let endRange = Range(match.range(at: 3), in: answer),
@@ -4319,8 +4309,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                               let eventEnd = dateAt(String(answer[endRange]))
                         else { return nil }
                         let title = String(answer[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let names = calendarAttendeeNames(
+                            in: answer,
+                            region: regionForEvent(at: index, in: structuredMatches, answerLength: answerLength)
+                        )
                         return CalendarMeetingCandidate(id: "\(title)|\(eventStart.timeIntervalSince1970)", title: title,
-                                                      start: eventStart, end: eventEnd, attendeeNames: attendeeNames)
+                                                      start: eventStart, end: eventEnd, attendeeNames: names)
                     }
                 }
                 // Calendar MCPs occasionally offer the event immediately before
@@ -10356,4 +10350,48 @@ final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate {
             onComplete(false, error.localizedDescription)
         }
     }
+}
+
+// MARK: - Calendar assistant reply parsing
+
+/// Claude emits Markdown list items in practice ("- **Organiser:** Jeff Chow",
+/// "- **Attendees:** Chris Wildsmith, …") as well as the plain `Invitees:` form
+/// the prompt asks for, so both are accepted.
+private let calendarOrganiserExpression = try! NSRegularExpression(
+    pattern: #"(?im)^\s*(?:[-*•]\s*)?(?:\*\*(?:Organizer|Organiser|Host):\*\*|(?:Organizer|Organiser|Host):)\s*(.+?)\s*$"#
+)
+private let calendarAttendeesExpression = try! NSRegularExpression(
+    pattern: #"(?im)^\s*(?:[-*•]\s*)?(?:\*\*(?:Attendees|Invitees):\*\*|(?:Attendees|Invitees):)\s*(.+?)\s*$"#
+)
+
+/// The slice of the reply belonging to one event: from its own title match up to
+/// the next event's, or to the end for the last one.
+///
+/// Without this the organiser/invitee search ran over the whole reply and every
+/// event received the first one's attendees.
+func regionForEvent(at index: Int, in matches: [NSTextCheckingResult], answerLength: Int) -> NSRange {
+    guard index < matches.count else { return NSRange(location: 0, length: answerLength) }
+    let start = matches[index].range.location
+    let end = index + 1 < matches.count ? matches[index + 1].range.location : answerLength
+    return NSRange(location: start, length: max(0, end - start))
+}
+
+/// Organiser plus invitee display names found inside `region`.
+///
+/// The organiser counts as an attendee: they are in the room, and the connector
+/// lists them separately from the invitee line.
+func calendarAttendeeNames(in answer: String, region: NSRange) -> [String] {
+    var names: [String] = []
+    if let organiser = calendarOrganiserExpression.firstMatch(in: answer, range: region),
+       let nameRange = Range(organiser.range(at: 1), in: answer) {
+        names.append(String(answer[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    if let block = calendarAttendeesExpression.firstMatch(in: answer, range: region),
+       let namesRange = Range(block.range(at: 1), in: answer) {
+        names += String(answer[namesRange])
+            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•"))) }
+            .filter { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
+    }
+    return Array(Set(names)).sorted()
 }

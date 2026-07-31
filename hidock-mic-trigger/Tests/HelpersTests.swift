@@ -132,3 +132,73 @@ final class SanitizeDeviceNameTests: XCTestCase {
         XCTAssertEqual(sanitizeDeviceName("  HiDock_H1  "), "HiDock H1")
     }
 }
+
+/// Invitees must belong to the event they were listed under.
+///
+/// The picker showed "16 invited" against both a 16-person all-hands and the
+/// 4-person panel interview that followed it in the same reply, because the
+/// organiser/invitee search ran over the whole answer and every parsed event was
+/// handed the first one's list. An inflated invitee list is not cosmetic: it feeds
+/// `allowed_names`, which restricts which identities speaker naming may assign.
+final class CalendarAttendeeScopingTests: XCTestCase {
+
+    /// The shape actually returned by the connector, from the 15:22 log entry.
+    private let answer = """
+    Title: Business Transformation Team - All Hands Q&A
+    Time: 14:00 – 15:00
+    Organiser: Jeff Chow
+    Invitees: Kaushal Patel; Sarthak Sethi; Chris Wildsmith; Ian Reay; James Whiting
+
+    Title: Volaris Business Transformation Specialist - Panel Interview
+    Time: 15:00 – 16:00
+    Organiser: Ian Reay
+    Invitees: Chris Wildsmith; James Whiting; Jeevan Dulai
+    """
+
+    private func titleMatches(_ text: String) -> [NSTextCheckingResult] {
+        let expression = try! NSRegularExpression(pattern: #"(?im)^\s*Title:\s*(.+?)\s*$"#)
+        return expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+    }
+
+    func testEachEventGetsOnlyItsOwnInvitees() {
+        let matches = titleMatches(answer)
+        XCTAssertEqual(matches.count, 2)
+        let length = (answer as NSString).length
+
+        let first = calendarAttendeeNames(
+            in: answer, region: regionForEvent(at: 0, in: matches, answerLength: length)
+        )
+        let second = calendarAttendeeNames(
+            in: answer, region: regionForEvent(at: 1, in: matches, answerLength: length)
+        )
+
+        // Organiser counts as an attendee; both lists are their own.
+        XCTAssertEqual(first, ["Chris Wildsmith", "Ian Reay", "James Whiting",
+                               "Jeff Chow", "Kaushal Patel", "Sarthak Sethi"])
+        XCTAssertEqual(second, ["Chris Wildsmith", "Ian Reay", "James Whiting", "Jeevan Dulai"])
+        XCTAssertFalse(second.contains("Kaushal Patel"),
+                       "the panel interview must not inherit the all-hands invitees")
+    }
+
+    func testLastEventRegionRunsToTheEndOfTheReply() {
+        let matches = titleMatches(answer)
+        let length = (answer as NSString).length
+        let region = regionForEvent(at: 1, in: matches, answerLength: length)
+        XCTAssertEqual(region.location + region.length, length)
+    }
+
+    func testUnavailableInviteesAreDiscarded() {
+        let text = """
+        Title: Some Meeting
+        Time: 09:00 – 09:30
+        Organiser: Ian Reay
+        Invitees: unavailable
+        """
+        let matches = titleMatches(text)
+        let names = calendarAttendeeNames(
+            in: text,
+            region: regionForEvent(at: 0, in: matches, answerLength: (text as NSString).length)
+        )
+        XCTAssertEqual(names, ["Ian Reay"])
+    }
+}
