@@ -1804,8 +1804,26 @@ struct TranscriptViewerView: View {
     @ViewBuilder
     private var calendarPicker: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Match this meeting")
-                .font(.headline)
+            HStack(spacing: 6) {
+                Text("Match this meeting")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                // Re-searching was only offered on the dead ends — an empty result
+                // that had already been rejected. Once candidates were listed there
+                // was no way to look again, which is exactly when you want to: the
+                // meeting may have been added, or the assistant may have missed it.
+                Button {
+                    selectedCalendarCandidate = nil
+                    calendarCandidates = []
+                    loadCalendarCandidates()
+                } label: {
+                    Label("Search again", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(calendarLoading)
+                .help("Search the calendar again for this recording")
+            }
             Text("Looking in your connected Microsoft 365 calendar. Attendees are only a speaker-count hint—you stay in control.")
                 .font(.caption)
                 .foregroundColor(.secondary)
