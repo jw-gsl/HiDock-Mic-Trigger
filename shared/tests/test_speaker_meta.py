@@ -53,9 +53,16 @@ def test_ensure_speaker_meta_backfills_only_missing():
     assert meta["1"]["source"] == "generic" and meta["1"]["verified"] is False
 
 
-def test_rematch_matches_generic_from_stored_embedding():
+def test_rematch_matches_generic_from_stored_embedding(monkeypatch):
+    # Declare the space explicitly. Stored vectors are only comparable to a
+    # library in the same space, and this test must assert that behaviour rather
+    # than inherit whichever model the developer's machine happens to have active.
+    monkeypatch.setattr(
+        "shared.speaker_meta._active_library_space", lambda: "titanet",
+    )
     data = {
         "audio_file": "/nope.wav",
+        "speaker_embedding_model": "titanet",
         "speaker_names": {"0": "James", "1": "Speaker 2"},
         "speaker_meta": {
             "0": {"source": "user", "confidence": None, "verified": True},
@@ -206,3 +213,45 @@ def test_record_rematch_correction_appends_immutable_event(tmp_path):
     assert stored == event
     assert stored["action"] == "rejected"
     assert stored["proposed_name"] == "Adam Mohamedally"
+
+
+def test_rematch_ignores_stored_embeddings_from_a_different_model(monkeypatch):
+    """TitaNet and ReDimNet2 are both 192-dim.
+
+    Comparing across their cosine spaces raises nothing — it just yields
+    meaningless similarities that can name the wrong person confidently. Stored
+    vectors from another space must be discarded, not trusted.
+    """
+    monkeypatch.setattr(
+        "shared.speaker_meta._active_library_space", lambda: "redimnet2_b6",
+    )
+    data = {
+        "audio_file": "/nope.wav",
+        "speaker_embedding_model": "titanet",
+        "speaker_names": {"0": "Speaker 1"},
+        "speaker_meta": {"0": {"source": "generic", "confidence": None, "verified": False}},
+        "speaker_embeddings": {"0": [0.1, 0.2, 0.3]},
+        "segments": [{"speaker_id": 0, "start": 0, "end": 5, "text": "hi", "speaker": "Speaker 1"}],
+    }
+    with patch("shared.voice_library_lite.identify_speaker", return_value=("Chris", 0.99)):
+        # audio_fallback off and the stored vector rejected, so nothing to match.
+        result = rematch_diarized(data, audio_fallback=False)
+    assert result["rematched"] == 0
+    assert data["speaker_names"]["0"] == "Speaker 1"
+
+
+def test_rematch_treats_an_untagged_sidecar_as_the_legacy_space(monkeypatch):
+    """Sidecars written before the tag existed predate the second model."""
+    monkeypatch.setattr(
+        "shared.speaker_meta._active_library_space", lambda: "titanet",
+    )
+    data = {
+        "audio_file": "/nope.wav",
+        "speaker_names": {"0": "Speaker 1"},
+        "speaker_meta": {"0": {"source": "generic", "confidence": None, "verified": False}},
+        "speaker_embeddings": {"0": [0.1, 0.2, 0.3]},
+        "segments": [{"speaker_id": 0, "start": 0, "end": 5, "text": "hi", "speaker": "Speaker 1"}],
+    }
+    with patch("shared.voice_library_lite.identify_speaker", return_value=("Chris", 0.81)):
+        result = rematch_diarized(data, audio_fallback=False)
+    assert result["rematched"] == 1

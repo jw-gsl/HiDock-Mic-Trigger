@@ -259,9 +259,8 @@ def transcribe_file(
             summary=summary,
         )
 
-        whisper_raw_path = transcript_path.with_name(
-            transcript_path.stem + "_whisper.json"
-        )
+        from shared.asr_sidecar import raw_asr_write_path
+        whisper_raw_path = raw_asr_write_path(transcript_path)
         whisper_raw_path.write_text(
             _json.dumps({"audio_file": str(mp3_path), "segments": segments},
                         indent=2, ensure_ascii=False),

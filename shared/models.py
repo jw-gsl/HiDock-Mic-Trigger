@@ -23,6 +23,75 @@ SILERO_VAD_URL = (
 )
 
 # Speaker embedding models — configurable (from minutes v0.10.0)
+# Licence provenance for speaker-embedding models.
+#
+# This matters in a way it does not for most model choices: the strongest model
+# available here (ReDimNet2-B6 `vb2+vox2`) is trained on VoxBlink2 and carries
+# CC BY-NC-SA 4.0, so it is fine for personal local use and must never ship in a
+# distributed build. Recording that per model — rather than in a doc someone has
+# to remember to read — is what lets the app tell the user which choice is safe.
+#
+# `distributable` is the field to check before shipping. `licence_source` cites
+# where the claim comes from; anything unverified says so rather than guessing.
+SPEAKER_EMBED_LICENCES = {
+    "redimnet2_b6": {
+        "licence": "CC BY-NC-SA 4.0 (VoxBlink2-derived checkpoint; code is MIT)",
+        "distributable": False,
+        "notes": "Local benchmark/review/personal use only. Strongest measured "
+                 "separation on this user's data.",
+        "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
+    },
+    "wespeaker_resnet293": {
+        "licence": "CC BY 4.0 (VoxCeleb-trained)",
+        "distributable": True,
+        "notes": "The bake-off names the VoxCeleb-trained class (ResNet221-LM or "
+                 "CAM++) as the shippable alternative; ResNet293-LM is the same "
+                 "class. Confirm the specific checkpoint's terms before shipping.",
+        "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
+    },
+    "campp": {
+        "licence": "CC BY 4.0 (3D-Speaker CAM++)",
+        "distributable": True,
+        "notes": "Named in the bake-off as a shippable alternative.",
+        "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
+    },
+    "titanet": {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified — NeMo TitaNet Small via sherpa-onnx. Measured as "
+                 "saturated on this user's data (every enrolled voice 0.97-0.99 "
+                 "against any speaker), so it is a poor naming choice regardless.",
+        "licence_source": None,
+    },
+    "eres2net": {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified.",
+        "licence_source": None,
+    },
+    "wavlm_base_plus_sv": {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified.",
+        "licence_source": None,
+    },
+}
+
+
+def speaker_embed_licence(model_key: str) -> dict:
+    """Licence facts for a speaker-embedding model.
+
+    An unknown model is reported as unverified rather than assumed safe: for a
+    shipping decision, "we do not know" and "it is fine" must not look alike.
+    """
+    return SPEAKER_EMBED_LICENCES.get(model_key) or {
+        "licence": None,
+        "distributable": None,
+        "notes": "Unverified — not in the licence registry.",
+        "licence_source": None,
+    }
+
+
 SPEAKER_EMBED_MODELS = {
     "titanet": {
         "filename": "speaker_embedding.onnx",
@@ -222,6 +291,36 @@ MODEL_REGISTRY = {
         "review_only": True,
         "description": "English VoxCeleb speaker-identity model selected by the local verified benchmark. It proposes evidence-backed names in the transcript review panel but never applies them automatically.",
     },
+    # pyannote community-1 — candidate replacement for Sortformer as the
+    # diarizer. Architecturally different in the way that matters here: it
+    # segments, embeds, then clusters *globally*, so speaker count is an outcome
+    # of clustering rather than a fixed per-window prediction capped at four
+    # speakers. The harness measured Sortformer at a -1.25 speaker-count bias,
+    # and Rec79 Part 2 showed why: a participant speaking 3.8% of a meeting,
+    # straddling a 300 s window boundary, never got a cluster of its own.
+    #
+    # Licence is the other reason to care. Unlike ReDimNet2 (CC BY-NC-SA, local
+    # use only) pyannote's pipeline and models are MIT and free for commercial
+    # use, so this is a path to a *shippable* build. The HF gate is usage
+    # tracking, not payment — but it does mean an accepted licence and a token.
+    "pyannote_community_1": {
+        "name": "pyannote community-1 (diarization)",
+        "filename": "pyannote-speaker-diarization-community-1",
+        "url": "https://huggingface.co/pyannote/speaker-diarization-community-1",
+        "size_mb": 0,          # fetched and cached by huggingface_hub, not by us
+        "required": False,
+        "stage": "diarization",
+        "stage_label": "Diarization (Who Spoke When)",
+        "category": "pipeline",
+        "backend_key": "pyannote",
+        "gated": True,
+        "gate_note": "Accept the licence on huggingface.co and set HF_TOKEN. "
+                     "Free for research and commercial use.",
+        "licence": "MIT (pipeline and models)",
+        "distributable": True,
+        "planned": False,
+        "description": "Clusters speaker embeddings globally rather than predicting a fixed per-window speaker set, so it has no 4-speaker cap and speaker count is an outcome of clustering. Reported to improve speaker assignment and counting over pyannote 3.1. MIT — usable in a distributed build, unlike the CC BY-NC-SA identity model.",
+    },
     # PalabraAI ReDimNet2-B6 — current bake-off winner on the local verified
     # benchmark (docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md): 96.65%
     # archive top-1, zero false accepts on archive and recent sets, 82.9%
@@ -240,8 +339,16 @@ MODEL_REGISTRY = {
         "category": "supporting",
         "used_by": "Transcript speaker verification (suggestions only)",
         "backend_key": "redimnet2_b6",
-        "review_only": True,
-        "description": "Strongest speaker-identity model on the local verified benchmark (96.65% archive top-1, zero false accepts, 82.9% safe-gate coverage). Proposes evidence-backed names in the review panel but never applies them automatically. Local use only (CC BY-NC-SA 4.0).",
+        # Whether this only suggests, or also names speakers automatically, is
+        # read live from ~/HiDock/Voice Library Candidates/active.json
+        # (`review_only`). It is deliberately NOT hardcoded here: it was, and a
+        # stale True made this description promise something untrue the moment the
+        # model was promoted.
+        "review_only_source": "voice_library_candidates_active_json",
+        "licence": "CC BY-NC-SA 4.0 (VoxBlink2-derived checkpoint; code is MIT)",
+        "distributable": False,
+        "licence_note": "Personal local use only — must not ship in a distributed build.",
+        "description": "Strongest speaker-identity model on the local verified benchmark (96.65% archive top-1, zero false accepts, 82.9% safe-gate coverage). Measured 62% correct automatic naming vs 2.1% for TitaNet. Personal local use only — CC BY-NC-SA 4.0, not for distribution.",
     },
     # W2V-BERT 2.0 via WeSpeaker's new official support — PLANNED,
     # review-only. Meta's facebook/w2v-bert-2.0 SSL frontend (580M params)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from shared.audio_utils import (
     extract_embedding,
@@ -197,3 +198,37 @@ def test_segment_audio_empty_list():
     audio = np.zeros(16000, dtype=np.float32)
     result = segment_audio(audio, 16000, [])
     assert result == []
+
+
+def test_wrapper_session_without_an_onnx_graph_is_delegated_to():
+    """ReDimNet2 is a Torch model wrapped to look like a session.
+
+    It has no ONNX graph to inspect, so `get_inputs()` raised AttributeError.
+    Every caller in diarize_sortformer treats a failed embedding as "no evidence
+    available", so the failure was silent: cross-window linking, mixed-turn
+    repair and split-to-count all degraded to no-ops the moment ReDimNet2 became
+    the selected model.
+    """
+    class WrapperSession:
+        def __init__(self):
+            self.calls = []
+
+        def extract_embedding(self, audio, sr=16000):
+            self.calls.append((len(audio), sr))
+            return np.arange(192, dtype=np.float32)
+
+    session = WrapperSession()
+    emb = extract_embedding(_sine_wave(duration=1.0), sr=16000, onnx_session=session)
+    assert emb.ndim == 1
+    assert len(emb) == 192
+    assert session.calls and session.calls[0][1] == 16000
+
+
+def test_session_that_is_neither_onnx_nor_wrapper_raises_clearly():
+    class Useless:
+        pass
+
+    with pytest.raises(RuntimeError) as excinfo:
+        extract_embedding(_sine_wave(duration=1.0), sr=16000, onnx_session=Useless())
+    # extract_embedding wraps inference errors; the cause names the real problem.
+    assert "Useless" in str(excinfo.value)

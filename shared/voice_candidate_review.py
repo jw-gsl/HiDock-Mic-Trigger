@@ -102,7 +102,17 @@ def load_candidate_config(path: str | Path = ACTIVE_CANDIDATE_CONFIG) -> dict:
     return {
         **raw,
         "available": not missing,
-        "review_only": True,
+        # Honour the config instead of pinning this on. It was hardcoded True
+        # while the candidate model was being trialled, which made the flag in
+        # active.json decorative — promoting a candidate to automatic naming
+        # needed a code change nobody would think to look for.
+        #
+        # The default stays True, so a config that says nothing is still
+        # review-only. Promotion is a deliberate act, and worth being deliberate
+        # about: check `shared.models.speaker_embed_licence(model_key)` first,
+        # because the strongest model here is CC BY-NC-SA and must not ship in a
+        # distributed build.
+        "review_only": bool(raw.get("review_only", True)),
         "reason": None if not missing else "candidate_unavailable: " + ", ".join(missing),
         "config_path": str(config_path),
         "candidate_dir": str(candidate_dir),
@@ -590,7 +600,7 @@ def list_candidate_speakers(
 def _meeting_key(source_path: str) -> str:
     """Reduce a sample source path to the recording/meeting name used by the app."""
     stem = Path(source_path).stem
-    for suffix in ("_diarized", "_whisper"):
+    for suffix in ("_diarized", "_asr", "_whisper"):
         if stem.endswith(suffix):
             stem = stem[: -len(suffix)]
     return stem

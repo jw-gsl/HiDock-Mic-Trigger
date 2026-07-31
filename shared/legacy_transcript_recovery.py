@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from shared.asr_sidecar import raw_asr_write_path
+
 from shared.speaker_meta import is_generic_name
 from shared.srt_writer import srt_path_for, write_srt
 from shared.transcript_writer import format_diarized_transcript
@@ -527,7 +529,7 @@ def restore_legacy_labels(
             continue
 
         whisper_path = sidecar_path.with_name(
-            sidecar_path.stem.replace("_diarized", "_whisper") + ".json"
+            raw_asr_write_path(sidecar_path).name
         )
         try:
             whisper_data = json.loads(whisper_path.read_text(encoding="utf-8"))

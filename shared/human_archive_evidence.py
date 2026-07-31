@@ -18,6 +18,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from shared.asr_sidecar import find_raw_asr, raw_asr_write_path
+
 import numpy as np
 
 from shared.models import SPEAKER_EMBED_MODELS
@@ -496,7 +498,7 @@ def _canonical_turns(turns: list[LegacyTurn], aliases: dict[str, str]) -> list[L
 
 def _source_segments_for_replacement(sidecar: Path, data: dict) -> tuple[list[dict], str]:
     """Prefer word-timed Whisper turns; fall back to the current transcript."""
-    whisper = sidecar.with_name(sidecar.stem.replace("_diarized", "_whisper") + ".json")
+    whisper = find_raw_asr(sidecar) or raw_asr_write_path(sidecar)
     try:
         raw = json.loads(whisper.read_text(encoding="utf-8"))
         if raw.get("segments"):

@@ -82,13 +82,33 @@ def diarize(
     whisper_segments: list[dict],
     n_speakers: int | None = None,
     calendar_context=None,
+    **backend_options,
 ) -> dict:
     """Dispatch to the user-selected diarization backend.
 
     Returns the same shape regardless of backend:
         {"segments": [{"start", "end", "text", "speaker", ...}], ...}
+
+    `backend_options` carries Sortformer-only refinements (`pinned_intervals`,
+    `two_sided_partition`, `refine_assignments`). They are dropped for the lite
+    backend rather than forwarded, so a caller opting into refinement never
+    crashes on whichever backend the user happens to have selected.
     """
     backend = _active("diarization", "lite")
+    if backend == "pyannote":
+        # Clusters embeddings globally instead of predicting a fixed speaker set
+        # per window, so speaker count is an outcome rather than a capped
+        # prediction. Sortformer's refinement options describe passes that only
+        # make sense for its fixed-topology output, so they are accepted and
+        # ignored rather than forwarded.
+        from shared.diarize_pyannote import diarize as pyannote_diarize
+        return pyannote_diarize(
+            audio_path,
+            whisper_segments,
+            n_speakers=n_speakers,
+            calendar_context=calendar_context,
+            **backend_options,
+        )
     if backend == "sortformer":
         # Sortformer's inference API is fixed-topology, but it honours an
         # explicit count post-hoc: stitched global labels are merged down to
@@ -100,6 +120,7 @@ def diarize(
             whisper_segments,
             n_speakers=n_speakers,
             calendar_context=calendar_context,
+            **backend_options,
         )
     from shared.diarize_lite import diarize as lite_diarize
     return lite_diarize(

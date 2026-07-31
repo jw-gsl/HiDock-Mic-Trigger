@@ -18,6 +18,8 @@ import re
 import sys
 from pathlib import Path
 
+from shared.asr_sidecar import RAW_ASR_SUFFIX, find_raw_asr
+
 from shared.agent_events import NULL_EMITTER
 from shared.llm_cli import get_engine, query_json, query_streaming
 from shared.summarize import _SYSTEM_INSTRUCTION
@@ -165,7 +167,7 @@ def available_templates() -> dict[str, Path]:
 
 def _read_transcript_text(transcript_path: Path) -> str:
     base = transcript_path.stem
-    wj = RAW_DIR / f"{base}_whisper.json"
+    wj = find_raw_asr(RAW_DIR / f"{base}.json") or (RAW_DIR / f"{base}{RAW_ASR_SUFFIX}")
     if wj.exists():
         try:
             import json

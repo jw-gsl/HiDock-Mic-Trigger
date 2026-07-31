@@ -25,6 +25,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# Imported only after the bootstrap above: this module is run as a script from
+# the transcription-pipeline directory, so `shared` is not importable until the
+# repo root is on sys.path.
+from shared.asr_sidecar import find_raw_asr, raw_asr_write_path  # noqa: E402
+from shared.transcript_history import snapshot as snapshot_transcript  # noqa: E402
+
 LOCK_PATH = Path(config.HIDOCK_ROOT) / "transcription-pipeline" / ".transcribe.lock"
 
 # Tracks the currently in-flight transcription so the SIGTERM handler can
@@ -501,7 +507,7 @@ def transcribe_file(
         # Save the original Whisper micro-segments (for re-diarization)
         import json as _json
         whisper_raw_path = transcript_path.with_name(
-            transcript_path.stem + "_whisper.json"
+            raw_asr_write_path(transcript_path).name
         )
         whisper_raw_segs = []
         for seg in result.get("segments", []):
@@ -905,6 +911,7 @@ def cmd_rediarize(args):
         print(f"File not found: {json_path}", file=sys.stderr)
         sys.exit(1)
 
+    snapshot_transcript(json_path, "Before re-diarisation (CLI)")
     data = _json.loads(json_path.read_text(encoding="utf-8"))
     audio_path = data.get("audio_file", "")
     if not Path(audio_path).exists():
@@ -924,16 +931,14 @@ def cmd_rediarize(args):
         print(f"Calendar context unavailable; continuing without it: {exc}", file=sys.stderr)
 
     # Try to load the original Whisper micro-segments for better diarization
-    whisper_raw_path = json_path.with_name(
-        json_path.stem.replace("_diarized", "_whisper") + ".json"
-    )
-    if whisper_raw_path.exists():
+    whisper_raw_path = find_raw_asr(json_path)
+    if whisper_raw_path is not None:
         whisper_data = _json.loads(whisper_raw_path.read_text(encoding="utf-8"))
         segments = whisper_data.get("segments", [])
         print(f"Using original Whisper segments: {len(segments)}", file=sys.stderr)
     else:
         segments = data.get("segments", [])
-        print(f"No _whisper.json found, using existing {len(segments)} segments", file=sys.stderr)
+        print(f"No raw-ASR sidecar found, using existing {len(segments)} segments", file=sys.stderr)
     progress(5)
 
     # Route through the dispatcher so rediarize respects the active
@@ -1057,6 +1062,7 @@ def cmd_recluster_with_anchors(args):
     if not json_path.exists():
         print(f"File not found: {json_path}", file=sys.stderr)
         sys.exit(1)
+    snapshot_transcript(json_path, "Before re-clustering with anchors (CLI)")
     progress(5)
     from shared.recluster_with_anchors import recluster_with_anchors, SIMILARITY_THRESHOLD
     threshold = args.threshold if args.threshold is not None else SIMILARITY_THRESHOLD
@@ -1261,12 +1267,75 @@ def cmd_record_rematch_correction(args):
     print(_json.dumps({"status": "completed", "event": event}))
 
 
+def cmd_anchor_sweep(args):
+    """Reclaim a confirmed speaker's speech from the clusters that swallowed it.
+
+    `recluster-with-anchors` only touches *unnamed* segments, so on a fully
+    reviewed transcript it correctly reports "nothing to do" while a quiet
+    participant's speech still sits under someone else's name. This sweeps the
+    named segments too, moving one only when it matches a confirmed centroid by a
+    clear margin over its current owner.
+
+    Prints the plan and stops unless --apply is given: reassigning reviewed speech
+    is exactly the kind of change that should be seen before it happens.
+    """
+    import json as _json
+    from shared.anchor_sweep import apply_sweep, load_audio_and_session, plan_sweep
+
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    audio, session = load_audio_and_session(data)
+    if audio is None or session is None:
+        print(_json.dumps({"error": "audio or embedding model unavailable"}))
+        sys.exit(1)
+    plan = plan_sweep(
+        data, audio, session,
+        targets=args.speaker or None,
+        min_similarity=args.min_similarity,
+        min_margin=args.min_margin,
+    )
+    if not args.apply:
+        print(_json.dumps({**plan, "applied": False}, indent=2))
+        return
+    if not plan.get("moves"):
+        print(_json.dumps({**plan, "applied": False, "moved": 0}))
+        return
+    snapshot_transcript(json_path, "Before anchor sweep (CLI)")
+    moved = apply_sweep(data, plan)
+    json_path.write_text(
+        _json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    _rewrite_sidecar_markdown(json_path, data)
+    print(_json.dumps({**plan, "applied": True, "moved": moved}, indent=2))
+
+
+def _rewrite_sidecar_markdown(json_path: Path, data: dict) -> None:
+    """Regenerate the .md/.srt so they agree with the reassigned speakers."""
+    try:
+        from shared.transcript_writer import write_transcript
+        md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+        body = " ".join(
+            seg.get("text", "").strip()
+            for seg in data.get("segments", []) if seg.get("text")
+        )
+        write_transcript(
+            md_path, body, source_path=Path(data.get("audio_file", "")),
+            model="anchor-sweep", diarized_result=data,
+        )
+    except Exception as exc:  # noqa: BLE001 - the JSON is already saved
+        print(f"anchor-sweep: could not rewrite .md: {exc}", file=sys.stderr)
+
+
 def cmd_rewrite_md(args):
     """Regenerate the .md next to a _diarized.json using confirmed-only labels.
 
     Used by the desktop app after Confirm / Clear / rename so the on-disk
     transcript matches publishable names (Speaker N until confirmed). Does not
-    alter the JSON.
+    alter the JSON, but it does overwrite a versioned artifact, so it snapshots
+    like any other rewrite.
     """
     import json as _json
     json_path = Path(args.json_path).resolve()
@@ -1510,7 +1579,7 @@ def cmd_merge_rediarize(args):
     stitched_segments: list[dict] = []
     cumulative_offset = 0.0
     for piece_path, piece_dur in zip(pieces, durations):
-        wjson = transcripts_dir / f"{piece_path.stem}_whisper.json"
+        wjson = find_raw_asr(transcripts_dir / f"{piece_path.stem}.json")
         if not wjson.exists():
             print(f"Missing per-piece whisper JSON for {piece_path.name}: {wjson}", file=sys.stderr)
             sys.exit(1)
@@ -1536,7 +1605,7 @@ def cmd_merge_rediarize(args):
     # Persist the stitched whisper.json so a future rediarize can reuse it.
     merged_stem = merged_audio.stem
     merged_md = transcripts_dir / f"{merged_stem}.md"
-    merged_whisper_json = transcripts_dir / f"{merged_stem}_whisper.json"
+    merged_whisper_json = raw_asr_write_path(transcripts_dir / f"{merged_stem}.json")
     merged_diarized_json = transcripts_dir / f"{merged_stem}_diarized.json"
     merged_whisper_json.write_text(
         _json.dumps({"audio_file": str(merged_audio), "segments": stitched_segments},
@@ -2012,6 +2081,21 @@ def main():
     p_split.add_argument("--transcript-dir", required=True)
     p_split.add_argument("--split-at", required=True, type=float)
     p_split.set_defaults(func=cmd_split_artifacts)
+
+    p_sweep = sub.add_parser(
+        "anchor-sweep",
+        help="Reclaim a confirmed speaker's misattributed segments using their "
+             "confirmed segments as the reference voice",
+    )
+    p_sweep.add_argument("json_path", help="Path to _diarized.json")
+    p_sweep.add_argument("--speaker", action="append",
+                         help="Limit to this confirmed name (repeatable)")
+    p_sweep.add_argument("--min-similarity", type=float, default=0.55)
+    p_sweep.add_argument("--min-margin", type=float, default=0.10)
+    p_sweep.add_argument("--apply", action="store_true",
+                         help="Write the changes (snapshots first). Without this, "
+                              "the plan is printed and nothing is modified.")
+    p_sweep.set_defaults(func=cmd_anchor_sweep)
 
     p_status = sub.add_parser("status", help="JSON report of transcription state")
     p_status.set_defaults(func=cmd_status)
