@@ -92,7 +92,12 @@ targets:
               fi
             }
             add_busy "transcribe(_parakeet|_cpp)?\.py" "transcription / re-diarisation"
-            add_busy "usb-extractor.*extractor\.py" "a device download"
+            # Only real transfers. The app polls `extractor.py … status` and
+            # `plaud-status` every couple of minutes, so matching any extractor
+            # process meant the list was almost never empty and this said BUSY
+            # nearly every time — the crying wolf it was rewritten to stop. A
+            # read-only probe finishes in seconds and re-runs on its own.
+            add_busy "extractor\.py.*(download|volume-import|mark-downloaded)" "a device download"
             add_busy "ffmpeg.*HiDock" "an audio conversion"
             add_busy "voice_training\.py" "voice-library training"
             # A live capture is the costliest thing to lose, and `ffmpeg.*HiDock`

@@ -25,71 +25,79 @@ if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
   exit 0
 fi
 
-# A local validation build may set CI=true to suppress deployment. It still
-# needs the build approval; only an actual headless CI runner should bypass
-# the client-side dialog.
-non_deploying=false
-if [ "${CI:-}" = "true" ] || echo "$cmd" | grep -Eqi '(^|[[:space:]])CI=true([[:space:]]|$)'; then
-  non_deploying=true
+# Deployment became opt-in on 2026-07-31 (see the "Deploy to Applications" phase
+# in hidock-mic-trigger/project.yml): a build without HIDOCK_DEPLOY=1 compiles and
+# leaves /Applications alone. This hook exists to guard the *deploy*, so a build
+# that cannot deploy has nothing to guard.
+#
+# That is also what made this dialog fire constantly. Env vars set inline on the
+# command — `GITHUB_ACTIONS=true xcodebuild …` — apply to the child, not to this
+# hook, so the check above never saw them and every compile-only verification
+# build prompted. There were around twenty in one session.
+if ! echo "$cmd" | grep -Eqi '(^|[[:space:]])HIDOCK_DEPLOY=(1|force)([[:space:]]|$)'; then
+  exit 0
+fi
+
+# Belt and braces for the inline form of GITHUB_ACTIONS.
+if echo "$cmd" | grep -Eqi '(^|[[:space:]])GITHUB_ACTIONS=true([[:space:]]|$)'; then
+  exit 0
 fi
 
 # Collect busy-state signals so the prompt's reason explains what the
 # rebuild is about to interrupt.
+# Only work that would actually be *lost*. A status probe is not work: the app
+# polls `extractor.py … status` and `plaud-status` every couple of minutes, so
+# matching any extractor process meant the list was almost never empty and the
+# dialog said BUSY nearly every time — the crying-wolf failure this reason string
+# was rewritten on 2026-07-28 to end. Read-only probes finish in seconds and
+# re-run on their own.
 busy=()
-if pgrep -f 'ffmpeg.*HiDock' >/dev/null 2>&1; then
-  busy+=("ffmpeg is actively recording the HiDock")
+if pgrep -f 'ffmpeg.*avfoundation' >/dev/null 2>&1; then
+  # The mic trigger holds the HiDock input open with `-f avfoundation -i :<n>`;
+  # there is no "HiDock" in its argv, so the old ffmpeg pattern never caught a
+  # live capture — the costliest thing to lose.
+  busy+=("a live recording — the mic trigger is holding the HiDock input open")
 fi
-if pgrep -f 'usb-extractor.*extractor\.py' >/dev/null 2>&1; then
-  busy+=("an extractor subprocess is running (download, status probe, or list-devices)")
+if pgrep -f 'ffmpeg.*HiDock' >/dev/null 2>&1; then
+  busy+=("an audio conversion")
+fi
+if pgrep -f 'extractor\.py.*(download|volume-import|mark-downloaded)' >/dev/null 2>&1; then
+  busy+=("a device download")
 fi
 if pgrep -f 'transcription-pipeline.*transcribe.*\.py' >/dev/null 2>&1; then
-  busy+=("a transcription subprocess is running (whisper/parakeet/cohere)")
+  busy+=("a transcription or re-diarisation")
+fi
+if pgrep -f 'voice_training\.py' >/dev/null 2>&1; then
+  busy+=("voice-library training")
 fi
 
-if [ "$non_deploying" = "true" ]; then
-  reason="A local HiDock validation build is requested. Deployment is disabled (CI=true), but approve starting the build?"
-elif [ ${#busy[@]} -gt 0 ]; then
-  reason="HiDock rebuild will kill the running app AND in-flight work:"$'\n'
+if [ ${#busy[@]} -gt 0 ]; then
+  reason="This deploys and relaunches the HiDock app, and would kill in-flight work:"$'\n'
   for item in "${busy[@]}"; do
     reason+="  • $item"$'\n'
   done
-  reason+="Approve rebuild?"
 else
-  reason="HiDock rebuild will kill the running app (idle — no ffmpeg/extractor/transcription detected). Approve rebuild?"
+  reason="This deploys and relaunches the HiDock app. Nothing is recording, downloading, converting or transcribing."
 fi
 
-# Keep the hook-level approval separate from the post-build deployment
-# approval: this one authorises starting the build; the Xcode script still
-# asks before replacing the installed app.
-decision=$(
-  /usr/bin/osascript \
-    -e 'on run argv' \
-    -e 'set reason to item 1 of argv' \
-    -e 'try' \
-    -e 'set answer to button returned of (display dialog reason buttons {"Cancel", "Approve Build"} default button "Cancel" cancel button "Cancel" with title "Approve HiDock rebuild")' \
-    -e 'return answer' \
-    -e 'on error' \
-    -e 'return "Cancel"' \
-    -e 'end try' \
-    -e 'end run' \
-    "$reason" 2>/dev/null || true
-)
-
-if [ "$decision" = "Approve Build" ]; then
-  jq -n --arg reason "$reason" '{
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "allow",
-      permissionDecisionReason: $reason
-    }
-  }'
-else
-  jq -n --arg reason "$reason" '{
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: ($reason + "\n\nBuild cancelled in the macOS approval dialog.")
-    }
-  }'
-fi
+# Ask through Claude Code rather than a native dialog.
+#
+# The osascript dialog this used to show was the one that needed clicking twice,
+# every time: a dialog owned by a process the harness spawned opens without focus,
+# so the first click is spent activating the window. It was also the *second*
+# approval for one action — the deploy phase in project.yml already asks before it
+# quits a running app — so the two together were the "popping up loads of times"
+# problem.
+#
+# `ask` surfaces this where the user is already looking, and cannot be mis-focused.
+# The guard is still meaningful in an autonomous session, which is why this is `ask`
+# rather than dropping the hook: deployment is opt-in now, so reaching this point at
+# all means something explicitly requested HIDOCK_DEPLOY.
+jq -n --arg reason "$reason" '{
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "ask",
+    permissionDecisionReason: $reason
+  }
+}'
 exit 0
