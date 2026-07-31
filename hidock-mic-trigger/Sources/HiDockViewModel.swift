@@ -417,6 +417,15 @@ final class HiDockViewModel: ObservableObject {
     @Published var transcriptionBusy = false
     @Published var transcriptionCurrentFile: String?
     @Published var transcriptionProgress: Int = 0
+    /// Speaker work (re-diarisation, re-clustering, rematch) in flight for one
+    /// recording, and what stage it is at.
+    ///
+    /// Distinct from `transcriptionBusy`: confirming a calendar meeting kicks off
+    /// speaker work with no ASR, so the row previously sat on its "needs tagging"
+    /// icon looking idle while the pipeline was actually rewriting it. The user
+    /// could not tell whether their confirmation had done anything.
+    @Published var speakerWorkFile: String?
+    @Published var speakerWorkStage: String = ""
     /// Recordings (by outputName) currently being summarised — drives the
     /// transient "Summarising" status pill, mirroring transcriptionCurrentFile.
     @Published var summarisingNames: Set<String> = []
@@ -987,6 +996,10 @@ final class HiDockViewModel: ObservableObject {
     var onTranscribeWithSpeakerCount: (String, Int) -> Void = { _, _ in }
     var onConfirmCalendarSuggestion: (String) -> Void = { _ in }
     var onRejectCalendarSuggestion: (String) -> Void = { _ in }
+    /// Look up the calendar for one recording on demand. The automatic gate only
+    /// runs once, just after transcription, so historic recordings have no way to
+    /// acquire a meeting without this.
+    var onLookupCalendarForRecording: (String) -> Void = { _ in }
     /// Delete the locally-downloaded MP3 for a recording (keeps the device
     /// copy intact). Next device refresh will show it as "On device" again.
     var onDeleteLocalCopy: (String) -> Void = { _ in }

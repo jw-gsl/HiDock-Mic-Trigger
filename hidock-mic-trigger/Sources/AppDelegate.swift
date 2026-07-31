@@ -675,6 +675,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onTranscribeWithSpeakerCount = { [weak self] name, n in self?.transcribeWithSpeakerCount(name: name, nSpeakers: n) }
         viewModel.onConfirmCalendarSuggestion = { [weak self] path in self?.confirmCalendarSuggestion(for: path) }
         viewModel.onRejectCalendarSuggestion = { [weak self] path in self?.rejectCalendarSuggestion(for: path) }
+        viewModel.onLookupCalendarForRecording = { [weak self] path in self?.lookupCalendarOnDemand(path) }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
         viewModel.onReconnectDevice = { [weak self] deviceId in self?.reconnectDevice(deviceId: deviceId) }
@@ -3539,8 +3540,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
-        viewModel.syncStatus = "Re-diarizing…"
-        viewModel.syncStatusLevel = .secondary
+        // The sidecar reports its own progress in place ("Re-diarising… the
+        // transcript will update here when it finishes"), so repeating it in the
+        // main window is noise — the same message twice on one screen.
+        let viewerShowsProgress = isTranscriptViewerOpen(diarizedPath: jsonPath)
+        if !viewerShowsProgress {
+            viewModel.syncStatus = "Re-diarizing…"
+            viewModel.syncStatusLevel = .secondary
+        }
+        // The row spinner stays either way: it is the only cue in the table that
+        // a confirmation started work, and the sidecar cannot show that.
+        viewModel.speakerWorkFile = recordingFileName(forTranscript: jsonPath)
+        viewModel.speakerWorkStage = nSpeakers.map { "Matching \($0) speakers…" } ?? "Matching speakers…"
         syncViewModelState()
 
         snapshotTranscriptArtifacts(jsonPath, reason: "Before re-diarisation")
@@ -3565,10 +3576,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 let summary = self.rediarizeSummary(before: before, after: after)
                 self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
-                self.viewModel.syncStatus = summary.hasChanges
-                    ? "Re-diarization complete — \(summary.changedSegmentAssignments) segment assignments changed"
-                    : "Re-diarization complete — no changes"
-                self.viewModel.syncStatusLevel = .success
+                if !viewerShowsProgress {
+                    self.viewModel.syncStatus = summary.hasChanges
+                        ? "Re-diarization complete — \(summary.changedSegmentAssignments) segment assignments changed"
+                        : "Re-diarization complete — no changes"
+                    self.viewModel.syncStatusLevel = .success
+                }
                 onUpdate(.completed(summary, after))
             case .failure(let error):
                 self.log("Re-diarization failed: \(error.localizedDescription)")
@@ -3576,8 +3589,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.viewModel.syncStatusLevel = .error
                 onUpdate(.failed(error.localizedDescription))
             }
+            self.viewModel.speakerWorkFile = nil
+            self.viewModel.speakerWorkStage = ""
             self.refreshTranscriptionState()
             self.syncViewModelState()
+            // An open viewer holds a snapshot from before this rewrite. Without a
+            // reload the user sees stale speakers and no sign anything happened —
+            // which is exactly what a calendar confirmation triggers.
+            self.reloadOpenTranscriptViewer(diarizedPath: jsonPath)
+        }
+    }
+
+    /// The recording filename a transcript belongs to, for row-level busy state.
+    private func recordingFileName(forTranscript jsonPath: String) -> String? {
+        let stem = URL(fileURLWithPath: jsonPath)
+            .deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "_diarized", with: "")
+        return syncEntries.first {
+            URL(fileURLWithPath: $0.recording.outputPath)
+                .deletingPathExtension().lastPathComponent == stem
+        }?.recording.outputName
+    }
+
+    /// Whether the transcript viewer is currently showing this transcript.
+    ///
+    /// The tab is keyed by the *_diarized.json* path (see `openTranscriptViewer`),
+    /// not the .md path. Keying this off .md meant it never matched, so both
+    /// callers below silently did nothing: the main window kept duplicating the
+    /// sidecar's progress message, and the viewer never reloaded after a
+    /// background re-diarisation.
+    private func isTranscriptViewerOpen(diarizedPath: String) -> Bool {
+        viewModel.detailTabs.contains { $0.id == "transcript:\(diarizedPath)" }
+    }
+
+    /// Re-open the transcript viewer if it is showing the file just rewritten.
+    private func reloadOpenTranscriptViewer(diarizedPath: String) {
+        let mdPath = diarizedPath.replacingOccurrences(of: "_diarized.json", with: ".md")
+        guard isTranscriptViewerOpen(diarizedPath: diarizedPath) else { return }
+        log("Reloading open transcript viewer after speaker work: \((mdPath as NSString).lastPathComponent)")
+        DispatchQueue.main.async { [weak self] in
+            self?.openTranscriptViewer(transcriptMdPath: mdPath)
         }
     }
 
@@ -4059,6 +4110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Organiser: <display name>
         Invitees: <name 1>; <name 2>; <name 3>
         Never omit Invitees: use `Invitees: unavailable` only if the MCP details response truly has no attendee data. Keep the answer concise.
+        If no event overlaps that window, reply with exactly NO_MATCH on its own line and nothing else. Do not offer the nearest or adjacent event.
         """
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -4082,6 +4134,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 let answer = root["result"] as? String ?? ""
+                // A negative answer must not be parsed as an event. The regex
+                // below looks for a bold span followed by a time range, which a
+                // refusal satisfies whenever the model helpfully volunteers the
+                // *nearest* event's time: the captured "title" then becomes the
+                // refusal sentence. That is exactly how a recording with no
+                // meeting came to be offered a suggestion called
+                // "No event overlaps that window." (Rec81, 2026-07-28).
+                //
+                // NO_MATCH is the explicit contract; the prose checks catch
+                // replies that predate it or ignore it. "Nearest event" is
+                // treated as negative on purpose — the request is for events
+                // that *overlap*, so an adjacent one is a false positive.
+                let lowered = answer.lowercased()
+                let negativeSignals = [
+                    "no_match", "no event", "no events", "no meeting", "no meetings",
+                    "no calendar event", "nothing overlaps", "nearest event",
+                    "could not find", "couldn\'t find", "did not find",
+                ]
+                if negativeSignals.contains(where: { lowered.contains($0) }) {
+                    self?.log("Calendar search: no overlapping event for \((audioPath as NSString).lastPathComponent)")
+                    DispatchQueue.main.async { completion([]) }
+                    return
+                }
                 // The connector's event search response is concise prose (for
                 // example “**[BT] Stream Leads Weekly** — 15:00–15:45”). Asking
                 // it to also satisfy a rigid attendee schema caused Claude to
@@ -4137,6 +4212,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                           let eventEnd = dateAt(String(answer[endRange]))
                     else { return nil }
                     let title = String(answer[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Second line of defence: a meeting title is a name, not a
+                    // sentence. Anything that reads like prose is the model
+                    // explaining itself, not an event, and must never reach the
+                    // Meeting column as something the user can confirm.
+                    guard AppDelegate.looksLikeEventTitle(title) else { return nil }
                     return CalendarMeetingCandidate(id: "\(title)|\(eventStart.timeIntervalSince1970)", title: title,
                                                   start: eventStart, end: eventEnd, attendeeNames: attendeeNames)
                 }
@@ -4177,6 +4257,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// A rejection is a deliberate review outcome, not absence of data.  Keep
     /// it separately from a suggested/confirmed event so opening a transcript
     /// cannot repeatedly invoke the calendar MCP after the user said no.
+    /// Whether a parsed string is plausibly a calendar event's name.
+    ///
+    /// The Markdown parser accepts any bold span followed by a time range, so a
+    /// model that explains itself in bold gets its explanation promoted to an
+    /// event title. Rec81 (2026-07-28) was offered a meeting called
+    /// "No event overlaps that window." for precisely this reason.
+    ///
+    /// Titles are short and are not sentences. This deliberately errs toward
+    /// rejecting: a missed suggestion costs a manual link, whereas a bogus one
+    /// invites the user to attach the wrong meeting to a transcript — and, before
+    /// the confirmed-speaker guard, to re-diarise it.
+    static func looksLikeEventTitle(_ title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count < 2 || trimmed.count > 120 { return false }
+        // A trailing full stop is the clearest prose tell; real titles rarely
+        // end in one, and every observed false positive did.
+        if trimmed.hasSuffix(".") { return false }
+        let lowered = trimmed.lowercased()
+        let prosePhrases = [
+            "no event", "no meeting", "nearest event", "details fetched",
+            "unavailable", "not find", "overlaps", "i could", "there is no",
+        ]
+        if prosePhrases.contains(where: { lowered.contains($0) }) { return false }
+        return true
+    }
+
+    /// Search the calendar for one recording because the user asked, not because
+    /// the pipeline reached that stage.
+    ///
+    /// The automatic gate fires once, just after transcription, so a recording
+    /// imported later — or one whose meeting was created after the fact — can
+    /// never acquire a meeting on its own. This is the manual route, and it
+    /// deliberately does *not* re-diarise on a no-match: the user is browsing,
+    /// not running the pipeline.
+    private func lookupCalendarOnDemand(_ audioPath: String) {
+        let name = (audioPath as NSString).lastPathComponent
+        if let linked = calendarLinkedEvent(for: audioPath) {
+            viewModel.syncStatus = "Already linked: \(linked.title)"
+            viewModel.syncStatusLevel = .success
+            syncViewModelState()
+            return
+        }
+        viewModel.syncStatus = "Checking calendar for \(name)…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
+        findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
+            guard let self else { return }
+            if events.count == 1, let event = events.first {
+                // A manual check clears a previous decline: the user is asking
+                // again, so the old "not this meeting" answer no longer applies.
+                self.clearCalendarRejection(for: audioPath)
+                self.saveCalendarSuggestion(event, for: audioPath)
+                self.log("Calendar lookup for \(name) → \(event.title) (awaiting confirmation)")
+                self.viewModel.syncStatus = "Found: \(event.title) — confirm or reject"
+                self.viewModel.syncStatusLevel = .warning
+            } else if events.isEmpty {
+                self.log("Calendar lookup for \(name): no overlapping event")
+                self.viewModel.syncStatus = "No meeting found for \(name)"
+                self.viewModel.syncStatusLevel = .secondary
+            } else {
+                self.log("Calendar lookup for \(name): \(events.count) candidates, none unambiguous")
+                self.viewModel.syncStatus = "\(events.count) possible meetings — open the transcript to choose"
+                self.viewModel.syncStatusLevel = .warning
+            }
+            self.refreshCalendarFields()
+            self.syncViewModelState()
+        }
+    }
+
     private func calendarRejectionURL(for audioPath: String) -> URL {
         let audio = URL(fileURLWithPath: audioPath)
         return audio.deletingLastPathComponent()
@@ -4810,6 +4960,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var env = ProcessInfo.processInfo.environment
             env["HOME"] = NSHomeDirectory()
             env["PYTHONPATH"] = self.repoRoot
+            // Gated models (pyannote) authenticate with this; absent otherwise.
+            HuggingFaceToken.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
@@ -6017,6 +6169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let linked = calendarLinkedEvent(for: audioPath)
             syncEntries[index].calendarMeetingTitle = linked?.title
             syncEntries[index].calendarMeetingStart = linked?.start
+            syncEntries[index].calendarRejected = linked == nil && hasCalendarRejection(for: audioPath)
             if let suggestion = suggestedCalendarEvent(for: audioPath), linked == nil {
                 syncEntries[index].calendarSuggestionTitle = suggestion.title
                 syncEntries[index].calendarSuggestionStart = suggestion.start
@@ -8689,6 +8842,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var env = ProcessInfo.processInfo.environment
             let home = NSHomeDirectory()
             env["HOME"] = home
+            // A gated diarization model needs the token to download; harmless
+            // when none is stored, and never written to disk.
+            HuggingFaceToken.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {

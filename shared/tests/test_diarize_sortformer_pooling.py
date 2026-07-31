@@ -172,14 +172,47 @@ def test_repool_rematches_on_the_pooled_vector(library_says):
     assert out["Speaker 2"]["source"] == "auto"
 
 
-def test_repool_demotes_when_the_pooled_voice_no_longer_matches(library_says):
-    # Forcing two different people together should not keep asserting one's name.
+def _balanced_merged_case():
+    """Two comparable speakers merged — neither dominates, but Speaker 2 is the
+    better-evidenced member, so its identity is the one that should survive."""
+    before = [(0.0, 150.0, "Speaker 1"), (150.0, 400.0, "Speaker 2")]
+    after = [(0.0, 150.0, "Speaker 2"), (150.0, 400.0, "Speaker 2")]
+    info = {
+        "Speaker 1": {"name": "Someone Else", "source": "auto", "confidence": 0.7,
+                      "embedding": [0.0, 1.0]},
+        "Speaker 2": {"name": "Jeevan", "source": "auto", "confidence": 0.82,
+                      "embedding": [1.0, 0.0]},
+    }
+    return info, before, after
+
+
+def test_repool_never_discards_a_name_on_a_weaker_pooled_match(library_says):
+    """A weaker pooled match must not throw the name away.
+
+    Demoting here looked principled — two people forced together should not keep
+    one's name — but it only ever destroyed correct answers. Rec79 lost a
+    confirmed name. Rec82 lost James Whiting at 83% because his speech was split
+    across several window labels, so pooling them moved the centroid below
+    threshold even though the cluster was entirely him.
+
+    The name is unverified either way, so it reaches the user as a suggestion to
+    confirm. Keeping a slightly-off match costs one click; discarding a good one
+    costs the tagging work the feature exists to save.
+    """
     library_says(None, 0.0)
-    info, before, after = _merged_case()
+    info, before, after = _balanced_merged_case()
     out = _repool_merged_speakers(info, before, after, ["Speaker 2"])
-    assert out["Speaker 2"]["source"] == "generic"
-    assert out["Speaker 2"]["name"] == "Speaker 2"
-    assert out["Speaker 2"]["confidence"] is None
+    assert out["Speaker 2"]["name"] == "Jeevan"
+    assert out["Speaker 2"]["source"] == "auto"
+
+
+def test_repool_still_upgrades_when_the_pooled_voice_matches_someone(library_says):
+    # Pooling can also *improve* the answer, and that path is unchanged.
+    library_says("Jeevan Kumar", 0.94)
+    info, before, after = _balanced_merged_case()
+    out = _repool_merged_speakers(info, before, after, ["Speaker 2"])
+    assert out["Speaker 2"]["name"] == "Jeevan Kumar"
+    assert out["Speaker 2"]["confidence"] == 0.94
 
 
 def test_repool_leaves_untouched_labels_alone(library_says):

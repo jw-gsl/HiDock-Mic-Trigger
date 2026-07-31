@@ -485,6 +485,45 @@ struct RecordingsTableView: View {
             .font(.caption)
             .foregroundColor(.green)
             .help("Raw transcript is ready — confirm or reject before speaker matching")
+        } else if entry.calendarRejected {
+            // The user already answered "not this meeting", so this is a settled
+            // state rather than an outstanding question. A dash here would invite
+            // the same decision a second time.
+            HStack(spacing: 5) {
+                // Orange calendar-with-minus: a calendar question that has been
+                // *answered* ("no meeting"), which is different from one still
+                // waiting. Grey read as "nothing here yet" and a person glyph did
+                // not say the answer came from the calendar at all.
+                Image(systemName: "calendar.badge.minus")
+                    .foregroundColor(.orange)
+                Text("Ad-hoc call")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button {
+                    viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary.opacity(0.7))
+                .help("Check the calendar again — a meeting may have been added since")
+                Spacer(minLength: 0)
+            }
+            .help("No calendar meeting — you marked this as an ad-hoc call")
+        } else if entry.recording.localExists {
+            // The automatic gate fires once, just after transcription, so a
+            // historic or later-imported recording can never acquire a meeting on
+            // its own. This is the manual route.
+            Button {
+                viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
+            } label: {
+                Label("Check calendar", systemImage: "calendar.badge.questionmark")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+            .help("Look up a calendar meeting for this recording now")
         } else {
             Text("—")
                 .foregroundColor(.secondary.opacity(0.5))

@@ -1000,10 +1000,9 @@ def _repool_merged_speakers(
     if not merged:
         return speaker_info
 
-    identify = scores_for = None
+    identify = None
     try:
         from shared.voice_library_lite import identify_speaker as identify
-        from shared.voice_library_lite import library_scores as scores_for
     except Exception as exc:  # noqa: BLE001 - pooling still helps without it
         print(f"Sortformer: pooled re-match unavailable ({exc})", file=sys.stderr)
 
@@ -1047,25 +1046,28 @@ def _repool_merged_speakers(
                         file=sys.stderr,
                     )
                 elif info.get("source") == "auto":
-                    # No match. Only treat that as evidence *against* the name if
-                    # the library actually had candidates to compare: it returns
-                    # zero scores when it is empty or the embedding dimension
-                    # does not match its model, and demoting on that would throw
-                    # away a good match for an unrelated reason.
-                    comparable = False
-                    try:
-                        comparable = bool(scores_for(pooled, allowed_names=allowed_names))
-                    except Exception:  # noqa: BLE001 - treat as "cannot tell"
-                        comparable = False
-                    if comparable:
-                        # Forcing two people together is the likely cause, so
-                        # demote for review rather than asserting a name.
-                        print(
-                            f"  Pooled voice for {label} no longer matches "
-                            f"'{info.get('name')}'; demoting to review",
-                            file=sys.stderr,
-                        )
-                        info.update(name=label, source="generic", confidence=None)
+                    # Deliberately do NOT demote here.
+                    #
+                    # The reasoning for demoting was sound — two people forced
+                    # together should not keep one's name — but in practice it
+                    # only ever destroyed correct answers. Rec79 lost a confirmed
+                    # name; Rec82 lost James Whiting at 83% because his speech was
+                    # split across several window labels, so pooling them moved
+                    # the centroid below threshold even though the cluster was
+                    # entirely him. A per-member dominance test does not catch
+                    # that: no single member owns the cluster.
+                    #
+                    # The name is unverified either way, so it reaches the user as
+                    # a suggestion to confirm, not an assertion. Keeping a
+                    # slightly-off match costs one click; discarding a good one
+                    # costs the tagging work this feature exists to save. And
+                    # duplicate names are already handled downstream by
+                    # `resolve_name_collisions`.
+                    print(
+                        f"  Kept '{info.get('name')}' for {label}: pooled voice is "
+                        "weaker but the name is unverified and reviewable",
+                        file=sys.stderr,
+                    )
         # A generic identity must carry the surviving label's own name, not the
         # absorbed member's, or the transcript shows a speaker that no longer exists.
         if info.get("source") == "generic":

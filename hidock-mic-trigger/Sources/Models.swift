@@ -310,13 +310,17 @@ struct HiDockSyncRecordingEntry: Identifiable {
     var calendarSuggestionTitle: String? = nil
     var calendarSuggestionStart: Date? = nil
     var calendarSuggestionAttendeeCount: Int = 0
+    /// The user explicitly said "not this meeting". Distinct from "not looked
+    /// yet": a declined recording is an ad-hoc call, and should read as a
+    /// settled answer rather than an unanswered question.
+    var calendarRejected: Bool = false
     /// User explicitly opted out of transcribing this recording. The file
     /// is downloaded but they don't want it in the transcription queue.
     /// Independent of `transcribed` — if false and skipped is true, the
     /// UI shows "Skipped" and auto-transcribe filters it out.
     var transcriptionSkipped: Bool = false
 
-    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, speakersAutoMatched: Bool = false, summaryPath: String? = nil, calendarMeetingTitle: String? = nil, calendarMeetingStart: Date? = nil, calendarSuggestionTitle: String? = nil, calendarSuggestionStart: Date? = nil, calendarSuggestionAttendeeCount: Int = 0, transcriptionSkipped: Bool = false) {
+    init(recording: HiDockSyncRecording, deviceProductId: Int, deviceId: String, deviceName: String, transcribed: Bool = false, transcriptPath: String? = nil, transcribedDate: Date? = nil, speakersTagged: Bool = false, speakersAutoMatched: Bool = false, summaryPath: String? = nil, calendarMeetingTitle: String? = nil, calendarMeetingStart: Date? = nil, calendarSuggestionTitle: String? = nil, calendarSuggestionStart: Date? = nil, calendarSuggestionAttendeeCount: Int = 0, calendarRejected: Bool = false, transcriptionSkipped: Bool = false) {
         self.id = "\(deviceId)-\(recording.name)"
         self.recording = recording
         self.deviceProductId = deviceProductId
@@ -333,6 +337,7 @@ struct HiDockSyncRecordingEntry: Identifiable {
         self.calendarSuggestionTitle = calendarSuggestionTitle
         self.calendarSuggestionStart = calendarSuggestionStart
         self.calendarSuggestionAttendeeCount = calendarSuggestionAttendeeCount
+        self.calendarRejected = calendarRejected
         self.transcriptionSkipped = transcriptionSkipped
     }
 
