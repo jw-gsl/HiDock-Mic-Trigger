@@ -3888,21 +3888,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let events = store.events(matching: predicate)
                 .filter { $0.endDate >= start && $0.startDate <= end }
                 .map { event -> CalendarMeetingCandidate in
-                    var names = (event.attendees ?? []).compactMap { attendee -> String? in
-                        guard attendee.participantStatus != .declined else { return nil }
-                        return self.displayName(for: attendee)
+                    var names: [String] = []
+                    var responses: [String: String] = [:]
+                    for attendee in event.attendees ?? [] {
+                        guard attendee.participantStatus != .declined,
+                              let name = self.displayName(for: attendee) else { continue }
+                        names.append(name)
+                        responses[name] = Self.responseLabel(attendee.participantStatus)
                     }
                     if let organiser = event.organizer?.name?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !organiser.isEmpty,
                        !names.contains(where: { $0.caseInsensitiveCompare(organiser) == .orderedSame }) {
                         names.append(organiser)
+                        // Whoever called the meeting is in it.
+                        responses[organiser] = "accepted"
                     }
                     return CalendarMeetingCandidate(
                         id: event.eventIdentifier,
                         title: event.title ?? "",
                         start: event.startDate,
                         end: event.endDate,
-                        attendeeNames: Array(Set(names)).sorted()
+                        attendeeNames: Array(Set(names)).sorted(),
+                        attendeeResponses: responses
                     )
                 }
                 .sorted { $0.start < $1.start }
@@ -3924,6 +3931,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         default:
             completion([])
+        }
+    }
+
+    /// EventKit participant status as the Graph-style string the Python side reads.
+    ///
+    /// `shared/calendar_context.py` treats "accepted"/"organizer" as accepted and
+    /// "declined" as declined; everything else is an unknown that deliberately does
+    /// **not** count as presence.
+    static func responseLabel(_ status: EKParticipantStatus) -> String {
+        switch status {
+        case .accepted: return "accepted"
+        case .declined: return "declined"
+        case .tentative: return "tentativelyAccepted"
+        case .delegated: return "delegated"
+        case .pending: return "notResponded"
+        default: return "none"
         }
     }
 
@@ -3989,8 +4012,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 "subject": event.title,
                 "start": ["dateTime": iso.string(from: event.start), "timeZone": recordingTimeZone.identifier],
                 "end": ["dateTime": iso.string(from: event.end), "timeZone": recordingTimeZone.identifier],
-                "attendees": event.attendeeNames.map {
-                    ["emailAddress": ["name": $0], "response": "accepted"]
+                // Real response status. This used to assert "accepted" for every
+                // attendee, discarding the one signal that distinguishes who was
+                // likely in the room from who was merely invited —
+                // `shared/calendar_context.py` has always been able to read it.
+                "attendees": event.attendeeNames.map { name -> [String: Any] in
+                    ["emailAddress": ["name": name],
+                     "response": event.attendeeResponses[name] ?? "none"]
                 },
             ]],
         ]

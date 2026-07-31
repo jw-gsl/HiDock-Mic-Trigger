@@ -608,6 +608,16 @@ struct CalendarMeetingCandidate: Identifiable, Hashable {
     let start: Date
     let end: Date
     let attendeeNames: [String]
+    /// Display name -> response status ("accepted", "tentative", "none", …).
+    ///
+    /// Empty when the source reports no per-person status, and an absent entry
+    /// means unknown — never assume acceptance from silence. "Invited" is not "in
+    /// the room": Rec88 invited 16 people and about nine spoke.
+    var attendeeResponses: [String: String] = [:]
+
+    var acceptedAttendeeNames: [String] {
+        attendeeNames.filter { attendeeResponses[$0]?.caseInsensitiveCompare("accepted") == .orderedSame }
+    }
 
     var attendeeCount: Int { attendeeNames.count }
     var attendeeSummary: String {
@@ -998,28 +1008,31 @@ struct TranscriptViewerView: View {
 
             // Speaker legend (only for diarized transcripts)
             if hasSpeakers {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
-                            speakerPill(speakerId: speakerId, interactive: true)
-                                .contextMenu {
-                                    Button(speakerFilter == speakerId ? "Show all speakers" : "Show only this speaker") {
-                                        speakerFilter = (speakerFilter == speakerId) ? nil : speakerId
-                                    }
-                                    if uniqueSpeakerIds.count > 1 {
-                                        Divider()
-                                        ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
-                                            Button("Merge into \(speakerName(for: targetId))") {
-                                                mapSpeaker(from: speakerId, to: targetId)
-                                            }
+                // Wraps rather than scrolls. A horizontal scroller nested in the
+                // viewer's vertical scroll never reliably took the gesture, so on a
+                // 14-speaker meeting the pills past the window edge were simply
+                // unreachable — you could not click the speaker you wanted to
+                // rename or filter by. Same treatment as the invitee pills above.
+                FlowLayout(spacing: 8, lineSpacing: 6) {
+                    ForEach(uniqueSpeakerIds, id: \.self) { speakerId in
+                        speakerPill(speakerId: speakerId, interactive: true)
+                            .contextMenu {
+                                Button(speakerFilter == speakerId ? "Show all speakers" : "Show only this speaker") {
+                                    speakerFilter = (speakerFilter == speakerId) ? nil : speakerId
+                                }
+                                if uniqueSpeakerIds.count > 1 {
+                                    Divider()
+                                    ForEach(uniqueSpeakerIds.filter { $0 != speakerId }, id: \.self) { targetId in
+                                        Button("Merge into \(speakerName(for: targetId))") {
+                                            mapSpeaker(from: speakerId, to: targetId)
                                         }
                                     }
                                 }
-                        }
+                            }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
 
                 Divider()
             }
@@ -2965,6 +2978,13 @@ struct TranscriptViewerView: View {
         if !invited.isEmpty {
             let enrolled = Set(calendarInvitedLibraryNames.map { $0.lowercased() })
             let assigned = Set(uniqueSpeakerIds.map { speakerName(for: $0).lowercased() })
+            // Who actually said they would come. An invite is not attendance —
+            // Rec88 invited 16 and about nine spoke — so the two are shown
+            // differently rather than being conflated.
+            let accepted = Set(
+                ((linkedCalendarEvent ?? suggestedCalendarEvent)?.acceptedAttendeeNames ?? [])
+                    .map { $0.lowercased() }
+            )
             HStack(alignment: .top, spacing: 4) {
                 Image(systemName: "person.2")
                     .font(.caption2)
@@ -2975,7 +2995,8 @@ struct TranscriptViewerView: View {
                         attendeePill(
                             name,
                             isEnrolled: enrolled.contains(name.lowercased()),
-                            isAssigned: assigned.contains(name.lowercased())
+                            isAssigned: assigned.contains(name.lowercased()),
+                            hasAccepted: accepted.isEmpty ? nil : accepted.contains(name.lowercased())
                         )
                     }
                 }
@@ -2985,8 +3006,16 @@ struct TranscriptViewerView: View {
         }
     }
 
-    private func attendeePill(_ name: String, isEnrolled: Bool, isAssigned: Bool) -> some View {
+    /// `hasAccepted` is nil when the source reported no per-person status, which
+    /// must not be shown as a refusal.
+    private func attendeePill(
+        _ name: String, isEnrolled: Bool, isAssigned: Bool, hasAccepted: Bool? = nil
+    ) -> some View {
         let tint: Color = isAssigned ? .green : (isEnrolled ? .accentColor : .secondary)
+        // Dim the people who never accepted: on a large invite they are the ones
+        // most likely absent, and it is worth being able to see that at a glance
+        // before mapping one of them onto a voice.
+        let unaccepted = hasAccepted == false
         return Button {
             mappingAttendee = name
         } label: {
@@ -2998,16 +3027,17 @@ struct TranscriptViewerView: View {
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(tint.opacity(0.14))
-            .foregroundColor(tint)
+            .background(tint.opacity(unaccepted ? 0.07 : 0.14))
+            .foregroundColor(tint.opacity(unaccepted ? 0.55 : 1.0))
             .clipShape(Capsule())
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .help(
-            isAssigned ? "\(name) is already mapped in this meeting — click to move them"
-            : isEnrolled ? "\(name) has an enrolled voice — click to map them to a speaker"
-            : "\(name) has no voice profile yet — mapping them enrols this meeting's audio"
+            (isAssigned ? "\(name) is already mapped in this meeting — click to move them"
+             : isEnrolled ? "\(name) has an enrolled voice — click to map them to a speaker"
+             : "\(name) has no voice profile yet — mapping them enrols this meeting's audio")
+            + (unaccepted ? " · did not accept the invite" : "")
         )
         .popover(
             isPresented: Binding(

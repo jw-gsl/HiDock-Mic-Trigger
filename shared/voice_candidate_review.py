@@ -277,10 +277,18 @@ def suggest_for_transcript(
     # never to boost a score, so the tuned gate stays calibrated.
     calendar_meta = data.get("calendar_context") or {}
     calendar_candidates = set()
+    # The accepted subset, used only to waive the crowd hold. Empty for a sidecar
+    # written before response status was preserved, which is the safe direction:
+    # unknown status must not read as acceptance.
+    calendar_accepted = set()
     if not calendar_meta.get("calendar_ambiguous"):
         calendar_candidates = {
             str(name).casefold()
             for name in (calendar_meta.get("calendar_candidate_names") or [])
+        }
+        calendar_accepted = {
+            str(name).casefold()
+            for name in (calendar_meta.get("calendar_accepted_names") or [])
         }
     active_speakers = {str(segment.get("speaker_id")) for segment in segments}
     unverified_speakers = {
@@ -372,6 +380,7 @@ def suggest_for_transcript(
                 in_calendar = best["name"].casefold() in calendar_candidates
                 if runner_up is not None:
                     runner_up_in_calendar = runner_up["name"].casefold() in calendar_candidates
+            accepted_in_calendar = best["name"].casefold() in calendar_accepted
 
             reasons = []
             robust = best["scorer"] == "top3_median"
@@ -384,12 +393,16 @@ def suggest_for_transcript(
             if margin < config["min_margin"]:
                 reasons.append("ambiguous_runner_up")
             # A crowded meeting is a hold because a wrong name becomes likelier as
-            # the field of plausible library candidates grows. A confirmed invitee
-            # collapses that field, so the attendee list is *more* decisive in a big
-            # meeting, not less — gating on speaker count alone had it backwards and
-            # switched naming off for exactly the meetings that need it most. With no
-            # calendar (`in_calendar is None`) the guard still applies in full.
-            if meeting_speaker_count > _MAX_REVIEW_MEETING_SPEAKERS and not in_calendar:
+            # the field of plausible library candidates grows. Someone who *accepted*
+            # collapses that field, so the attendee list is more decisive in a big
+            # meeting, not less — gating on speaker count alone had it backwards.
+            #
+            # It has to be acceptance, not mere invitation. Rec88 invited 16 people
+            # and about 9 spoke: waiving the guard for anyone not-declined handed it
+            # to seven people who were never in the room, which is the wrong-name
+            # risk the guard exists for. Unknown status (an older sidecar, or a
+            # source that reports none) counts as not accepted, so the guard holds.
+            if meeting_speaker_count > _MAX_REVIEW_MEETING_SPEAKERS and not accepted_in_calendar:
                 reasons.append("crowded_meeting")
             acoustic_quality = quality.get("acoustic_quality")
             if acoustic_quality is not None and float(acoustic_quality) < _MIN_ACOUSTIC_QUALITY:
@@ -401,6 +414,9 @@ def suggest_for_transcript(
                 reasons.append("not_in_calendar")
             strong = robust and not reasons
             suggestions[speaker_id] = {
+                # Surfaced so a reviewer can see whether the crowd hold applied or
+                # was waived, and on what basis.
+                "accepted_in_calendar": accepted_in_calendar,
                 "current_name": name,
                 "current_source": state.get("source") or (
                     "generic" if is_generic_name(name) else "auto"

@@ -28,6 +28,20 @@ class CalendarAttendee:
     def declined(self) -> bool:
         return self.response.casefold() in {"declined", "decline", "no"}
 
+    @property
+    def accepted(self) -> bool:
+        """Whether this person said they would be there.
+
+        Distinct from "not declined", which lumps in tentative and never-replied.
+        On a large invite those are the people most likely *not* in the room:
+        Rec88 invited 16 and about 9 spoke. Callers that treat an invitation as
+        evidence of presence need this narrower signal, not the absence of a
+        refusal. The organiser counts — they called the meeting.
+        """
+        return self.response.casefold() in {
+            "accepted", "accept", "yes", "organizer", "organiser",
+        }
+
 
 @dataclass(frozen=True)
 class CalendarEvent:
@@ -41,6 +55,9 @@ class CalendarEvent:
 @dataclass(frozen=True)
 class CalendarContext:
     candidate_names: frozenset[str] = field(default_factory=frozenset)
+    # Invitees who actually accepted. A subset of `candidate_names`, and empty
+    # when the source did not report per-person status.
+    accepted_names: frozenset[str] = field(default_factory=frozenset)
     selected_event_id: str | None = None
     selected_event_title: str | None = None
     ambiguous: bool = False
@@ -64,6 +81,7 @@ class CalendarContext:
             "calendar_event_id": self.selected_event_id,
             "calendar_event_title": self.selected_event_title,
             "calendar_candidate_names": sorted(self.candidate_names, key=normalize_name),
+            "calendar_accepted_names": sorted(self.accepted_names, key=normalize_name),
             "calendar_ambiguous": self.ambiguous,
             "calendar_source": self.source,
             "calendar_reason": self.reason,
@@ -274,8 +292,9 @@ def load_context(payload_or_path: Any, recording_start: Any = None,
                                reason="multiple events are equally plausible")
     selected = best[0]
     candidates = frozenset(a.name for a in selected.attendees if not a.declined and a.name)
-    return CalendarContext(candidates, selected.id, selected.title, False, context_source,
-                           "selected event by maximum overlap", events)
+    accepted = frozenset(a.name for a in selected.attendees if a.accepted and a.name)
+    return CalendarContext(candidates, accepted, selected.id, selected.title, False,
+                           context_source, "selected event by maximum overlap", events)
 
 
 def load_context_for_audio(audio_path: Any, context_path: Any = None) -> CalendarContext | None:
@@ -311,8 +330,15 @@ def load_context_for_audio(audio_path: Any, context_path: Any = None) -> Calenda
         except Exception:
             library = {"speakers": {}}
         matched = candidate_names_for_voice_library(context, library)
-        return CalendarContext(matched, context.selected_event_id, context.selected_event_title,
-                               context.ambiguous, context.source, context.reason, context.events)
+        # Keep the accepted subset expressed in the *library's* display names, so
+        # consumers can compare it against the same strings as candidate_names.
+        accepted_raw = {normalize_name(name) for name in context.accepted_names}
+        accepted = frozenset(
+            name for name in matched if normalize_name(name) in accepted_raw
+        ) if accepted_raw else frozenset()
+        return CalendarContext(matched, accepted, context.selected_event_id,
+                               context.selected_event_title, context.ambiguous,
+                               context.source, context.reason, context.events)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
