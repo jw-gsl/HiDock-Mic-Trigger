@@ -274,8 +274,11 @@ struct RecordingsTableView: View {
             // Summary column placeholder — merge groups don't carry a
             // per-entry summaryPath; dash keeps the columns aligned with
             // the regular rows.
-            Text("—")
-                .foregroundColor(.secondary.opacity(0.5))
+            HStack(spacing: 4) {
+                Color.clear.frame(width: Self.meetingIconWidth, height: 1)
+                Text("—")
+                    .foregroundColor(.secondary.opacity(0.5))
+            }
                 .frame(width: 80, alignment: .leading)
 
             // Recording name — truncate to match regular row length
@@ -438,11 +441,42 @@ struct RecordingsTableView: View {
         return formatter
     }()
 
+    /// Fixed width for the leading glyph of every meeting cell.
+    ///
+    /// `calendar.badge.*` symbols are not all the same width, so letting them size
+    /// themselves left the meeting titles starting at a different x on every row.
+    /// Reserving one width aligns the text column regardless of which state a row is
+    /// in — and keeps it aligned with rows whose leading glyph is a button.
+    private static let meetingIconWidth: CGFloat = 15
+
+    /// Blue calendar-with-magnifying-glass: "search the calendar for this meeting".
+    ///
+    /// Composed rather than named, because `calendar.badge.magnifyingglass` does not
+    /// exist as an SF Symbol — and neither does `calendar.badge.questionmark`, which
+    /// this replaces. `Image(systemName:)` renders a missing symbol as nothing, so
+    /// the lookup button in this column has been **invisible**: those rows appeared
+    /// to hold only the orange ad-hoc icon, and the absent glyph was part of why the
+    /// column looked misaligned.
+    private var calendarSearchIcon: some View {
+        Image(systemName: "calendar")
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 7, weight: .bold))
+                    .padding(1)
+                    .background(
+                        Circle().fill(Color(nsColor: .windowBackgroundColor))
+                    )
+                    .offset(x: 3, y: 3)
+            }
+            .foregroundColor(.blue)
+    }
+
     @ViewBuilder
     private func meetingCell(_ entry: HiDockSyncRecordingEntry) -> some View {
         if let meeting = entry.calendarMeetingTitle, !meeting.isEmpty {
             HStack(spacing: 4) {
                 Image(systemName: "calendar.badge.checkmark")
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
                 Text(meeting)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -460,8 +494,9 @@ struct RecordingsTableView: View {
             .fixedSize(horizontal: false, vertical: true)
             .help("Confirmed calendar meeting: \(meeting)")
         } else if let suggestion = entry.calendarSuggestionTitle, !suggestion.isEmpty {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: "calendar.badge.clock")
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
                 Text(suggestion)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -498,25 +533,28 @@ struct RecordingsTableView: View {
             // The user already answered "not this meeting", so this is a settled
             // state rather than an outstanding question. A dash here would invite
             // the same decision a second time.
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 // Orange calendar-with-minus: a calendar question that has been
                 // *answered* ("no meeting"), which is different from one still
                 // waiting. Grey read as "nothing here yet" and a person glyph did
                 // not say the answer came from the calendar at all.
                 Image(systemName: "calendar.badge.minus")
                     .foregroundColor(.orange)
+                    .frame(width: Self.meetingIconWidth, alignment: .leading)
                 Text("Ad-hoc call")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Button {
                     viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.caption2)
+                    // Same action as the lookup button on an unanswered row, so it
+                    // gets the same glyph. `arrow.clockwise` said "retry" without
+                    // saying what would be retried.
+                    calendarSearchIcon
+                        .font(.caption)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.secondary.opacity(0.7))
-                .help("Check the calendar again — a meeting may have been added since")
+                .help("Search the calendar again — a meeting may have been added since")
                 Spacer(minLength: 0)
             }
             .help("No calendar meeting — you marked this as an ad-hoc call")
@@ -524,16 +562,16 @@ struct RecordingsTableView: View {
             // The automatic gate fires once, just after transcription, so a
             // historic or later-imported recording can never acquire a meeting on
             // its own. This is the manual route.
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Button {
                     viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
                 } label: {
-                    Image(systemName: "calendar.badge.questionmark")
+                    calendarSearchIcon
                         .font(.caption)
+                        .frame(width: Self.meetingIconWidth, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-                .help("Look up a calendar meeting for this recording now")
+                .help("Search the calendar for a meeting matching this recording")
 
                 Button {
                     viewModel.onRejectCalendarSuggestion(entry.recording.outputPath)

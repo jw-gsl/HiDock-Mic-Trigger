@@ -53,67 +53,74 @@ targets:
         script: |
           set -euo pipefail
 
-          # GitHub Actions is genuinely headless, so it must not attempt a
-          # native dialog. A local validation build may also set CI=true to
-          # suppress deployment; it still requires an explicit build approval.
-          IS_GITHUB_CI="${GITHUB_ACTIONS:-}"
-          LOCAL_NON_DEPLOYING="false"
-          if [ "${CI:-}" = "true" ] && [ "$IS_GITHUB_CI" != "true" ]; then
-            LOCAL_NON_DEPLOYING="true"
+          # This is a *post*-build script, so by the time it runs the build has
+          # already happened. The only thing a prompt here can gate is the
+          # deployment — replacing and relaunching the installed app. So there is
+          # exactly one prompt, and only on the path that actually deploys.
+          #
+          # There used to be a second "Approve HiDock rebuild" dialog for local
+          # CI=true validation builds. It was pure friction: it asked permission
+          # for a build that had already finished, and both answers led to the
+          # same place, because the CI=true guard below exited without deploying
+          # either way. Declining and approving were indistinguishable.
+          if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+            echo "note: GitHub Actions — no dialog, no deployment"
+            exit 0
           fi
-          if [ "$IS_GITHUB_CI" = "true" ]; then
-            echo "note: Skipping build approval and deployment on GitHub Actions"
+          if [ "${CI:-}" = "true" ]; then
+            echo "note: CI=true validation build — compiled only, installed app untouched"
             exit 0
           fi
 
-          if [ "$LOCAL_NON_DEPLOYING" = "true" ]; then
-            BUILD_APPROVED=$(/usr/bin/osascript \
-              -e 'display dialog "A local HiDock validation build is ready to run. Deployment is disabled for this build, but the build may still interrupt active work if it is already using the app." buttons {"Decline", "Approve Build"} default button "Decline" cancel button "Decline" with title "Approve HiDock rebuild"' \
-              -e 'button returned of the result' 2>/dev/null || true)
-            if [ "$BUILD_APPROVED" != "Approve Build" ]; then
-              echo "note: Local build approval declined; deployment remains disabled"
-              exit 0
+          # Deployment kills the running app and its children, so it can abort a
+          # transcription, a re-diarisation, or a download mid-flight.
+          #
+          # The warning used to be unconditional prose — it always claimed the
+          # deploy "may interrupt active work", which reads like a detection and is
+          # therefore ignored. On 2026-07-28 a deploy silently killed an in-flight
+          # re-diarisation while that same dialog gave no specific signal. So
+          # actually look, and say what is running.
+          BUSY_LIST=""
+          add_busy() {
+            if /usr/bin/pgrep -f "$1" > /dev/null 2>&1; then
+              BUSY_LIST="${BUSY_LIST}${BUSY_LIST:+, }$2"
             fi
-            echo "note: Local build approved; deployment remains disabled (CI=true)"
+          }
+          add_busy "transcribe(_parakeet|_cpp)?\.py" "transcription / re-diarisation"
+          add_busy "usb-extractor.*extractor\.py" "a device download"
+          add_busy "ffmpeg.*HiDock" "an audio conversion"
+          add_busy "voice_training\.py" "voice-library training"
+          # A live capture was the one thing this never looked for, despite being
+          # the most costly to lose. The deploy's `pkill -f hidock-mic-trigger`
+          # kills the `mic-trigger/hidock-mic-trigger` CLI as well as the app, and
+          # `ffmpeg.*HiDock` above cannot catch the trigger's ffmpeg: it is invoked
+          # as `-f avfoundation -i :<index>`, with no "HiDock" anywhere in its
+          # arguments. So match how it actually holds the input.
+          #
+          # Deliberately keyed on that ffmpeg rather than on the trigger process
+          # itself: the trigger runs whenever the app does, so flagging its mere
+          # existence would mean every deploy claimed BUSY — the crying-wolf
+          # failure this dialog was rewritten on 2026-07-28 to stop.
+          add_busy "ffmpeg.*avfoundation" "a live recording (the mic trigger is holding the HiDock input open)"
+
+          if [ -n "$BUSY_LIST" ]; then
+            DIALOG_TEXT="HiDock is BUSY: ${BUSY_LIST}. Replacing the app now will kill it mid-run and the work will be lost. Wait, or replace anyway?"
+            DEFAULT_BUTTON="Cancel"
           else
-            # Deployment kills the running app and its children, so it can
-            # abort a transcription, a re-diarisation, or a download mid-flight.
-            #
-            # The warning used to be unconditional prose — it always claimed the
-            # deploy "may interrupt active work", which reads like a detection
-            # and is therefore ignored. On 2026-07-28 a deploy silently killed an
-            # in-flight re-diarisation while that same dialog gave no specific
-            # signal. So actually look, and say what is running.
-            BUSY_LIST=""
-            add_busy() {
-              if /usr/bin/pgrep -f "$1" > /dev/null 2>&1; then
-                BUSY_LIST="${BUSY_LIST}${BUSY_LIST:+, }$2"
-              fi
-            }
-            add_busy "transcribe(_parakeet|_cpp)?\.py" "transcription / re-diarisation"
-            add_busy "usb-extractor.*extractor\.py" "a device download"
-            add_busy "ffmpeg.*HiDock" "an audio conversion"
-            add_busy "voice_training\.py" "voice-library training"
-
-            if [ -n "$BUSY_LIST" ]; then
-              DIALOG_TEXT="HiDock is BUSY: ${BUSY_LIST}. Replacing the app now will kill it mid-run and the work will be lost. Wait, or replace anyway?"
-              DEFAULT_BUTTON="Cancel"
-            else
-              DIALOG_TEXT="No transcription, download or conversion is running. Replacing the app will close and relaunch it — safe to proceed."
-              DEFAULT_BUTTON="Replace App"
-            fi
-
-            DEPLOY_APPROVED=$(/usr/bin/osascript \
-              -e "display dialog \"$DIALOG_TEXT\" buttons {\"Cancel\", \"Replace App\"} default button \"$DEFAULT_BUTTON\" cancel button \"Cancel\" with title \"Approve HiDock app replacement\"" \
-              -e 'button returned of the result' 2>/dev/null || true)
-            if [ "$DEPLOY_APPROVED" != "Replace App" ]; then
-              echo "note: Deployment cancelled; the installed app was not changed"
-              exit 0
-            fi
+            DIALOG_TEXT="No transcription, download or conversion is running. Replacing the app will close and relaunch it — safe to proceed."
+            DEFAULT_BUTTON="Replace App"
           fi
 
-          # CI=true local validation builds stop after the approval above.
-          if [ "${CI:-}" = "true" ]; then
+          # `osascript` is spawned by xcodebuild, so its dialog opens without focus
+          # and macOS spends the first click activating the window — the approval
+          # needed clicking twice, every time. `tell me to activate` makes the
+          # dialog frontmost so one click is enough.
+          DEPLOY_APPROVED=$(/usr/bin/osascript \
+            -e 'tell me to activate' \
+            -e "display dialog \"$DIALOG_TEXT\" buttons {\"Cancel\", \"Replace App\"} default button \"$DEFAULT_BUTTON\" cancel button \"Cancel\" with title \"Approve HiDock app replacement\"" \
+            -e 'button returned of the result' 2>/dev/null || true)
+          if [ "$DEPLOY_APPROVED" != "Replace App" ]; then
+            echo "note: Deployment cancelled; the installed app was not changed"
             exit 0
           fi
 
