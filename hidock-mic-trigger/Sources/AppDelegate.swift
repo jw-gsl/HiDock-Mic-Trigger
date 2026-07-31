@@ -4014,6 +4014,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // already explicitly resolved every active speaker. In that case
             // calendar context is saved for display/history but reclustering
             // would only risk changing human-confirmed assignments.
+            // Note this gate reads *cached* transcription state. If the row has
+            // not been refreshed to Transcribed yet, linking a meeting will not
+            // re-diarise — and used to say nothing about why. Every branch below
+            // now logs, so "I confirmed it and nothing happened" is answerable
+            // from the log rather than by reproducing it.
             if rediarizeAfterLink,
                let entry = syncEntries.first(where: { $0.recording.outputPath == audioPath }),
                entry.transcribed, let transcriptPath = entry.transcriptPath {
@@ -4036,6 +4041,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     viewModel.syncStatusLevel = .success
                     syncViewModelState()
                 }
+            } else if rediarizeAfterLink {
+                // Reached when the cached row is not marked Transcribed (or has no
+                // transcript path) — the case that made confirming look like a
+                // no-op.
+                let entry = syncEntries.first(where: { $0.recording.outputPath == audioPath })
+                log("Calendar linked but not re-diarised \(audioURL.lastPathComponent): "
+                    + "transcribed=\(entry?.transcribed.description ?? "no such row"), "
+                    + "transcript=\(entry?.transcriptPath ?? "none")")
             }
         } catch {
             log("Failed to save calendar context: \(error.localizedDescription)")
@@ -4480,7 +4493,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func confirmCalendarSuggestion(for audioPath: String) {
-        guard let event = suggestedCalendarEvent(for: audioPath) else { return }
+        // The table renders the tick from cached fields, but the event itself is
+        // read back from the `_calendar_suggestion.json` sidecar. If the two ever
+        // disagree, this used to `return` in silence: the tick looked live, did
+        // nothing, and left no trace to diagnose it by. Say so instead.
+        guard let event = suggestedCalendarEvent(for: audioPath) else {
+            log("Confirm ignored for \((audioPath as NSString).lastPathComponent): "
+                + "no calendar suggestion on disk (the row's tick is stale)")
+            refreshCalendarFields()
+            viewModel.syncEntries = syncEntries
+            return
+        }
         linkCalendarEvent(audioPath: audioPath, duration: ImportedRecordingsStore.probeDuration(at: audioPath), event: event)
     }
 
@@ -8940,7 +8963,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             { $0.hasPrefix("W0") },
             { $0.hasPrefix("STAGE:") },
             { $0.hasPrefix("PROGRESS:") },
-            { $0.hasPrefix("    ") },            // NeMo dumps its configs indented
             { $0.contains("Diarizing:") },
             { $0.contains("it/s]") },
             { $0.contains("UserWarning") },
@@ -8948,8 +8970,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         var kept: [String] = []
         var suppressed = 0
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(raw).trimmingCharacters(in: .whitespaces)
-            if line.isEmpty || noise.contains(where: { $0(line) }) { continue }
+            let rawLine = String(raw)
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            // Indentation has to be tested on the raw line. Trimming first and
+            // then checking `hasPrefix("    ")` could never match, which is why
+            // NeMo's indented config dump reached the log and pushed the actual
+            // Sortformer decisions past the line cap.
+            if rawLine.hasPrefix("    ") || rawLine.hasPrefix("\t") { continue }
+            if noise.contains(where: { $0(line) }) { continue }
             if kept.count < maxLines { kept.append(line) } else { suppressed += 1 }
         }
         guard !kept.isEmpty else { return }

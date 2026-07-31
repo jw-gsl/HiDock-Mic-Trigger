@@ -25,7 +25,9 @@ struct RecordingsTableView: View {
     /// Hide the lower-priority columns (Transcribed date, Size) when the detail
     /// pane is open so the narrowed list fits without much horizontal scrolling.
     private var showExtraColumns: Bool { !viewModel.detailPaneVisible }
-    /// Table's natural width — Transcribed(140) + Size(70) drop out when hidden.
+    /// Table's natural width — Size(70) drops out when hidden. The Transcribed
+    /// date column was removed: the Status cascade already says whether a
+    /// recording is transcribed, and the date itself was never acted on.
     var body: some View {
         tableBody
         .overlay(
@@ -55,9 +57,6 @@ struct RecordingsTableView: View {
                 headerButton("Summary", key: nil, width: 80)
                 headerButton("Recording", key: "name", width: 220)
                 headerButton("Created", key: "created", width: 155)
-                if showExtraColumns {
-                    headerButton("Transcribed", key: "transcribed", width: 140)
-                }
                 headerButton("Length", key: "duration", width: 70)
                 if showExtraColumns {
                     headerButton("Size", key: "size", width: 70)
@@ -294,15 +293,6 @@ struct RecordingsTableView: View {
             Text(earliestDate)
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
-
-            // Transcribed — the merged file's transcript mtime.
-            if showExtraColumns {
-                let mergedTranscriptPath = viewModel.mergedFileTranscriptPaths[(group.outputPath as NSString).lastPathComponent]
-                Text(transcribedDateString(forPath: mergedTranscriptPath))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(mergedTranscriptPath == nil ? .secondary.opacity(0.5) : .primary)
-                    .frame(width: 140, alignment: .leading)
-            }
 
             // Length (total)
             Text(formatRecordingDuration(group.totalDuration))
@@ -714,15 +704,6 @@ struct RecordingsTableView: View {
             Text("\(entry.recording.createDate) \(entry.recording.createTime)")
                 .font(.caption.monospacedDigit())
                 .frame(width: 155, alignment: .leading)
-
-            // Transcribed — when the transcription happened (transcript file
-            // mtime). Dash until transcribed.
-            if showExtraColumns {
-                Text(entry.transcribedDate.map { Self.transcribedDateFormatter.string(from: $0) } ?? "—")
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(entry.transcribedDate == nil ? .secondary.opacity(0.5) : .primary)
-                    .frame(width: 140, alignment: .leading)
-            }
 
             // The extractor pre-download estimate is `file_size / 8000`
             // (assumes 64 kbps), which is correct for H1 (16 kHz/64 kbps)

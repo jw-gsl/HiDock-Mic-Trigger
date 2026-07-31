@@ -35,10 +35,14 @@ OTHER = _vec(0.0, 1.0, 0.0)
 def test_longest_speaker_survives_a_merge_not_the_earliest():
     # The exact reported defect: a 4 s fragment appears first, a 390 s speaker
     # second, and they are the same voice.
+    # Both merge candidates hold real speech: a label under
+    # `_MICRO_LABEL_MAX_SECONDS` is now outside the count budget entirely, so a
+    # 4 s fragment would no longer be a merge candidate at all (it gets absorbed
+    # downstream instead). Survivor selection is what this test is about.
     turns = [
-        (0.0, 4.0, "Speaker 1"),        # fragment
-        (10.0, 400.0, "Speaker 2"),     # the real speaker
-        (410.0, 500.0, "Speaker 3"),    # someone else
+        (0.0, 60.0, "Speaker 1"),       # shorter, but a real speaker
+        (60.0, 450.0, "Speaker 2"),     # the longest speaker
+        (450.0, 540.0, "Speaker 3"),    # someone else
     ]
     embeddings = {"Speaker 1": JEEVAN, "Speaker 2": JEEVAN_ISH, "Speaker 3": OTHER}
     out = _merge_labels_to_count(turns, embeddings, 2)
@@ -46,7 +50,7 @@ def test_longest_speaker_survives_a_merge_not_the_earliest():
 
 
 def test_ties_keep_the_earliest_label_for_determinism():
-    turns = [(0.0, 10.0, "A"), (10.0, 20.0, "B"), (20.0, 30.0, "C")]
+    turns = [(0.0, 20.0, "A"), (20.0, 40.0, "B"), (40.0, 60.0, "C")]
     embeddings = {"A": JEEVAN, "B": JEEVAN_ISH, "C": OTHER}
     out = _merge_labels_to_count(turns, embeddings, 2)
     assert [label for _, _, label in out] == ["A", "A", "C"]
@@ -54,8 +58,8 @@ def test_ties_keep_the_earliest_label_for_determinism():
 
 def test_survivor_is_chosen_per_cluster_not_globally():
     turns = [
-        (0.0, 5.0, "A"), (5.0, 100.0, "B"),      # cluster one → B
-        (100.0, 105.0, "C"), (105.0, 300.0, "D"),  # cluster two → D
+        (0.0, 20.0, "A"), (20.0, 120.0, "B"),       # cluster one → B
+        (120.0, 140.0, "C"), (140.0, 340.0, "D"),   # cluster two → D
     ]
     embeddings = {"A": JEEVAN, "B": JEEVAN_ISH, "C": OTHER, "D": _vec(0.01, 0.999, 0.0)}
     out = _merge_labels_to_count(turns, embeddings, 2)
