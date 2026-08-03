@@ -2674,8 +2674,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
 
+    /// Selected rows expanded for merging, with any ticked merge group replaced
+    /// by the recordings that made it.
+    ///
+    /// A merge parent is a synthesised row: its checkbox key is `merge:<id>` and it
+    /// has no entry in `syncEntries`, so `selectedSyncEntries()` could never see
+    /// it. Ticking a merged file plus another recording therefore yielded one
+    /// entry and the merge refused with "need 2+ downloaded files" — there was no
+    /// way to add a recording to an existing merge at all.
+    ///
+    /// Expanding to the children rather than concatenating the merged MP3 is
+    /// deliberate: the output is built from the original sources in one pass, so
+    /// the audio is encoded once instead of twice, and the new group records every
+    /// real recording it contains rather than nesting a merge inside a merge.
+    private func mergeInputEntries() -> (entries: [HiDockSyncRecordingEntry], subsumed: [MergeGroup]) {
+        var entries = selectedSyncEntries()
+        var subsumed: [MergeGroup] = []
+        var seen = Set(entries.map(\.recording.name))
+        for key in syncCheckedRecordings where key.hasPrefix("merge:") {
+            let groupId = String(key.dropFirst("merge:".count))
+            guard let group = mergeGroups.first(where: { $0.id == groupId }) else { continue }
+            subsumed.append(group)
+            for childName in group.childNames {
+                guard !seen.contains(childName),
+                      let child = syncEntries.first(where: { $0.recording.name == childName })
+                else { continue }
+                seen.insert(childName)
+                entries.append(child)
+            }
+        }
+        return (entries, subsumed)
+    }
+
     private func mergeSelectedRecordings() {
-        let selected = selectedSyncEntries()
+        let (selected, subsumedGroups) = mergeInputEntries()
         let entries = selected
             .filter { $0.recording.localExists }
             .sorted { "\($0.recording.createDate) \($0.recording.createTime)" < "\($1.recording.createDate) \($1.recording.createTime)" }
@@ -2702,6 +2734,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if outputName.count > 100 { outputName = "Merged-\(firstName).mp3" }
         let outputPath = "\(outputFolder)/\(outputName)"
         let childNames = Set(entries.map(\.recording.name))
+
+        // A group we are absorbing must go, or its children would belong to two
+        // merges at once and the table would show them under both parents.
+        for group in subsumedGroups where Set(group.childNames) != childNames {
+            guard let index = mergeGroups.firstIndex(where: { $0.id == group.id }) else { continue }
+            try? FileManager.default.removeItem(atPath: group.outputPath)
+            let stem = (group.outputPath as NSString).lastPathComponent
+                .replacingOccurrences(of: ".mp3", with: "")
+            let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+            for suffix in ["", "_diarized", "_whisper", "_asr"] {
+                let ext = suffix.isEmpty ? ".md" : ".json"
+                try? FileManager.default.removeItem(atPath: "\(dir)/\(stem)\(suffix)\(ext)")
+            }
+            try? FileManager.default.removeItem(atPath: "\(dir)/\(stem).srt")
+            mergeGroups.remove(at: index)
+            log("Absorbed existing merge \(group.outputName) into the new one")
+        }
 
         // Check if these same children were already merged — replace instead of creating duplicates
         if let existingIdx = mergeGroups.firstIndex(where: { Set($0.childNames) == childNames }) {
@@ -4944,6 +4993,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onRestoreTranscriptVersion: { [weak self] jsonPath, revision in
                 self?.restoreTranscriptVersion(jsonPath, revision: revision)
             },
+            onTranscriptVersionDetail: { [weak self] jsonPath, revision in
+                self?.transcriptVersionDetail(jsonPath, revision: revision)
+            },
             onFindCalendarEvents: { [weak self] audioPath, duration, completion in
                 self?.findMacCalendarEvents(audioPath: audioPath, duration: duration, completion: completion)
                     ?? completion([])
@@ -5279,6 +5331,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard fields.count == 3 else { return nil }
             return TranscriptVersion(id: fields[0], title: "\(fields[1]) · \(fields[2])")
         }
+    }
+
+    /// The speaker names stored in one revision, and how they differ from now.
+    ///
+    /// Read straight out of git with `show <rev>:<file>` — no checkout, so
+    /// inspecting a version cannot disturb the working copy. Returns nil when the
+    /// revision or its blob cannot be read, which the UI shows as "unavailable"
+    /// rather than as an empty (and misleading) speaker list.
+    private func transcriptVersionDetail(
+        _ diarizedPath: String, revision: String
+    ) -> TranscriptVersionDetail? {
+        guard let root = ensureTranscriptHistoryRepository(for: diarizedPath),
+              let artifact = transcriptHistoryArtifacts(for: diarizedPath).first
+        else { return nil }
+        let shown = runTranscriptGit(root: root, arguments: ["show", "\(revision):\(artifact)"])
+        guard shown.status == 0, let data = shown.output.data(using: .utf8) else { return nil }
+
+        func speakerState(_ json: Any?) -> ([String: String], Set<String>) {
+            guard let dict = json as? [String: Any] else { return ([:], []) }
+            let names = (dict["speaker_names"] as? [String: String]) ?? [:]
+            var verified: Set<String> = []
+            if let meta = dict["speaker_meta"] as? [String: [String: Any]] {
+                for (id, entry) in meta where (entry["verified"] as? Bool) == true {
+                    verified.insert(id)
+                }
+            }
+            return (names, verified)
+        }
+
+        let (names, verified) = speakerState(try? JSONSerialization.jsonObject(with: data))
+        guard !names.isEmpty else { return nil }
+        let currentNames: [String: String] = {
+            guard let current = FileManager.default.contents(atPath: diarizedPath) else { return [:] }
+            return speakerState(try? JSONSerialization.jsonObject(with: current)).0
+        }()
+        let changed = Set(names.filter { currentNames[$0.key] != $0.value }.keys)
+        return TranscriptVersionDetail(
+            speakerNames: names, changedIds: changed, verifiedIds: verified
+        )
     }
 
     private func restoreTranscriptVersion(_ diarizedPath: String, revision: String) {
@@ -5661,6 +5752,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onMergePerson: { [weak self] from, into in
                 self?.mergePersonAcrossLibraries(from: from, into: into)
             },
+            onLoadDuplicates: { [weak self] completion in
+                self?.loadVoiceLibraryDuplicates(completion: completion) ?? completion([], nil)
+            },
             meName: viewModel.voiceLibraryMeName,
             onToggleMe: { [weak self] name in
                 self?.toggleVoiceLibraryMe(name)
@@ -5675,6 +5769,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// the active matching library: a human choosing a person is not an
     /// automatic voice match, and hiding candidate-only people here made valid
     /// names such as Chris Wildsmith impossible to select.
+    /// Duplicate pairs and store drift across both voice libraries.
+    ///
+    /// Off the main thread: this reads and compares every embedding in two
+    /// multi-megabyte libraries, which is far too slow to block a tab switch.
+    private func loadVoiceLibraryDuplicates(
+        completion: @escaping ([VoiceLibraryDuplicate], VoiceLibraryDrift?) -> Void
+    ) {
+        let script = transcriptionScriptPath
+        guard FileManager.default.fileExists(atPath: script) else {
+            completion([], nil)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion([], nil) }
+                return
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.voiceLibraryPythonPath())
+            self.configureVoiceLibraryProcess(process)
+            process.arguments = [script, "library-duplicates"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            var pairs: [VoiceLibraryDuplicate] = []
+            var drift: VoiceLibraryDrift?
+            do {
+                try process.run()
+                // Read before waiting — a large payload fills the pipe buffer and
+                // read-after-wait deadlocks (same ordering as refreshMeetingExtraStats).
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let rows = payload["duplicates"] as? [[String: Any]] {
+                        pairs = rows.compactMap { row in
+                            guard let names = row["names"] as? [String], names.count == 2,
+                                  let keep = row["suggested_keep"] as? String,
+                                  let verdict = row["verdict"] as? String
+                            else { return nil }
+                            return VoiceLibraryDuplicate(
+                                names: names,
+                                suggestedKeep: keep,
+                                verdict: verdict,
+                                meanSimilarity: row["mean_similarity"] as? Double,
+                                sharedMeetings: row["shared_meetings"] as? [String] ?? [],
+                                stores: row["stores"] as? [String: [String]] ?? [:],
+                                sampleCounts: row["sample_counts"] as? [String: Int] ?? [:]
+                            )
+                        }
+                    }
+                    if let d = payload["drift"] as? [String: Any] {
+                        drift = VoiceLibraryDrift(
+                            matchingOnly: d["matching_only"] as? [String] ?? [],
+                            namingOnly: d["naming_only"] as? [String] ?? [],
+                            matchingCount: d["matching_count"] as? Int ?? 0,
+                            namingCount: d["naming_count"] as? Int ?? 0
+                        )
+                    }
+                }
+            } catch {
+                self.log("Could not compare voice libraries: \(error.localizedDescription)")
+            }
+            let actionable = pairs.filter { $0.verdict != "different" }.count
+            self.log("Voice library duplicates: \(pairs.count) pair(s), \(actionable) worth merging")
+            DispatchQueue.main.async { completion(pairs, drift) }
+        }
+    }
+
     private func listVoiceLibraryNames(completion: @escaping ([String]) -> Void) {
         let scriptPath = voiceLibraryScriptPath()
         guard FileManager.default.fileExists(atPath: scriptPath) else { completion([]); return }

@@ -36,7 +36,9 @@ struct SyncToolbarSection: View {
                     Label("Merge", systemImage: "arrow.triangle.merge")
                 }
                 .labelStyle(ToolbarActionLabelStyle())
-                .help("Merge the selected recordings into one")
+                .help("Merge the selected recordings into one. An existing merged file can be "
+                      + "one of the selections — it is rebuilt from its original recordings plus "
+                      + "whatever you add, so the audio is only ever encoded once.")
                 // Local-file op — don't gate on `syncBusy`. Only block during an
                 // active download or in-flight trim.
                 .disabled(viewModel.syncDownloading || viewModel.trimBusy || viewModel.syncCheckedRecordings.count < 2)

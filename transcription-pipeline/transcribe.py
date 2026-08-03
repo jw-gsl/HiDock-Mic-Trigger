@@ -1432,6 +1432,33 @@ def cmd_candidate_speakers(args):
     print(_json.dumps(list_candidate_speakers(config_path=args.config)))
 
 
+def cmd_library_duplicates(args):
+    """People enrolled twice, across the matching and naming libraries (JSON).
+
+    Read-only. Every row carries its measured evidence and a verdict, because a
+    shared first name is not proof: of six pairs examined on 2026-08-03, two were
+    different people. The UI shows the evidence and the user decides.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from shared.voice_candidate_review import load_candidate_config
+    from shared.voice_library_duplicates import find_drift, find_duplicates
+
+    matching = _Path(args.matching_library).expanduser()
+    naming = None
+    config = load_candidate_config(args.config)
+    if config.get("available") and config.get("library_path"):
+        naming = _Path(config["library_path"])
+
+    payload = {
+        "duplicates": find_duplicates(matching, naming),
+        "drift": find_drift(matching, naming) if naming else None,
+        "naming_library": None if naming is None else str(naming),
+    }
+    print(_json.dumps(payload))
+
+
 def cmd_calendar_context(args):
     """Write a <stem>_calendar.json sidecar for an audio recording.
 
@@ -2029,6 +2056,20 @@ def main():
         default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
     )
     p_candidate_people.set_defaults(func=cmd_candidate_speakers)
+
+    p_library_dupes = sub.add_parser(
+        "library-duplicates",
+        help="People enrolled twice across both voice libraries, with evidence (JSON, read-only)",
+    )
+    p_library_dupes.add_argument(
+        "--matching-library",
+        default=str(Path.home() / "HiDock" / "Voice Library" / "embeddings.json"),
+    )
+    p_library_dupes.add_argument(
+        "--config",
+        default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
+    )
+    p_library_dupes.set_defaults(func=cmd_library_duplicates)
 
     p_candidate_merge = sub.add_parser(
         "merge-candidate-speakers",

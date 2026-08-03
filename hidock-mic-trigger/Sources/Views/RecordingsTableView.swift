@@ -541,7 +541,12 @@ struct RecordingsTableView: View {
                     Text("· \(Self.meetingDateFormatter.string(from: start))")
                         .font(.caption2.monospacedDigit())
                         .foregroundColor(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .lineLimit(1)
+                        // Lowest priority: in a compressed column the meeting
+                        // *title* is what matters, and Created already shows the
+                        // date two columns along. Let this yield rather than
+                        // force the row wider than the space it has.
+                        .layoutPriority(-1)
                 }
             }
             .font(.caption)
@@ -608,13 +613,21 @@ struct RecordingsTableView: View {
                     Text("· \(Self.meetingDateFormatter.string(from: start))")
                         .font(.caption2.monospacedDigit())
                         .foregroundColor(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .lineLimit(1)
+                        // Lowest priority: in a compressed column the meeting
+                        // *title* is what matters, and Created already shows the
+                        // date two columns along. Let this yield rather than
+                        // force the row wider than the space it has.
+                        .layoutPriority(-1)
                 }
             }
             .font(.caption)
             .foregroundColor(.green)
             .lineLimit(1)
-            .fixedSize(horizontal: false, vertical: true)
+            // No vertical fixedSize: it grants the cell its ideal *height*, so
+            // once the Meeting column became compressible the title wrapped and
+            // the whole row grew taller as the window narrowed. One line, truncated.
+            .frame(height: 16)
             .help("Confirmed calendar meeting: \(meeting)")
         } else if let suggestion = entry.calendarSuggestionTitle, !suggestion.isEmpty {
             HStack(spacing: 4) {
@@ -628,7 +641,12 @@ struct RecordingsTableView: View {
                     Text("· \(Self.meetingDateFormatter.string(from: start))")
                         .font(.caption2.monospacedDigit())
                         .foregroundColor(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
+                        .lineLimit(1)
+                        // Lowest priority: in a compressed column the meeting
+                        // *title* is what matters, and Created already shows the
+                        // date two columns along. Let this yield rather than
+                        // force the row wider than the space it has.
+                        .layoutPriority(-1)
                 } else {
                     Text("· Confirm")
                         .font(.caption2)
@@ -650,7 +668,10 @@ struct RecordingsTableView: View {
             .font(.caption)
             .foregroundColor(.green)
             .lineLimit(1)
-            .fixedSize(horizontal: false, vertical: true)
+            // No vertical fixedSize: it grants the cell its ideal *height*, so
+            // once the Meeting column became compressible the title wrapped and
+            // the whole row grew taller as the window narrowed. One line, truncated.
+            .frame(height: 16)
             .help("Detected speakers are ready — confirm the meeting to refine them with attendee context, or mark this an ad-hoc call")
         } else if entry.calendarRejected {
             // The user already answered "not this meeting", so this is a settled
