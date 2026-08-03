@@ -435,6 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !splitSources.isEmpty {
             log("Loaded \(splitSources.count) split source(s) — hidden in favour of their parts")
         }
+        repairTranscriptHistoryAtLaunch()
         // Backfill duration for any entries imported before duration probing
         // was wired up (duration saved as 0).
         var needsSave = false
@@ -5166,6 +5167,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         try? config.run()
         config.waitUntilExit()
         return isUsableTranscriptRepository(repository)
+    }
+
+    /// Repair a broken history repository at launch, not on first use.
+    ///
+    /// The repair below is correct but lazy: it only runs inside
+    /// `ensureTranscriptHistoryRepository`, which only the snapshot and version
+    /// paths call. Snapshots guard *speaker-mutating* work, so a machine could
+    /// transcribe for days without ever triggering it — six transcripts passed
+    /// through this one between 2026-07-31 and 2026-08-03 and the repo stayed
+    /// broken. Meanwhile the History panel kept saying "no earlier snapshots",
+    /// which is indistinguishable from the original bug. Fixing it up front
+    /// means the feature is either working or visibly explained, never quietly
+    /// broken while looking fine.
+    private func repairTranscriptHistoryAtLaunch() {
+        let folder = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let repository = URL(fileURLWithPath: folder)
+            .appendingPathComponent(".hidock-transcript-history", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: repository.path) else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            guard !self.isUsableTranscriptRepository(repository) else { return }
+            let repaired = self.repairTranscriptHistoryRepository(repository)
+            DispatchQueue.main.async {
+                if repaired {
+                    self.log("Repaired transcript history at \(repository.path) — an older build "
+                        + "left it unusable, so no speaker edit had ever been versioned")
+                } else {
+                    self.log("Transcript history at \(repository.path) is unusable and could not be "
+                        + "repaired automatically; it will be moved aside on the next snapshot")
+                }
+            }
+        }
     }
 
     private func ensureTranscriptHistoryRepository(for diarizedPath: String) -> URL? {

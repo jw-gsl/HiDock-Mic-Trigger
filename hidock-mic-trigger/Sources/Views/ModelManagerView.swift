@@ -253,6 +253,17 @@ struct ModelManagerView: View {
     /// bold section header with a one-line explainer.
     @State private var huggingFaceTokenEntry: String = ""
     @State private var huggingFaceStatus: String = ""
+    /// The stored token's redacted form, read from the Keychain **once**.
+    ///
+    /// `HuggingFaceToken.isConfigured` and `.redacted()` each perform their own
+    /// `SecItemCopyMatching`, and both were called straight from the view body —
+    /// four Keychain reads per render, re-run on every state change. When the
+    /// item's ACL does not match the running app (an item created by an earlier,
+    /// differently-signed build), macOS prompts on *each* read, so the app asked
+    /// for Keychain access again and again. Caching makes it one read per open,
+    /// refreshed only when this view actually changes the token.
+    @State private var huggingFaceRedacted: String?
+    @State private var huggingFaceLoaded = false
 
     private let pipelineStageOrder = ["transcription", "diarization"]
     private let supportingStageOrder = ["vad", "embedding", "identity_review"]
@@ -270,8 +281,8 @@ struct ModelManagerView: View {
                 Image(systemName: "key.horizontal").foregroundColor(.orange)
                 Text("Hugging Face access").fontWeight(.medium)
                 Spacer()
-                if HuggingFaceToken.isConfigured {
-                    Label(HuggingFaceToken.redacted() ?? "stored", systemImage: "checkmark.seal.fill")
+                if let redacted = huggingFaceRedacted {
+                    Label(redacted, systemImage: "checkmark.seal.fill")
                         .font(.caption)
                         .foregroundColor(.green)
                 } else {
@@ -308,7 +319,7 @@ struct ModelManagerView: View {
 
             HStack(spacing: 8) {
                 Text("3.").font(.caption.monospaced()).foregroundColor(.secondary)
-                if HuggingFaceToken.isConfigured {
+                if let redacted = huggingFaceRedacted {
                     // A stored token is a settled state, so show it as one. An
                     // always-live entry field invited typing a second token over
                     // a working one with no indication of which would win —
@@ -317,7 +328,7 @@ struct ModelManagerView: View {
                         Image(systemName: "lock.fill")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text(HuggingFaceToken.redacted() ?? "••••••••")
+                        Text(redacted)
                             .font(.caption.monospaced())
                             .foregroundColor(.secondary)
                     }
@@ -332,6 +343,7 @@ struct ModelManagerView: View {
                     Button("Remove") {
                         HuggingFaceToken.delete()
                         huggingFaceTokenEntry = ""
+                        huggingFaceRedacted = nil
                         huggingFaceStatus = "Token removed."
                     }
                     .help("Delete the stored token from your Keychain so a new one can be entered")
@@ -345,6 +357,11 @@ struct ModelManagerView: View {
                         do {
                             try HuggingFaceToken.save(huggingFaceTokenEntry)
                             huggingFaceTokenEntry = ""
+                            // Saving re-creates the item, so its ACL is bound to
+                            // the app doing the saving. This is also the cure for
+                            // an item stranded by an earlier build's signature:
+                            // Remove then Save, and the prompts stop.
+                            huggingFaceRedacted = HuggingFaceToken.redacted()
                             huggingFaceStatus = "Token saved to your Keychain."
                         } catch {
                             huggingFaceStatus = error.localizedDescription
@@ -363,6 +380,13 @@ struct ModelManagerView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
+        .onAppear {
+            // Exactly one Keychain read per time this page is opened. Guarded so
+            // a re-appear (tab switch, window refocus) does not read again.
+            guard !huggingFaceLoaded else { return }
+            huggingFaceLoaded = true
+            huggingFaceRedacted = HuggingFaceToken.redacted()
+        }
     }
 
     /// Explainer under the Calendar provider picker — honest about the app
