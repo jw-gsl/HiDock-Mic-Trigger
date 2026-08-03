@@ -296,3 +296,107 @@ def test_identity_candidate_sync_errors_without_config(tmp_path, monkeypatch):
 
     result = shared_models._sync_identity_review_candidate("unknown_backend")
     assert result["ok"] is False
+
+
+class TestActiveIdentityReviewBackend:
+    """The Models page must not contradict what is actually running.
+
+    `identity_review` is absent from `_DEFAULT_BACKENDS` because its selection
+    lives in the candidate config, not pipeline_backends.json. Since
+    `load_pipeline_backends` filters unknown stages, `backends.get(...)` was
+    always None and no identity-review model was ever marked active — so on
+    2026-08-03 the page showed ReDimNet2-B6 unselected while it was performing
+    every automatic speaker name in the app.
+    """
+
+    def test_reads_the_live_selection_from_the_candidate_config(self, tmp_path, monkeypatch):
+        from shared import models as shared_models
+
+        active = tmp_path / "active.json"
+        active.write_text(json.dumps({"enabled": True, "model_key": "redimnet2_b6"}))
+        monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", active)
+
+        assert shared_models.active_identity_review_backend() == "redimnet2_b6"
+
+    def test_a_disabled_candidate_is_not_active(self, tmp_path, monkeypatch):
+        from shared import models as shared_models
+
+        active = tmp_path / "active.json"
+        active.write_text(json.dumps({"enabled": False, "model_key": "redimnet2_b6"}))
+        monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", active)
+
+        assert shared_models.active_identity_review_backend() is None
+
+    def test_missing_or_unreadable_config_is_not_an_error(self, tmp_path, monkeypatch):
+        from shared import models as shared_models
+
+        monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", tmp_path / "nope.json")
+        assert shared_models.active_identity_review_backend() is None
+
+        broken = tmp_path / "broken.json"
+        broken.write_text("{not json")
+        monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", broken)
+        assert shared_models.active_identity_review_backend() is None
+
+    def test_the_status_payload_marks_that_backend_active(self, tmp_path, monkeypatch):
+        from shared import models as shared_models
+
+        active = tmp_path / "active.json"
+        active.write_text(json.dumps({"enabled": True, "model_key": "redimnet2_b6"}))
+        monkeypatch.setattr(shared_models, "_ACTIVE_CANDIDATE_PATH", active)
+
+        review = {
+            key: value for key, value in shared_models.get_model_status().items()
+            if value["stage"] == "identity_review"
+        }
+        assert review, "expected identity_review models in the registry"
+        chosen = [v["backend_key"] for v in review.values() if v["active"]]
+        assert chosen == ["redimnet2_b6"]
+
+
+class TestLicenceReachesTheUI:
+    """Whether a model may ship was only reachable by reading prose."""
+
+    def test_a_non_distributable_model_is_flagged(self):
+        from shared.models import get_model_status
+
+        statuses = get_model_status()
+        redimnet = next(v for v in statuses.values() if v["backend_key"] == "redimnet2_b6")
+        assert redimnet["distributable"] is False
+        assert "CC BY-NC-SA" in (redimnet["licence"] or "")
+
+    def test_a_distributable_model_says_so(self):
+        from shared.models import get_model_status
+
+        statuses = get_model_status()
+        wespeaker = next(
+            v for v in statuses.values() if v["backend_key"] == "wespeaker_resnet293"
+        )
+        assert wespeaker["distributable"] is True
+
+    def test_every_model_that_restricts_itself_is_registered_as_such(self):
+        """Silence must mean "unverified", never "safe".
+
+        W2V-BERT's own description said CC BY-NC-SA while the licence registry
+        had no entry for it, so it would have rendered with no warning at all.
+
+        The scan looks for a model restricting *itself*, not merely mentioning a
+        restrictive licence: pyannote community-1 is MIT and cites CC BY-NC-SA
+        only to contrast with the identity model, so a bare substring match on
+        the licence name gives a false positive.
+        """
+        from shared.models import get_model_status
+
+        claims_restriction = (
+            "non-commercial", "not for distribution", "must not ship",
+            "personal local use only",
+        )
+        for value in get_model_status().values():
+            description = value.get("description", "").lower()
+            if "usable in a distributed build" in description:
+                continue  # positively asserts the opposite
+            if any(phrase in description for phrase in claims_restriction):
+                assert value["distributable"] is False, (
+                    f"{value['name']} restricts its own use but is not "
+                    f"registered as non-distributable"
+                )

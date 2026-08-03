@@ -41,6 +41,17 @@ SPEAKER_EMBED_LICENCES = {
                  "separation on this user's data.",
         "licence_source": "docs/BAKEOFF-redimnet2-vs-wespeaker-2026-07-25.md",
     },
+    # Its own description already stated CC BY-NC-SA, but the licence registry
+    # had no entry — so with the badge reading `distributable`, the model would
+    # have shown *no* warning while being non-distributable. Silence has to mean
+    # "unverified", never "safe", so a known restriction must be recorded here.
+    "wespeaker_w2vbert2": {
+        "licence": "CC BY-NC-SA 4.0 (Meta w2v-bert-2.0 + Adapter-MFA)",
+        "distributable": False,
+        "notes": "Non-commercial. Benchmark and personal local use only; must "
+                 "never ship in a distributed build.",
+        "licence_source": "Model card at https://huggingface.co/facebook/w2v-bert-2.0",
+    },
     "wespeaker_resnet293": {
         "licence": "CC BY 4.0 (VoxCeleb-trained)",
         "distributable": True,
@@ -614,6 +625,31 @@ _IDENTITY_CANDIDATE_DIRS = {
 }
 
 
+def active_identity_review_backend() -> str | None:
+    """Which identity-review backend is live, read from the candidate config.
+
+    `identity_review` is deliberately absent from `_DEFAULT_BACKENDS`: its
+    selection is not stored in pipeline_backends.json but in the candidate
+    config that `_sync_identity_review_candidate` writes. `load_pipeline_backends`
+    filters unknown stages, so `backends.get("identity_review")` was always None
+    and *no* identity-review model was ever marked active.
+
+    That was not a cosmetic badge problem. On 2026-08-03 the Models page showed
+    ReDimNet2-B6 with an empty radio button while it was the promoted library
+    performing every automatic speaker name in the app — the page contradicted
+    what was actually running, on the one row where the licence terms
+    (CC BY-NC-SA, not distributable) make the answer matter most.
+    """
+    try:
+        config = json.loads(_ACTIVE_CANDIDATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not config.get("enabled"):
+        return None
+    model_key = config.get("model_key")
+    return str(model_key) if model_key else None
+
+
 def _sync_identity_review_candidate(backend_key: str) -> dict:
     """Point the review-candidate config (active.json) at the selected
     model's candidate library, backing up the previous config first.
@@ -730,7 +766,14 @@ def get_model_status() -> dict[str, dict]:
             # Active = this entry's backend_key matches the persisted
             # selection for its stage. Makes the UI "ACTIVE" badge
             # reflect the live config, not a hardcoded registry flag.
-            "active": backends.get(stage) == info.get("backend_key", key),
+            # Active = this entry's backend_key matches the persisted selection
+            # for its stage. identity_review keeps its selection in the candidate
+            # config rather than pipeline_backends.json, so it is resolved
+            # separately — see active_identity_review_backend.
+            "active": (
+                active_identity_review_backend() if stage == "identity_review"
+                else backends.get(stage)
+            ) == info.get("backend_key", key),
             "experimental": info.get("experimental", False),
             "built_in": info.get("built_in", False),
             "nemo_model": info.get("nemo_model", False),
@@ -742,6 +785,19 @@ def get_model_status() -> dict[str, dict]:
             # Optional key into model_capability.CAPABILITY_REQUIREMENTS —
             # when set the UI offers a "Check compatibility" preflight.
             "capability": info.get("capability"),
+            # Licence status, surfaced so the UI can badge it on the collapsed
+            # row. Whether a model may ship is the fact most likely to cause real
+            # harm if missed, and it was previously only reachable by reading a
+            # paragraph of description text. None = unverified, which is shown as
+            # such rather than assumed safe.
+            "distributable": speaker_embed_licence(
+                info.get("backend_key", key)
+            ).get("distributable"),
+            "licence": speaker_embed_licence(info.get("backend_key", key)).get("licence"),
+            # Gated models authenticate their download with a Hugging Face token.
+            # Surfaced so the app can read that credential only when something
+            # actually needs it, instead of on every pipeline subprocess.
+            "gated": info.get("gated", False),
         }
     return statuses
 

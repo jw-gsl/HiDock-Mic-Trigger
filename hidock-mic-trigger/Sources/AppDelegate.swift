@@ -5769,6 +5769,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// the active matching library: a human choosing a person is not an
     /// automatic voice match, and hiding candidate-only people here made valid
     /// names such as Chris Wildsmith impossible to select.
+    /// True when a gated model is selected, or installed and therefore able to be
+    /// selected — the only circumstances in which a Hugging Face token is any use.
+    ///
+    /// Deliberately generous: a token is needed to *download* a gated model as
+    /// well as to run one, so a gated model that is merely present counts. The
+    /// point is not to be minimal, it is to stop reading a credential on the
+    /// overwhelming majority of runs that provably cannot use it.
+    private var anyGatedModelInPlay: Bool {
+        viewModel.modelStatuses.values.contains { $0.gated && ($0.active || $0.installed) }
+    }
+
     /// Duplicate pairs and store drift across both voice libraries.
     ///
     /// Off the main thread: this reads and compares every embedding in two
@@ -7479,7 +7490,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 nemoModel: info["nemo_model"] as? Bool ?? false,
                                 reviewOnly: info["review_only"] as? Bool ?? false,
                                 planned: info["planned"] as? Bool ?? false,
-                                capability: info["capability"] as? String
+                                capability: info["capability"] as? String,
+                                distributable: info["distributable"] as? Bool,
+                                licence: info["licence"] as? String,
+                                gated: info["gated"] as? Bool ?? false
                             )
                         }
                         self.viewModel.modelStatuses = statuses
@@ -9542,9 +9556,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var env = ProcessInfo.processInfo.environment
             let home = NSHomeDirectory()
             env["HOME"] = home
-            // A gated diarization model needs the token to download; harmless
-            // when none is stored, and never written to disk.
-            HuggingFaceToken.inject(into: &env)
+            // Only reach for the credential when a gated model could actually use
+            // it. This is the generic runner for *every* transcription-pipeline
+            // subprocess — rematch, split-artifacts, calendar-context,
+            // library-duplicates — none of which authenticate with Hugging Face.
+            // Reading it regardless meant the app asked the Keychain for a
+            // credential it had no use for, and on a machine whose Keychain item
+            // was created by an earlier build (so its ACL no longer matches) every
+            // one of those reads raised an access prompt. Only pyannote is gated,
+            // so a Parakeet + Sortformer pipeline now never touches the Keychain.
+            if self.anyGatedModelInPlay {
+                HuggingFaceToken.inject(into: &env)
+            }
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {

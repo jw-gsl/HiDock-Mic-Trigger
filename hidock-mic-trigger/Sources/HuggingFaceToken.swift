@@ -45,6 +45,44 @@ enum HuggingFaceToken {
         cacheLock.unlock()
     }
 
+    /// A Keychain access list containing only the running application.
+    ///
+    /// Returns nil if it cannot be built, in which case the item is saved without
+    /// an explicit list — the previous behaviour. Failing to set an ACL is worth
+    /// degrading for; failing to save the token is not.
+    private static func selfOnlyAccess() -> SecAccess? {
+        var me: SecTrustedApplication?
+        // nil path = the current application.
+        guard SecTrustedApplicationCreateFromPath(nil, &me) == errSecSuccess,
+              let me else { return nil }
+        var access: SecAccess?
+        guard SecAccessCreate(
+            "HiDock Hugging Face token" as CFString, [me] as CFArray, &access
+        ) == errSecSuccess else { return nil }
+        return access
+    }
+
+    /// True when the stored item can be read without prompting.
+    ///
+    /// `kSecUseAuthenticationUIFail` makes the Keychain return an error instead of
+    /// showing a dialog, so this can be asked safely. A false here means the
+    /// item's access list no longer matches this build and the only fix is to
+    /// re-create it — which is what the Settings page offers.
+    static func isReadableWithoutPrompting() -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        // errSecItemNotFound means there is nothing stored, which prompts nobody.
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
     /// The licence that must be accepted before the token can fetch the model.
     /// Free for research and commercial use — the gate is usage tracking.
     static let licenceURL = URL(
@@ -67,6 +105,20 @@ enum HuggingFaceToken {
         SecItemDelete(query as CFDictionary)
         var add = query
         add[kSecValueData as String] = Data(trimmed.utf8)
+        // Give the item an access list naming *this* application, so reading it
+        // back never raises a prompt.
+        //
+        // Without an explicit list the item inherits whatever the creating
+        // process was, and once the app is rebuilt and re-signed that entry can
+        // stop matching — which is how a token saved on 2026-07-31 ended up
+        // asking permission on every read afterwards, with no way to stop it from
+        // inside the app. `SecAccessCreate` is long-deprecated but is still the
+        // only way for a non-sandboxed app to say this; the modern alternative
+        // (`kSecUseDataProtectionKeychain`) needs a keychain-access-group
+        // entitlement this app does not carry.
+        if let access = selfOnlyAccess() {
+            add[kSecAttrAccess as String] = access
+        }
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else {
             invalidateCache()
