@@ -974,7 +974,13 @@ struct TranscriptViewerView: View {
                 }
 
                 Button {
-                    transcriptVersions = onListTranscriptVersions?(filePath) ?? []
+                    // Only flip the presentation flag here. Loading the versions
+                    // in the same action assigned @State *and* set isPresented in
+                    // one update, so SwiftUI rebuilt the popover's anchor while it
+                    // was presenting and the popover silently failed to appear —
+                    // the button had to be clicked twice. The list is loaded from
+                    // the popover's own onAppear instead, which also keeps the
+                    // synchronous git call off the click.
                     showTranscriptHistory = true
                 } label: {
                     Image(systemName: "clock.arrow.circlepath")
@@ -986,6 +992,13 @@ struct TranscriptViewerView: View {
                     transcriptHistoryPicker
                         .frame(width: 360)
                         .padding(12)
+                        .onAppear {
+                            transcriptVersions = onListTranscriptVersions?(filePath) ?? []
+                            // Detail is read per revision and cached; drop it so a
+                            // reopened list reflects edits made since.
+                            expandedVersionId = nil
+                            versionDetails = [:]
+                        }
                 }
 
                 // Icon-only so they always fit the (narrow) pane.

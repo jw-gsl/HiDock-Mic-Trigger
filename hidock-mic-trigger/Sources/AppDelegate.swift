@@ -5752,6 +5752,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onMergePerson: { [weak self] from, into in
                 self?.mergePersonAcrossLibraries(from: from, into: into)
             },
+            onLoadDuplicates: { [weak self] completion in
+                self?.loadVoiceLibraryDuplicates(completion: completion) ?? completion([], nil)
+            },
             meName: viewModel.voiceLibraryMeName,
             onToggleMe: { [weak self] name in
                 self?.toggleVoiceLibraryMe(name)
@@ -5766,6 +5769,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// the active matching library: a human choosing a person is not an
     /// automatic voice match, and hiding candidate-only people here made valid
     /// names such as Chris Wildsmith impossible to select.
+    /// Duplicate pairs and store drift across both voice libraries.
+    ///
+    /// Off the main thread: this reads and compares every embedding in two
+    /// multi-megabyte libraries, which is far too slow to block a tab switch.
+    private func loadVoiceLibraryDuplicates(
+        completion: @escaping ([VoiceLibraryDuplicate], VoiceLibraryDrift?) -> Void
+    ) {
+        let script = transcriptionScriptPath
+        guard FileManager.default.fileExists(atPath: script) else {
+            completion([], nil)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion([], nil) }
+                return
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self.voiceLibraryPythonPath())
+            self.configureVoiceLibraryProcess(process)
+            process.arguments = [script, "library-duplicates"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            var pairs: [VoiceLibraryDuplicate] = []
+            var drift: VoiceLibraryDrift?
+            do {
+                try process.run()
+                // Read before waiting — a large payload fills the pipe buffer and
+                // read-after-wait deadlocks (same ordering as refreshMeetingExtraStats).
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let rows = payload["duplicates"] as? [[String: Any]] {
+                        pairs = rows.compactMap { row in
+                            guard let names = row["names"] as? [String], names.count == 2,
+                                  let keep = row["suggested_keep"] as? String,
+                                  let verdict = row["verdict"] as? String
+                            else { return nil }
+                            return VoiceLibraryDuplicate(
+                                names: names,
+                                suggestedKeep: keep,
+                                verdict: verdict,
+                                meanSimilarity: row["mean_similarity"] as? Double,
+                                sharedMeetings: row["shared_meetings"] as? [String] ?? [],
+                                stores: row["stores"] as? [String: [String]] ?? [:],
+                                sampleCounts: row["sample_counts"] as? [String: Int] ?? [:]
+                            )
+                        }
+                    }
+                    if let d = payload["drift"] as? [String: Any] {
+                        drift = VoiceLibraryDrift(
+                            matchingOnly: d["matching_only"] as? [String] ?? [],
+                            namingOnly: d["naming_only"] as? [String] ?? [],
+                            matchingCount: d["matching_count"] as? Int ?? 0,
+                            namingCount: d["naming_count"] as? Int ?? 0
+                        )
+                    }
+                }
+            } catch {
+                self.log("Could not compare voice libraries: \(error.localizedDescription)")
+            }
+            let actionable = pairs.filter { $0.verdict != "different" }.count
+            self.log("Voice library duplicates: \(pairs.count) pair(s), \(actionable) worth merging")
+            DispatchQueue.main.async { completion(pairs, drift) }
+        }
+    }
+
     private func listVoiceLibraryNames(completion: @escaping ([String]) -> Void) {
         let scriptPath = voiceLibraryScriptPath()
         guard FileManager.default.fileExists(atPath: scriptPath) else { completion([]); return }

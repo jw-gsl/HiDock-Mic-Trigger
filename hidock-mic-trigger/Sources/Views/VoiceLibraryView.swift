@@ -70,12 +70,55 @@ enum VoiceSortKey: String, CaseIterable, Identifiable {
     }
 }
 
-/// Tabs inside the Voice Library pane: the live TitaNet matching library, or
-/// every named person across the matching and review-only candidate libraries.
+/// Tabs inside the Voice Library pane: the live matching library, every named
+/// person across both libraries, or the people who appear to be enrolled twice.
 enum VoiceLibraryTab: String, CaseIterable, Identifiable {
-    case matching, people
+    case matching, people, duplicates
     var id: String { rawValue }
-    var label: String { self == .matching ? "Matching" : "All People" }
+    var label: String {
+        switch self {
+        case .matching: return "Matching"
+        case .people: return "All People"
+        case .duplicates: return "Duplicates"
+        }
+    }
+}
+
+/// One pair of library entries that may be the same person twice.
+///
+/// The app holds two stores — the matching library the window lists, and whichever
+/// candidate library is promoted for automatic naming — and they drift. A person
+/// enrolled twice also competes with themselves: naming needs the best match to
+/// lead the runner-up by a margin, so `Adam` at 0.822 and `Adam Gardner` at 0.807
+/// cancelled out and that speaker was named nothing.
+///
+/// `verdict` is deliberately three-valued. A shared first name is not proof: of six
+/// pairs examined on 2026-08-03, four were one person and two were different people
+/// (`Ian` was not Ian Reay). So the evidence is shown and the user decides.
+struct VoiceLibraryDuplicate: Identifiable {
+    let names: [String]
+    let suggestedKeep: String
+    /// "same", "unclear", or "different".
+    let verdict: String
+    let meanSimilarity: Double?
+    let sharedMeetings: [String]
+    /// name → which stores hold it ("matching" / "naming").
+    let stores: [String: [String]]
+    let sampleCounts: [String: Int]
+
+    var id: String { names.joined(separator: "|") }
+    /// The other name — the one that disappears if the pair is merged.
+    var absorbed: String { names.first { $0 != suggestedKeep } ?? names[0] }
+}
+
+/// People stranded in one store. Both directions are silent failures: someone
+/// only in the naming library cannot be seen or edited here, and someone only in
+/// the matching library can never be named automatically at all.
+struct VoiceLibraryDrift {
+    let matchingOnly: [String]
+    let namingOnly: [String]
+    let matchingCount: Int
+    let namingCount: Int
 }
 
 struct VoiceLibraryView: View {
@@ -108,6 +151,16 @@ struct VoiceLibraryView: View {
     @State private var peopleSelection: Set<String> = []
     @State private var pairMerge = false
     @State private var pairKeepName: String = ""
+    /// Duplicate pairs and store drift, loaded on demand by the Duplicates tab.
+    @State var duplicates: [VoiceLibraryDuplicate] = []
+    @State var drift: VoiceLibraryDrift? = nil
+    @State private var duplicatesLoaded = false
+    @State private var duplicatesLoading = false
+    /// Pair awaiting confirmation, so a merge is never one stray click.
+    @State private var pendingDuplicateMerge: VoiceLibraryDuplicate? = nil
+    /// Show the pairs the evidence says are different people, which are hidden
+    /// by default — they are the ones a name-only view would get wrong.
+    @State private var showRejectedPairs = false
     let onDelete: (String) -> Void
     let onRename: (String, String) -> Void
     var onListSamples: ((String, @escaping ([VoiceLibrarySample]) -> Void) -> Void)? = nil
@@ -125,6 +178,8 @@ struct VoiceLibraryView: View {
     /// Merge a person in every library that contains the source name (live
     /// matching library and/or review-only candidate library).
     var onMergePerson: ((String, String) -> Void)? = nil
+    /// Load duplicate pairs + store drift across both libraries.
+    var onLoadDuplicates: ((@escaping ([VoiceLibraryDuplicate], VoiceLibraryDrift?) -> Void) -> Void)? = nil
     /// The person who is the user themselves ("Me"), pinned atop person
     /// pickers. Tapping a row's star toggles it; nil means no Me set.
     @State var meName: String? = nil
@@ -199,12 +254,23 @@ struct VoiceLibraryView: View {
 
             if !allPeople.isEmpty {
                 Picker("", selection: $tab) {
-                    ForEach(VoiceLibraryTab.allCases) { Text($0.label).tag($0) }
+                    ForEach(VoiceLibraryTab.allCases) { tab in
+                        // Badge the count of pairs actually worth acting on, so
+                        // the tab is only loud when there is something to fix.
+                        if tab == .duplicates, actionableDuplicateCount > 0 {
+                            Text("\(tab.label) (\(actionableDuplicateCount))").tag(tab)
+                        } else {
+                            Text(tab.label).tag(tab)
+                        }
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                .onChange(of: tab) { newTab in
+                    if newTab == .duplicates { loadDuplicatesIfNeeded() }
+                }
 
                 Divider()
             }
@@ -280,7 +346,9 @@ struct VoiceLibraryView: View {
 
             Divider()
 
-            if tab == .people {
+            if tab == .duplicates {
+                duplicatesList
+            } else if tab == .people {
                 peopleList
             } else if speakers.isEmpty {
                 emptyState
@@ -472,6 +540,208 @@ struct VoiceLibraryView: View {
     /// Every named person across the matching and review-only candidate
     /// libraries, alphabetical. Merge is the only mutation offered here —
     /// deletes and sample inspection stay in the Matching tab.
+    /// Pairs the evidence supports acting on. "different" pairs are excluded:
+    /// they are name collisions, not duplicates, and badging them would push the
+    /// user toward exactly the merge that would be wrong.
+    private var actionableDuplicateCount: Int {
+        duplicates.filter { $0.verdict != "different" }.count
+    }
+
+    private func loadDuplicatesIfNeeded() {
+        guard !duplicatesLoaded, !duplicatesLoading, let load = onLoadDuplicates else { return }
+        duplicatesLoading = true
+        load { pairs, storeDrift in
+            duplicates = pairs
+            drift = storeDrift
+            duplicatesLoading = false
+            duplicatesLoaded = true
+        }
+    }
+
+    /// One row per suspected duplicate, with the evidence that produced the
+    /// verdict, plus a summary of people stranded in only one of the two stores.
+    @ViewBuilder
+    private var duplicatesList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if duplicatesLoading {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Comparing both libraries…").font(.caption).foregroundColor(.secondary)
+                    }
+                    .padding(.top, 12)
+                } else {
+                    driftSummary
+
+                    let actionable = duplicates.filter { $0.verdict != "different" }
+                    let rejected = duplicates.filter { $0.verdict == "different" }
+
+                    if actionable.isEmpty {
+                        Label("No duplicate profiles found.", systemImage: "checkmark.seal")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    } else {
+                        Text("Same person, enrolled twice")
+                            .font(.caption.weight(.semibold))
+                        Text("Merging keeps the fuller name and moves every sample onto it, in both "
+                             + "libraries. A person enrolled twice competes with themselves and can "
+                             + "stop their own voice being recognised.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        ForEach(actionable) { pair in
+                            duplicateRow(pair)
+                        }
+                    }
+
+                    if !rejected.isEmpty {
+                        Divider().padding(.vertical, 2)
+                        Button {
+                            showRejectedPairs.toggle()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: showRejectedPairs ? "chevron.down" : "chevron.right")
+                                    .font(.caption2)
+                                Text("\(rejected.count) share a first name but are different people")
+                                    .font(.caption)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Shown so the decision is visible. The voices disagree, so merging "
+                              + "these would put one person's words under another's name.")
+                        if showRejectedPairs {
+                            ForEach(rejected) { pair in
+                                duplicateRow(pair)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear { loadDuplicatesIfNeeded() }
+        .confirmationDialog(
+            "Merge these two profiles?",
+            isPresented: Binding(
+                get: { pendingDuplicateMerge != nil },
+                set: { if !$0 { pendingDuplicateMerge = nil } }
+            ),
+            presenting: pendingDuplicateMerge
+        ) { pair in
+            Button("Merge into \(pair.suggestedKeep)", role: .destructive) {
+                onMergePerson?(pair.absorbed, pair.suggestedKeep)
+                duplicates.removeAll { $0.id == pair.id }
+                pendingDuplicateMerge = nil
+                duplicatesLoaded = false   // re-read after the library changes
+            }
+            Button("Cancel", role: .cancel) { pendingDuplicateMerge = nil }
+        } message: { pair in
+            Text("\(pair.absorbed)'s samples move onto \(pair.suggestedKeep), and "
+                 + "\(pair.absorbed) is removed. This applies to both libraries.")
+        }
+    }
+
+    /// The two stores and anyone stranded in only one of them. Surfaced here
+    /// because neither condition is visible anywhere else in the app: a
+    /// naming-only person cannot be edited, and a matching-only person can never
+    /// be named automatically.
+    @ViewBuilder
+    private var driftSummary: some View {
+        if let drift {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Text("This list shows \(drift.matchingCount) people; automatic naming uses "
+                         + "a library of \(drift.namingCount).")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                if !drift.matchingOnly.isEmpty {
+                    Label("\(drift.matchingOnly.count) can never be recognised automatically: "
+                          + drift.matchingOnly.joined(separator: ", "),
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .help("The library that does the naming has no profile for them, so their "
+                              + "voice can never be matched. Enrol them from a transcript.")
+                }
+                if !drift.namingOnly.isEmpty {
+                    Label("\(drift.namingOnly.count) are used for naming but not listed above.",
+                          systemImage: "eye.slash")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .help(drift.namingOnly.joined(separator: ", "))
+                }
+            }
+            .padding(.bottom, 4)
+            Divider()
+        }
+    }
+
+    private func duplicateRow(_ pair: VoiceLibraryDuplicate) -> some View {
+        let isDifferent = pair.verdict == "different"
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: isDifferent ? "person.2.slash"
+                      : pair.verdict == "same" ? "person.2.fill" : "questionmark.circle")
+                    .font(.caption)
+                    .foregroundColor(isDifferent ? .secondary : pair.verdict == "same" ? .orange : .yellow)
+                Text(pair.names.joined(separator: "  +  "))
+                    .font(.caption.weight(.medium))
+                Spacer(minLength: 6)
+                if !isDifferent {
+                    Button("Merge") { pendingDuplicateMerge = pair }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("Keep \(pair.suggestedKeep) and move \(pair.absorbed)'s samples onto it")
+                }
+            }
+            // The evidence, always visible. A verdict the user cannot check is
+            // just an assertion, and these decisions name real people.
+            HStack(spacing: 8) {
+                if !pair.sharedMeetings.isEmpty {
+                    evidenceChip("same recording", .green,
+                                 help: "Both profiles were built from "
+                                 + pair.sharedMeetings.joined(separator: ", ")
+                                 + " — one clip cannot be two people.")
+                } else if let mean = pair.meanSimilarity {
+                    evidenceChip(String(format: "voice match %.0f%%", mean * 100),
+                                 isDifferent ? .secondary : .orange,
+                                 help: "Mean similarity between every pair of samples, judged "
+                                 + "against how similar each profile is to itself.")
+                }
+                ForEach(pair.names, id: \.self) { name in
+                    let count = pair.sampleCounts[name] ?? 0
+                    let stores = (pair.stores[name] ?? []).map {
+                        $0 == "naming" ? "naming" : "listed"
+                    }
+                    evidenceChip("\(name.split(separator: " ").first ?? ""): \(count) sample(s)",
+                                 .secondary,
+                                 help: "\(name) is in the \(stores.joined(separator: " + ")) library")
+                }
+            }
+            if isDifferent {
+                Text("The voices do not match — keep both.")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.8))
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6)
+            .fill(Color.secondary.opacity(isDifferent ? 0.04 : 0.09)))
+    }
+
+    private func evidenceChip(_ text: String, _ tint: Color, help: String) -> some View {
+        Text(text)
+            .font(.system(size: 9))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(tint.opacity(0.15)))
+            .foregroundColor(tint)
+            .help(help)
+    }
+
     private var peopleList: some View {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         let visible = allPeople
