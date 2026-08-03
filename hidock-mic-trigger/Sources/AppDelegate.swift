@@ -7479,7 +7479,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 nemoModel: info["nemo_model"] as? Bool ?? false,
                                 reviewOnly: info["review_only"] as? Bool ?? false,
                                 planned: info["planned"] as? Bool ?? false,
-                                capability: info["capability"] as? String
+                                capability: info["capability"] as? String,
+                                distributable: info["distributable"] as? Bool,
+                                licence: info["licence"] as? String
                             )
                         }
                         self.viewModel.modelStatuses = statuses

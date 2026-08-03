@@ -53,6 +53,23 @@ struct ModelStatus: Identifiable {
     /// (`models.py capability <key>`). When set, the row offers a
     /// "Check compatibility" action.
     var capability: String? = nil
+    /// Whether this model's licence permits shipping it in a distributed build.
+    /// `nil` means unverified, which is shown as such — for a shipping decision
+    /// "we don't know" and "it's fine" must not look alike.
+    var distributable: Bool? = nil
+    /// The licence itself, for the badge's tooltip.
+    var licence: String? = nil
+
+    /// Short badge text for the licence, or nil when there is nothing to say.
+    /// Only models with a known licence position get a badge; a model outside
+    /// the registry stays silent rather than claiming to be either safe or not.
+    var licenceBadge: (text: String, safe: Bool)? {
+        switch distributable {
+        case .some(false): return ("Personal use only", false)
+        case .some(true): return ("Distributable", true)
+        case .none: return nil
+        }
+    }
 }
 
 /// One check from a `models.py capability <key>` preflight report.
@@ -107,10 +124,27 @@ func formatSize(mb: Int) -> String {
     return "\(mb) MB"
 }
 
+/// Models vs the settings that merely lived on the same page.
+///
+/// AI Summariser, Hugging Face access, and Calendar are not models. They occupied
+/// the first screen and pushed the actual pipeline below the fold, which is most
+/// of why the page read as cluttered. Split out, Models answers exactly one
+/// question: what is in the pipeline.
+enum ModelManagerTab: String, CaseIterable, Identifiable {
+    case models, settings
+    var id: String { rawValue }
+    var label: String { self == .models ? "Models" : "Settings" }
+}
+
 struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
     /// Stages are collapsed by default; this holds the expanded ones.
     @State private var expandedStages: Set<String> = []
+    @State private var tab: ModelManagerTab = .models
+    /// Model rows whose description/provenance block is showing. Collapsed by
+    /// default: twelve rows of 2–4 line descriptions buried the six words that
+    /// actually matter, which is which one is on.
+    @State private var expandedRows: Set<String> = []
 
     /// Every stage currently having at least one registered model.
     private var allStageKeys: Set<String> {
@@ -121,20 +155,21 @@ struct ModelManagerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             HStack {
-                Text("Models")
+                Text(tab.label)
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
-                Button("Expand all") { expandedStages = allStageKeys }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .help("Expand every pipeline stage")
-                Button("Collapse all") { expandedStages = [] }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .help("Collapse every pipeline stage")
+                if tab == .models {
+                    Button("Expand all") { expandedStages = allStageKeys }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .help("Expand every pipeline stage")
+                    Button("Collapse all") { expandedStages = [] }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .help("Collapse every pipeline stage")
+                }
                 Button {
                     viewModel.onRefreshModelStatuses()
                 } label: {
@@ -145,106 +180,128 @@ struct ModelManagerView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
-            .padding(.bottom, 12)
+            .padding(.bottom, 10)
 
-            Divider()
-
-            // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Image(systemName: "sparkles").foregroundColor(.indigo)
-                    Text("AI Summariser").fontWeight(.medium)
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { viewModel.summarizeEngine },
-                        set: { viewModel.onSetSummarizeEngine($0) }
-                    )) {
-                        ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
-                            Text(choice.label).tag(choice.id)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                }
-                Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
-                    .font(.caption).foregroundColor(.secondary)
-
-                Toggle("Show the CLI pane while summarising", isOn: Binding(
-                    get: { viewModel.showCLIWhileSummarising },
-                    set: { viewModel.onSetShowCLIWhileSummarising($0) }
-                ))
-                .toggleStyle(.checkbox)
-                .padding(.top, 4)
-                Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
-                    .font(.caption).foregroundColor(.secondary)
+            Picker("", selection: $tab) {
+                ForEach(ModelManagerTab.allCases) { Text($0.label).tag($0) }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
             .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.bottom, 10)
 
             Divider()
 
-            // Hugging Face access — required only for *gated* models. pyannote's
-            // diarizer is gated: accepting the licence grants your account
-            // access, but a download still has to authenticate as you, so a
-            // token is needed as well. Stored in the Keychain, never on disk,
-            // and handed to the pipeline through the subprocess environment.
-            huggingFaceSection
-
-            Divider()
-
-            // Calendar provider — meeting context (attendees) used for
-            // speaker merging and suggestion narrowing.
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Image(systemName: "calendar").foregroundColor(.teal)
-                    Text("Calendar").fontWeight(.medium)
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { viewModel.calendarProvider },
-                        set: { viewModel.onSetCalendarProvider($0) }
-                    )) {
-                        ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
-                            Text(choice.label).tag(choice.id)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                }
-                Text(calendarExplainer)
-                    .font(.caption).foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-
-            Divider()
-
-            if viewModel.modelStatuses.isEmpty {
-                VStack(spacing: 12) {
-                    Spacer()
-                    ProgressView()
-                    Text("Loading model statuses...")
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
+            if tab == .settings {
+                settingsTab
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
-                        categoryBlock(
-                            title: "Pipeline Stages",
-                            subtitle: "Your primary choices — what transforms audio into diarized transcripts.",
-                            stages: pipelineStageOrder
-                        )
-                        categoryBlock(
-                            title: "Supporting Models",
-                            subtitle: "Infrastructure consumed by one or more pipeline backends. Each stage is also pick-one so alternatives can land later.",
-                            stages: supportingStageOrder
-                        )
-                    }
-                    .padding(.vertical, 8)
-                }
+                modelsTab
             }
         }
         .frame(minWidth: 360, minHeight: 300)   // hosted in the resizable detail pane (min 480 wide)
+    }
+
+    @ViewBuilder
+    private var settingsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Image(systemName: "sparkles").foregroundColor(.indigo)
+                        Text("AI Summariser").fontWeight(.medium)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { viewModel.summarizeEngine },
+                            set: { viewModel.onSetSummarizeEngine($0) }
+                        )) {
+                            ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
+                                Text(choice.label).tag(choice.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
+                        .font(.caption).foregroundColor(.secondary)
+
+                    Toggle("Show the CLI pane while summarising", isOn: Binding(
+                        get: { viewModel.showCLIWhileSummarising },
+                        set: { viewModel.onSetShowCLIWhileSummarising($0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .padding(.top, 4)
+                    Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+
+                Divider()
+
+                // Hugging Face access — required only for *gated* models. pyannote's
+                // diarizer is gated: accepting the licence grants your account
+                // access, but a download still has to authenticate as you, so a
+                // token is needed as well. Stored in the Keychain, never on disk,
+                // and handed to the pipeline through the subprocess environment.
+                huggingFaceSection
+
+                Divider()
+
+                // Calendar provider — meeting context (attendees) used for
+                // speaker merging and suggestion narrowing.
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Image(systemName: "calendar").foregroundColor(.teal)
+                        Text("Calendar").fontWeight(.medium)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { viewModel.calendarProvider },
+                            set: { viewModel.onSetCalendarProvider($0) }
+                        )) {
+                            ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
+                                Text(choice.label).tag(choice.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    Text(calendarExplainer)
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var modelsTab: some View {
+        if viewModel.modelStatuses.isEmpty {
+            VStack(spacing: 12) {
+                Spacer()
+                ProgressView()
+                Text("Loading model statuses...")
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                    categoryBlock(
+                        title: "Pipeline Stages",
+                        subtitle: "What transforms audio into diarized transcripts.",
+                        stages: pipelineStageOrder
+                    )
+                    categoryBlock(
+                        title: "Supporting Models",
+                        subtitle: "Infrastructure the pipeline backends depend on.",
+                        stages: supportingStageOrder
+                    )
+                }
+                .padding(.vertical, 8)
+            }
+        }
     }
 
     /// Top-level categorisation. Pipeline stages are the user's direct
@@ -446,6 +503,41 @@ struct ModelManagerView: View {
         }
     }
 
+    /// Licence status as a badge. Read from `shared/models.py`'s `distributable`
+    /// field, which already models this — it was only ever reachable by reading a
+    /// paragraph of description text, despite being the fact most likely to cause
+    /// harm if missed.
+    private func licencePill(_ text: String, safe: Bool, licence: String?) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill((safe ? Color.secondary : Color.orange).opacity(0.18)))
+            .foregroundColor(safe ? .secondary : .orange)
+            .help(licence.map { "\($0). " + (safe
+                ? "Safe to include in a distributed build."
+                : "Local personal use only — must never ship in a distributed build.") }
+                ?? text)
+    }
+
+    private func modelRow(_ status: ModelStatus, stageEntryCount: Int) -> some View {
+        ModelRowView(
+            status: status,
+            allowSelection: stageEntryCount > 1,
+            expanded: expandedRows.contains(status.id),
+            onToggleExpanded: {
+                if expandedRows.contains(status.id) { expandedRows.remove(status.id) }
+                else { expandedRows.insert(status.id) }
+            },
+            capabilityReport: viewModel.modelCapabilities[status.id],
+            capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
+            onDownload: { viewModel.onDownloadModelByKey(status.id) },
+            onDelete: { viewModel.onDeleteModelByKey(status.id) },
+            onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
+            onCheckCapability: { viewModel.onCheckModelCapability(status.id) }
+        )
+    }
+
     @ViewBuilder
     private func stageSection(stage: String, entries: [ModelStatus]) -> some View {
         let expanded = expandedStages.contains(stage)
@@ -456,23 +548,32 @@ struct ModelManagerView: View {
             Button {
                 if expanded { expandedStages.remove(stage) } else { expandedStages.insert(stage) }
             } label: {
-                HStack(alignment: .firstTextBaseline) {
+                let selected = entries.first(where: { $0.active })
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundColor(.secondary)
                         .frame(width: 12)
                     Text(entries.first?.stageLabel ?? stage.capitalized)
-                        .font(.headline)
-                    Text(entries.count == 1 ? "" : " — pick one")
-                        .font(.caption)
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
-                    Spacer()
-                    if !expanded, let current = entries.first(where: { $0.active }) ?? entries.first {
-                        Text(current.name)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    Spacer(minLength: 8)
+                    // The selected model is the answer this row exists to give,
+                    // so it is the loudest thing on it. "— pick one" used to sit
+                    // where the stage label is and read as an outstanding task
+                    // even on stages that already had a selection.
+                    if let selected {
+                        if let badge = selected.licenceBadge, !badge.safe {
+                            licencePill(badge.text, safe: false, licence: selected.licence)
+                        }
+                        Text(selected.name)
+                            .font(.headline)
                             .lineLimit(1)
                             .truncationMode(.tail)
+                    } else {
+                        Text("None selected")
+                            .font(.headline)
+                            .foregroundColor(.orange)
                     }
                 }
                 .padding(.horizontal, 20)
@@ -484,19 +585,26 @@ struct ModelManagerView: View {
             .help(expanded ? "Collapse \(entries.first?.stageLabel ?? stage)" : "Expand \(entries.first?.stageLabel ?? stage)")
 
             if expanded {
-                ForEach(entries) { status in
-                    ModelRowView(
-                        status: status,
-                        allowSelection: entries.count > 1,
-                        capabilityReport: viewModel.modelCapabilities[status.id],
-                        capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
-                        onDownload: { viewModel.onDownloadModelByKey(status.id) },
-                        onDelete: { viewModel.onDeleteModelByKey(status.id) },
-                        onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
-                        onCheckCapability: { viewModel.onCheckModelCapability(status.id) }
-                    )
-                    Divider()
-                        .padding(.horizontal, 16)
+                // Planned models can never be chosen, so they are separated out
+                // rather than presented alongside real options with a radio
+                // button they cannot honour.
+                let choosable = entries.filter { !$0.planned }
+                let notYet = entries.filter { $0.planned }
+                ForEach(choosable) { status in
+                    modelRow(status, stageEntryCount: choosable.count)
+                    Divider().padding(.horizontal, 16)
+                }
+                if !notYet.isEmpty {
+                    Text("Not yet available")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
+                        .padding(.bottom, 2)
+                    ForEach(notYet) { status in
+                        modelRow(status, stageEntryCount: choosable.count)
+                        Divider().padding(.horizontal, 16)
+                    }
                 }
             }
         }
@@ -509,6 +617,9 @@ struct ModelRowView: View {
     /// a radio-style selector. Stages with only one candidate (VAD,
     /// Voice Library) hide the picker and just show installed state.
     let allowSelection: Bool
+    /// True when this row's description and provenance block is showing.
+    let expanded: Bool
+    let onToggleExpanded: () -> Void
     /// Latest capability-preflight report for this row, if the user has
     /// run "Check compatibility". Rendered inline under the description.
     let capabilityReport: ModelCapabilityReport?
@@ -550,11 +661,16 @@ struct ModelRowView: View {
                             : "Download first to select this backend"))
             )
         } else {
-            // Single-option stage: still show an installed/uninstalled
-            // dot so the row shape is consistent.
-            Image(systemName: status.installed ? "checkmark.circle.fill" : "arrow.down.circle")
+            // Single-option stage. Same radio vocabulary as everywhere else: a
+            // green tick here made Speaker Embeddings look like a different kind
+            // of control, so it was unclear whether it was even choosable.
+            Image(systemName: status.active ? "largecircle.fill.circle"
+                  : (status.installed ? "circle" : "circle.dashed"))
                 .font(.title2)
-                .foregroundColor(status.installed ? .green : .secondary)
+                .foregroundColor(status.active ? .accentColor : .secondary.opacity(status.installed ? 1 : 0.4))
+                .help(status.active
+                      ? "Active — the only backend for \(friendlyStage(status.stage))"
+                      : "The only backend for \(friendlyStage(status.stage))")
         }
     }
 
@@ -567,6 +683,22 @@ struct ModelRowView: View {
             .background(color, in: Capsule())
     }
 
+    /// Licence status badge. Deliberately quieter than the tag pills — it is a
+    /// constraint to notice, not a label to shout — but always present on the
+    /// collapsed row, because "may this ship?" should never need a click.
+    private func licencePill(_ text: String, safe: Bool, licence: String?) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill((safe ? Color.secondary : Color.orange).opacity(0.18)))
+            .foregroundColor(safe ? .secondary : .orange)
+            .help(licence.map { "\($0). " + (safe
+                ? "Safe to include in a distributed build."
+                : "Local personal use only — must never ship in a distributed build.") }
+                ?? text)
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             selector
@@ -575,24 +707,42 @@ struct ModelRowView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(status.name)
-                        .font(.headline)
+                    Button(action: onToggleExpanded) {
+                        HStack(spacing: 5) {
+                            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            Text(status.name)
+                                .font(.headline)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(expanded ? "Hide details" : "Show what this model is and what uses it")
+
+                    // The licence position rides on the collapsed row: whether a
+                    // model may ship is too consequential to require expanding.
+                    if let badge = status.licenceBadge {
+                        licencePill(badge.text, safe: badge.safe, licence: status.licence)
+                    }
+
                     Spacer()
                     if !status.builtIn && status.sizeMB > 0 {
-                        Text(formatSize(mb: status.sizeMB))
-                            .font(.callout)
+                        // "49 MB" meant consumed disk next to Installed and
+                        // download cost next to Download, styled identically.
+                        Text(status.installed
+                             ? "\(formatSize(mb: status.sizeMB)) on disk"
+                             : "\(formatSize(mb: status.sizeMB)) download")
+                            .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
 
-                // Tag pills on their own line — several at once (e.g.
-                // EXPERIMENTAL + REVIEW ONLY + PLANNED) no longer crush the
-                // model name or wrap mid-pill.
-                if (status.active && status.installed) || status.builtIn || status.experimental || status.reviewOnly || status.planned {
+                // ACTIVE is gone: the filled radio and the stage header already
+                // say it, and a third restatement competed with the badges that
+                // carry information the other two do not.
+                if status.builtIn || status.experimental || status.reviewOnly || status.planned {
                     HStack(spacing: 6) {
-                        if status.active && status.installed {
-                            tagPill("ACTIVE", .green)
-                        }
                         if status.builtIn {
                             tagPill("BUILT-IN", .gray)
                         }
@@ -608,22 +758,24 @@ struct ModelRowView: View {
                     }
                 }
 
-                Text(status.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                if expanded {
+                    Text(status.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
 
-                // Make the stage-relationship explicit so the user can
-                // see why a supporting model exists or which support
-                // a pipeline backend needs.
-                if !status.dependsOn.isEmpty {
-                    Text("Uses: \(status.dependsOn)")
-                        .font(.caption2.italic())
-                        .foregroundColor(.secondary.opacity(0.85))
-                }
-                if !status.usedBy.isEmpty {
-                    Text("Used by: \(status.usedBy)")
-                        .font(.caption2.italic())
-                        .foregroundColor(.secondary.opacity(0.85))
+                    // Make the stage-relationship explicit so the user can
+                    // see why a supporting model exists or which support
+                    // a pipeline backend needs.
+                    if !status.dependsOn.isEmpty {
+                        Text("Uses: \(status.dependsOn)")
+                            .font(.caption2.italic())
+                            .foregroundColor(.secondary.opacity(0.85))
+                    }
+                    if !status.usedBy.isEmpty {
+                        Text("Used by: \(status.usedBy)")
+                            .font(.caption2.italic())
+                            .foregroundColor(.secondary.opacity(0.85))
+                    }
                 }
 
                 if status.downloading {
