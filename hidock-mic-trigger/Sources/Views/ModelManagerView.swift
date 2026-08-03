@@ -445,10 +445,13 @@ struct ModelManagerView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundColor(.orange)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("macOS asks permission every time this token is read.")
+                        Text("macOS will ask permission once more for this token.")
                             .font(.caption)
-                        Text("It was saved by an earlier build, so it is no longer tied to this "
-                             + "app. Remove it and save it again to stop the prompts.")
+                        Text("It was saved by an earlier build, so its access is not yet tied to "
+                             + "this app. The next time the token is used, HiDock re-saves it "
+                             + "under this app's identity and the prompts stop for good — "
+                             + "including after future updates. Removing and saving it now does "
+                             + "the same thing immediately.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }

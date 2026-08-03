@@ -136,6 +136,19 @@ enum HuggingFaceToken {
         cacheLock.unlock()
     }
 
+    /// Read the token, repairing its access list the first time that is needed.
+    ///
+    /// This is the fix for "every new build asks permission again". The grant
+    /// macOS records belongs to the *item's* access list, not to the app, and an
+    /// item whose list was captured from a differently-signed build stops
+    /// matching the moment the app is rebuilt — so clicking "Always Allow"
+    /// cannot help, and neither could anything else from inside the app.
+    ///
+    /// So on the first read that needed a prompt, rewrite the item with an
+    /// access list naming this application. That list is expressed as the app's
+    /// *designated requirement* (identifier + team), which every subsequent
+    /// Developer ID build satisfies — so it survives releases and deploys
+    /// instead of breaking on each one. Costs one prompt, once, ever.
     static func load() -> String? {
         cacheLock.lock()
         defer { cacheLock.unlock() }
@@ -144,6 +157,43 @@ enum HuggingFaceToken {
         case .token(let token): return token
         case .unread: break
         }
+        // Ask before reading, so we can tell a promptless read from one that
+        // raised a dialog. Cheap, and the only way to know a repair is due.
+        let neededPrompt = !isReadableWithoutPrompting()
+        let token = readStoredToken()
+        if let token, neededPrompt, rewriteWithSelfOwnedAccess(token) {
+            NSLog("HuggingFaceToken: repaired Keychain access — this build now owns "
+                  + "the item, so future releases will not ask again")
+        }
+        cache = token.map(Cached.token) ?? .notFound
+        return token
+    }
+
+    /// Re-create the item so its access list belongs to the running app.
+    /// Returns true when the item is promptless afterwards.
+    private static func rewriteWithSelfOwnedAccess(_ token: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        guard let access = selfOnlyAccess() else { return false }
+        // Delete-then-add, because kSecAttrAccess cannot be changed by update.
+        // The plaintext is in hand, so a failure between the two is recoverable
+        // by the add that follows immediately.
+        SecItemDelete(query as CFDictionary)
+        var add = query
+        add[kSecValueData as String] = Data(token.utf8)
+        add[kSecAttrAccess as String] = access
+        guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else {
+            NSLog("HuggingFaceToken: could not repair Keychain access; the token "
+                  + "may need removing and saving again")
+            return false
+        }
+        return isReadableWithoutPrompting()
+    }
+
+    private static func readStoredToken() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -152,15 +202,13 @@ enum HuggingFaceToken {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: CFTypeRef?
+        // Reads the Keychain and nothing else — `load` owns the cache, so there
+        // is exactly one writer and no chance of the two disagreeing.
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data,
               let token = String(data: data, encoding: .utf8),
               !token.isEmpty
-        else {
-            cache = .notFound
-            return nil
-        }
-        cache = .token(token)
+        else { return nil }
         return token
     }
 
