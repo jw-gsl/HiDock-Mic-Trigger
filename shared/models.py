@@ -794,6 +794,10 @@ def get_model_status() -> dict[str, dict]:
                 info.get("backend_key", key)
             ).get("distributable"),
             "licence": speaker_embed_licence(info.get("backend_key", key)).get("licence"),
+            # Gated models authenticate their download with a Hugging Face token.
+            # Surfaced so the app can read that credential only when something
+            # actually needs it, instead of on every pipeline subprocess.
+            "gated": info.get("gated", False),
         }
     return statuses
 

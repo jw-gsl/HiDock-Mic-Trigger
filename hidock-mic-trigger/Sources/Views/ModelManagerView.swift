@@ -59,6 +59,9 @@ struct ModelStatus: Identifiable {
     var distributable: Bool? = nil
     /// The licence itself, for the badge's tooltip.
     var licence: String? = nil
+    /// True when downloading or running this model authenticates with a Hugging
+    /// Face token. Only pyannote's diarizer is gated today.
+    var gated: Bool = false
 
     /// Short badge text for the licence, or nil when there is nothing to say.
     /// Only models with a known licence position get a badge; a model outside
@@ -321,6 +324,9 @@ struct ModelManagerView: View {
     /// refreshed only when this view actually changes the token.
     @State private var huggingFaceRedacted: String?
     @State private var huggingFaceLoaded = false
+    /// False when the stored token can only be read by prompting — checked
+    /// without prompting, via kSecUseAuthenticationUIFail.
+    @State private var huggingFaceReadable = true
 
     private let pipelineStageOrder = ["transcription", "diarization"]
     private let supportingStageOrder = ["vad", "embedding", "identity_review"]
@@ -419,6 +425,7 @@ struct ModelManagerView: View {
                             // an item stranded by an earlier build's signature:
                             // Remove then Save, and the prompts stop.
                             huggingFaceRedacted = HuggingFaceToken.redacted()
+                            huggingFaceReadable = HuggingFaceToken.isReadableWithoutPrompting()
                             huggingFaceStatus = "Token saved to your Keychain."
                         } catch {
                             huggingFaceStatus = error.localizedDescription
@@ -427,6 +434,26 @@ struct ModelManagerView: View {
                     .disabled(huggingFaceTokenEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 Spacer()
+            }
+
+            // A token whose access list no longer matches this build reads fine —
+            // but only by asking permission every time, which cannot be fixed
+            // from the Keychain side. Say so plainly and name the remedy, rather
+            // than leaving the prompts unexplained.
+            if huggingFaceRedacted != nil && !huggingFaceReadable {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("macOS asks permission every time this token is read.")
+                            .font(.caption)
+                        Text("It was saved by an earlier build, so it is no longer tied to this "
+                             + "app. Remove it and save it again to stop the prompts.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.top, 2)
             }
 
             if !huggingFaceStatus.isEmpty {
@@ -442,6 +469,7 @@ struct ModelManagerView: View {
             // a re-appear (tab switch, window refocus) does not read again.
             guard !huggingFaceLoaded else { return }
             huggingFaceLoaded = true
+            huggingFaceReadable = HuggingFaceToken.isReadableWithoutPrompting()
             huggingFaceRedacted = HuggingFaceToken.redacted()
         }
     }
