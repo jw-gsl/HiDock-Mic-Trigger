@@ -588,6 +588,21 @@ struct TranscriptVersion: Identifiable {
     let title: String
 }
 
+/// Who the speakers were in one stored revision.
+///
+/// A history list of timestamps and reasons still cannot answer the only question
+/// that matters before restoring — "what would I be going back to?" Two snapshots
+/// two seconds apart are indistinguishable from their labels alone, so each row
+/// can be expanded to show the names it holds and how they differ from now.
+struct TranscriptVersionDetail {
+    /// speaker id → name, as stored in that revision.
+    let speakerNames: [String: String]
+    /// Ids whose name differs from the transcript's current state.
+    let changedIds: Set<String>
+    /// Ids confirmed in that revision, so a restore's cost is visible.
+    let verifiedIds: Set<String>
+}
+
 enum TranscriptRediarizeStatus {
     case running
     case completed(TranscriptRediarizeSummary, DiarizedTranscript)
@@ -717,6 +732,10 @@ struct TranscriptViewerView: View {
     @State private var showTranscriptHistory = false
     @State private var transcriptVersions: [TranscriptVersion] = []
     @State private var pendingTranscriptRestore: TranscriptVersion?
+    /// Which history row is expanded, and the detail read for each one so far.
+    /// Outer nil = not read yet; inner nil = read and unavailable.
+    @State private var expandedVersionId: String?
+    @State private var versionDetails: [String: TranscriptVersionDetail?] = [:]
     @StateObject var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
@@ -756,6 +775,8 @@ struct TranscriptViewerView: View {
     var onSnapshotTranscript: ((String, String) -> Void)? = nil
     var onListTranscriptVersions: ((String) -> [TranscriptVersion])? = nil
     var onRestoreTranscriptVersion: ((String, String) -> Void)? = nil
+    /// Read one stored revision's speakers so a history row can be expanded.
+    var onTranscriptVersionDetail: ((String, String) -> TranscriptVersionDetail?)? = nil
     /// Search the user's locally synced macOS calendar around this recording.
     var onFindCalendarEvents: ((String, Double, @escaping ([CalendarMeetingCandidate]) -> Void) -> Void)?
     /// Query the already-authenticated Microsoft 365 MCP configured in Claude.
@@ -1248,7 +1269,7 @@ struct TranscriptViewerView: View {
         guard transcript.segments.contains(where: { $0.speakerId == newId }) else { return }
         transcript.speakerNames["\(newId)"] = trimmed
         setMeta(newId, source: "user", verified: true, confidence: nil)
-        saveTranscript()
+        saveTranscript("Before assigning selected text to \(name)")
         // This was an explicit human identification, so it is trusted training
         // evidence as well as a correction to this transcript. The sidecar has
         // just been saved, allowing the enrolment path to use the selected
@@ -1377,7 +1398,7 @@ struct TranscriptViewerView: View {
             onEnrollSpeaker(speakerName(for: newSpeakerId), audioPath, start, end)
         }
 
-        saveTranscript()
+        saveTranscript("Before reassigning selected text")
     }
 
     /// Split one diarized segment around a selected word range. New sidecars
@@ -2727,7 +2748,7 @@ struct TranscriptViewerView: View {
         let renameFrom = previousMeta?.verified == true ? previousName : nil
         enrollConfirmed(trimmed, speakerId: speakerId, previousName: renameFrom)
 
-        saveTranscript()
+        saveTranscript("Before renaming \(previousName) → \(trimmed)")
         recordConfirmationForNaming(speakerId: speakerId, name: trimmed)
         refreshLibraryNames()
     }
@@ -2859,7 +2880,7 @@ struct TranscriptViewerView: View {
         setMeta(id, source: existingSource == "user" ? "user" : "auto",
                 verified: true, confidence: speakerMeta(for: id)?.confidence)
         enrollConfirmed(name, speakerId: id)
-        saveTranscript()
+        saveTranscript("Before confirming \(name)")
         recordConfirmationForNaming(speakerId: id, name: name)
         refreshLibraryNames()
     }
@@ -2868,7 +2889,7 @@ struct TranscriptViewerView: View {
     /// but is NOT enrolled into the voice library.
     private func markUnknown(_ id: Int) {
         setMeta(id, source: "unknown", verified: true, confidence: nil)
-        saveTranscript()
+        saveTranscript("Before marking speaker \(id + 1) unknown")
         onRecordSpeakerSuggestion?(filePath, id, "unknown", nil, nil)
     }
 
@@ -2899,7 +2920,9 @@ struct TranscriptViewerView: View {
             editingSpeakerId = nil
             nameFieldFocused = false
         }
-        if save { saveTranscript() }
+        // `save: false` is the batch path (clearAllUnverifiedSpeakers), which
+        // snapshots once for the whole sweep rather than once per speaker.
+        if save { saveTranscript("Before clearing speaker \(id + 1)") }
     }
 
     /// Clear every unconfirmed auto/typed assignment in one pass. Confirmed
@@ -2910,7 +2933,7 @@ struct TranscriptViewerView: View {
         for id in ids {
             clearSpeakerAssignment(id, save: false)
         }
-        saveTranscript()
+        saveTranscript("Before clearing \(ids.count) unconfirmed speaker(s)")
     }
 
     /// True when this multi-speaker meeting still has anyone not fully
@@ -2956,7 +2979,7 @@ struct TranscriptViewerView: View {
             editingSpeakerId = nil
             nameFieldFocused = false
         }
-        if changed { saveTranscript() }
+        if changed { saveTranscript("Before marking all speakers unknown") }
     }
 
     /// Merge the just-renamed speaker into the existing speaker that already has
@@ -2967,7 +2990,7 @@ struct TranscriptViewerView: View {
         // The surviving speaker now carries a confirmed, user-set identity.
         setMeta(merge.to, source: "user", verified: true, confidence: nil)
         enrollConfirmed(merge.name, speakerId: merge.to, previousName: previousName)
-        saveTranscript()
+        saveTranscript("Before merging two speakers")
         refreshLibraryNames()
     }
 
@@ -3383,7 +3406,7 @@ struct TranscriptViewerView: View {
     private func undoMerge() {
         guard let previous = transcriptHistory.popLast() else { return }
         transcript = previous
-        saveTranscript()
+        saveTranscript("Before undoing a speaker merge")
     }
 
     private func mapSpeaker(from sourceId: Int, to targetId: Int) {
@@ -3408,7 +3431,66 @@ struct TranscriptViewerView: View {
         // clean transcript into a wall of text and broke word-range selection.
         // Leaving the segments as-is keeps the readable per-turn blocks.
 
-        saveTranscript()
+        saveTranscript("Before mapping one speaker onto another")
+    }
+
+    private func toggleVersionExpansion(_ version: TranscriptVersion) {
+        if expandedVersionId == version.id {
+            expandedVersionId = nil
+            return
+        }
+        expandedVersionId = version.id
+        // Read lazily and cache: `git show` per row on every render would make
+        // scrolling the list spawn a subprocess per frame.
+        if versionDetails[version.id] == nil {
+            versionDetails[version.id] = onTranscriptVersionDetail?(filePath, version.id)
+                .map { Optional($0) } ?? .some(nil)
+        }
+    }
+
+    /// The speakers stored in one snapshot. Names that differ from the current
+    /// transcript are marked, because those are what a restore would change.
+    @ViewBuilder
+    private func versionDetailRows(for version: TranscriptVersion) -> some View {
+        if let cached = versionDetails[version.id], let detail = cached {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(detail.speakerNames.keys.sorted {
+                    (Int($0) ?? 0) < (Int($1) ?? 0)
+                }, id: \.self) { id in
+                    HStack(spacing: 4) {
+                        if detail.verifiedIds.contains(id) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 8))
+                                .foregroundColor(.green)
+                        } else {
+                            Circle().fill(Color.secondary.opacity(0.3))
+                                .frame(width: 6, height: 6)
+                        }
+                        Text(detail.speakerNames[id] ?? "")
+                            .font(.caption2)
+                            .foregroundColor(detail.changedIds.contains(id) ? .orange : .secondary)
+                        if detail.changedIds.contains(id) {
+                            Text("differs from now")
+                                .font(.system(size: 9))
+                                .foregroundColor(.orange.opacity(0.8))
+                        }
+                    }
+                }
+                if detail.changedIds.isEmpty {
+                    Text("Identical to the current transcript.")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+            }
+        } else if versionDetails[version.id] != nil {
+            Text("Could not read this snapshot.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        } else {
+            Text("Reading…")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
     }
 
     @ViewBuilder
@@ -3425,16 +3507,36 @@ struct TranscriptViewerView: View {
                     .foregroundColor(.secondary)
             } else {
                 ForEach(transcriptVersions) { version in
-                    HStack(spacing: 8) {
-                        Text(version.title)
-                            .font(.caption)
-                            .lineLimit(2)
-                        Spacer()
-                        Button("Restore") {
-                            pendingTranscriptRestore = version
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            // Disclosure, not a separate control: the question
+                            // "what am I restoring?" belongs on the row that
+                            // offers to restore it.
+                            Button {
+                                toggleVersionExpansion(version)
+                            } label: {
+                                Image(systemName: expandedVersionId == version.id
+                                      ? "chevron.down" : "chevron.right")
+                                    .font(.caption2)
+                                    .frame(width: 10)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show the speakers stored in this snapshot")
+
+                            Text(version.title)
+                                .font(.caption)
+                                .lineLimit(2)
+                            Spacer()
+                            Button("Restore") {
+                                pendingTranscriptRestore = version
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        if expandedVersionId == version.id {
+                            versionDetailRows(for: version)
+                                .padding(.leading, 18)
+                        }
                     }
                 }
             }
@@ -3458,9 +3560,18 @@ struct TranscriptViewerView: View {
         }
     }
 
-    private func saveTranscript() {
+    /// Persist the transcript, taking a rollback snapshot of the state *before*
+    /// this change.
+    ///
+    /// `reason` becomes the label in the History list, so it has to name the
+    /// change that is about to happen. Every caller used to pass nothing and get
+    /// "Before speaker edit", which made the list useless the moment there were
+    /// two entries: naming Garry Clarke and then confirming James Whiting were two
+    /// seconds apart on Rec02 and read as identical rows, with no way to tell which
+    /// was which or what restoring either would do.
+    private func saveTranscript(_ reason: String = "Before speaker edit") {
         do {
-            onSnapshotTranscript?(filePath, "Before speaker edit")
+            onSnapshotTranscript?(filePath, reason)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(transcript)
