@@ -16,6 +16,35 @@ enum HuggingFaceToken {
     private static let service = "com.hidock.tools.huggingface"
     private static let account = "hf-access-token"
 
+    /// One Keychain read per process, not one per caller.
+    ///
+    /// Every `load()` is a `SecItemCopyMatching`, and macOS prompts for access on
+    /// each one whenever the item's ACL does not match the running app — which is
+    /// the case for any item created by an earlier build signed with a different
+    /// identity. Callers made that painful: the Models page read it four times per
+    /// render, and `inject(into:)` reads it again for every transcription
+    /// subprocess. The result was an app that asked permission over and over.
+    ///
+    /// The token only changes through `save` / `delete` in this process, so both
+    /// update the cache and the stored value can never be stale. `notFound` is
+    /// cached too — a missing token is an answer, and re-asking for it is what
+    /// produced repeat prompts on machines with no token at all.
+    private enum Cached {
+        case unread
+        case notFound
+        case token(String)
+    }
+    private static var cache: Cached = .unread
+    private static let cacheLock = NSLock()
+
+    /// Forget the cached value so the next read goes back to the Keychain. For
+    /// tests, and for after an external change to the stored item.
+    static func invalidateCache() {
+        cacheLock.lock()
+        cache = .unread
+        cacheLock.unlock()
+    }
+
     /// The licence that must be accepted before the token can fetch the model.
     /// Free for research and commercial use — the gate is usage tracking.
     static let licenceURL = URL(
@@ -40,15 +69,29 @@ enum HuggingFaceToken {
         add[kSecValueData as String] = Data(trimmed.utf8)
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else {
+            invalidateCache()
             throw NSError(
                 domain: "HuggingFaceKeychain", code: Int(status),
                 userInfo: [NSLocalizedDescriptionKey:
                     "Could not save the Hugging Face token to the Keychain"]
             )
         }
+        // Delete-then-add re-creates the item, so its ACL now belongs to *this*
+        // app. That is what clears the repeat-prompt state left by an item an
+        // earlier, differently-signed build created.
+        cacheLock.lock()
+        cache = .token(trimmed)
+        cacheLock.unlock()
     }
 
     static func load() -> String? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        switch cache {
+        case .notFound: return nil
+        case .token(let token): return token
+        case .unread: break
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -61,7 +104,11 @@ enum HuggingFaceToken {
               let data = result as? Data,
               let token = String(data: data, encoding: .utf8),
               !token.isEmpty
-        else { return nil }
+        else {
+            cache = .notFound
+            return nil
+        }
+        cache = .token(token)
         return token
     }
 
@@ -72,6 +119,9 @@ enum HuggingFaceToken {
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
+        cacheLock.lock()
+        cache = .notFound
+        cacheLock.unlock()
     }
 
     static var isConfigured: Bool { load() != nil }
