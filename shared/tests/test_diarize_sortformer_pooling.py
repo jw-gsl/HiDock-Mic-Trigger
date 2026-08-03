@@ -264,3 +264,77 @@ def test_repool_keeps_a_match_when_the_library_cannot_compare(library_says):
     assert out["Speaker 2"]["name"] == "Jeevan"
     assert out["Speaker 2"]["source"] == "auto"
     assert out["Speaker 2"]["confidence"] == 0.82
+
+
+# --- confirmed speakers are not merge fodder ---------------------------------
+
+class TestConfirmedSpeakersSurviveACountReduction:
+    """Merging is driven by cosine alone, which is blind to review work.
+
+    Reported 2026-08-03 against Rec88: 14 detected speakers, 7 already named,
+    and reducing the count to 9 had nothing stopping it from collapsing two of
+    the named ones into one another — silently attributing one person's words to
+    another and undoing the confirmation by hand.
+    """
+
+    def test_two_confirmed_speakers_are_never_fused(self):
+        # Speaker 1 and Speaker 2 are near-identical by cosine, so an unguarded
+        # merge picks that pair first. Both are confirmed, so it must not.
+        turns = [
+            (0.0, 100.0, "Speaker 1"),
+            (100.0, 200.0, "Speaker 2"),
+            (200.0, 300.0, "Speaker 3"),
+        ]
+        embeddings = {"Speaker 1": JEEVAN, "Speaker 2": JEEVAN_ISH, "Speaker 3": OTHER}
+        out = _merge_labels_to_count(
+            turns, embeddings, 2, protected={"Speaker 1", "Speaker 2"},
+        )
+        survivors = {label for _, _, label in out}
+        assert "Speaker 1" in survivors
+        assert "Speaker 2" in survivors
+
+    def test_the_count_floor_is_the_number_of_confirmed_speakers(self, capsys):
+        turns = [
+            (0.0, 100.0, "Speaker 1"),
+            (100.0, 200.0, "Speaker 2"),
+            (200.0, 300.0, "Speaker 3"),
+        ]
+        embeddings = {"Speaker 1": JEEVAN, "Speaker 2": JEEVAN_ISH, "Speaker 3": OTHER}
+        out = _merge_labels_to_count(
+            turns, embeddings, 1, protected={"Speaker 1", "Speaker 2", "Speaker 3"},
+        )
+        assert len({label for _, _, label in out}) == 3
+        assert "confirmed" in capsys.readouterr().err
+
+    def test_a_confirmed_speaker_still_absorbs_its_own_fragments(self):
+        """Protection blocks confirmed-vs-confirmed, not all merging."""
+        turns = [
+            (0.0, 300.0, "Speaker 1"),      # confirmed
+            (300.0, 400.0, "Speaker 2"),    # same voice, not confirmed
+            (400.0, 500.0, "Speaker 3"),    # someone else
+        ]
+        embeddings = {"Speaker 1": JEEVAN, "Speaker 2": JEEVAN_ISH, "Speaker 3": OTHER}
+        out = _merge_labels_to_count(turns, embeddings, 2, protected={"Speaker 1"})
+        assert [label for _, _, label in out] == ["Speaker 1", "Speaker 1", "Speaker 3"]
+
+    def test_the_confirmed_label_survives_even_when_it_speaks_less(self):
+        """Identity travels with the survivor, so the named label must win."""
+        turns = [
+            (0.0, 30.0, "Speaker 1"),       # confirmed, but brief
+            (30.0, 400.0, "Speaker 2"),     # same voice, longer, unconfirmed
+            (400.0, 500.0, "Speaker 3"),
+        ]
+        embeddings = {"Speaker 1": JEEVAN, "Speaker 2": JEEVAN_ISH, "Speaker 3": OTHER}
+        out = _merge_labels_to_count(turns, embeddings, 2, protected={"Speaker 1"})
+        assert [label for _, _, label in out] == ["Speaker 1", "Speaker 1", "Speaker 3"]
+
+    def test_no_confirmations_behaves_exactly_as_before(self):
+        turns = [
+            (0.0, 60.0, "Speaker 1"),
+            (60.0, 450.0, "Speaker 2"),
+            (450.0, 540.0, "Speaker 3"),
+        ]
+        embeddings = {"Speaker 1": JEEVAN, "Speaker 2": JEEVAN_ISH, "Speaker 3": OTHER}
+        assert _merge_labels_to_count(turns, embeddings, 2) == _merge_labels_to_count(
+            turns, embeddings, 2, protected=set(),
+        )

@@ -1087,6 +1087,7 @@ def _merge_labels_to_count(
     turns: list[tuple[float, float, str]],
     label_embeddings: dict,
     count: int,
+    protected: set[str] | None = None,
 ) -> list[tuple[float, float, str]]:
     """Merge global labels down to `count` by repeatedly combining the two
     most similar clusters (single-linkage max cosine over member embeddings).
@@ -1137,6 +1138,7 @@ def _merge_labels_to_count(
     if count < 1 or len(labels) <= count:
         return turns
     speech = _label_speech_seconds(turns)
+    protected_labels = {lab for lab in (protected or ()) if lab in labels}
 
     mergeable = [
         lab for lab in labels
@@ -1146,11 +1148,36 @@ def _merge_labels_to_count(
     if len(mergeable) <= count:
         return turns
 
+    # A confirmed speaker is a fact, not a hypothesis. Merging is driven purely
+    # by cosine similarity, so asking for a lower count could fuse two people the
+    # user had already identified by hand — silently undoing review work and
+    # attributing one person's words to another. Rec88 is the shape of it: 14
+    # labels, 7 already named, and nothing stopping a reduction to 9 from
+    # collapsing two of the named ones together.
+    #
+    # So the requested count cannot go below the number of confirmed speakers.
+    # Stop at that floor and say so, rather than honouring a number by
+    # destroying the evidence the user supplied.
+    floor = len({lab for lab in mergeable if lab in protected_labels})
+    target = count
+    if floor > count:
+        target = floor
+        print(
+            f"Sortformer: {floor} speakers are confirmed, so merging stops at "
+            f"{floor} rather than the requested {count}",
+            file=sys.stderr,
+        )
+
     clusters: list[list[str]] = [[lab] for lab in mergeable]
-    while len(clusters) > count:
+    while len(clusters) > target:
         best = None
         for i in range(len(clusters)):
             for j in range(i + 1, len(clusters)):
+                # Never fuse two confirmed speakers into one another. Each may
+                # still absorb unconfirmed fragments of its own voice.
+                if (any(lab in protected_labels for lab in clusters[i])
+                        and any(lab in protected_labels for lab in clusters[j])):
+                    continue
                 sim = max(
                     _cosine(label_embeddings[a], label_embeddings[b])
                     for a in clusters[i]
@@ -1158,7 +1185,9 @@ def _merge_labels_to_count(
                 )
                 if best is None or sim > best[0]:
                     best = (sim, i, j)
-        if best is None:  # pragma: no cover - two clusters always yield a pair
+        if best is None:
+            # Every remaining pair is confirmed-vs-confirmed. Stopping short is
+            # correct: there is no merge left that does not destroy a decision.
             break
         _, i, j = best
         clusters[i].extend(clusters[j])
@@ -1166,7 +1195,17 @@ def _merge_labels_to_count(
 
     mapping = {}
     for cluster in clusters:
-        survivor = max(cluster, key=lambda lab: (speech.get(lab, 0.0), -labels.index(lab)))
+        # A confirmed label outranks a longer-speaking unconfirmed one. Identity
+        # travels with the survivor, so letting an unconfirmed label win would
+        # discard the name the user had already attached to this voice.
+        survivor = max(
+            cluster,
+            key=lambda lab: (
+                lab in protected_labels,
+                speech.get(lab, 0.0),
+                -labels.index(lab),
+            ),
+        )
         for member in cluster:
             mapping[member] = survivor
     # Labels with no embedding were never candidates, so they pass through.
@@ -2254,8 +2293,22 @@ def diarize(
     )
     if plan == "merge-down":
         before = len(internal_labels)
+        # Labels the user has already confirmed, derived from the pinned
+        # stretches. Merging must not collapse two of these together.
+        protected_labels: set[str] = set()
+        for p_start, p_end in pinned_intervals or ():
+            for t_start, t_end, lab in renamed_turns:
+                if t_start < p_end and t_end > p_start:
+                    protected_labels.add(lab)
+        if protected_labels:
+            print(
+                f"Sortformer: {len(protected_labels)} confirmed speaker(s) protected "
+                f"from the merge: {', '.join(sorted(protected_labels))}",
+                file=sys.stderr,
+            )
         renamed_turns = _merge_labels_to_count(
-            renamed_turns, label_embs, effective_n_speakers
+            renamed_turns, label_embs, effective_n_speakers,
+            protected=protected_labels,
         )
         surviving = {lab for _, _, lab in renamed_turns}
         internal_labels = [lab for lab in internal_labels if lab in surviving]

@@ -44,6 +44,30 @@ func compactRecordingLabel(_ fileName: String) -> String {
     return label.isEmpty ? stem : label
 }
 
+/// A table column that is either a fixed width or allowed to compress.
+///
+/// Every column used to be a hard `.frame(width:)`, which made the table's
+/// minimum width the sum of all of them — 1059pt with the detail pane open. The
+/// pane's own 480pt minimum plus a 1280pt window left the table only 800pt, so it
+/// overflowed by 259pt and AppKit *centred* the overflow, producing a ~129pt gap
+/// down the left that grew as the window narrowed. That was the phantom "gutter":
+/// not padding, just content too wide to fit being centred in the space it had.
+///
+/// The widest, most variable column (Meeting) is flexible instead, so the table
+/// compresses to whatever it is offered rather than overflowing.
+private struct ColumnWidth: ViewModifier {
+    let width: CGFloat
+    let flexible: Bool
+
+    func body(content: Content) -> some View {
+        if flexible {
+            content.frame(minWidth: 0, maxWidth: width, alignment: .leading)
+        } else {
+            content.frame(width: width, alignment: .leading)
+        }
+    }
+}
+
 struct RecordingsTableView: View {
     @ObservedObject var viewModel: HiDockViewModel
     /// Track whether we've programmatically restored the initial position for
@@ -100,7 +124,7 @@ struct RecordingsTableView: View {
                 Text("").frame(width: 70) // actions
                 // Meeting is last: it is the widest, most variable cell, so
                 // trailing it keeps every fixed-width column aligned.
-                headerButton("Meeting", key: nil, width: 260)
+                headerButton("Meeting", key: nil, width: 260, flexible: true)
                 Spacer(minLength: 0)
             }
             .font(.caption.weight(.medium))
@@ -224,7 +248,7 @@ struct RecordingsTableView: View {
     // MARK: - Header
 
     @ViewBuilder
-    private func headerButton(_ title: String, key: String?, width: CGFloat) -> some View {
+    private func headerButton(_ title: String, key: String?, width: CGFloat, flexible: Bool = false) -> some View {
         if let key = key {
             Button {
                 if viewModel.syncSortKey == key {
@@ -243,10 +267,10 @@ struct RecordingsTableView: View {
                 }
             }
             .buttonStyle(.plain)
-            .frame(width: width, alignment: .leading)
+            .modifier(ColumnWidth(width: width, flexible: flexible))
         } else {
             Text(title)
-                .frame(width: width, alignment: .leading)
+                .modifier(ColumnWidth(width: width, flexible: flexible))
         }
     }
 
@@ -373,7 +397,7 @@ struct RecordingsTableView: View {
             // so its calendar state lives in `mergedFileCalendarTitles` the same way
             // its transcript lives in `mergedFileTranscriptPaths`.
             mergeParentMeetingCell(group)
-                .frame(width: 260, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: 260, alignment: .leading)
 
             Spacer(minLength: 0)
         }
@@ -896,7 +920,7 @@ struct RecordingsTableView: View {
             .frame(width: 70, alignment: .leading)
 
             meetingCell(entry)
-                .frame(width: 260, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: 260, alignment: .leading)
 
             // Per-row "Potential merge" toggle for candidate rows. Click
             // ticks the row; once 2+ are ticked, the toolbar surfaces
