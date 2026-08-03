@@ -268,9 +268,12 @@ struct VoiceLibraryView: View {
                 .labelsHidden()
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .onChange(of: tab) { newTab in
-                    if newTab == .duplicates { loadDuplicatesIfNeeded() }
-                }
+                // Load when the window opens, not when the Duplicates tab is
+                // selected. Deferring it made the badge worthless: the count was
+                // zero until you had already gone looking, so it could never be
+                // what told you to look. The comparison runs off the main thread,
+                // so the badge simply appears a moment after the window does.
+                .onAppear { loadDuplicatesIfNeeded() }
 
                 Divider()
             }

@@ -7521,6 +7521,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptPath, "download", key]
+            // A gated model authenticates its *download*, and this path never
+            // passed the token — so fetching pyannote would have failed with a
+            // 401 that looks like a network error. Injected only for the models
+            // that are actually gated.
+            if self?.viewModel.modelStatuses[key]?.gated == true {
+                var env = ProcessInfo.processInfo.environment
+                HuggingFaceToken.inject(into: &env)
+                process.environment = env
+            }
             let outPipe = Pipe()
             let errPipe = Pipe()
             process.standardOutput = outPipe
