@@ -4853,10 +4853,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         duration: Double,
         userMessage: String,
         sessionId: String?,
-        completion: @escaping (String, String?) -> Void
+        onEvent: @escaping (CalendarAssistantEvent) -> Void
     ) {
         guard let start = calendarRecordingStart(for: audioPath) else {
-            completion("I couldn't determine this recording's start time.", sessionId)
+            onEvent(.finished(reply: "I couldn't determine this recording's start time.",
+                              sessionId: sessionId, candidates: []))
             return
         }
         let cliCandidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
@@ -4864,44 +4865,212 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
             + ["\(NSHomeDirectory())/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
         guard let claudePath = cliCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            completion("Claude CLI is not available. Open Calendar connection to set it up.", sessionId)
+            onEvent(.finished(reply: "Claude CLI is not available. Open Calendar connection to set it up.",
+                              sessionId: sessionId, candidates: []))
             return
         }
         let iso = ISO8601DateFormatter()
         let end = start.addingTimeInterval(max(1, duration))
+        // The CANDIDATE contract is what makes the answer actionable. Parsing the
+        // prose was the alternative and it is a worse one: the structured search
+        // already needs a `looksLikeEventTitle` guard because model commentary
+        // kept being mistaken for event titles. One machine-readable line per
+        // event keeps the prose free-form and the parsing exact.
         let context = """
-        You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). Use the connected Microsoft 365 or Google Calendar MCP when calendar information is needed. Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files. User: \(userMessage)
+        You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). Use the connected Microsoft 365 or Google Calendar MCP when calendar information is needed. Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
+
+        When you are confident about one or more specific events, end your reply with one line per event, after all prose, in exactly this form:
+        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <comma-separated attendee display names>
+        Emit no CANDIDATE line if you are unsure — a wrong one would attach the recording to the wrong meeting. Never mention the CANDIDATE lines in your prose.
+
+        User: \(userMessage)
         """
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: claudePath)
-            var arguments = ["--print", "--output-format", "json"]
+            // stream-json + partial messages is what turns an opaque wait into
+            // visible progress. --verbose is required alongside them.
+            var arguments = [
+                "--print", "--output-format", "stream-json",
+                "--include-partial-messages", "--verbose",
+            ]
             if let sessionId, !sessionId.isEmpty { arguments += ["--resume", sessionId] }
             arguments.append(context)
             process.arguments = arguments
             let output = Pipe()
             process.standardOutput = output
+            process.standardError = Pipe()
+
+            var pending = Data()
+            var replyText = ""
+            var finalReply: String?
+            var nextSession: String?
+
+            func handle(_ line: Data) {
+                guard !line.isEmpty,
+                      let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+                else { return }
+                if let session = event["session_id"] as? String, !session.isEmpty {
+                    nextSession = session
+                }
+                switch event["type"] as? String {
+                case "stream_event":
+                    // Text deltas and tool starts both arrive here.
+                    guard let raw = event["event"] as? [String: Any] else { return }
+                    if let delta = raw["delta"] as? [String: Any],
+                       let chunk = delta["text"] as? String, !chunk.isEmpty {
+                        replyText += chunk
+                        let shown = Self.strippingCandidateLines(replyText, streaming: true)
+                        if !shown.isEmpty {
+                            DispatchQueue.main.async { onEvent(.partialReply(shown)) }
+                        }
+                    }
+                    if let block = raw["content_block"] as? [String: Any],
+                       block["type"] as? String == "tool_use",
+                       let name = block["name"] as? String {
+                        DispatchQueue.main.async {
+                            onEvent(.activity(Self.friendlyToolActivity(name)))
+                        }
+                    }
+                case "assistant":
+                    // Whole assistant message — the non-partial fallback.
+                    if let message = event["message"] as? [String: Any],
+                       let content = message["content"] as? [[String: Any]] {
+                        let text = content.compactMap { $0["text"] as? String }.joined()
+                        if !text.isEmpty { replyText = text }
+                    }
+                case "result":
+                    if let result = event["result"] as? String { finalReply = result }
+                default:
+                    break
+                }
+            }
+
             do {
                 try process.run()
-                let data = output.fileHandleForReading.readDataToEndOfFile()
+                DispatchQueue.main.async { onEvent(.activity("Asking the calendar assistant…")) }
+                let reader = output.fileHandleForReading
+                while true {
+                    let chunk = reader.availableData
+                    if chunk.isEmpty { break }
+                    pending.append(chunk)
+                    // stream-json is newline-delimited; a chunk can split a line.
+                    while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+                        let line = pending[pending.startIndex..<newline]
+                        pending.removeSubrange(pending.startIndex...newline)
+                        handle(Data(line))
+                    }
+                }
+                if !pending.isEmpty { handle(pending) }
                 process.waitUntilExit()
-                guard process.terminationStatus == 0,
-                      let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    self?.log("Calendar assistant CLI did not return a result")
-                    DispatchQueue.main.async { completion("I couldn't reach the calendar connector. You can check its connection from the calendar menu.", sessionId) }
+
+                let answer = (finalReply ?? replyText).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard process.terminationStatus == 0, !answer.isEmpty else {
+                    self?.log("Calendar assistant CLI did not return a result (status \(process.terminationStatus))")
+                    DispatchQueue.main.async {
+                        onEvent(.finished(
+                            reply: "I couldn't reach the calendar connector. You can check its connection from the calendar menu.",
+                            sessionId: nextSession ?? sessionId, candidates: []
+                        ))
+                    }
                     return
                 }
-                let reply = (root["result"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let nextSession = root["session_id"] as? String
+                let candidates = Self.calendarCandidates(inAssistantReply: answer)
+                if !candidates.isEmpty {
+                    self?.log("Calendar assistant offered \(candidates.count) linkable event(s)")
+                }
                 DispatchQueue.main.async {
-                    completion((reply?.isEmpty == false ? reply! : "I couldn't find a usable calendar response."), nextSession ?? sessionId)
+                    onEvent(.finished(
+                        reply: Self.strippingCandidateLines(answer),
+                        sessionId: nextSession ?? sessionId,
+                        candidates: candidates
+                    ))
                 }
             } catch {
                 self?.log("Calendar assistant CLI failed: \(error.localizedDescription)")
-                DispatchQueue.main.async { completion("Calendar assistant failed: \(error.localizedDescription)", sessionId) }
+                DispatchQueue.main.async {
+                    onEvent(.finished(reply: "Calendar assistant failed: \(error.localizedDescription)",
+                                      sessionId: sessionId, candidates: []))
+                }
             }
         }
+    }
+
+    /// Human wording for the tool the assistant just invoked, so the panel names
+    /// the actual step instead of always claiming to be "searching calendar".
+    private static func friendlyToolActivity(_ toolName: String) -> String {
+        let lower = toolName.lowercased()
+        if lower.contains("calendar") { return "Searching your calendar…" }
+        if lower.contains("mail") || lower.contains("outlook") { return "Checking email for the invite…" }
+        if lower.contains("teams") || lower.contains("chat") { return "Checking Teams messages…" }
+        return "Running \(toolName)…"
+    }
+
+    /// The prose, with the machine-readable CANDIDATE lines removed.
+    ///
+    /// `streaming` also hides a final line that is still only a *prefix* of
+    /// "CANDIDATE:". Deltas arrive a few characters at a time — the first one
+    /// observed was the single letter "C" — so without this the marker briefly
+    /// flashes into the panel before the rest of the word arrives and it
+    /// disappears again.
+    static func strippingCandidateLines(_ reply: String, streaming: Bool = false) -> String {
+        let marker = "CANDIDATE:"
+        var lines = reply.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if streaming, let last = lines.last {
+            let trimmed = last.trimmingCharacters(in: .whitespaces).uppercased()
+            if !trimmed.isEmpty, marker.hasPrefix(trimmed) { lines.removeLast() }
+        }
+        return lines
+            .filter { !$0.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix(marker) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Events the assistant marked as confirmable.
+    ///
+    /// Strict by design: a malformed line is dropped rather than guessed at,
+    /// because the consequence of accepting one is attaching a recording — and
+    /// its speaker names — to the wrong meeting.
+    static func calendarCandidates(inAssistantReply reply: String) -> [CalendarMeetingCandidate] {
+        let iso = ISO8601DateFormatter()
+        let isoNoSeconds = ISO8601DateFormatter()
+        isoNoSeconds.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        var out: [CalendarMeetingCandidate] = []
+        var seen = Set<String>()
+        for rawLine in reply.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.uppercased().hasPrefix("CANDIDATE:") else { continue }
+            let body = line.dropFirst("CANDIDATE:".count)
+            let fields = body.split(separator: "|", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count >= 3 else { continue }
+            let title = fields[0].replacingOccurrences(of: "*", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            // `looksLikeEventTitle` is tuned against the *structured* search's
+            // observed false positives — set phrases and trailing full stops —
+            // and a model explaining itself in the title field slips past all of
+            // them. A word cap is the reliable tell here and is kept local rather
+            // than folded into the shared guard, which the other search path
+            // depends on behaving exactly as it does. Real titles are short:
+            // "Volaris Group - Business Transformation Specialist (Theo)" is
+            // seven words, so twelve leaves generous headroom.
+            let wordCount = title.split(whereSeparator: { $0 == " " || $0 == "\t" }).count
+            guard !title.isEmpty, wordCount <= 12, looksLikeEventTitle(title) else { continue }
+            guard let start = iso.date(from: fields[1]) ?? isoNoSeconds.date(from: fields[1]),
+                  let end = iso.date(from: fields[2]) ?? isoNoSeconds.date(from: fields[2]),
+                  end > start
+            else { continue }
+            let attendees = fields.count >= 4
+                ? fields[3].split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                : []
+            let id = "\(title)|\(start.timeIntervalSince1970)"
+            guard seen.insert(id).inserted else { continue }
+            out.append(CalendarMeetingCandidate(id: id, title: title, start: start, end: end,
+                                                attendeeNames: attendees))
+        }
+        return out
     }
 
     private func openTranscriptViewer(transcriptMdPath: String) {
@@ -5033,9 +5202,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onOpenCalendarMCPOnboarding: { [weak self] in
                 self?.openCalendarMCPOnboarding()
             },
-            onCalendarAssistantTurn: { [weak self] audioPath, duration, message, sessionId, completion in
-                self?.runCalendarAssistantTurn(audioPath: audioPath, duration: duration, userMessage: message, sessionId: sessionId, completion: completion)
-                    ?? completion("Calendar assistant is unavailable.", sessionId)
+            onCalendarAssistantTurn: { [weak self] audioPath, duration, message, sessionId, onEvent in
+                self?.runCalendarAssistantTurn(audioPath: audioPath, duration: duration,
+                                               userMessage: message, sessionId: sessionId,
+                                               onEvent: onEvent)
+                    ?? onEvent(.finished(reply: "Calendar assistant is unavailable.",
+                                         sessionId: sessionId, candidates: []))
             }
         )
 

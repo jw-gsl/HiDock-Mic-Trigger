@@ -640,11 +640,37 @@ struct CalendarMeetingCandidate: Identifiable, Hashable {
     }
 }
 
+/// What the calendar assistant is doing, as it happens.
+///
+/// The CLI was previously run with `--output-format json` and read to EOF, so the
+/// panel showed an indeterminate "Searching calendar…" for the whole call and
+/// then the finished answer in one jump. `stream-json` reports each step, so the
+/// tool it is actually calling and the reply forming are both visible.
+enum CalendarAssistantEvent {
+    /// A step worth naming — usually the MCP tool being called.
+    case activity(String)
+    /// The reply so far, accumulated.
+    case partialReply(String)
+    /// Final answer, the session to resume next time, and any event the
+    /// assistant identified precisely enough to act on.
+    case finished(reply: String, sessionId: String?, candidates: [CalendarMeetingCandidate])
+}
+
 private struct CalendarAssistantMessage: Identifiable {
     enum Role { case user, assistant }
     let id = UUID()
     let role: Role
-    let text: String
+    var text: String
+    /// Events named in this reply, offered as one-click links.
+    ///
+    /// Without these the assistant was a dead end: it would identify the right
+    /// meeting in prose — often the *only* place the right meeting appeared,
+    /// since the structured search keys off the recording's own start time and
+    /// misses anything outside that window — and the reviewer then had to go and
+    /// find it again by hand through a different search.
+    var candidates: [CalendarMeetingCandidate] = []
+    /// True while this reply is still arriving.
+    var streaming: Bool = false
 }
 
 // MARK: - TranscriptViewerView
@@ -729,6 +755,8 @@ struct TranscriptViewerView: View {
     @State private var calendarAssistantMessages: [CalendarAssistantMessage] = []
     @State private var calendarAssistantSessionId: String?
     @State private var calendarAssistantRunning = false
+    /// What the assistant is doing right now, from the CLI's own event stream.
+    @State private var calendarAssistantActivity = ""
     @State private var showTranscriptHistory = false
     @State private var transcriptVersions: [TranscriptVersion] = []
     @State private var pendingTranscriptRestore: TranscriptVersion?
@@ -808,7 +836,10 @@ struct TranscriptViewerView: View {
     var onOpenCalendarMCPOnboarding: (() -> Void)?
     /// A formatted, multi-turn Claude CLI/MCP calendar conversation. The UI is
     /// deliberately local to the transcript rather than a raw terminal window.
-    var onCalendarAssistantTurn: ((String, Double, String, String?, @escaping (String, String?) -> Void) -> Void)? = nil
+    /// Run one assistant turn, reporting progress as it happens. The handler is
+    /// called repeatedly with `.activity` / `.partialReply` and exactly once with
+    /// `.finished`.
+    var onCalendarAssistantTurn: ((String, Double, String, String?, @escaping (CalendarAssistantEvent) -> Void) -> Void)? = nil
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -1661,17 +1692,34 @@ struct TranscriptViewerView: View {
                             .padding(.vertical, 4)
                     }
                     ForEach(calendarAssistantMessages) { message in
-                        Text(message.text)
-                            .font(.caption)
-                            .textSelection(.enabled)
-                            .padding(7)
-                            .background(message.role == .user ? Color.accentColor.opacity(0.13) : Color.secondary.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
-                            .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+                        VStack(alignment: .leading, spacing: 5) {
+                            if !message.text.isEmpty {
+                                Text(message.text)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                                    .padding(7)
+                                    .background(message.role == .user ? Color.accentColor.opacity(0.13) : Color.secondary.opacity(0.10))
+                                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                                    .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+                            }
+                            // The whole point of the panel: act on what it found.
+                            ForEach(message.candidates) { candidate in
+                                calendarAssistantCandidateRow(candidate)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
                     }
                     if calendarAssistantRunning {
-                        ProgressView("Searching calendar…")
-                            .controlSize(.small)
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            // Name the step. "Searching calendar…" was shown for
+                            // the entire call regardless of what was happening.
+                            Text(calendarAssistantActivity.isEmpty ? "Working…" : calendarAssistantActivity)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     }
                 }
                 .padding(8)
@@ -1696,17 +1744,75 @@ struct TranscriptViewerView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18)))
     }
 
+    /// An event the assistant identified, with a one-click link.
+    ///
+    /// Confirming goes through exactly the same path as the Meeting column's own
+    /// confirm — `confirmCalendarMeeting` — so linking, the invitee-derived
+    /// speaker count, and the re-diarisation gate all behave identically however
+    /// the event was found.
+    private func calendarAssistantCandidateRow(_ candidate: CalendarMeetingCandidate) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "calendar.badge.checkmark")
+                .font(.caption2)
+                .foregroundColor(.green)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(candidate.title)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Text("\(Self.candidateTimeFormatter.string(from: candidate.start)) · \(candidate.attendeeSummary)")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 4)
+            Button("Use this meeting") {
+                calendarAssistantExpanded = false
+                confirmCalendarMeeting(candidate)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .help("Link this meeting to the recording and refine the speakers with its attendees")
+        }
+        .padding(7)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.green.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.green.opacity(0.28)))
+    }
+
+    private static let candidateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "d MMM HH:mm"
+        return formatter
+    }()
+
     private func sendCalendarAssistantMessage() {
         let message = calendarAssistantDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !calendarAssistantRunning, let turn = onCalendarAssistantTurn else { return }
         calendarAssistantDraft = ""
         calendarAssistantMessages.append(CalendarAssistantMessage(role: .user, text: message))
         calendarAssistantRunning = true
-        turn(audioPath, Double(transcriptDurationSeconds), message, calendarAssistantSessionId) { reply, sessionId in
+        calendarAssistantActivity = "Starting…"
+        // One placeholder reply, filled in as the stream arrives, so the text
+        // grows in place rather than appearing all at once at the end.
+        calendarAssistantMessages.append(
+            CalendarAssistantMessage(role: .assistant, text: "", streaming: true)
+        )
+        let replyIndex = calendarAssistantMessages.count - 1
+        turn(audioPath, Double(transcriptDurationSeconds), message, calendarAssistantSessionId) { event in
             DispatchQueue.main.async {
-                calendarAssistantMessages.append(CalendarAssistantMessage(role: .assistant, text: reply))
-                calendarAssistantSessionId = sessionId ?? calendarAssistantSessionId
-                calendarAssistantRunning = false
+                guard calendarAssistantMessages.indices.contains(replyIndex) else { return }
+                switch event {
+                case .activity(let what):
+                    calendarAssistantActivity = what
+                case .partialReply(let text):
+                    calendarAssistantMessages[replyIndex].text = text
+                case .finished(let reply, let sessionId, let candidates):
+                    calendarAssistantMessages[replyIndex].text = reply
+                    calendarAssistantMessages[replyIndex].candidates = candidates
+                    calendarAssistantMessages[replyIndex].streaming = false
+                    calendarAssistantSessionId = sessionId ?? calendarAssistantSessionId
+                    calendarAssistantRunning = false
+                    calendarAssistantActivity = ""
+                }
             }
         }
     }
