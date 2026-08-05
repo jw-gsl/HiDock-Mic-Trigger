@@ -4905,6 +4905,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             var replyText = ""
             var finalReply: String?
             var nextSession: String?
+            // The CLI's first text delta can be a single character, so forwarding
+            // every delta as its own main-thread update forced a full
+            // TranscriptViewerView re-render (and its GeometryReaders) dozens of
+            // times a second. Coalescing to 10/s is imperceptible as "streaming"
+            // but cuts that to a tenth — the final .finished event always carries
+            // the complete text, so nothing is lost by skipping intermediate ones.
+            var lastPartialEmit = Date.distantPast
+            let partialReplyMinInterval: TimeInterval = 0.1
 
             func handle(_ line: Data) {
                 guard !line.isEmpty,
@@ -4920,9 +4928,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if let delta = raw["delta"] as? [String: Any],
                        let chunk = delta["text"] as? String, !chunk.isEmpty {
                         replyText += chunk
-                        let shown = Self.strippingCandidateLines(replyText, streaming: true)
-                        if !shown.isEmpty {
-                            DispatchQueue.main.async { onEvent(.partialReply(shown)) }
+                        let now = Date()
+                        if now.timeIntervalSince(lastPartialEmit) >= partialReplyMinInterval {
+                            lastPartialEmit = now
+                            let shown = Self.strippingCandidateLines(replyText, streaming: true)
+                            if !shown.isEmpty {
+                                DispatchQueue.main.async { onEvent(.partialReply(shown)) }
+                            }
                         }
                     }
                     if let block = raw["content_block"] as? [String: Any],
