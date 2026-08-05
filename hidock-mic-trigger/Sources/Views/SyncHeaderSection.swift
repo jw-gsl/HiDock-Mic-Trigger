@@ -58,7 +58,8 @@ struct SyncHeaderSection: View {
                     // See MeetingHeatmapView's equivalent block: ticking the
                     // elapsed time locally avoids a shared-view-model write
                     // (and the whole-window re-render it forces) every second.
-                    if viewModel.syncBusy, let start = viewModel.syncRefreshStartDate {
+                    if let start = viewModel.syncBusy ? viewModel.syncRefreshStartDate
+                        : (viewModel.calendarLookupInProgress.isEmpty ? nil : viewModel.calendarLookupStartDate) {
                         TimelineView(.periodic(from: start, by: 1)) { ctx in
                             Text("\(viewModel.syncStatus) \(MicTriggerSection.uptimeString(since: start, now: ctx.date))")
                                 .font(.caption)

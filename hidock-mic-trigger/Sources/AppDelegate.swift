@@ -4722,12 +4722,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncViewModelState()
             return
         }
+        guard !viewModel.calendarLookupInProgress.contains(audioPath) else { return }
+        viewModel.calendarLookupInProgress.insert(audioPath)
+        viewModel.calendarLookupStartDate = Date()
         viewModel.syncStatus = "Checking calendar for \(name)…"
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
         findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
             guard let self else { return }
+            self.viewModel.calendarLookupInProgress.remove(audioPath)
+            if self.viewModel.calendarLookupInProgress.isEmpty {
+                self.viewModel.calendarLookupStartDate = nil
+            }
             guard !self.hasCalendarRejection(for: audioPath) else {
                 self.log("Calendar suggestion suppressed for \((audioPath as NSString).lastPathComponent): marked ad-hoc while lookup was running")
                 return
