@@ -174,7 +174,14 @@ struct RecordingsTableView: View {
                     guard let top = frames
                         .filter({ $0.value.maxY > 0 })
                         .min(by: { $0.value.minY < $1.value.minY }) else { return }
-                    viewModel.recordingsTableScrollAnchor = top.key
+                    // Every other derived-state field in HiDockViewModel guards
+                    // its write like this; this one didn't, so ordinary
+                    // scrolling fired `objectWillChange` (and the derived-list
+                    // cache invalidation it triggers) once per frame even when
+                    // the anchor row hadn't actually changed.
+                    if viewModel.recordingsTableScrollAnchor != top.key {
+                        viewModel.recordingsTableScrollAnchor = top.key
+                    }
                 }
                 .onChange(of: viewModel.displayRows.count) { newCount in
                     guard !didScrollToTop, newCount > 0,

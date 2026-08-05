@@ -149,6 +149,17 @@ final class HiDockViewModel: ObservableObject {
     @Published var syncBusy = false
     @Published var syncDownloading = false
     @Published var syncDownloadProgress: String?
+    /// Anchors for the self-ticking "Refreshing… Ns" / "Downloading… Ns" labels
+    /// — set once when a refresh/download starts (and cleared when it ends), the
+    /// same way `triggerConnectedSince` anchors the uptime label. Elapsed time
+    /// used to be recomputed into `syncStatus`/`syncDownloadProgress` by a 1s
+    /// Timer, which fired `objectWillChange` on this whole shared view model —
+    /// and everything observing it, including the recordings table — every
+    /// second for the entire refresh/download. A local `TimelineView` reads
+    /// these anchors and ticks on its own; the shared state changes only twice
+    /// per operation (start, stop) instead of once a second.
+    @Published var syncRefreshStartDate: Date?
+    @Published var syncDownloadStartDate: Date?
     /// Device-side filename of the recording the extractor is currently
     /// pulling (e.g. `2026May06-...hda`). Updated in real time from the
     /// extractor's `FILE_START:` / `FILE_DONE:` stderr markers, so the

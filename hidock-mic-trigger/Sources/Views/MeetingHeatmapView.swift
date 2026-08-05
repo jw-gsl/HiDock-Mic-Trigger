@@ -340,11 +340,27 @@ struct MeetingHeatmapView: View {
                     if viewModel.syncBusy || viewModel.syncDownloading {
                         ProgressView().controlSize(.mini)
                     }
-                    Text(viewModel.syncStatus)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    // While refreshing, the elapsed seconds used to be baked
+                    // into `syncStatus` by a 1s Timer that touched this whole
+                    // shared view model every tick. Ticking it locally here
+                    // instead means the refresh no longer forces a re-render
+                    // of the rest of the window (recordings table included)
+                    // once a second for however long it runs.
+                    if viewModel.syncBusy, let start = viewModel.syncRefreshStartDate {
+                        TimelineView(.periodic(from: start, by: 1)) { ctx in
+                            Text("\(viewModel.syncStatus) \(MicTriggerSection.uptimeString(since: start, now: ctx.date))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    } else {
+                        Text(viewModel.syncStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
                 .frame(minWidth: 0)
                 .layoutPriority(-1)
