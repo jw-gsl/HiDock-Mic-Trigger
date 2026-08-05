@@ -343,9 +343,15 @@ struct RecordingsTableView: View {
             // Recording name. Shorten by *meaning* (compactRecordingLabel knows
             // the merge shape), never by character count — a blind prefix cut
             // turned "…-Rec01-Part-1-to-…" into "Rec0…".
+            //
+            // A merge is always sequential, so this is already just "first→last"
+            // — the label only gets long when the last piece's own name is long
+            // (e.g. a split file's "-Part-2" suffix). Truncating from the tail
+            // keeps "first→" intact; middle truncation was chopping out the "→"
+            // itself, since it sits at the label's centre.
             Text(compactRecordingLabel(group.outputName))
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
                 .help(group.outputName)
                 .clipped()
