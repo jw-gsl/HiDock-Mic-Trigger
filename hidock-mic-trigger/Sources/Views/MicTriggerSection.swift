@@ -2,7 +2,6 @@ import SwiftUI
 
 struct MicTriggerSection: View {
     @ObservedObject var viewModel: HiDockViewModel
-    @State private var pulseAnimation = false
 
     private let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -61,17 +60,24 @@ struct MicTriggerSection: View {
             HStack(spacing: 12) {
                 // Status indicator
                 HStack(spacing: 6) {
+                    // Static glow, not a pulse. This dot used to breathe via
+                    // `.repeatForever`, which never stops once the trigger goes
+                    // healthy — i.e. permanently, in normal use. An active
+                    // SwiftUI animation keeps the display cycle running every
+                    // frame, and each frame re-runs a full layout pass over the
+                    // whole window (NSHostingView.layout → ViewGraph render →
+                    // sizeThatFits down the entire tree). With the recordings
+                    // table in that tree, this one 10pt dot was costing ~30% CPU
+                    // indefinitely, and had been tripping macOS's own CPU
+                    // watchdog (cpu_resource diagnostics) for weeks. The glow
+                    // says "alive" just as well standing still.
                     Circle()
                         .fill(dotColor)
                         .frame(width: 10, height: 10)
-                        .shadow(color: viewModel.triggerHealthy ? Color.green.opacity(pulseAnimation ? 0.6 : 0.0) : .clear, radius: pulseAnimation ? 6 : 0)
-                        .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulseAnimation)
-                        .onChange(of: viewModel.triggerHealthy) { healthy in
-                            pulseAnimation = healthy
-                        }
-                        .onAppear {
-                            pulseAnimation = viewModel.triggerHealthy
-                        }
+                        .shadow(
+                            color: viewModel.triggerHealthy ? Color.green.opacity(0.6) : .clear,
+                            radius: viewModel.triggerHealthy ? 4 : 0
+                        )
                     Text("Mic Trigger")
                         .font(.headline)
                     if isDevBuild {
@@ -124,7 +130,7 @@ struct MicTriggerSection: View {
                         Circle()
                             .fill(Color.red)
                             .frame(width: 8, height: 8)
-                            .shadow(color: Color.red.opacity(pulseAnimation ? 0.7 : 0.0), radius: pulseAnimation ? 5 : 0)
+                            .shadow(color: Color.red.opacity(0.7), radius: 4)
                         Text("Recording")
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.red)
