@@ -242,12 +242,29 @@ final class CompactRecordingLabelTests: XCTestCase {
         )
     }
 
-    func testMergedSplitPartsKeepTheirPartNumbers() {
+    func testMergedSplitPartsDropPartSuffixAndCollapseWhenRecombined() {
+        // Recombining a split recording's own two halves is just "Rec01" again.
+        // "-Part-N" exists only to tell the halves apart when shown on their
+        // own; stripping it inside a merge span makes the two ends equal, so
+        // the existing collapse-when-equal behaviour kicks in instead of
+        // showing a redundant "Rec01→Rec01".
         XCTAssertEqual(
             compactRecordingLabel(
                 "Merged-2026Jul31-175620-Rec01-Part-1-to-2026Jul31-175620-Rec01-Part-2.mp3"
             ),
-            "Rec01-Part-1→Rec01-Part-2"
+            "Rec01"
+        )
+    }
+
+    func testMergeEndingOnASplitPartDropsOnlyItsSuffix() {
+        // A merge spanning a whole recording and a different recording's
+        // split part — "-Part-2" is dropped, but "Rec00" and "Rec01" stay
+        // distinct, so the arrow (and the span it communicates) survives.
+        XCTAssertEqual(
+            compactRecordingLabel(
+                "Merged-2026Jul31-174035-Rec00-to-2026Jul31-175620-Rec01-Part-2.mp3"
+            ),
+            "Rec00→Rec01"
         )
     }
 
