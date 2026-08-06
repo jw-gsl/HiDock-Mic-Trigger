@@ -517,6 +517,25 @@ struct SegmentSelection: Equatable, Identifiable {
     }
 }
 
+/// Holds the published word frames without making the view depend on them.
+///
+/// These frames were previously kept in `@State`, which hung the app. Every
+/// word in the transcript carries its own `GeometryReader` (5,623 of them on a
+/// 144-segment recording), and their frames are reported in a scrolling
+/// coordinate space, so the merged dictionary changes on essentially every
+/// layout pass. Writing that into `@State` re-ran `TranscriptViewerView`'s
+/// body, which re-laid out the words, which republished the frames — a layout
+/// loop that pinned the main thread at 100% with `NSHostingView.layout()`
+/// re-entering itself ten deep, and never unwound.
+///
+/// Nothing in `body` ever read the frames: their only consumer is
+/// `transcriptWordPosition(at:)`, called from the drag-selection gesture. So
+/// the dependency was pure cost. A reference box keeps them exactly as
+/// current, while mutating it invalidates nothing.
+private final class TranscriptWordFrameStore {
+    var frames: [WordPosition: CGRect] = [:]
+}
+
 /// Lets word-token views publish their frames in the transcript's common
 /// coordinate space so one drag can continue across multiple rows.
 private struct TranscriptWordFramesKey: PreferenceKey {
@@ -723,7 +742,10 @@ struct TranscriptViewerView: View {
     /// words the user right-clicked, even if the view refreshes underneath it.
     @State private var pendingNamedSelection: SegmentSelection?
     @State private var selectionPersonQuery = ""
-    @State private var transcriptWordFrames: [WordPosition: CGRect] = [:]
+    /// Deliberately a reference box, not `@State` holding the dictionary —
+    /// see TranscriptWordFrameStore. Writing frames must not invalidate this
+    /// view, or publishing them re-triggers the layout that publishes them.
+    @State private var transcriptWordFrames = TranscriptWordFrameStore()
     @State private var selectionDragStart: WordPosition? = nil
     /// Timestamp of the text just edited. Splitting a segment changes its view
     /// identity, so SwiftUI otherwise reconstructs the scroll view at the top.
@@ -2487,7 +2509,7 @@ struct TranscriptViewerView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .onPreferenceChange(TranscriptWordFramesKey.self) { frames in
-                        transcriptWordFrames = frames
+                        transcriptWordFrames.frames = frames
                     }
                     .simultaneousGesture(transcriptSelectionGesture)
                 }
@@ -2548,7 +2570,7 @@ struct TranscriptViewerView: View {
     }
 
     private func transcriptWordPosition(at point: CGPoint) -> WordPosition? {
-        transcriptWordFrames.first(where: { $0.value.contains(point) })?.key
+        transcriptWordFrames.frames.first(where: { $0.value.contains(point) })?.key
     }
 
     @ViewBuilder
