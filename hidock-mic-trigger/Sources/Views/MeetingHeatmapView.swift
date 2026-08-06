@@ -337,18 +337,46 @@ struct MeetingHeatmapView: View {
             // needed) instead of on its own row — less is more.
             if !viewModel.syncStatus.isEmpty {
                 HStack(spacing: 5) {
-                    if viewModel.syncBusy || viewModel.syncDownloading {
+                    if viewModel.syncBusy || viewModel.syncDownloading || !viewModel.calendarLookupInProgress.isEmpty {
                         ProgressView().controlSize(.mini)
                     }
-                    Text(viewModel.syncStatus)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    // While refreshing (or checking the calendar), the elapsed
+                    // seconds used to be baked into `syncStatus` by a 1s Timer
+                    // that touched this whole shared view model every tick.
+                    // Ticking it locally here instead means the operation no
+                    // longer forces a re-render of the rest of the window
+                    // (recordings table included) once a second for however
+                    // long it runs.
+                    if viewModel.syncBusy, let start = viewModel.syncRefreshStartDate {
+                        tickingStatus(since: start)
+                    } else if !viewModel.calendarLookupInProgress.isEmpty, let start = viewModel.calendarLookupStartDate {
+                        tickingStatus(since: start)
+                    } else {
+                        Text(viewModel.syncStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
                 .frame(minWidth: 0)
                 .layoutPriority(-1)
             }
+        }
+    }
+
+    /// `viewModel.syncStatus` with a locally-ticking elapsed-time suffix, for
+    /// whichever operation is currently running (refresh or calendar lookup).
+    /// Reads `start` from the caller rather than owning its own state, so the
+    /// shared view model only changes twice per operation (start, stop)
+    /// instead of once a second.
+    private func tickingStatus(since start: Date) -> some View {
+        TimelineView(.periodic(from: start, by: 1)) { ctx in
+            Text("\(viewModel.syncStatus) \(MicTriggerSection.uptimeString(since: start, now: ctx.date))")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
     }
 

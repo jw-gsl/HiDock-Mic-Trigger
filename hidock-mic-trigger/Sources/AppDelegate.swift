@@ -93,8 +93,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncDeviceHungUntil: [String: Date] = [:]
     private let hungBackoffInterval: TimeInterval = 180
     private var syncBusy = false
-    private var syncRefreshStartDate: Date?
-    private var syncRefreshTimer: Timer?
     private var syncAutoDownloadTimer: Timer?
     /// Lightweight periodic check for new Plaud recordings. Plaud is an API, not
     /// a USB device, so nothing else surfaces new recordings on it — this poll
@@ -108,8 +106,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // token mutation — so they can run in parallel, letting HiDock and Plaud
     // paint together instead of one-after-another on the serial queue above.
     private let cacheReadQueue = DispatchQueue(label: "hidock.cacheread", qos: .userInitiated, attributes: .concurrent)
-    private var syncDownloadStartDate: Date?
-    private var syncDownloadTimer: Timer?
     private var syncDownloadStopping = false
     private var syncDownloading = false
 
@@ -857,10 +853,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
+    ///
+    /// Every field here is guarded by an equality check before writing. A
+    /// `@Published` write fires `objectWillChange` (and marks the derived-list
+    /// cache dirty) regardless of whether the value actually changed, and this
+    /// method is called from ~120 sites — including three repeating timers that
+    /// run for the full duration of any sync refresh, download, or
+    /// transcription job. Without the guards, ordinary use forced a full
+    /// re-render of the whole window (recordings table included) every 1-3s,
+    /// indefinitely — this is what the performance rootcause doc's fix for
+    /// `triggerUptime`/`syncEntries` addressed for those two fields; the rest
+    /// of the fields here had the same defect and are fixed the same way.
     private func syncViewModelState() {
         let running = process != nil
-        viewModel.triggerRunning = running
-        viewModel.triggerPID = process?.processIdentifier
+        if viewModel.triggerRunning != running { viewModel.triggerRunning = running }
+        if viewModel.triggerPID != process?.processIdentifier {
+            viewModel.triggerPID = process?.processIdentifier
+        }
         let uptimeStr = formatUptime() ?? ""
         if viewModel.triggerUptime != uptimeStr { viewModel.triggerUptime = uptimeStr }
         // Anchor for the Mic Trigger row's self-ticking uptime label (changes
@@ -868,14 +877,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if viewModel.triggerConnectedSince != triggerConnectedSince {
             viewModel.triggerConnectedSince = triggerConnectedSince
         }
-        viewModel.autoStartOnLaunch = autoStartOnLaunch
-        viewModel.selectedMicName = selectedMicName
+        if viewModel.autoStartOnLaunch != autoStartOnLaunch { viewModel.autoStartOnLaunch = autoStartOnLaunch }
+        if viewModel.selectedMicName != selectedMicName { viewModel.selectedMicName = selectedMicName }
         // #3: don't enumerate CoreAudio devices on every state sync (this is
         // called from ~90 sites). The mic list only changes on a device-change
         // event, which updates it directly; throttle any stray refresh here.
-        viewModel.availableMics = throttledMicNames()
-        viewModel.syncBusy = syncBusy
-        viewModel.syncDownloading = syncDownloading
+        let mics = throttledMicNames()
+        if viewModel.availableMics != mics { viewModel.availableMics = mics }
+        if viewModel.syncBusy != syncBusy { viewModel.syncBusy = syncBusy }
+        if viewModel.syncDownloading != syncDownloading { viewModel.syncDownloading = syncDownloading }
         // #4: only push the (now ~1700-element) entries array when it actually
         // changed — an unchanged reassignment still fires @Published and marks
         // the derived-list cache dirty for nothing.
@@ -886,31 +896,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncEntries = syncEntries
             lastPushedSyncEntriesVersion = syncEntriesVersion
         }
-        viewModel.syncCheckedRecordings = syncCheckedRecordings
-        viewModel.syncAutoDownload = syncAutoDownload
-        viewModel.syncAutoTranscribe = syncAutoTranscribe
-        viewModel.syncAutoSummarise = syncAutoSummarise
-        viewModel.diarizeEnabled = diarizeEnabled
-        viewModel.syncFilterDeviceId = syncFilterDeviceId
-        viewModel.syncPairedDevices = syncPairedDevices
-        viewModel.syncPaired = syncPaired
-        viewModel.syncDeviceConnected = syncDeviceConnected
-        viewModel.syncDeviceStorage = syncDeviceStorage
-        viewModel.syncDeviceLastError = syncDeviceLastError
-        viewModel.syncDeviceLastOK = syncDeviceLastOK
-        viewModel.syncOutputFolder = syncOutputFolder
-        viewModel.syncTranscriptFolder = syncTranscriptFolder
-        viewModel.transcriptionBusy = transcriptionBusy
-        viewModel.transcriptionCurrentFile = transcriptionCurrentFile
-        viewModel.currentlyDownloadingName = currentlyDownloadingName
-        viewModel.triggerHealthy = triggerHealthy
-        viewModel.triggerWaitMessage = triggerWaitMessage
-        viewModel.triggerLastStartedAt = triggerLastStartedAt
-        viewModel.transcriptionProgress = transcriptionProgress
-        viewModel.transcriptionPaused = transcriptionPaused
-        viewModel.transcriptionQueue = pendingTranscriptionQueue
-        viewModel.transcriptionFileIndex = transcriptionFileIndex
-        viewModel.transcriptionFileCount = transcriptionFileCount
+        if viewModel.syncCheckedRecordings != syncCheckedRecordings {
+            viewModel.syncCheckedRecordings = syncCheckedRecordings
+        }
+        if viewModel.syncAutoDownload != syncAutoDownload { viewModel.syncAutoDownload = syncAutoDownload }
+        if viewModel.syncAutoTranscribe != syncAutoTranscribe { viewModel.syncAutoTranscribe = syncAutoTranscribe }
+        if viewModel.syncAutoSummarise != syncAutoSummarise { viewModel.syncAutoSummarise = syncAutoSummarise }
+        if viewModel.diarizeEnabled != diarizeEnabled { viewModel.diarizeEnabled = diarizeEnabled }
+        if viewModel.syncFilterDeviceId != syncFilterDeviceId { viewModel.syncFilterDeviceId = syncFilterDeviceId }
+        if viewModel.syncPairedDevices != syncPairedDevices { viewModel.syncPairedDevices = syncPairedDevices }
+        if viewModel.syncPaired != syncPaired { viewModel.syncPaired = syncPaired }
+        if viewModel.syncDeviceConnected != syncDeviceConnected { viewModel.syncDeviceConnected = syncDeviceConnected }
+        if viewModel.syncDeviceStorage != syncDeviceStorage { viewModel.syncDeviceStorage = syncDeviceStorage }
+        if !Self.lastErrorMapsEqual(viewModel.syncDeviceLastError, syncDeviceLastError) {
+            viewModel.syncDeviceLastError = syncDeviceLastError
+        }
+        if viewModel.syncDeviceLastOK != syncDeviceLastOK { viewModel.syncDeviceLastOK = syncDeviceLastOK }
+        if viewModel.syncOutputFolder != syncOutputFolder { viewModel.syncOutputFolder = syncOutputFolder }
+        if viewModel.syncTranscriptFolder != syncTranscriptFolder {
+            viewModel.syncTranscriptFolder = syncTranscriptFolder
+        }
+        if viewModel.transcriptionBusy != transcriptionBusy { viewModel.transcriptionBusy = transcriptionBusy }
+        if viewModel.transcriptionCurrentFile != transcriptionCurrentFile {
+            viewModel.transcriptionCurrentFile = transcriptionCurrentFile
+        }
+        if viewModel.currentlyDownloadingName != currentlyDownloadingName {
+            viewModel.currentlyDownloadingName = currentlyDownloadingName
+        }
+        if viewModel.triggerHealthy != triggerHealthy { viewModel.triggerHealthy = triggerHealthy }
+        if viewModel.triggerWaitMessage != triggerWaitMessage { viewModel.triggerWaitMessage = triggerWaitMessage }
+        if viewModel.triggerLastStartedAt != triggerLastStartedAt {
+            viewModel.triggerLastStartedAt = triggerLastStartedAt
+        }
+        if viewModel.transcriptionProgress != transcriptionProgress {
+            viewModel.transcriptionProgress = transcriptionProgress
+        }
+        if viewModel.transcriptionPaused != transcriptionPaused { viewModel.transcriptionPaused = transcriptionPaused }
+        if viewModel.transcriptionQueue != pendingTranscriptionQueue {
+            viewModel.transcriptionQueue = pendingTranscriptionQueue
+        }
+        if viewModel.transcriptionFileIndex != transcriptionFileIndex {
+            viewModel.transcriptionFileIndex = transcriptionFileIndex
+        }
+        if viewModel.transcriptionFileCount != transcriptionFileCount {
+            viewModel.transcriptionFileCount = transcriptionFileCount
+        }
+    }
+
+    /// `[String: (String, Date)]` can't derive `Equatable` — tuples aren't a
+    /// protocol-conforming type — so this hand-rolled comparison is what lets
+    /// `syncDeviceLastError` get the same unchanged-write guard as every other
+    /// field above.
+    private static func lastErrorMapsEqual(_ a: [String: (String, Date)], _ b: [String: (String, Date)]) -> Bool {
+        guard a.count == b.count else { return false }
+        for (key, value) in a {
+            guard let other = b[key], other.0 == value.0, other.1 == value.1 else { return false }
+        }
+        return true
     }
 
     // MARK: - Notifications
@@ -4680,12 +4722,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncViewModelState()
             return
         }
+        guard !viewModel.calendarLookupInProgress.contains(audioPath) else { return }
+        viewModel.calendarLookupInProgress.insert(audioPath)
+        viewModel.calendarLookupStartDate = Date()
         viewModel.syncStatus = "Checking calendar for \(name)…"
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
         findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
             guard let self else { return }
+            self.viewModel.calendarLookupInProgress.remove(audioPath)
+            if self.viewModel.calendarLookupInProgress.isEmpty {
+                self.viewModel.calendarLookupStartDate = nil
+            }
             guard !self.hasCalendarRejection(for: audioPath) else {
                 self.log("Calendar suggestion suppressed for \((audioPath as NSString).lastPathComponent): marked ad-hoc while lookup was running")
                 return
@@ -8381,20 +8430,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    // No longer a literal Timer: it used to tick `viewModel.syncStatus` every
+    // second, which fired `objectWillChange` on the whole shared view model —
+    // and everything observing it, including the recordings table — once a
+    // second for the entire refresh. The elapsed-time display now lives in a
+    // local `TimelineView` (SyncHeaderSection) reading `syncRefreshStartDate`,
+    // which this only has to set once at start and clear once at stop.
     private func startSyncRefreshTimer() {
-        syncRefreshStartDate = Date()
-        syncRefreshTimer?.invalidate()
-        syncRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.syncRefreshStartDate else { return }
-            let elapsed = Int(Date().timeIntervalSince(start))
-            self.viewModel.syncStatus = "Refreshing... \(elapsed)s"
-        }
+        viewModel.syncRefreshStartDate = Date()
     }
 
     private func stopSyncRefreshTimer() {
-        syncRefreshTimer?.invalidate()
-        syncRefreshTimer = nil
-        syncRefreshStartDate = nil
+        viewModel.syncRefreshStartDate = nil
     }
 
     private var visibleSyncEntries: [HiDockSyncRecordingEntry] {
@@ -9180,23 +9227,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    // No longer a literal Timer: it used to tick `viewModel.syncDownloadProgress`
+    // every second as a fallback before real byte-progress arrived, which fired
+    // `objectWillChange` on the whole shared view model once a second for the
+    // entire download. `DownloadProgressBar` now renders that fallback itself
+    // via a local `TimelineView` reading `syncDownloadStartDate`, which this
+    // only has to set once at start and clear once at stop.
     private func startDownloadTimer() {
-        syncDownloadStartDate = Date()
-        syncDownloadTimer?.invalidate()
-        syncDownloadTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.syncDownloadStartDate else { return }
-            let elapsed = Int(Date().timeIntervalSince(start))
-            let mins = elapsed / 60
-            let secs = elapsed % 60
-            let timeStr = mins > 0 ? String(format: "%d:%02d", mins, secs) : "\(secs)s"
-            self.viewModel.syncDownloadProgress = "Downloading... \(timeStr)"
-        }
+        viewModel.syncDownloadStartDate = Date()
     }
 
     private func stopDownloadTimer() {
-        syncDownloadTimer?.invalidate()
-        syncDownloadTimer = nil
-        syncDownloadStartDate = nil
+        viewModel.syncDownloadStartDate = nil
         viewModel.syncDownloadProgress = nil
         viewModel.ledMatrix.setStatus(nil)
     }
@@ -9294,8 +9336,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
-            self.viewModel.syncStatus = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
-            self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let status = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let progress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            if self.viewModel.syncStatus != status { self.viewModel.syncStatus = status }
+            if self.viewModel.syncDownloadProgress != progress { self.viewModel.syncDownloadProgress = progress }
             self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }) { [weak self] result in
             guard self != nil else { return }
@@ -9457,8 +9501,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.beginDownloadProgressIfNeeded()
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
-            self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
-            self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let status = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let progress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            if self.viewModel.syncStatus != status { self.viewModel.syncStatus = status }
+            if self.viewModel.syncDownloadProgress != progress { self.viewModel.syncDownloadProgress = progress }
             self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }, onFile: { [weak self] name, started in
             guard let self = self else { return }
