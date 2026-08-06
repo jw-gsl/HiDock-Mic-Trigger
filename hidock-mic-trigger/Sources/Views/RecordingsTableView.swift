@@ -28,8 +28,12 @@ func compactRecordingLabel(_ fileName: String) -> String {
     if stem.hasPrefix("Merged-"), let range = stem.range(of: "-to-") {
         let first = String(stem[stem.index(stem.startIndex, offsetBy: 7)..<range.lowerBound])
         let last = String(stem[range.upperBound...])
-        let from = compactRecordingLabel(first)
-        let to = compactRecordingLabel(last)
+        // "-Part-1"/"-Part-2" exists to tell a split recording's two halves
+        // apart when they're shown on their own; once inside a merge span it's
+        // dead weight — the merge is always sequential, so "Rec01" already
+        // identifies which piece it is without doubling the label's length.
+        let from = stripSplitPartSuffix(compactRecordingLabel(first))
+        let to = stripSplitPartSuffix(compactRecordingLabel(last))
         return from == to ? from : "\(from)→\(to)"
     }
     // `<yyyy><Mon><dd>-<HHmmss>-<label>` — the device's own convention.
@@ -42,6 +46,11 @@ func compactRecordingLabel(_ fileName: String) -> String {
     else { return stem }
     let label = String(stem[labelRange]).trimmingCharacters(in: .whitespaces)
     return label.isEmpty ? stem : label
+}
+
+private func stripSplitPartSuffix(_ label: String) -> String {
+    guard let range = label.range(of: #"-Part-\d+$"#, options: .regularExpression) else { return label }
+    return String(label[..<range.lowerBound])
 }
 
 /// A table column that is either a fixed width or allowed to compress.
@@ -350,9 +359,15 @@ struct RecordingsTableView: View {
             // Recording name. Shorten by *meaning* (compactRecordingLabel knows
             // the merge shape), never by character count — a blind prefix cut
             // turned "…-Rec01-Part-1-to-…" into "Rec0…".
+            //
+            // A merge is always sequential, so this is already just "first→last"
+            // — the label only gets long when the last piece's own name is long
+            // (e.g. a split file's "-Part-2" suffix). Truncating from the tail
+            // keeps "first→" intact; middle truncation was chopping out the "→"
+            // itself, since it sits at the label's centre.
             Text(compactRecordingLabel(group.outputName))
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
                 .help(group.outputName)
                 .clipped()
