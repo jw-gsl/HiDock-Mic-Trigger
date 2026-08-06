@@ -326,3 +326,120 @@ final class EnrichedAttendeeParsingTests: XCTestCase {
         XCTAssertNil(parseEnrichedAttendees(#"{"other": ["x"]}"#))
     }
 }
+
+/// The calendar assistant used to be a dead end: it would identify the right
+/// meeting in prose and there was no way to act on it. A `CANDIDATE:` line makes
+/// the answer actionable, and this is the parser that decides which meeting a
+/// recording — and therefore its speaker names — gets attached to. It is
+/// deliberately strict: a malformed line is dropped, never guessed at.
+final class CalendarAssistantCandidateParsingTests: XCTestCase {
+
+    private func iso(_ text: String) -> Date {
+        ISO8601DateFormatter().date(from: text)!
+    }
+
+    func testParsesAWellFormedCandidate() {
+        let reply = """
+        Found it — the Zonal weekly sync at 13:30.
+        CANDIDATE: Zonal weekly sync | 2026-08-04T13:30:00Z | 2026-08-04T14:00:00Z | Joe Kraft, Ian Reay
+        """
+        let found = AppDelegate.calendarCandidates(inAssistantReply: reply)
+        XCTAssertEqual(found.count, 1)
+        XCTAssertEqual(found[0].title, "Zonal weekly sync")
+        XCTAssertEqual(found[0].start, iso("2026-08-04T13:30:00Z"))
+        XCTAssertEqual(found[0].attendeeNames, ["Joe Kraft", "Ian Reay"])
+    }
+
+    func testTheCandidateLinesAreStrippedFromTheProse() {
+        let reply = """
+        Found it — the Zonal weekly sync.
+        CANDIDATE: Zonal weekly sync | 2026-08-04T13:30:00Z | 2026-08-04T14:00:00Z | Joe Kraft
+        """
+        let shown = AppDelegate.strippingCandidateLines(reply)
+        XCTAssertEqual(shown, "Found it — the Zonal weekly sync.")
+        XCTAssertFalse(shown.contains("CANDIDATE"))
+    }
+
+    func testSeveralCandidatesAreAllOffered() {
+        let reply = """
+        Two possibilities.
+        CANDIDATE: Zonal weekly sync | 2026-08-04T13:30:00Z | 2026-08-04T14:00:00Z | Joe Kraft
+        CANDIDATE: AI accelerator | 2026-08-04T14:30:00Z | 2026-08-04T15:30:00Z | Janni Zesach
+        """
+        XCTAssertEqual(AppDelegate.calendarCandidates(inAssistantReply: reply).count, 2)
+    }
+
+    func testAttendeesAreOptional() {
+        let reply = "CANDIDATE: Standup | 2026-08-04T09:00:00Z | 2026-08-04T09:15:00Z |"
+        let found = AppDelegate.calendarCandidates(inAssistantReply: reply)
+        XCTAssertEqual(found.count, 1)
+        XCTAssertTrue(found[0].attendeeNames.isEmpty)
+    }
+
+    func testDuplicateLinesCollapse() {
+        let line = "CANDIDATE: Standup | 2026-08-04T09:00:00Z | 2026-08-04T09:15:00Z | A"
+        XCTAssertEqual(AppDelegate.calendarCandidates(inAssistantReply: "\(line)\n\(line)").count, 1)
+    }
+
+    // --- the refusals: a wrong candidate attaches the wrong meeting ---
+
+    func testProseAloneOffersNothing() {
+        let reply = "It was probably the Zonal weekly sync at 13:30, organised by Joe Kraft."
+        XCTAssertTrue(AppDelegate.calendarCandidates(inAssistantReply: reply).isEmpty)
+    }
+
+    func testAnUnparseableDateIsDropped() {
+        let reply = "CANDIDATE: Zonal weekly sync | today at 1330 | later | Joe Kraft"
+        XCTAssertTrue(AppDelegate.calendarCandidates(inAssistantReply: reply).isEmpty)
+    }
+
+    func testTooFewFieldsIsDropped() {
+        let reply = "CANDIDATE: Zonal weekly sync | 2026-08-04T13:30:00Z"
+        XCTAssertTrue(AppDelegate.calendarCandidates(inAssistantReply: reply).isEmpty)
+    }
+
+    func testAnEndBeforeItsStartIsDropped() {
+        let reply = "CANDIDATE: Backwards | 2026-08-04T14:00:00Z | 2026-08-04T13:30:00Z | A"
+        XCTAssertTrue(AppDelegate.calendarCandidates(inAssistantReply: reply).isEmpty)
+    }
+
+    func testAnEmptyTitleIsDropped() {
+        let reply = "CANDIDATE:  | 2026-08-04T13:30:00Z | 2026-08-04T14:00:00Z | A"
+        XCTAssertTrue(AppDelegate.calendarCandidates(inAssistantReply: reply).isEmpty)
+    }
+
+    func testCommentaryMasqueradingAsATitleIsDropped() {
+        // The same guard the structured search needs: a title is a name, not a
+        // sentence explaining what the model did.
+        let reply = "CANDIDATE: I searched your calendar and found that the meeting "
+            + "you are looking for is probably the one at half past one | "
+            + "2026-08-04T13:30:00Z | 2026-08-04T14:00:00Z | A"
+        XCTAssertTrue(AppDelegate.calendarCandidates(inAssistantReply: reply).isEmpty)
+    }
+
+    func testStrippingLeavesAProseOnlyReplyUntouched() {
+        let reply = "I couldn't find anything matching that time."
+        XCTAssertEqual(AppDelegate.strippingCandidateLines(reply), reply)
+    }
+}
+
+extension CalendarAssistantCandidateParsingTests {
+
+    func testAPartialCandidateMarkerIsHiddenWhileStreaming() {
+        // Deltas arrive a few characters at a time; the first observed was "C".
+        for partial in ["C", "CAN", "CANDIDATE", "CANDIDATE:"] {
+            let shown = AppDelegate.strippingCandidateLines(
+                "Found it — the Zonal weekly sync.\n\(partial)", streaming: true
+            )
+            XCTAssertEqual(shown, "Found it — the Zonal weekly sync.",
+                           "partial marker \(partial) leaked into the panel")
+        }
+    }
+
+    func testRealProseIsNotMistakenForAPartialMarker() {
+        let shown = AppDelegate.strippingCandidateLines(
+            "Found it.\nCan you confirm the time?", streaming: true
+        )
+        XCTAssertTrue(shown.contains("Can you confirm the time?"))
+    }
+}

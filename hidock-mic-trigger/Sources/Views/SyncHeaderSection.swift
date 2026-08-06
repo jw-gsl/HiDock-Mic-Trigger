@@ -55,9 +55,21 @@ struct SyncHeaderSection: View {
                     Circle()
                         .fill(statusColor)
                         .frame(width: 8, height: 8)
-                    Text(viewModel.syncStatus)
-                        .font(.caption)
-                        .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
+                    // See MeetingHeatmapView's equivalent block: ticking the
+                    // elapsed time locally avoids a shared-view-model write
+                    // (and the whole-window re-render it forces) every second.
+                    if let start = viewModel.syncBusy ? viewModel.syncRefreshStartDate
+                        : (viewModel.calendarLookupInProgress.isEmpty ? nil : viewModel.calendarLookupStartDate) {
+                        TimelineView(.periodic(from: start, by: 1)) { ctx in
+                            Text("\(viewModel.syncStatus) \(MicTriggerSection.uptimeString(since: start, now: ctx.date))")
+                                .font(.caption)
+                                .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
+                        }
+                    } else {
+                        Text(viewModel.syncStatus)
+                            .font(.caption)
+                            .foregroundColor(statusColor == .secondary ? .secondary : statusColor)
+                    }
                     Spacer()
                 }
             }

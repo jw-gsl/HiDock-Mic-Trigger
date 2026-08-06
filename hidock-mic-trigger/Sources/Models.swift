@@ -57,7 +57,7 @@ struct HiDockSyncRecording: Codable {
     }
 }
 
-struct HiDockStorageStats: Codable {
+struct HiDockStorageStats: Codable, Equatable {
     let totalFiles: Int
     let returnedFiles: Int
     let totalBytesReturned: Int
@@ -528,7 +528,7 @@ struct MergeCandidatesPayload: Codable {
     let total_count: Int
 }
 
-struct TranscriptionQueueItem: Identifiable {
+struct TranscriptionQueueItem: Identifiable, Equatable {
     let id: String
     let path: String
     let filename: String
@@ -548,7 +548,7 @@ struct TranscriptionQueueItem: Identifiable {
     }
 }
 
-enum TranscriptionQueueStatus: String {
+enum TranscriptionQueueStatus: String, Equatable {
     case queued = "Queued"
     case transcribing = "Transcribing"
     case completed = "Completed"

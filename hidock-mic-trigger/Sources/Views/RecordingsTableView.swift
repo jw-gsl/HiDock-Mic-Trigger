@@ -183,7 +183,14 @@ struct RecordingsTableView: View {
                     guard let top = frames
                         .filter({ $0.value.maxY > 0 })
                         .min(by: { $0.value.minY < $1.value.minY }) else { return }
-                    viewModel.recordingsTableScrollAnchor = top.key
+                    // Every other derived-state field in HiDockViewModel guards
+                    // its write like this; this one didn't, so ordinary
+                    // scrolling fired `objectWillChange` (and the derived-list
+                    // cache invalidation it triggers) once per frame even when
+                    // the anchor row hadn't actually changed.
+                    if viewModel.recordingsTableScrollAnchor != top.key {
+                        viewModel.recordingsTableScrollAnchor = top.key
+                    }
                 }
                 .onChange(of: viewModel.displayRows.count) { newCount in
                     guard !didScrollToTop, newCount > 0,
@@ -579,28 +586,39 @@ struct RecordingsTableView: View {
                 Text("Ad-hoc call")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Button {
-                    viewModel.onLookupCalendarForRecording(group.outputPath)
-                } label: {
-                    calendarSearchIcon
-                        .font(.caption)
+                if viewModel.calendarLookupInProgress.contains(group.outputPath) {
+                    ProgressView().controlSize(.mini).font(.caption)
+                        .help("Checking the calendar…")
+                } else {
+                    Button {
+                        viewModel.onLookupCalendarForRecording(group.outputPath)
+                    } label: {
+                        calendarSearchIcon
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search the calendar again — a meeting may have been added since")
                 }
-                .buttonStyle(.plain)
-                .help("Search the calendar again — a meeting may have been added since")
                 Spacer(minLength: 0)
             }
             .help("No calendar meeting — you marked this merged recording as an ad-hoc call")
         } else {
             HStack(spacing: 4) {
-                Button {
-                    viewModel.onLookupCalendarForRecording(group.outputPath)
-                } label: {
-                    calendarSearchIcon
-                        .font(.caption)
+                if viewModel.calendarLookupInProgress.contains(group.outputPath) {
+                    ProgressView().controlSize(.mini)
                         .frame(width: Self.meetingIconWidth, alignment: .leading)
+                        .help("Checking the calendar…")
+                } else {
+                    Button {
+                        viewModel.onLookupCalendarForRecording(group.outputPath)
+                    } label: {
+                        calendarSearchIcon
+                            .font(.caption)
+                            .frame(width: Self.meetingIconWidth, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search the calendar for a meeting matching this merged recording")
                 }
-                .buttonStyle(.plain)
-                .help("Search the calendar for a meeting matching this merged recording")
 
                 Button {
                     viewModel.onRejectCalendarSuggestion(group.outputPath)
@@ -703,17 +721,22 @@ struct RecordingsTableView: View {
                 Text("Ad-hoc call")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Button {
-                    viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
-                } label: {
-                    // Same action as the lookup button on an unanswered row, so it
-                    // gets the same glyph. `arrow.clockwise` said "retry" without
-                    // saying what would be retried.
-                    calendarSearchIcon
-                        .font(.caption)
+                if viewModel.calendarLookupInProgress.contains(entry.recording.outputPath) {
+                    ProgressView().controlSize(.mini).font(.caption)
+                        .help("Checking the calendar…")
+                } else {
+                    Button {
+                        viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
+                    } label: {
+                        // Same action as the lookup button on an unanswered row, so it
+                        // gets the same glyph. `arrow.clockwise` said "retry" without
+                        // saying what would be retried.
+                        calendarSearchIcon
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search the calendar again — a meeting may have been added since")
                 }
-                .buttonStyle(.plain)
-                .help("Search the calendar again — a meeting may have been added since")
                 Spacer(minLength: 0)
             }
             .help("No calendar meeting — you marked this as an ad-hoc call")
@@ -722,15 +745,21 @@ struct RecordingsTableView: View {
             // historic or later-imported recording can never acquire a meeting on
             // its own. This is the manual route.
             HStack(spacing: 4) {
-                Button {
-                    viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
-                } label: {
-                    calendarSearchIcon
-                        .font(.caption)
+                if viewModel.calendarLookupInProgress.contains(entry.recording.outputPath) {
+                    ProgressView().controlSize(.mini)
                         .frame(width: Self.meetingIconWidth, alignment: .leading)
+                        .help("Checking the calendar…")
+                } else {
+                    Button {
+                        viewModel.onLookupCalendarForRecording(entry.recording.outputPath)
+                    } label: {
+                        calendarSearchIcon
+                            .font(.caption)
+                            .frame(width: Self.meetingIconWidth, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search the calendar for a meeting matching this recording")
                 }
-                .buttonStyle(.plain)
-                .help("Search the calendar for a meeting matching this recording")
 
                 Button {
                     viewModel.onRejectCalendarSuggestion(entry.recording.outputPath)

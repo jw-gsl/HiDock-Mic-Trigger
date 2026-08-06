@@ -398,9 +398,25 @@ struct DownloadProgressBar: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text(viewModel.syncDownloadProgress ?? "Downloading...")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                // Real byte-progress (`syncDownloadProgress`) wins once it
+                // arrives; until then, tick the elapsed time locally instead
+                // of writing it into the shared view model every second (see
+                // MeetingHeatmapView's equivalent block for why that mattered).
+                if let progress = viewModel.syncDownloadProgress {
+                    Text(progress)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if let start = viewModel.syncDownloadStartDate {
+                    TimelineView(.periodic(from: start, by: 1)) { ctx in
+                        Text("Downloading... \(MicTriggerSection.uptimeString(since: start, now: ctx.date))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("Downloading...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
                 Button(role: .destructive) {
                     viewModel.onStopDownload()

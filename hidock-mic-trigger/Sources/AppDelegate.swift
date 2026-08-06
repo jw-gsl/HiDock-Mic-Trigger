@@ -93,8 +93,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var syncDeviceHungUntil: [String: Date] = [:]
     private let hungBackoffInterval: TimeInterval = 180
     private var syncBusy = false
-    private var syncRefreshStartDate: Date?
-    private var syncRefreshTimer: Timer?
     private var syncAutoDownloadTimer: Timer?
     /// Lightweight periodic check for new Plaud recordings. Plaud is an API, not
     /// a USB device, so nothing else surfaces new recordings on it — this poll
@@ -108,8 +106,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // token mutation — so they can run in parallel, letting HiDock and Plaud
     // paint together instead of one-after-another on the serial queue above.
     private let cacheReadQueue = DispatchQueue(label: "hidock.cacheread", qos: .userInitiated, attributes: .concurrent)
-    private var syncDownloadStartDate: Date?
-    private var syncDownloadTimer: Timer?
     private var syncDownloadStopping = false
     private var syncDownloading = false
 
@@ -857,10 +853,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Push all mutable state to the ViewModel so SwiftUI reflects it.
+    ///
+    /// Every field here is guarded by an equality check before writing. A
+    /// `@Published` write fires `objectWillChange` (and marks the derived-list
+    /// cache dirty) regardless of whether the value actually changed, and this
+    /// method is called from ~120 sites — including three repeating timers that
+    /// run for the full duration of any sync refresh, download, or
+    /// transcription job. Without the guards, ordinary use forced a full
+    /// re-render of the whole window (recordings table included) every 1-3s,
+    /// indefinitely — this is what the performance rootcause doc's fix for
+    /// `triggerUptime`/`syncEntries` addressed for those two fields; the rest
+    /// of the fields here had the same defect and are fixed the same way.
     private func syncViewModelState() {
         let running = process != nil
-        viewModel.triggerRunning = running
-        viewModel.triggerPID = process?.processIdentifier
+        if viewModel.triggerRunning != running { viewModel.triggerRunning = running }
+        if viewModel.triggerPID != process?.processIdentifier {
+            viewModel.triggerPID = process?.processIdentifier
+        }
         let uptimeStr = formatUptime() ?? ""
         if viewModel.triggerUptime != uptimeStr { viewModel.triggerUptime = uptimeStr }
         // Anchor for the Mic Trigger row's self-ticking uptime label (changes
@@ -868,14 +877,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if viewModel.triggerConnectedSince != triggerConnectedSince {
             viewModel.triggerConnectedSince = triggerConnectedSince
         }
-        viewModel.autoStartOnLaunch = autoStartOnLaunch
-        viewModel.selectedMicName = selectedMicName
+        if viewModel.autoStartOnLaunch != autoStartOnLaunch { viewModel.autoStartOnLaunch = autoStartOnLaunch }
+        if viewModel.selectedMicName != selectedMicName { viewModel.selectedMicName = selectedMicName }
         // #3: don't enumerate CoreAudio devices on every state sync (this is
         // called from ~90 sites). The mic list only changes on a device-change
         // event, which updates it directly; throttle any stray refresh here.
-        viewModel.availableMics = throttledMicNames()
-        viewModel.syncBusy = syncBusy
-        viewModel.syncDownloading = syncDownloading
+        let mics = throttledMicNames()
+        if viewModel.availableMics != mics { viewModel.availableMics = mics }
+        if viewModel.syncBusy != syncBusy { viewModel.syncBusy = syncBusy }
+        if viewModel.syncDownloading != syncDownloading { viewModel.syncDownloading = syncDownloading }
         // #4: only push the (now ~1700-element) entries array when it actually
         // changed — an unchanged reassignment still fires @Published and marks
         // the derived-list cache dirty for nothing.
@@ -886,31 +896,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncEntries = syncEntries
             lastPushedSyncEntriesVersion = syncEntriesVersion
         }
-        viewModel.syncCheckedRecordings = syncCheckedRecordings
-        viewModel.syncAutoDownload = syncAutoDownload
-        viewModel.syncAutoTranscribe = syncAutoTranscribe
-        viewModel.syncAutoSummarise = syncAutoSummarise
-        viewModel.diarizeEnabled = diarizeEnabled
-        viewModel.syncFilterDeviceId = syncFilterDeviceId
-        viewModel.syncPairedDevices = syncPairedDevices
-        viewModel.syncPaired = syncPaired
-        viewModel.syncDeviceConnected = syncDeviceConnected
-        viewModel.syncDeviceStorage = syncDeviceStorage
-        viewModel.syncDeviceLastError = syncDeviceLastError
-        viewModel.syncDeviceLastOK = syncDeviceLastOK
-        viewModel.syncOutputFolder = syncOutputFolder
-        viewModel.syncTranscriptFolder = syncTranscriptFolder
-        viewModel.transcriptionBusy = transcriptionBusy
-        viewModel.transcriptionCurrentFile = transcriptionCurrentFile
-        viewModel.currentlyDownloadingName = currentlyDownloadingName
-        viewModel.triggerHealthy = triggerHealthy
-        viewModel.triggerWaitMessage = triggerWaitMessage
-        viewModel.triggerLastStartedAt = triggerLastStartedAt
-        viewModel.transcriptionProgress = transcriptionProgress
-        viewModel.transcriptionPaused = transcriptionPaused
-        viewModel.transcriptionQueue = pendingTranscriptionQueue
-        viewModel.transcriptionFileIndex = transcriptionFileIndex
-        viewModel.transcriptionFileCount = transcriptionFileCount
+        if viewModel.syncCheckedRecordings != syncCheckedRecordings {
+            viewModel.syncCheckedRecordings = syncCheckedRecordings
+        }
+        if viewModel.syncAutoDownload != syncAutoDownload { viewModel.syncAutoDownload = syncAutoDownload }
+        if viewModel.syncAutoTranscribe != syncAutoTranscribe { viewModel.syncAutoTranscribe = syncAutoTranscribe }
+        if viewModel.syncAutoSummarise != syncAutoSummarise { viewModel.syncAutoSummarise = syncAutoSummarise }
+        if viewModel.diarizeEnabled != diarizeEnabled { viewModel.diarizeEnabled = diarizeEnabled }
+        if viewModel.syncFilterDeviceId != syncFilterDeviceId { viewModel.syncFilterDeviceId = syncFilterDeviceId }
+        if viewModel.syncPairedDevices != syncPairedDevices { viewModel.syncPairedDevices = syncPairedDevices }
+        if viewModel.syncPaired != syncPaired { viewModel.syncPaired = syncPaired }
+        if viewModel.syncDeviceConnected != syncDeviceConnected { viewModel.syncDeviceConnected = syncDeviceConnected }
+        if viewModel.syncDeviceStorage != syncDeviceStorage { viewModel.syncDeviceStorage = syncDeviceStorage }
+        if !Self.lastErrorMapsEqual(viewModel.syncDeviceLastError, syncDeviceLastError) {
+            viewModel.syncDeviceLastError = syncDeviceLastError
+        }
+        if viewModel.syncDeviceLastOK != syncDeviceLastOK { viewModel.syncDeviceLastOK = syncDeviceLastOK }
+        if viewModel.syncOutputFolder != syncOutputFolder { viewModel.syncOutputFolder = syncOutputFolder }
+        if viewModel.syncTranscriptFolder != syncTranscriptFolder {
+            viewModel.syncTranscriptFolder = syncTranscriptFolder
+        }
+        if viewModel.transcriptionBusy != transcriptionBusy { viewModel.transcriptionBusy = transcriptionBusy }
+        if viewModel.transcriptionCurrentFile != transcriptionCurrentFile {
+            viewModel.transcriptionCurrentFile = transcriptionCurrentFile
+        }
+        if viewModel.currentlyDownloadingName != currentlyDownloadingName {
+            viewModel.currentlyDownloadingName = currentlyDownloadingName
+        }
+        if viewModel.triggerHealthy != triggerHealthy { viewModel.triggerHealthy = triggerHealthy }
+        if viewModel.triggerWaitMessage != triggerWaitMessage { viewModel.triggerWaitMessage = triggerWaitMessage }
+        if viewModel.triggerLastStartedAt != triggerLastStartedAt {
+            viewModel.triggerLastStartedAt = triggerLastStartedAt
+        }
+        if viewModel.transcriptionProgress != transcriptionProgress {
+            viewModel.transcriptionProgress = transcriptionProgress
+        }
+        if viewModel.transcriptionPaused != transcriptionPaused { viewModel.transcriptionPaused = transcriptionPaused }
+        if viewModel.transcriptionQueue != pendingTranscriptionQueue {
+            viewModel.transcriptionQueue = pendingTranscriptionQueue
+        }
+        if viewModel.transcriptionFileIndex != transcriptionFileIndex {
+            viewModel.transcriptionFileIndex = transcriptionFileIndex
+        }
+        if viewModel.transcriptionFileCount != transcriptionFileCount {
+            viewModel.transcriptionFileCount = transcriptionFileCount
+        }
+    }
+
+    /// `[String: (String, Date)]` can't derive `Equatable` — tuples aren't a
+    /// protocol-conforming type — so this hand-rolled comparison is what lets
+    /// `syncDeviceLastError` get the same unchanged-write guard as every other
+    /// field above.
+    private static func lastErrorMapsEqual(_ a: [String: (String, Date)], _ b: [String: (String, Date)]) -> Bool {
+        guard a.count == b.count else { return false }
+        for (key, value) in a {
+            guard let other = b[key], other.0 == value.0, other.1 == value.1 else { return false }
+        }
+        return true
     }
 
     // MARK: - Notifications
@@ -4680,12 +4722,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             syncViewModelState()
             return
         }
+        guard !viewModel.calendarLookupInProgress.contains(audioPath) else { return }
+        viewModel.calendarLookupInProgress.insert(audioPath)
+        viewModel.calendarLookupStartDate = Date()
         viewModel.syncStatus = "Checking calendar for \(name)…"
         viewModel.syncStatusLevel = .secondary
         syncViewModelState()
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
         findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
             guard let self else { return }
+            self.viewModel.calendarLookupInProgress.remove(audioPath)
+            if self.viewModel.calendarLookupInProgress.isEmpty {
+                self.viewModel.calendarLookupStartDate = nil
+            }
             guard !self.hasCalendarRejection(for: audioPath) else {
                 self.log("Calendar suggestion suppressed for \((audioPath as NSString).lastPathComponent): marked ad-hoc while lookup was running")
                 return
@@ -4853,10 +4902,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         duration: Double,
         userMessage: String,
         sessionId: String?,
-        completion: @escaping (String, String?) -> Void
+        onEvent: @escaping (CalendarAssistantEvent) -> Void
     ) {
         guard let start = calendarRecordingStart(for: audioPath) else {
-            completion("I couldn't determine this recording's start time.", sessionId)
+            onEvent(.finished(reply: "I couldn't determine this recording's start time.",
+                              sessionId: sessionId, candidates: []))
             return
         }
         let cliCandidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
@@ -4864,44 +4914,224 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
             + ["\(NSHomeDirectory())/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
         guard let claudePath = cliCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            completion("Claude CLI is not available. Open Calendar connection to set it up.", sessionId)
+            onEvent(.finished(reply: "Claude CLI is not available. Open Calendar connection to set it up.",
+                              sessionId: sessionId, candidates: []))
             return
         }
         let iso = ISO8601DateFormatter()
         let end = start.addingTimeInterval(max(1, duration))
+        // The CANDIDATE contract is what makes the answer actionable. Parsing the
+        // prose was the alternative and it is a worse one: the structured search
+        // already needs a `looksLikeEventTitle` guard because model commentary
+        // kept being mistaken for event titles. One machine-readable line per
+        // event keeps the prose free-form and the parsing exact.
         let context = """
-        You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). Use the connected Microsoft 365 or Google Calendar MCP when calendar information is needed. Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files. User: \(userMessage)
+        You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). Use the connected Microsoft 365 or Google Calendar MCP when calendar information is needed. Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
+
+        When you are confident about one or more specific events, end your reply with one line per event, after all prose, in exactly this form:
+        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <comma-separated attendee display names>
+        Emit no CANDIDATE line if you are unsure — a wrong one would attach the recording to the wrong meeting. Never mention the CANDIDATE lines in your prose.
+
+        User: \(userMessage)
         """
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: claudePath)
-            var arguments = ["--print", "--output-format", "json"]
+            // stream-json + partial messages is what turns an opaque wait into
+            // visible progress. --verbose is required alongside them.
+            var arguments = [
+                "--print", "--output-format", "stream-json",
+                "--include-partial-messages", "--verbose",
+            ]
             if let sessionId, !sessionId.isEmpty { arguments += ["--resume", sessionId] }
             arguments.append(context)
             process.arguments = arguments
             let output = Pipe()
             process.standardOutput = output
+            process.standardError = Pipe()
+
+            var pending = Data()
+            var replyText = ""
+            var finalReply: String?
+            var nextSession: String?
+            // The CLI's first text delta can be a single character, so forwarding
+            // every delta as its own main-thread update forced a full
+            // TranscriptViewerView re-render (and its GeometryReaders) dozens of
+            // times a second. Coalescing to 10/s is imperceptible as "streaming"
+            // but cuts that to a tenth — the final .finished event always carries
+            // the complete text, so nothing is lost by skipping intermediate ones.
+            var lastPartialEmit = Date.distantPast
+            let partialReplyMinInterval: TimeInterval = 0.1
+
+            func handle(_ line: Data) {
+                guard !line.isEmpty,
+                      let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+                else { return }
+                if let session = event["session_id"] as? String, !session.isEmpty {
+                    nextSession = session
+                }
+                switch event["type"] as? String {
+                case "stream_event":
+                    // Text deltas and tool starts both arrive here.
+                    guard let raw = event["event"] as? [String: Any] else { return }
+                    if let delta = raw["delta"] as? [String: Any],
+                       let chunk = delta["text"] as? String, !chunk.isEmpty {
+                        replyText += chunk
+                        let now = Date()
+                        if now.timeIntervalSince(lastPartialEmit) >= partialReplyMinInterval {
+                            lastPartialEmit = now
+                            let shown = Self.strippingCandidateLines(replyText, streaming: true)
+                            if !shown.isEmpty {
+                                DispatchQueue.main.async { onEvent(.partialReply(shown)) }
+                            }
+                        }
+                    }
+                    if let block = raw["content_block"] as? [String: Any],
+                       block["type"] as? String == "tool_use",
+                       let name = block["name"] as? String {
+                        DispatchQueue.main.async {
+                            onEvent(.activity(Self.friendlyToolActivity(name)))
+                        }
+                    }
+                case "assistant":
+                    // Whole assistant message — the non-partial fallback.
+                    if let message = event["message"] as? [String: Any],
+                       let content = message["content"] as? [[String: Any]] {
+                        let text = content.compactMap { $0["text"] as? String }.joined()
+                        if !text.isEmpty { replyText = text }
+                    }
+                case "result":
+                    if let result = event["result"] as? String { finalReply = result }
+                default:
+                    break
+                }
+            }
+
             do {
                 try process.run()
-                let data = output.fileHandleForReading.readDataToEndOfFile()
+                DispatchQueue.main.async { onEvent(.activity("Asking the calendar assistant…")) }
+                let reader = output.fileHandleForReading
+                while true {
+                    let chunk = reader.availableData
+                    if chunk.isEmpty { break }
+                    pending.append(chunk)
+                    // stream-json is newline-delimited; a chunk can split a line.
+                    while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+                        let line = pending[pending.startIndex..<newline]
+                        pending.removeSubrange(pending.startIndex...newline)
+                        handle(Data(line))
+                    }
+                }
+                if !pending.isEmpty { handle(pending) }
                 process.waitUntilExit()
-                guard process.terminationStatus == 0,
-                      let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    self?.log("Calendar assistant CLI did not return a result")
-                    DispatchQueue.main.async { completion("I couldn't reach the calendar connector. You can check its connection from the calendar menu.", sessionId) }
+
+                let answer = (finalReply ?? replyText).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard process.terminationStatus == 0, !answer.isEmpty else {
+                    self?.log("Calendar assistant CLI did not return a result (status \(process.terminationStatus))")
+                    DispatchQueue.main.async {
+                        onEvent(.finished(
+                            reply: "I couldn't reach the calendar connector. You can check its connection from the calendar menu.",
+                            sessionId: nextSession ?? sessionId, candidates: []
+                        ))
+                    }
                     return
                 }
-                let reply = (root["result"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let nextSession = root["session_id"] as? String
+                let candidates = Self.calendarCandidates(inAssistantReply: answer)
+                if !candidates.isEmpty {
+                    self?.log("Calendar assistant offered \(candidates.count) linkable event(s)")
+                }
                 DispatchQueue.main.async {
-                    completion((reply?.isEmpty == false ? reply! : "I couldn't find a usable calendar response."), nextSession ?? sessionId)
+                    onEvent(.finished(
+                        reply: Self.strippingCandidateLines(answer),
+                        sessionId: nextSession ?? sessionId,
+                        candidates: candidates
+                    ))
                 }
             } catch {
                 self?.log("Calendar assistant CLI failed: \(error.localizedDescription)")
-                DispatchQueue.main.async { completion("Calendar assistant failed: \(error.localizedDescription)", sessionId) }
+                DispatchQueue.main.async {
+                    onEvent(.finished(reply: "Calendar assistant failed: \(error.localizedDescription)",
+                                      sessionId: sessionId, candidates: []))
+                }
             }
         }
+    }
+
+    /// Human wording for the tool the assistant just invoked, so the panel names
+    /// the actual step instead of always claiming to be "searching calendar".
+    private static func friendlyToolActivity(_ toolName: String) -> String {
+        let lower = toolName.lowercased()
+        if lower.contains("calendar") { return "Searching your calendar…" }
+        if lower.contains("mail") || lower.contains("outlook") { return "Checking email for the invite…" }
+        if lower.contains("teams") || lower.contains("chat") { return "Checking Teams messages…" }
+        return "Running \(toolName)…"
+    }
+
+    /// The prose, with the machine-readable CANDIDATE lines removed.
+    ///
+    /// `streaming` also hides a final line that is still only a *prefix* of
+    /// "CANDIDATE:". Deltas arrive a few characters at a time — the first one
+    /// observed was the single letter "C" — so without this the marker briefly
+    /// flashes into the panel before the rest of the word arrives and it
+    /// disappears again.
+    static func strippingCandidateLines(_ reply: String, streaming: Bool = false) -> String {
+        let marker = "CANDIDATE:"
+        var lines = reply.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if streaming, let last = lines.last {
+            let trimmed = last.trimmingCharacters(in: .whitespaces).uppercased()
+            if !trimmed.isEmpty, marker.hasPrefix(trimmed) { lines.removeLast() }
+        }
+        return lines
+            .filter { !$0.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix(marker) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Events the assistant marked as confirmable.
+    ///
+    /// Strict by design: a malformed line is dropped rather than guessed at,
+    /// because the consequence of accepting one is attaching a recording — and
+    /// its speaker names — to the wrong meeting.
+    static func calendarCandidates(inAssistantReply reply: String) -> [CalendarMeetingCandidate] {
+        let iso = ISO8601DateFormatter()
+        let isoNoSeconds = ISO8601DateFormatter()
+        isoNoSeconds.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        var out: [CalendarMeetingCandidate] = []
+        var seen = Set<String>()
+        for rawLine in reply.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.uppercased().hasPrefix("CANDIDATE:") else { continue }
+            let body = line.dropFirst("CANDIDATE:".count)
+            let fields = body.split(separator: "|", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count >= 3 else { continue }
+            let title = fields[0].replacingOccurrences(of: "*", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            // `looksLikeEventTitle` is tuned against the *structured* search's
+            // observed false positives — set phrases and trailing full stops —
+            // and a model explaining itself in the title field slips past all of
+            // them. A word cap is the reliable tell here and is kept local rather
+            // than folded into the shared guard, which the other search path
+            // depends on behaving exactly as it does. Real titles are short:
+            // "Volaris Group - Business Transformation Specialist (Theo)" is
+            // seven words, so twelve leaves generous headroom.
+            let wordCount = title.split(whereSeparator: { $0 == " " || $0 == "\t" }).count
+            guard !title.isEmpty, wordCount <= 12, looksLikeEventTitle(title) else { continue }
+            guard let start = iso.date(from: fields[1]) ?? isoNoSeconds.date(from: fields[1]),
+                  let end = iso.date(from: fields[2]) ?? isoNoSeconds.date(from: fields[2]),
+                  end > start
+            else { continue }
+            let attendees = fields.count >= 4
+                ? fields[3].split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                : []
+            let id = "\(title)|\(start.timeIntervalSince1970)"
+            guard seen.insert(id).inserted else { continue }
+            out.append(CalendarMeetingCandidate(id: id, title: title, start: start, end: end,
+                                                attendeeNames: attendees))
+        }
+        return out
     }
 
     private func openTranscriptViewer(transcriptMdPath: String) {
@@ -5033,9 +5263,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onOpenCalendarMCPOnboarding: { [weak self] in
                 self?.openCalendarMCPOnboarding()
             },
-            onCalendarAssistantTurn: { [weak self] audioPath, duration, message, sessionId, completion in
-                self?.runCalendarAssistantTurn(audioPath: audioPath, duration: duration, userMessage: message, sessionId: sessionId, completion: completion)
-                    ?? completion("Calendar assistant is unavailable.", sessionId)
+            onCalendarAssistantTurn: { [weak self] audioPath, duration, message, sessionId, onEvent in
+                self?.runCalendarAssistantTurn(audioPath: audioPath, duration: duration,
+                                               userMessage: message, sessionId: sessionId,
+                                               onEvent: onEvent)
+                    ?? onEvent(.finished(reply: "Calendar assistant is unavailable.",
+                                         sessionId: sessionId, candidates: []))
             }
         )
 
@@ -8197,20 +8430,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    // No longer a literal Timer: it used to tick `viewModel.syncStatus` every
+    // second, which fired `objectWillChange` on the whole shared view model —
+    // and everything observing it, including the recordings table — once a
+    // second for the entire refresh. The elapsed-time display now lives in a
+    // local `TimelineView` (SyncHeaderSection) reading `syncRefreshStartDate`,
+    // which this only has to set once at start and clear once at stop.
     private func startSyncRefreshTimer() {
-        syncRefreshStartDate = Date()
-        syncRefreshTimer?.invalidate()
-        syncRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.syncRefreshStartDate else { return }
-            let elapsed = Int(Date().timeIntervalSince(start))
-            self.viewModel.syncStatus = "Refreshing... \(elapsed)s"
-        }
+        viewModel.syncRefreshStartDate = Date()
     }
 
     private func stopSyncRefreshTimer() {
-        syncRefreshTimer?.invalidate()
-        syncRefreshTimer = nil
-        syncRefreshStartDate = nil
+        viewModel.syncRefreshStartDate = nil
     }
 
     private var visibleSyncEntries: [HiDockSyncRecordingEntry] {
@@ -8996,23 +9227,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncViewModelState()
     }
 
+    // No longer a literal Timer: it used to tick `viewModel.syncDownloadProgress`
+    // every second as a fallback before real byte-progress arrived, which fired
+    // `objectWillChange` on the whole shared view model once a second for the
+    // entire download. `DownloadProgressBar` now renders that fallback itself
+    // via a local `TimelineView` reading `syncDownloadStartDate`, which this
+    // only has to set once at start and clear once at stop.
     private func startDownloadTimer() {
-        syncDownloadStartDate = Date()
-        syncDownloadTimer?.invalidate()
-        syncDownloadTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.syncDownloadStartDate else { return }
-            let elapsed = Int(Date().timeIntervalSince(start))
-            let mins = elapsed / 60
-            let secs = elapsed % 60
-            let timeStr = mins > 0 ? String(format: "%d:%02d", mins, secs) : "\(secs)s"
-            self.viewModel.syncDownloadProgress = "Downloading... \(timeStr)"
-        }
+        viewModel.syncDownloadStartDate = Date()
     }
 
     private func stopDownloadTimer() {
-        syncDownloadTimer?.invalidate()
-        syncDownloadTimer = nil
-        syncDownloadStartDate = nil
+        viewModel.syncDownloadStartDate = nil
         viewModel.syncDownloadProgress = nil
         viewModel.ledMatrix.setStatus(nil)
     }
@@ -9110,8 +9336,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self = self else { return }
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
-            self.viewModel.syncStatus = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
-            self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let status = "Downloading \(current.recording.outputName) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let progress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            if self.viewModel.syncStatus != status { self.viewModel.syncStatus = status }
+            if self.viewModel.syncDownloadProgress != progress { self.viewModel.syncDownloadProgress = progress }
             self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }) { [weak self] result in
             guard self != nil else { return }
@@ -9273,8 +9501,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.beginDownloadProgressIfNeeded()
             let receivedMB = String(format: "%.1f", Double(received) / 1_000_000)
             let totalMB = String(format: "%.1f", Double(total) / 1_000_000)
-            self.viewModel.syncStatus = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
-            self.viewModel.syncDownloadProgress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let status = "Downloading (\(device.cleanName)) — \(pct)% (\(receivedMB)/\(totalMB) MB)"
+            let progress = "\(pct)% (\(receivedMB)/\(totalMB) MB)"
+            if self.viewModel.syncStatus != status { self.viewModel.syncStatus = status }
+            if self.viewModel.syncDownloadProgress != progress { self.viewModel.syncDownloadProgress = progress }
             self.viewModel.ledMatrix.setStatus("\(LEDFont.arrowDown) \(pct)%", color: .blue)
         }, onFile: { [weak self] name, started in
             guard let self = self else { return }
