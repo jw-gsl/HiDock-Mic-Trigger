@@ -2904,6 +2904,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     )
                     self.mergeGroups.append(group)
                     self.saveMergeGroups()
+                    self.inheritCalendarMeeting(from: entries, to: outputPath,
+                                                duration: totalDuration)
 
                     self.syncCheckedRecordings.removeAll()
                     self.refreshSyncStatus()
@@ -4425,6 +4427,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func calendarMeetingTitle(for audioPath: String) -> String? {
         calendarLinkedEvent(for: audioPath)?.title
+    }
+
+    /// Carry a confirmed meeting from the pieces of a merge onto the merged
+    /// recording, when every piece agrees on it.
+    ///
+    /// Merging recordings that are already linked to one meeting used to
+    /// produce a merged row with an empty Meeting column, asking the reviewer
+    /// to search for an answer they had already given — twice over, once per
+    /// piece. Agreement is the whole condition: if the pieces carry different
+    /// events, or any piece is unlinked, the merge spans more than one meeting
+    /// (or an unknown one) and picking a winner would be a guess. Those cases
+    /// are left for the reviewer, exactly as before.
+    ///
+    /// `rediarizeAfterLink` is false because the merge is already about to
+    /// stitch the piece transcripts and re-diarise the merged audio; linking
+    /// would otherwise queue a second, redundant pass over the same file.
+    private func inheritCalendarMeeting(
+        from entries: [HiDockSyncRecordingEntry],
+        to mergedPath: String,
+        duration: Double
+    ) {
+        let linked = entries.map { calendarLinkedEvent(for: $0.recording.outputPath) }
+        guard let first = linked.first ?? nil,
+              linked.allSatisfy({ $0?.id == first.id })
+        else { return }
+        log("Merge inherits calendar meeting '\(first.title)' from all \(entries.count) piece(s)")
+        finishLinkingCalendarEvent(audioPath: mergedPath, duration: duration,
+                                   event: first, rediarizeAfterLink: false)
     }
 
     /// Read the durable calendar link back into the transcript sidecar.  The
