@@ -443,3 +443,52 @@ extension CalendarAssistantCandidateParsingTests {
         XCTAssertTrue(shown.contains("Can you confirm the time?"))
     }
 }
+
+/// A merged recording must still be datable, or it can never find its meeting.
+final class TimestampBearingStemTests: XCTestCase {
+
+    func testDeviceStemIsUnchanged() {
+        XCTAssertEqual(timestampBearingStem("2026Aug05-103036-Rec12"), "2026Aug05-103036-Rec12")
+    }
+
+    func testMergedStemYieldsTheFirstPiece() {
+        // The bug: the first 16 characters of the merged name are
+        // "Merged-2026Aug05", which is not a date, so every calendar path bailed
+        // out — the assistant said it couldn't determine the start time and
+        // Match meeting found nothing.
+        XCTAssertEqual(
+            timestampBearingStem("Merged-2026Aug05-103036-Rec12-to-2026Aug05-104851-Rec13"),
+            "2026Aug05-103036-Rec12"
+        )
+    }
+
+    func testMergedStemStartsWithAParseableTimestamp() {
+        let stem = timestampBearingStem("Merged-2026Aug05-103036-Rec12-to-2026Aug05-104851-Rec13")
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Europe/London")
+        formatter.dateFormat = "yyyyMMMdd-HHmmss"
+        XCTAssertNotNil(formatter.date(from: String(stem.prefix(16))))
+    }
+
+    func testTruncatedMergeNameWithoutASpanStillYieldsItsPiece() {
+        // Merge names longer than 100 characters drop the "-to-<last>" half.
+        XCTAssertEqual(
+            timestampBearingStem("Merged-2026Aug05-103036-Rec12"),
+            "2026Aug05-103036-Rec12"
+        )
+    }
+
+    func testMergeStartingOnASplitPartKeepsThatPartsTimestamp() {
+        XCTAssertEqual(
+            timestampBearingStem("Merged-2026Jul31-175620-Rec01-Part-1-to-2026Jul31-180000-Rec02"),
+            "2026Jul31-175620-Rec01-Part-1"
+        )
+    }
+
+    func testNonMergeNameWithToInItIsNotTreatedAsASpan() {
+        // Only the "Merged-" prefix marks a span; an imported file that happens
+        // to contain "-to-" must be left alone.
+        XCTAssertEqual(timestampBearingStem("intro-to-swift"), "intro-to-swift")
+    }
+}

@@ -3979,11 +3979,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func calendarRecordingStart(for audioPath: String) -> Date? {
-        let stem = URL(fileURLWithPath: audioPath).deletingPathExtension().lastPathComponent
+        let url = URL(fileURLWithPath: audioPath)
+        let stem = timestampBearingStem(url.deletingPathExtension().lastPathComponent)
         guard stem.count >= 16 else { return nil }
+        // Resolve the timezone against whichever piece the timestamp came from.
+        // A merge has no captured zone of its own (nothing calls
+        // captureRecordingTimeZone at merge time), so reading the merged path
+        // would fall back to whatever the Mac is set to *now* — hours out for a
+        // recording made in another timezone, which lands the search window on
+        // the wrong part of the day. Its first child does have one.
+        let timeZonePath = stem == url.deletingPathExtension().lastPathComponent
+            ? audioPath
+            : url.deletingLastPathComponent().appendingPathComponent("\(stem).mp3").path
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = recordingTimeZone(for: audioPath)
+        formatter.timeZone = recordingTimeZone(for: timeZonePath)
         formatter.dateFormat = "yyyyMMMdd-HHmmss"
         return formatter.date(from: String(stem.prefix(16)))
     }
