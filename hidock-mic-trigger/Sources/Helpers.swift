@@ -205,3 +205,25 @@ func sanitizeDeviceName(_ raw: String) -> String {
     }
     return s.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces)
 }
+
+/// The part of a recording's filename stem that carries its `yyyyMMMdd-HHmmss`
+/// timestamp.
+///
+/// For a device recording that is the stem itself. A merge output is named
+/// `Merged-<first stem>-to-<last stem>` (or just `Merged-<first stem>` when the
+/// full span would exceed 100 characters), so its timestamp is not at the front
+/// — which meant every calendar path failed on a merged recording: the parser
+/// read "Merged-2026Aug05" as the date, got nil, and the callers gave up. The
+/// assistant answered "I couldn't determine this recording's start time" and
+/// Match meeting reported no matching event, with no way to link a merge to its
+/// meeting at all.
+///
+/// Merge inputs are sorted chronologically before the output is named, so the
+/// *first* stem is the earliest piece and its timestamp is when the merged
+/// recording begins.
+func timestampBearingStem(_ stem: String) -> String {
+    guard stem.hasPrefix("Merged-") else { return stem }
+    let body = String(stem.dropFirst("Merged-".count))
+    guard let range = body.range(of: "-to-") else { return body }
+    return String(body[body.startIndex..<range.lowerBound])
+}
