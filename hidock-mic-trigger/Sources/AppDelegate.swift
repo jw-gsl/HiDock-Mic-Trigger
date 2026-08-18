@@ -4,6 +4,7 @@ import CoreAudio
 import EventKit
 import UniformTypeIdentifiers
 import UserNotifications
+import Darwin
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
@@ -94,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let hungBackoffInterval: TimeInterval = 180
     private var syncBusy = false
     private var syncAutoDownloadTimer: Timer?
+    private var postReleaseSyncTimer: Timer?
     /// Lightweight periodic check for new Plaud recordings. Plaud is an API, not
     /// a USB device, so nothing else surfaces new recordings on it — this poll
     /// does. It only runs the expensive refresh/auto-download when the Plaud
@@ -641,6 +643,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         refreshMicNamesNow()
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
+        // Automatic download is the normal HiDock workflow: a recording is
+        // complete when the Samson mic is released. Preserve an explicit user
+        // choice of false, but make new installs default to on.
+        if UserDefaults.standard.object(forKey: syncAutoDownloadKey) == nil {
+            UserDefaults.standard.set(true, forKey: syncAutoDownloadKey)
+        }
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
         viewModel.plaudPollIntervalSeconds = plaudPollInterval
@@ -1098,12 +1106,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.viewModel.hidockRecordingActive = false
                     self.viewModel.ledMatrix.setRecording(false)
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
-                    guard let self = self, self.syncPaired, !self.syncBusy else { return }
-                    self.log("Auto-refreshing sync after mic release")
-                    self.refreshSyncStatus()
-                }
-                scheduleAutoDownloadNewRecordings()
+                // HiDock finalises the file after the audio interface is
+                // released. Use one post-release pipeline: wait for that
+                // finalisation, refresh the catalog so the new row appears,
+                // and let the normal auto-download path run from the fresh
+                // status. If another sync is still in flight, retry instead
+                // of silently dropping this recording's only event.
+                schedulePostReleaseSync()
             }
         }
     }
@@ -8037,6 +8046,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// user's H1 crossed the threshold. 120s gives plenty of headroom and
     /// still keeps us from hanging forever on a genuinely wedged device.
     private let extractorProcessTimeout: TimeInterval = 120
+    private let extractorTerminationGracePeriod: TimeInterval = 2
+
+    /// Stop a wedged extractor without ever waiting indefinitely. `terminate`
+    /// is normally enough, but a libusb call can leave the Python child stuck
+    /// in the kernel; the old code then called waitUntilExit() forever and
+    /// left syncBusy=true for the rest of the app session. A bounded SIGKILL
+    /// fallback lets the caller complete its failure path and release the
+    /// sync gate.
+    @discardableResult
+    private func terminateExtractorProcess(_ process: Process, label: String) -> Bool {
+        guard process.isRunning else { return true }
+
+        process.terminate()
+        let gracefulDeadline = Date().addingTimeInterval(extractorTerminationGracePeriod)
+        while process.isRunning && Date() < gracefulDeadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
+        if process.isRunning {
+            NSLog("%@ still running after terminate; sending SIGKILL (pid %d)", label, process.processIdentifier)
+            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            let killDeadline = Date().addingTimeInterval(extractorTerminationGracePeriod)
+            while process.isRunning && Date() < killDeadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+
+        // This is now guaranteed to return immediately: either the process has
+        // exited, or we have exhausted the bounded kill grace period.
+        if !process.isRunning {
+            process.waitUntilExit()
+        }
+        return !process.isRunning
+    }
 
     /// Lightweight CONCURRENT extractor runner for launch cache-paint reads
     /// only (cached-status / plaud-cached-status). Pure catalog reads — no USB
@@ -8119,13 +8162,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     Thread.sleep(forTimeInterval: 0.2)
                 }
                 var weKilledIt = false
+                var processStopped = true
                 if process.isRunning {
                     NSLog("runExtractor: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
                     weKilledIt = true
-                    process.terminate()
-                    Thread.sleep(forTimeInterval: 1)
-                    if process.isRunning { process.interrupt() }
-                    process.waitUntilExit()
+                    processStopped = self.terminateExtractorProcess(process, label: "runExtractor")
                 } else {
                     NSLog("runExtractor: process exited with status %d", process.terminationStatus)
                 }
@@ -8147,6 +8188,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 DispatchQueue.main.async { self.syncExtractorProcess = nil }
                 try outHandle.close()
                 try errHandle.close()
+
+                if !processStopped {
+                    // Do not read the temp files or wait for EOF while a
+                    // child is still alive: it may still own those descriptors.
+                    // The important invariant is that the app's completion
+                    // callback runs so syncBusy can be cleared.
+                    try? FileManager.default.removeItem(at: outURL)
+                    try? FileManager.default.removeItem(at: errURL)
+                    let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
+                        NSLocalizedDescriptionKey: "Extractor could not be terminated after a " + String(Int(self.extractorProcessTimeout)) + "s timeout"
+                    ])
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                    return
+                }
 
                 let outData = (try? Data(contentsOf: outURL)) ?? Data()
                 let errData = (try? Data(contentsOf: errURL)) ?? Data()
@@ -8259,15 +8314,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                process.waitUntilExit()
+                NSLog("runExtractorWithProgress: process started (pid %d)", process.processIdentifier)
+                let deadline = Date().addingTimeInterval(self.extractorProcessTimeout)
+                while process.isRunning && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+
+                var processStopped = true
+                if process.isRunning {
+                    NSLog("runExtractorWithProgress: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
+                    processStopped = self.terminateExtractorProcess(process, label: "runExtractorWithProgress")
+                }
+
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
-                let trailingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let trailingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
-                outQueue.sync { outData.append(trailingOut) }
-                errQueue.sync { stderrData.append(trailingErr) }
+                if processStopped {
+                    process.waitUntilExit()
+                    let trailingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    let trailingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    outQueue.sync { outData.append(trailingOut) }
+                    errQueue.sync { stderrData.append(trailingErr) }
+                }
 
                 DispatchQueue.main.async { self.syncExtractorProcess = nil }
+
+                if !processStopped {
+                    let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
+                        NSLocalizedDescriptionKey: "Extractor could not be terminated after a " + String(Int(self.extractorProcessTimeout)) + "s timeout"
+                    ])
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                    return
+                }
 
                 let finalOut = outQueue.sync { outData }
                 let finalErr = errQueue.sync { stderrData }
@@ -8574,6 +8651,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func filterSyncByDevice(_ deviceId: String?) {
         syncFilterDeviceId = deviceId
         syncViewModelState()
+    }
+
+    /// A mic-release event is the natural end-of-recording boundary. HiDock
+    /// needs a few seconds after ffmpeg closes before its file list includes
+    /// the new .hda, so probe after a short settle period. Do not abandon the
+    /// event just because another probe/download is busy: that was the reason
+    /// completed recordings could remain invisible until a manual refresh.
+    private func schedulePostReleaseSync() {
+        guard syncPaired else { return }
+        postReleaseSyncTimer?.invalidate()
+        postReleaseSyncTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+            self?.runPostReleaseSync(attempt: 0)
+        }
+        log("Post-release sync scheduled (8s settle)")
+    }
+
+    private func runPostReleaseSync(attempt: Int) {
+        guard syncPaired else { return }
+        guard !syncBusy else {
+            // A normal catalog probe can take tens of seconds on a large H1.
+            // Keep the release event alive while it drains, but bound retries
+            // so a genuinely broken device does not create an endless timer.
+            if attempt < 60 {
+                if attempt == 0 { log("Post-release sync waiting for existing sync to finish") }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.runPostReleaseSync(attempt: attempt + 1)
+                }
+            } else {
+                log("Post-release sync still busy after 120s — leaving the event for the next manual refresh")
+            }
+            return
+        }
+
+        log("Auto-refreshing sync after mic release")
+        refreshSyncStatus()
+        // The refresh itself can detect a catalog count rise. Scheduling the
+        // sweep as well makes the release contract explicit and catches a new
+        // file even when the count did not change from a partial prior read.
+        scheduleAutoDownloadNewRecordings()
     }
 
     private func scheduleAutoDownloadNewRecordings(attempt: Int = 0) {
