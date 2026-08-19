@@ -144,6 +144,48 @@ def download_model_if_needed() -> None:
     print("Model download complete.", file=sys.stderr)
 
 
+_LANG_WINDOW_SR = 16000
+
+
+def _transcribe_multilingual(mp3_path: Path, model) -> list[dict]:
+    """Transcribe `mp3_path`, re-detecting language every ~30s instead of
+    once for the whole file, so a call that switches language mid-way (e.g.
+    English intro, Portuguese body) gets each window decoded in its actual
+    spoken language instead of force-decoded in whichever language the
+    opening seconds happened to be. See docs/PLAN-multilingual-transcription.md.
+    """
+    from shared.audio_utils import load_audio
+    from shared.lang_windows import transcribe_with_language_windows
+
+    audio = load_audio(mp3_path, sr=_LANG_WINDOW_SR)
+    duration_s = len(audio) / _LANG_WINDOW_SR
+
+    def _slice(start_s, end_s):
+        return audio[int(start_s * _LANG_WINDOW_SR):int(end_s * _LANG_WINDOW_SR)]
+
+    def detect_fn(start_s, end_s):
+        (language, probability), _all = model.auto_detect_language(_slice(start_s, end_s))
+        return language, float(probability)
+
+    def transcribe_fn(start_s, end_s, language):
+        segs = model.transcribe(_slice(start_s, end_s), language=language)
+        return [
+            {
+                "start": start_s + (seg.t0 / 100.0 if hasattr(seg, "t0") else 0.0),
+                "end": start_s + (seg.t1 / 100.0 if hasattr(seg, "t1") else 0.0),
+                "text": seg.text.strip(),
+            }
+            for seg in segs
+        ]
+
+    return transcribe_with_language_windows(
+        duration_s,
+        detect_fn,
+        transcribe_fn,
+        fallback_language=config.WHISPER_LANGUAGE,
+    )
+
+
 def load_whisper_model():
     """Load whisper.cpp model (cached after first call)."""
     global _model
@@ -197,17 +239,8 @@ def transcribe_file(
             model = load_whisper_model()
 
         progress(15)
-        segments = model.transcribe(str(mp3_path), language=config.WHISPER_LANGUAGE)
+        whisper_dicts = _transcribe_multilingual(mp3_path, model)
         progress(85)
-
-        # Convert pywhispercpp segments to dicts for diarization
-        whisper_dicts = []
-        for seg in segments:
-            whisper_dicts.append({
-                "start": seg.t0 / 100.0 if hasattr(seg, "t0") else 0.0,
-                "end": seg.t1 / 100.0 if hasattr(seg, "t1") else 0.0,
-                "text": seg.text.strip(),
-            })
 
         config.RAW_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
