@@ -9713,19 +9713,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     static func computeTranscriptionTimeout(
         for path: String, knownDuration: Double = 0,
     ) -> TimeInterval {
-        if knownDuration > 0 {
+        let fileSizeMB = Double(
+            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+        ) / (1024 * 1024)
+        // A duration is only trustworthy if the bitrate it implies is
+        // physically plausible for audio — catches AVFoundation silently
+        // mis-probing a codec it can't parse (e.g. a Plaud recording, which
+        // is Opus muxed in Ogg but named ".mp3" — see SegmentAudioPlayer's
+        // ffmpeg fallback comment) instead of failing cleanly to 0. A
+        // 3h06m/47MB recording once probed at ~11s, implying ~4 MB/s — no
+        // real audio format gets anywhere near that; even uncompressed
+        // 24-bit/192kHz stereo tops out around 1.1 MB/s. That wrong duration
+        // produced a ~10-minute timeout that killed a transcription that was
+        // still legitimately running.
+        func isPlausible(_ duration: Double) -> Bool {
+            guard duration > 0 else { return false }
+            return fileSizeMB / duration < 2.0
+        }
+
+        if knownDuration > 0, isPlausible(knownDuration) {
             return min(14400.0, max(600.0, knownDuration * 1.5 + 600.0))
         }
-        // Fallback: probe via AVFoundation if we didn't get a duration upstream.
+        // Fallback: probe via AVFoundation if we didn't get a plausible
+        // duration upstream.
         let probed = ImportedRecordingsStore.probeDuration(at: path)
-        if probed > 0 {
+        if probed > 0, isPlausible(probed) {
             return min(14400.0, max(600.0, probed * 1.5 + 600.0))
         }
         // Last resort: scale by file size, roughly MP3-calibrated. Overshoots
         // for WAV/FLAC but better to over-allocate than kill mid-transcription.
-        let fileSizeMB = Double(
-            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
-        ) / (1024 * 1024)
         return min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
     }
 
