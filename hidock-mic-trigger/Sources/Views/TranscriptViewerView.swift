@@ -590,6 +590,57 @@ private struct WordTokensView: View {
     }
 }
 
+/// Play button + karaoke word tokens for one segment, scoped to its own
+/// small `View` so only this struct — not the whole `TranscriptViewerView`
+/// with its full segment list — re-renders on playback ticks.
+///
+/// `TranscriptViewerView` holds `audioPlayer` as plain `@State` specifically
+/// so it does *not* subscribe to this. Only the segment row that is actually
+/// playing needs to redraw a few times a second as the karaoke highlight
+/// advances; before this was split out, every `@Published` change here
+/// invalidated the parent's body, rebuilding every segment's view tree
+/// (`FlowLayout` + one `GeometryReader` per word) whether it was playing,
+/// visible, or not. See the comment on `TranscriptViewerView.audioPlayer`.
+private struct SegmentPlaybackControls: View {
+    @ObservedObject var audioPlayer: SegmentAudioPlayer
+    let segmentIndex: Int
+    let segment: DiarizedSegment
+    let audioPath: String
+    let words: [String]
+    let timedWords: [DiarizedWord]?
+    let selection: SegmentSelection?
+
+    var body: some View {
+        let isPlaying = audioPlayer.playingSegmentId == segment.id
+        Button {
+            if isPlaying {
+                audioPlayer.stop()
+            } else {
+                audioPlayer.play(
+                    audioPath: audioPath,
+                    start: segment.start,
+                    end: segment.end,
+                    segmentId: segment.id,
+                    wordCount: words.count,
+                    wordTimings: timedWords
+                )
+            }
+        } label: {
+            Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle")
+                .foregroundColor(isPlaying ? .blue : .secondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 18)
+
+        WordTokensView(
+            segmentIndex: segmentIndex,
+            words: words,
+            selection: selection,
+            playingWord: isPlaying ? audioPlayer.playingWordIndex : nil
+        )
+    }
+}
+
 struct TranscriptRediarizeSummary {
     let beforeSpeakerCount: Int
     let afterSpeakerCount: Int
@@ -786,7 +837,21 @@ struct TranscriptViewerView: View {
     /// Outer nil = not read yet; inner nil = read and unavailable.
     @State private var expandedVersionId: String?
     @State private var versionDetails: [String: TranscriptVersionDetail?] = [:]
-    @StateObject var audioPlayer = SegmentAudioPlayer()
+    /// Deliberately plain `@State`, not `@StateObject` — see
+    /// `SegmentPlaybackControls`. `@StateObject` would subscribe this
+    /// (very large) view's body to every `@Published` change on the player,
+    /// including the karaoke timer's word-index ticks during playback. That
+    /// forced a full rebuild of every segment row's view tree — including
+    /// its own `FlowLayout` + one `GeometryReader` per word — on every tick,
+    /// not just the one row that was actually playing. Fine for a
+    /// hundred-segment recording; on a 766-segment/28,863-word one, scrolling
+    /// while a segment played pinned the main thread at 100% CPU for 90+
+    /// seconds in a recursive `NSView layoutSubtreeWithOldSize:` (same defect
+    /// class as the word-frames loop above, a different trigger). `@State`
+    /// still preserves the player's identity across view updates without
+    /// subscribing this view to its changes — only `SegmentPlaybackControls`,
+    /// scoped to one row, observes it.
+    @State var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
     let onEnrollSpeaker: (String, String, Double, Double) -> Void
@@ -2772,27 +2837,6 @@ struct TranscriptViewerView: View {
 
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .top, spacing: 8) {
-                // Play button
-                Button {
-                    if audioPlayer.playingSegmentId == segment.id {
-                        audioPlayer.stop()
-                    } else {
-                        audioPlayer.play(
-                            audioPath: audioPath,
-                            start: segment.start,
-                            end: segment.end,
-                            segmentId: segment.id,
-                            wordCount: words.count,
-                            wordTimings: timedWords
-                        )
-                    }
-                } label: {
-                    Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
-                        .foregroundColor(audioPlayer.playingSegmentId == segment.id ? .blue : .secondary)
-                }
-                .buttonStyle(.plain)
-                .frame(width: 18)
-
                 Text("[\(formatTime(seconds: segment.start))]")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(.secondary)
@@ -2807,11 +2851,14 @@ struct TranscriptViewerView: View {
 
                 }
 
-                WordTokensView(
+                SegmentPlaybackControls(
+                    audioPlayer: audioPlayer,
                     segmentIndex: idx,
+                    segment: segment,
+                    audioPath: audioPath,
                     words: words,
-                    selection: selection,
-                    playingWord: audioPlayer.playingSegmentId == segment.id ? audioPlayer.playingWordIndex : nil
+                    timedWords: timedWords,
+                    selection: selection
                 )
 
                 Spacer(minLength: 0)
