@@ -8129,6 +8129,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Turn a failed extractor subprocess's raw output into something an
+    /// NSAlert can actually show.
+    ///
+    /// A download prints one `PROGRESS:received:total:pct` line per chunk —
+    /// thousands of them for a large file — to the same stream this reads on
+    /// failure. Rec57 (2026-08-19, a 17.6MB HiDock recording that stalled at
+    /// 99.96%) produced an alert of ~2,150 raw lines, all but the last of
+    /// them noise. This drops PROGRESS lines and keeps only the last few
+    /// meaningful ones — normally the actual exception message — so the
+    /// dialog stays readable regardless of how far a transfer got.
+    static func extractorFailureMessage(from data: Data, maxLines: Int = 8, maxLength: Int = 1200) -> String {
+        let raw = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return raw }
+        let meaningful = raw
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("PROGRESS:") }
+        // If every line was progress noise, fall back to the raw tail rather
+        // than showing nothing.
+        let lines = meaningful.isEmpty ? raw.split(separator: "\n", omittingEmptySubsequences: false) : meaningful
+        var summary = lines.suffix(maxLines).joined(separator: "\n")
+        if summary.count > maxLength {
+            summary = "…" + summary.suffix(maxLength)
+        }
+        return summary
+    }
+
     private func runExtractor(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         log("runExtractor: \(fullArgs.joined(separator: " "))")
@@ -8237,14 +8263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 } else {
-                    let raw = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? ""
-                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let summarized = Self.extractorFailureMessage(from: errData.isEmpty ? outData : errData)
                     // Empty-stderr non-zero exits are most often a silent USB
                     // disconnect or the device being busy recording. Surface
                     // something actionable instead of a bare blank line.
-                    let message = trimmed.isEmpty
+                    let message = summarized.isEmpty
                         ? "Device not responding — unplug/replug, or wait if actively recording (exit \(process.terminationStatus))"
-                        : trimmed
+                        : summarized
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
                         NSLocalizedDescriptionKey: message
                     ])
@@ -8355,9 +8380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         completion(.success(finalOut))
                     }
                 } else {
-                    let message = String(data: finalErr.isEmpty ? finalOut : finalErr, encoding: .utf8) ?? "Extractor failed"
+                    let summarized = Self.extractorFailureMessage(from: finalErr.isEmpty ? finalOut : finalErr)
+                    let message = summarized.isEmpty ? "Extractor failed" : summarized
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
-                        NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        NSLocalizedDescriptionKey: message
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 }
@@ -9829,19 +9855,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     static func computeTranscriptionTimeout(
         for path: String, knownDuration: Double = 0,
     ) -> TimeInterval {
-        if knownDuration > 0 {
+        let fileSizeMB = Double(
+            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+        ) / (1024 * 1024)
+        // A duration is only trustworthy if the bitrate it implies is
+        // physically plausible for audio — catches AVFoundation silently
+        // mis-probing a codec it can't parse (e.g. a Plaud recording, which
+        // is Opus muxed in Ogg but named ".mp3" — see SegmentAudioPlayer's
+        // ffmpeg fallback comment) instead of failing cleanly to 0. A
+        // 3h06m/47MB recording once probed at ~11s, implying ~4 MB/s — no
+        // real audio format gets anywhere near that; even uncompressed
+        // 24-bit/192kHz stereo tops out around 1.1 MB/s. That wrong duration
+        // produced a ~10-minute timeout that killed a transcription that was
+        // still legitimately running.
+        func isPlausible(_ duration: Double) -> Bool {
+            guard duration > 0 else { return false }
+            return fileSizeMB / duration < 2.0
+        }
+
+        if knownDuration > 0, isPlausible(knownDuration) {
             return min(14400.0, max(600.0, knownDuration * 1.5 + 600.0))
         }
-        // Fallback: probe via AVFoundation if we didn't get a duration upstream.
+        // Fallback: probe via AVFoundation if we didn't get a plausible
+        // duration upstream.
         let probed = ImportedRecordingsStore.probeDuration(at: path)
-        if probed > 0 {
+        if probed > 0, isPlausible(probed) {
             return min(14400.0, max(600.0, probed * 1.5 + 600.0))
         }
         // Last resort: scale by file size, roughly MP3-calibrated. Overshoots
         // for WAV/FLAC but better to over-allocate than kill mid-transcription.
-        let fileSizeMB = Double(
-            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
-        ) / (1024 * 1024)
         return min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
     }
 
