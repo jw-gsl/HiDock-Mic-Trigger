@@ -8086,6 +8086,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Turn a failed extractor subprocess's raw output into something an
+    /// NSAlert can actually show.
+    ///
+    /// A download prints one `PROGRESS:received:total:pct` line per chunk —
+    /// thousands of them for a large file — to the same stream this reads on
+    /// failure. Rec57 (2026-08-19, a 17.6MB HiDock recording that stalled at
+    /// 99.96%) produced an alert of ~2,150 raw lines, all but the last of
+    /// them noise. This drops PROGRESS lines and keeps only the last few
+    /// meaningful ones — normally the actual exception message — so the
+    /// dialog stays readable regardless of how far a transfer got.
+    static func extractorFailureMessage(from data: Data, maxLines: Int = 8, maxLength: Int = 1200) -> String {
+        let raw = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return raw }
+        let meaningful = raw
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("PROGRESS:") }
+        // If every line was progress noise, fall back to the raw tail rather
+        // than showing nothing.
+        let lines = meaningful.isEmpty ? raw.split(separator: "\n", omittingEmptySubsequences: false) : meaningful
+        var summary = lines.suffix(maxLines).joined(separator: "\n")
+        if summary.count > maxLength {
+            summary = "…" + summary.suffix(maxLength)
+        }
+        return summary
+    }
+
     private func runExtractor(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         log("runExtractor: \(fullArgs.joined(separator: " "))")
@@ -8182,14 +8208,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 } else {
-                    let raw = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? ""
-                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let summarized = Self.extractorFailureMessage(from: errData.isEmpty ? outData : errData)
                     // Empty-stderr non-zero exits are most often a silent USB
                     // disconnect or the device being busy recording. Surface
                     // something actionable instead of a bare blank line.
-                    let message = trimmed.isEmpty
+                    let message = summarized.isEmpty
                         ? "Device not responding — unplug/replug, or wait if actively recording (exit \(process.terminationStatus))"
-                        : trimmed
+                        : summarized
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
                         NSLocalizedDescriptionKey: message
                     ])
@@ -8278,9 +8303,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         completion(.success(finalOut))
                     }
                 } else {
-                    let message = String(data: finalErr.isEmpty ? finalOut : finalErr, encoding: .utf8) ?? "Extractor failed"
+                    let summarized = Self.extractorFailureMessage(from: finalErr.isEmpty ? finalOut : finalErr)
+                    let message = summarized.isEmpty ? "Extractor failed" : summarized
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
-                        NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        NSLocalizedDescriptionKey: message
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 }
