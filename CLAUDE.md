@@ -190,6 +190,49 @@ python -m pytest Windows-App/tests/ -q
 
 Run both before pushing. CI runs them on PRs via `test.yml`.
 
+## Transcription Pipeline — Multiple Model Backends
+
+The transcription pipeline is not one fixed model — each stage has multiple interchangeable
+backends, selected via `pipeline_backends.json` (repo root), managed by the Model Manager UI
+(`shared/models.py`), and routed through `shared/pipeline_dispatch.py`. Always check
+`pipeline_backends.json` for the currently *active* backend before reasoning about pipeline
+behaviour — code that references "the" transcription/diarization model without checking this
+file will be wrong as soon as the user switches backends.
+
+- **Transcription (ASR)** — and note the packaged app and the dev pipeline run genuinely
+  different code here, not just a config toggle:
+  - **`transcribe_cpp.py`** (what the *installed* app actually runs — see
+    `transcriptionScriptPath` in `AppDelegate.swift`, chosen whenever `bundledResourcesRoot != nil`)
+    always uses **whisper.cpp via `pywhispercpp`**, unconditionally. It does **not** consult
+    `pipeline_backends.json`'s `"transcription"` key at all — Parakeet is never reachable from
+    the packaged app's transcription path, full stop.
+  - **`transcribe.py`** (the *dev* pipeline, used when running from a repo checkout rather than
+    the installed `.app`) dispatches per `pipeline_backends.json`'s `"transcription"` key
+    between:
+    - `whisper` — OpenAI Whisper (`large-v3-turbo`), multilingual. Per-window language
+      re-detection is implemented in both pipelines (`shared/lang_windows.py`) so a call that
+      switches language mid-way gets each ~30s window decoded in its own detected language —
+      see `docs/PLAN-multilingual-transcription.md`.
+    - `parakeet` — NVIDIA Parakeet TDT (`mlx-community/parakeet-tdt-0.6b-v2`), Apple Silicon
+      MLX, **English-only by model architecture** (not a config flag — it cannot decode other
+      languages at all, and no amount of language detection fixes that). ~2–6× faster than
+      Whisper (`docs/BENCH-whisper-vs-parakeet-2026-04-20.md`). Currently the active default in
+      `pipeline_backends.json`, but again: this only affects the dev pipeline.
+    - `cohere` (`transcribe_cohere.py`) — Cohere Transcribe 03-2026, **prototype, not wired
+      into the Model Manager**. No native timestamps/diarization/language-detection; requires
+      a forced-alignment pass and an explicit per-file language.
+- **Diarization:** `lite` (in-tree `diarize_lite`, default fallback), `sortformer`
+  (currently active), `pyannote`.
+- **Voice Activity Detection:** `silero` (default), `ten` (TEN VAD, currently active).
+- **Speaker Embeddings / Identity Review:** `titanet` (currently active), plus
+  `wespeaker_resnet293`, `wespeaker_w2vbert2`, `redimnet2_b6` as identity-review candidates.
+
+When working on transcription accuracy, language handling, or speed, identify which **script**
+is actually running first (`transcribe_cpp.py` for the installed app vs `transcribe.py` for a
+dev checkout) before assuming `pipeline_backends.json`'s `"transcription"` key is relevant —
+it only governs `transcribe.py`. A fix landed only in `transcribe.py` is invisible to every
+installed-app user.
+
 ## Device Identity System
 
 Devices are identified by string `deviceId` values, not integer product IDs:

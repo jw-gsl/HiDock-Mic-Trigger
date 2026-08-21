@@ -142,6 +142,62 @@ def _word_timestamps_safe(model) -> bool:
         return True
 
 
+def _transcribe_multilingual_whisper(audio_path: str, model) -> dict:
+    """Transcribe `audio_path` with Whisper, re-detecting language every
+    ~30s instead of once for the whole file. Whisper's own
+    detect_language() only runs once, from the first ~30s of audio, and
+    reuses that single guess throughout — so a call that switches language
+    mid-way (English intro, Portuguese body) gets the switched-to portion
+    force-decoded in whichever language the opening seconds happened to be.
+    See docs/PLAN-multilingual-transcription.md.
+    """
+    import whisper
+    from shared.lang_windows import transcribe_with_language_windows
+
+    audio = whisper.load_audio(audio_path)
+    sr = whisper.audio.SAMPLE_RATE
+    duration_s = len(audio) / sr
+    word_timestamps = _word_timestamps_safe(model)
+
+    def _slice(start_s, end_s):
+        return audio[int(start_s * sr):int(end_s * sr)]
+
+    def detect_fn(start_s, end_s):
+        chunk = whisper.pad_or_trim(_slice(start_s, end_s))
+        mel = whisper.log_mel_spectrogram(chunk, n_mels=model.dims.n_mels).to(model.device)
+        _, probs = whisper.detect_language(model, mel)
+        language = max(probs, key=probs.get)
+        return language, float(probs[language])
+
+    def transcribe_fn(start_s, end_s, language):
+        chunk = _slice(start_s, end_s)
+        if len(chunk) < sr:  # <1s of audio left in this window — nothing usable
+            return []
+        result = model.transcribe(
+            chunk, language=language, verbose=False, word_timestamps=word_timestamps,
+        )
+        offset_segments = []
+        for seg in result.get("segments", []):
+            offset_seg = dict(seg)
+            offset_seg["start"] = start_s + seg["start"]
+            offset_seg["end"] = start_s + seg["end"]
+            if "words" in offset_seg:
+                offset_seg["words"] = [
+                    {**w, "start": start_s + w["start"], "end": start_s + w["end"]}
+                    for w in offset_seg["words"]
+                ]
+            offset_segments.append(offset_seg)
+        return offset_segments
+
+    segments = transcribe_with_language_windows(
+        duration_s, detect_fn, transcribe_fn, fallback_language=config.WHISPER_LANGUAGE,
+    )
+    return {
+        "text": " ".join(seg["text"].strip() for seg in segments),
+        "segments": segments,
+    }
+
+
 def _load_human_speaker_anchors(
     audio_path: Path,
     transcript_path: Path,
@@ -248,6 +304,46 @@ def transcribe_file(
         except Exception:
             _backends = {"transcription": "whisper"}
         asr_backend = _backends.get("transcription", "whisper")
+
+        if asr_backend == "parakeet":
+            # Parakeet is English-only by model architecture — no amount of
+            # language forcing fixes that (unlike Whisper's forced-English
+            # bug, which per-window detection above fixes). Run a cheap
+            # probe (a few sampled windows) before committing to it; any
+            # confidently non-English window means this file needs Whisper
+            # instead. See docs/PLAN-multilingual-transcription.md.
+            try:
+                import whisper as _whisper
+                from shared.audio_utils import load_audio as _probe_load_audio
+                from shared.lang_windows import probe_has_non_english
+
+                probe_model = load_whisper_model()
+                probe_audio = _probe_load_audio(str(mp3_path), sr=16000)
+                probe_duration = len(probe_audio) / 16000
+
+                def _probe_detect(start_s, end_s):
+                    chunk = _whisper.pad_or_trim(
+                        probe_audio[int(start_s * 16000):int(end_s * 16000)]
+                    )
+                    mel = _whisper.log_mel_spectrogram(
+                        chunk, n_mels=probe_model.dims.n_mels
+                    ).to(probe_model.device)
+                    _, probs = _whisper.detect_language(probe_model, mel)
+                    lang = max(probs, key=probs.get)
+                    return lang, float(probs[lang])
+
+                if probe_has_non_english(probe_duration, _probe_detect):
+                    print(
+                        "Non-English audio detected — Parakeet can't decode it "
+                        "(English-only by architecture); routing this file to "
+                        "Whisper instead.",
+                        file=sys.stderr,
+                    )
+                    asr_backend = "whisper"
+                    model = probe_model  # reuse — avoids loading Whisper twice
+            except Exception as e:
+                print(f"Language probe failed, proceeding with Parakeet: {e}", file=sys.stderr)
+
         print(f"Transcription backend: {asr_backend}", file=sys.stderr)
 
         if asr_backend == "whisper" and model is None:
@@ -307,14 +403,7 @@ def transcribe_file(
                 )
                 active_model_name = config.WHISPER_MODEL
         else:
-            # word_timestamps lets the diarizer do per-word speaker
-            # alignment — see _word_timestamps_safe for the MPS caveat.
-            result = model.transcribe(
-                transcribe_path,
-                language=config.WHISPER_LANGUAGE,
-                verbose=False,
-                word_timestamps=_word_timestamps_safe(model),
-            )
+            result = _transcribe_multilingual_whisper(transcribe_path, model)
             active_model_name = config.WHISPER_MODEL
         progress(85)
 
