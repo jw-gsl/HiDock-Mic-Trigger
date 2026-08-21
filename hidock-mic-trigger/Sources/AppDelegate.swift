@@ -4,6 +4,7 @@ import CoreAudio
 import EventKit
 import UniformTypeIdentifiers
 import UserNotifications
+import Darwin
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
@@ -94,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let hungBackoffInterval: TimeInterval = 180
     private var syncBusy = false
     private var syncAutoDownloadTimer: Timer?
+    private var postReleaseSyncTimer: Timer?
     /// Lightweight periodic check for new Plaud recordings. Plaud is an API, not
     /// a USB device, so nothing else surfaces new recordings on it — this poll
     /// does. It only runs the expensive refresh/auto-download when the Plaud
@@ -641,6 +643,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         refreshMicNamesNow()
         viewModel.syncPairedDevices = syncPairedDevices
         viewModel.syncPaired = syncPaired
+        // Automatic download is the normal HiDock workflow: a recording is
+        // complete when the Samson mic is released. Preserve an explicit user
+        // choice of false, but make new installs default to on.
+        if UserDefaults.standard.object(forKey: syncAutoDownloadKey) == nil {
+            UserDefaults.standard.set(true, forKey: syncAutoDownloadKey)
+        }
         viewModel.syncAutoDownload = UserDefaults.standard.bool(forKey: syncAutoDownloadKey)
         syncAutoDownload = viewModel.syncAutoDownload
         viewModel.plaudPollIntervalSeconds = plaudPollInterval
@@ -1098,12 +1106,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.viewModel.hidockRecordingActive = false
                     self.viewModel.ledMatrix.setRecording(false)
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
-                    guard let self = self, self.syncPaired, !self.syncBusy else { return }
-                    self.log("Auto-refreshing sync after mic release")
-                    self.refreshSyncStatus()
-                }
-                scheduleAutoDownloadNewRecordings()
+                // HiDock finalises the file after the audio interface is
+                // released. Use one post-release pipeline: wait for that
+                // finalisation, refresh the catalog so the new row appears,
+                // and let the normal auto-download path run from the fresh
+                // status. If another sync is still in flight, retry instead
+                // of silently dropping this recording's only event.
+                schedulePostReleaseSync()
             }
         }
     }
@@ -5349,13 +5358,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// The publishable Markdown is derived from the diarized sidecar. Keep the
+    /// path calculation in one place so the post-write check cannot
+    /// accidentally verify a different file from the one the pipeline writes.
+    private func transcriptMarkdownPath(forDiarizedPath diarizedPath: String) -> String {
+        let url = URL(fileURLWithPath: diarizedPath)
+        let filename = url.lastPathComponent
+        if filename.hasSuffix("_diarized.json") {
+            let stem = String(filename.dropLast("_diarized.json".count))
+            return url.deletingLastPathComponent()
+                .appendingPathComponent(stem + ".md").path
+        }
+        return url.deletingPathExtension().appendingPathExtension("md").path
+    }
+
+    /// Return false when the sibling Markdown is absent or older than the
+    /// sidecar. Speaker edits save the JSON first, so this is a cheap and
+    /// reliable guard against a rewrite that was skipped or silently failed.
+    private func transcriptMarkdownIsCurrent(diarizedPath: String) -> Bool {
+        let fm = FileManager.default
+        let mdPath = transcriptMarkdownPath(forDiarizedPath: diarizedPath)
+        guard fm.fileExists(atPath: diarizedPath), fm.fileExists(atPath: mdPath),
+              let sidecarAttrs = try? fm.attributesOfItem(atPath: diarizedPath),
+              let markdownAttrs = try? fm.attributesOfItem(atPath: mdPath),
+              let sidecarDate = sidecarAttrs[.modificationDate] as? Date,
+              let markdownDate = markdownAttrs[.modificationDate] as? Date else {
+            return false
+        }
+        return markdownDate >= sidecarDate
+    }
+
     /// Regenerate the .md next to a diarized JSON (confirmed names only).
-    /// Best-effort background — JSON is already saved by the viewer.
+    /// A speaker save must not silently leave a stale publishable transcript:
+    /// report readiness failures, subprocess failures, and stale output in the
+    /// same status surface used by the rest of the app.
     private func rewriteTranscriptMarkdown(diarizedPath: String) {
-        guard ensureTranscriptionReady() else { return }
+        let mdPath = transcriptMarkdownPath(forDiarizedPath: diarizedPath)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: diarizedPath) else {
+            viewModel.syncStatus = "Transcript rewrite failed: sidecar not found"
+            viewModel.syncStatusLevel = .error
+            syncViewModelState()
+            log("rewrite-md skipped: sidecar not found at \(diarizedPath)")
+            return
+        }
+        guard ensureTranscriptionReady() else {
+            viewModel.syncStatus = "Transcript rewrite unavailable"
+            viewModel.syncStatusLevel = .error
+            syncViewModelState()
+            log("rewrite-md unavailable for \(diarizedPath): transcription pipeline is not ready")
+            return
+        }
+
+        viewModel.syncStatus = "Updating transcript Markdown…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        log("rewrite-md queued for \(diarizedPath) → \(mdPath)")
+
         runTranscription(arguments: ["rewrite-md", diarizedPath]) { [weak self] result in
-            if case .failure(let error) = result {
-                self?.log("rewrite-md failed for \(diarizedPath): \(error.localizedDescription)")
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                guard self.transcriptMarkdownIsCurrent(diarizedPath: diarizedPath) else {
+                    self.viewModel.syncStatus = "Transcript Markdown stale after rewrite"
+                    self.viewModel.syncStatusLevel = .error
+                    self.syncViewModelState()
+                    self.log("rewrite-md reported success but output is missing or older than the sidecar: \(mdPath)")
+                    return
+                }
+                self.viewModel.syncStatus = "Transcript Markdown updated"
+                self.viewModel.syncStatusLevel = .success
+                self.syncViewModelState()
+                self.log("rewrite-md completed and verified: \(mdPath)")
+            case .failure(let error):
+                let detail = error.localizedDescription
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                self.viewModel.syncStatus = detail.isEmpty
+                    ? "Transcript rewrite failed"
+                    : "Transcript rewrite failed: \(detail)"
+                self.viewModel.syncStatusLevel = .error
+                self.syncViewModelState()
+                self.log("rewrite-md failed for \(diarizedPath): \(detail)")
             }
         }
     }
@@ -8037,6 +8120,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// user's H1 crossed the threshold. 120s gives plenty of headroom and
     /// still keeps us from hanging forever on a genuinely wedged device.
     private let extractorProcessTimeout: TimeInterval = 120
+    private let extractorTerminationGracePeriod: TimeInterval = 2
+
+    /// Stop a wedged extractor without ever waiting indefinitely. `terminate`
+    /// is normally enough, but a libusb call can leave the Python child stuck
+    /// in the kernel; the old code then called waitUntilExit() forever and
+    /// left syncBusy=true for the rest of the app session. A bounded SIGKILL
+    /// fallback lets the caller complete its failure path and release the
+    /// sync gate.
+    @discardableResult
+    private func terminateExtractorProcess(_ process: Process, label: String) -> Bool {
+        guard process.isRunning else { return true }
+
+        process.terminate()
+        let gracefulDeadline = Date().addingTimeInterval(extractorTerminationGracePeriod)
+        while process.isRunning && Date() < gracefulDeadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
+        if process.isRunning {
+            NSLog("%@ still running after terminate; sending SIGKILL (pid %d)", label, process.processIdentifier)
+            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            let killDeadline = Date().addingTimeInterval(extractorTerminationGracePeriod)
+            while process.isRunning && Date() < killDeadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+
+        // This is now guaranteed to return immediately: either the process has
+        // exited, or we have exhausted the bounded kill grace period.
+        if !process.isRunning {
+            process.waitUntilExit()
+        }
+        return !process.isRunning
+    }
 
     /// Lightweight CONCURRENT extractor runner for launch cache-paint reads
     /// only (cached-status / plaud-cached-status). Pure catalog reads — no USB
@@ -8086,6 +8203,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Turn a failed extractor subprocess's raw output into something an
+    /// NSAlert can actually show.
+    ///
+    /// A download prints one `PROGRESS:received:total:pct` line per chunk —
+    /// thousands of them for a large file — to the same stream this reads on
+    /// failure. Rec57 (2026-08-19, a 17.6MB HiDock recording that stalled at
+    /// 99.96%) produced an alert of ~2,150 raw lines, all but the last of
+    /// them noise. This drops PROGRESS lines and keeps only the last few
+    /// meaningful ones — normally the actual exception message — so the
+    /// dialog stays readable regardless of how far a transfer got.
+    static func extractorFailureMessage(from data: Data, maxLines: Int = 8, maxLength: Int = 1200) -> String {
+        let raw = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return raw }
+        let meaningful = raw
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("PROGRESS:") }
+        // If every line was progress noise, fall back to the raw tail rather
+        // than showing nothing.
+        let lines = meaningful.isEmpty ? raw.split(separator: "\n", omittingEmptySubsequences: false) : meaningful
+        var summary = lines.suffix(maxLines).joined(separator: "\n")
+        if summary.count > maxLength {
+            summary = "…" + summary.suffix(maxLength)
+        }
+        return summary
+    }
+
     private func runExtractor(arguments: [String], productId: Int? = nil, environment: [String: String] = [:], completion: @escaping (Result<Data, Error>) -> Void) {
         let fullArgs = extractorArguments(arguments, productId: productId)
         log("runExtractor: \(fullArgs.joined(separator: " "))")
@@ -8119,13 +8262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     Thread.sleep(forTimeInterval: 0.2)
                 }
                 var weKilledIt = false
+                var processStopped = true
                 if process.isRunning {
                     NSLog("runExtractor: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
                     weKilledIt = true
-                    process.terminate()
-                    Thread.sleep(forTimeInterval: 1)
-                    if process.isRunning { process.interrupt() }
-                    process.waitUntilExit()
+                    processStopped = self.terminateExtractorProcess(process, label: "runExtractor")
                 } else {
                     NSLog("runExtractor: process exited with status %d", process.terminationStatus)
                 }
@@ -8147,6 +8288,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 DispatchQueue.main.async { self.syncExtractorProcess = nil }
                 try outHandle.close()
                 try errHandle.close()
+
+                if !processStopped {
+                    // Do not read the temp files or wait for EOF while a
+                    // child is still alive: it may still own those descriptors.
+                    // The important invariant is that the app's completion
+                    // callback runs so syncBusy can be cleared.
+                    try? FileManager.default.removeItem(at: outURL)
+                    try? FileManager.default.removeItem(at: errURL)
+                    let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
+                        NSLocalizedDescriptionKey: "Extractor could not be terminated after a " + String(Int(self.extractorProcessTimeout)) + "s timeout"
+                    ])
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                    return
+                }
 
                 let outData = (try? Data(contentsOf: outURL)) ?? Data()
                 let errData = (try? Data(contentsOf: errURL)) ?? Data()
@@ -8182,14 +8337,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 } else {
-                    let raw = String(data: errData.isEmpty ? outData : errData, encoding: .utf8) ?? ""
-                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let summarized = Self.extractorFailureMessage(from: errData.isEmpty ? outData : errData)
                     // Empty-stderr non-zero exits are most often a silent USB
                     // disconnect or the device being busy recording. Surface
                     // something actionable instead of a bare blank line.
-                    let message = trimmed.isEmpty
+                    let message = summarized.isEmpty
                         ? "Device not responding — unplug/replug, or wait if actively recording (exit \(process.terminationStatus))"
-                        : trimmed
+                        : summarized
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
                         NSLocalizedDescriptionKey: message
                     ])
@@ -8259,15 +8413,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                process.waitUntilExit()
+                NSLog("runExtractorWithProgress: process started (pid %d)", process.processIdentifier)
+                let deadline = Date().addingTimeInterval(self.extractorProcessTimeout)
+                while process.isRunning && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+
+                var processStopped = true
+                if process.isRunning {
+                    NSLog("runExtractorWithProgress: killing hung process (pid %d) after %ds", process.processIdentifier, Int(self.extractorProcessTimeout))
+                    processStopped = self.terminateExtractorProcess(process, label: "runExtractorWithProgress")
+                }
+
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
-                let trailingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let trailingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
-                outQueue.sync { outData.append(trailingOut) }
-                errQueue.sync { stderrData.append(trailingErr) }
+                if processStopped {
+                    process.waitUntilExit()
+                    let trailingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    let trailingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    outQueue.sync { outData.append(trailingOut) }
+                    errQueue.sync { stderrData.append(trailingErr) }
+                }
 
                 DispatchQueue.main.async { self.syncExtractorProcess = nil }
+
+                if !processStopped {
+                    let error = NSError(domain: "HiDockSync", code: -1, userInfo: [
+                        NSLocalizedDescriptionKey: "Extractor could not be terminated after a " + String(Int(self.extractorProcessTimeout)) + "s timeout"
+                    ])
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                    return
+                }
 
                 let finalOut = outQueue.sync { outData }
                 let finalErr = errQueue.sync { stderrData }
@@ -8278,9 +8454,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         completion(.success(finalOut))
                     }
                 } else {
-                    let message = String(data: finalErr.isEmpty ? finalOut : finalErr, encoding: .utf8) ?? "Extractor failed"
+                    let summarized = Self.extractorFailureMessage(from: finalErr.isEmpty ? finalOut : finalErr)
+                    let message = summarized.isEmpty ? "Extractor failed" : summarized
                     let error = NSError(domain: "HiDockSync", code: Int(process.terminationStatus), userInfo: [
-                        NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        NSLocalizedDescriptionKey: message
                     ])
                     DispatchQueue.main.async { completion(.failure(error)) }
                 }
@@ -8574,6 +8751,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func filterSyncByDevice(_ deviceId: String?) {
         syncFilterDeviceId = deviceId
         syncViewModelState()
+    }
+
+    /// A mic-release event is the natural end-of-recording boundary. HiDock
+    /// needs a few seconds after ffmpeg closes before its file list includes
+    /// the new .hda, so probe after a short settle period. Do not abandon the
+    /// event just because another probe/download is busy: that was the reason
+    /// completed recordings could remain invisible until a manual refresh.
+    private func schedulePostReleaseSync() {
+        guard syncPaired else { return }
+        postReleaseSyncTimer?.invalidate()
+        postReleaseSyncTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+            self?.runPostReleaseSync(attempt: 0)
+        }
+        log("Post-release sync scheduled (8s settle)")
+    }
+
+    private func runPostReleaseSync(attempt: Int) {
+        guard syncPaired else { return }
+        guard !syncBusy else {
+            // A normal catalog probe can take tens of seconds on a large H1.
+            // Keep the release event alive while it drains, but bound retries
+            // so a genuinely broken device does not create an endless timer.
+            if attempt < 60 {
+                if attempt == 0 { log("Post-release sync waiting for existing sync to finish") }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.runPostReleaseSync(attempt: attempt + 1)
+                }
+            } else {
+                log("Post-release sync still busy after 120s — leaving the event for the next manual refresh")
+            }
+            return
+        }
+
+        log("Auto-refreshing sync after mic release")
+        refreshSyncStatus()
+        // The refresh itself can detect a catalog count rise. Scheduling the
+        // sweep as well makes the release contract explicit and catches a new
+        // file even when the count did not change from a partial prior read.
+        scheduleAutoDownloadNewRecordings()
     }
 
     private func scheduleAutoDownloadNewRecordings(attempt: Int = 0) {
@@ -9713,19 +9929,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     static func computeTranscriptionTimeout(
         for path: String, knownDuration: Double = 0,
     ) -> TimeInterval {
-        if knownDuration > 0 {
+        let fileSizeMB = Double(
+            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+        ) / (1024 * 1024)
+        // A duration is only trustworthy if the bitrate it implies is
+        // physically plausible for audio — catches AVFoundation silently
+        // mis-probing a codec it can't parse (e.g. a Plaud recording, which
+        // is Opus muxed in Ogg but named ".mp3" — see SegmentAudioPlayer's
+        // ffmpeg fallback comment) instead of failing cleanly to 0. A
+        // 3h06m/47MB recording once probed at ~11s, implying ~4 MB/s — no
+        // real audio format gets anywhere near that; even uncompressed
+        // 24-bit/192kHz stereo tops out around 1.1 MB/s. That wrong duration
+        // produced a ~10-minute timeout that killed a transcription that was
+        // still legitimately running.
+        func isPlausible(_ duration: Double) -> Bool {
+            guard duration > 0 else { return false }
+            return fileSizeMB / duration < 2.0
+        }
+
+        if knownDuration > 0, isPlausible(knownDuration) {
             return min(14400.0, max(600.0, knownDuration * 1.5 + 600.0))
         }
-        // Fallback: probe via AVFoundation if we didn't get a duration upstream.
+        // Fallback: probe via AVFoundation if we didn't get a plausible
+        // duration upstream.
         let probed = ImportedRecordingsStore.probeDuration(at: path)
-        if probed > 0 {
+        if probed > 0, isPlausible(probed) {
             return min(14400.0, max(600.0, probed * 1.5 + 600.0))
         }
         // Last resort: scale by file size, roughly MP3-calibrated. Overshoots
         // for WAV/FLAC but better to over-allocate than kill mid-transcription.
-        let fileSizeMB = Double(
-            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
-        ) / (1024 * 1024)
         return min(14400.0, max(600.0, fileSizeMB * 60.0 + 600.0))
     }
 

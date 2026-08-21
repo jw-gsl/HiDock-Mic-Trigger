@@ -1466,7 +1466,24 @@ def cmd_rewrite_md(args):
         model=model,
         diarized_result=data,
     )
-    print(_json.dumps({"status": "completed", "md_path": str(md_path)}))
+    # Treat a missing or stale sibling as a failed rewrite. The desktop app
+    # saves the sidecar first, so a successful rewrite must leave Markdown at
+    # least as new as that sidecar; otherwise speaker names can appear saved in
+    # the UI while the publishable .md remains generic.
+    if not md_path.exists():
+        raise RuntimeError(f"rewrite-md did not create {md_path}")
+    sidecar_mtime_ns = json_path.stat().st_mtime_ns
+    md_mtime_ns = md_path.stat().st_mtime_ns
+    if md_mtime_ns < sidecar_mtime_ns:
+        raise RuntimeError(
+            f"rewrite-md produced stale output: {md_path} is older than {json_path}"
+        )
+    print(_json.dumps({
+        "status": "completed",
+        "md_path": str(md_path),
+        "sidecar_mtime_ns": sidecar_mtime_ns,
+        "md_mtime_ns": md_mtime_ns,
+    }))
 
 
 def cmd_speaker_confidence(args):
