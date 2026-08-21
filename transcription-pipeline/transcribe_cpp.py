@@ -324,7 +324,7 @@ def transcribe_file(
             from shared.transcript_writer import format_diarized_transcript
             text = format_diarized_transcript(diarized_result)
         else:
-            text = " ".join(seg.text.strip() for seg in segments).strip()
+            text = " ".join(seg["text"].strip() for seg in whisper_dicts).strip()
 
         # Optionally run LLM summarization
         summary = None
