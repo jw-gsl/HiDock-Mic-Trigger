@@ -517,6 +517,25 @@ struct SegmentSelection: Equatable, Identifiable {
     }
 }
 
+/// Holds the published word frames without making the view depend on them.
+///
+/// These frames were previously kept in `@State`, which hung the app. Every
+/// word in the transcript carries its own `GeometryReader` (5,623 of them on a
+/// 144-segment recording), and their frames are reported in a scrolling
+/// coordinate space, so the merged dictionary changes on essentially every
+/// layout pass. Writing that into `@State` re-ran `TranscriptViewerView`'s
+/// body, which re-laid out the words, which republished the frames — a layout
+/// loop that pinned the main thread at 100% with `NSHostingView.layout()`
+/// re-entering itself ten deep, and never unwound.
+///
+/// Nothing in `body` ever read the frames: their only consumer is
+/// `transcriptWordPosition(at:)`, called from the drag-selection gesture. So
+/// the dependency was pure cost. A reference box keeps them exactly as
+/// current, while mutating it invalidates nothing.
+private final class TranscriptWordFrameStore {
+    var frames: [WordPosition: CGRect] = [:]
+}
+
 /// Lets word-token views publish their frames in the transcript's common
 /// coordinate space so one drag can continue across multiple rows.
 private struct TranscriptWordFramesKey: PreferenceKey {
@@ -568,6 +587,57 @@ private struct WordTokensView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Play button + karaoke word tokens for one segment, scoped to its own
+/// small `View` so only this struct — not the whole `TranscriptViewerView`
+/// with its full segment list — re-renders on playback ticks.
+///
+/// `TranscriptViewerView` holds `audioPlayer` as plain `@State` specifically
+/// so it does *not* subscribe to this. Only the segment row that is actually
+/// playing needs to redraw a few times a second as the karaoke highlight
+/// advances; before this was split out, every `@Published` change here
+/// invalidated the parent's body, rebuilding every segment's view tree
+/// (`FlowLayout` + one `GeometryReader` per word) whether it was playing,
+/// visible, or not. See the comment on `TranscriptViewerView.audioPlayer`.
+private struct SegmentPlaybackControls: View {
+    @ObservedObject var audioPlayer: SegmentAudioPlayer
+    let segmentIndex: Int
+    let segment: DiarizedSegment
+    let audioPath: String
+    let words: [String]
+    let timedWords: [DiarizedWord]?
+    let selection: SegmentSelection?
+
+    var body: some View {
+        let isPlaying = audioPlayer.playingSegmentId == segment.id
+        Button {
+            if isPlaying {
+                audioPlayer.stop()
+            } else {
+                audioPlayer.play(
+                    audioPath: audioPath,
+                    start: segment.start,
+                    end: segment.end,
+                    segmentId: segment.id,
+                    wordCount: words.count,
+                    wordTimings: timedWords
+                )
+            }
+        } label: {
+            Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle")
+                .foregroundColor(isPlaying ? .blue : .secondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 18)
+
+        WordTokensView(
+            segmentIndex: segmentIndex,
+            words: words,
+            selection: selection,
+            playingWord: isPlaying ? audioPlayer.playingWordIndex : nil
+        )
     }
 }
 
@@ -723,7 +793,10 @@ struct TranscriptViewerView: View {
     /// words the user right-clicked, even if the view refreshes underneath it.
     @State private var pendingNamedSelection: SegmentSelection?
     @State private var selectionPersonQuery = ""
-    @State private var transcriptWordFrames: [WordPosition: CGRect] = [:]
+    /// Deliberately a reference box, not `@State` holding the dictionary —
+    /// see TranscriptWordFrameStore. Writing frames must not invalidate this
+    /// view, or publishing them re-triggers the layout that publishes them.
+    @State private var transcriptWordFrames = TranscriptWordFrameStore()
     @State private var selectionDragStart: WordPosition? = nil
     /// Timestamp of the text just edited. Splitting a segment changes its view
     /// identity, so SwiftUI otherwise reconstructs the scroll view at the top.
@@ -764,7 +837,21 @@ struct TranscriptViewerView: View {
     /// Outer nil = not read yet; inner nil = read and unavailable.
     @State private var expandedVersionId: String?
     @State private var versionDetails: [String: TranscriptVersionDetail?] = [:]
-    @StateObject var audioPlayer = SegmentAudioPlayer()
+    /// Deliberately plain `@State`, not `@StateObject` — see
+    /// `SegmentPlaybackControls`. `@StateObject` would subscribe this
+    /// (very large) view's body to every `@Published` change on the player,
+    /// including the karaoke timer's word-index ticks during playback. That
+    /// forced a full rebuild of every segment row's view tree — including
+    /// its own `FlowLayout` + one `GeometryReader` per word — on every tick,
+    /// not just the one row that was actually playing. Fine for a
+    /// hundred-segment recording; on a 766-segment/28,863-word one, scrolling
+    /// while a segment played pinned the main thread at 100% CPU for 90+
+    /// seconds in a recursive `NSView layoutSubtreeWithOldSize:` (same defect
+    /// class as the word-frames loop above, a different trigger). `@State`
+    /// still preserves the player's identity across view updates without
+    /// subscribing this view to its changes — only `SegmentPlaybackControls`,
+    /// scoped to one row, observes it.
+    @State var audioPlayer = SegmentAudioPlayer()
     let filePath: String
     let audioPath: String
     let onEnrollSpeaker: (String, String, Double, Double) -> Void
@@ -2487,7 +2574,7 @@ struct TranscriptViewerView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .onPreferenceChange(TranscriptWordFramesKey.self) { frames in
-                        transcriptWordFrames = frames
+                        transcriptWordFrames.frames = frames
                     }
                     .simultaneousGesture(transcriptSelectionGesture)
                 }
@@ -2548,7 +2635,7 @@ struct TranscriptViewerView: View {
     }
 
     private func transcriptWordPosition(at point: CGPoint) -> WordPosition? {
-        transcriptWordFrames.first(where: { $0.value.contains(point) })?.key
+        transcriptWordFrames.frames.first(where: { $0.value.contains(point) })?.key
     }
 
     @ViewBuilder
@@ -2750,27 +2837,6 @@ struct TranscriptViewerView: View {
 
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .top, spacing: 8) {
-                // Play button
-                Button {
-                    if audioPlayer.playingSegmentId == segment.id {
-                        audioPlayer.stop()
-                    } else {
-                        audioPlayer.play(
-                            audioPath: audioPath,
-                            start: segment.start,
-                            end: segment.end,
-                            segmentId: segment.id,
-                            wordCount: words.count,
-                            wordTimings: timedWords
-                        )
-                    }
-                } label: {
-                    Image(systemName: audioPlayer.playingSegmentId == segment.id ? "stop.circle.fill" : "play.circle")
-                        .foregroundColor(audioPlayer.playingSegmentId == segment.id ? .blue : .secondary)
-                }
-                .buttonStyle(.plain)
-                .frame(width: 18)
-
                 Text("[\(formatTime(seconds: segment.start))]")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(.secondary)
@@ -2785,11 +2851,14 @@ struct TranscriptViewerView: View {
 
                 }
 
-                WordTokensView(
+                SegmentPlaybackControls(
+                    audioPlayer: audioPlayer,
                     segmentIndex: idx,
+                    segment: segment,
+                    audioPath: audioPath,
                     words: words,
-                    selection: selection,
-                    playingWord: audioPlayer.playingSegmentId == segment.id ? audioPlayer.playingWordIndex : nil
+                    timedWords: timedWords,
+                    selection: selection
                 )
 
                 Spacer(minLength: 0)
