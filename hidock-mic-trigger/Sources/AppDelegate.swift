@@ -5358,13 +5358,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// The publishable Markdown is derived from the diarized sidecar. Keep the
+    /// path calculation in one place so the post-write check cannot
+    /// accidentally verify a different file from the one the pipeline writes.
+    private func transcriptMarkdownPath(forDiarizedPath diarizedPath: String) -> String {
+        let url = URL(fileURLWithPath: diarizedPath)
+        let filename = url.lastPathComponent
+        if filename.hasSuffix("_diarized.json") {
+            let stem = String(filename.dropLast("_diarized.json".count))
+            return url.deletingLastPathComponent()
+                .appendingPathComponent(stem + ".md").path
+        }
+        return url.deletingPathExtension().appendingPathExtension("md").path
+    }
+
+    /// Return false when the sibling Markdown is absent or older than the
+    /// sidecar. Speaker edits save the JSON first, so this is a cheap and
+    /// reliable guard against a rewrite that was skipped or silently failed.
+    private func transcriptMarkdownIsCurrent(diarizedPath: String) -> Bool {
+        let fm = FileManager.default
+        let mdPath = transcriptMarkdownPath(forDiarizedPath: diarizedPath)
+        guard fm.fileExists(atPath: diarizedPath), fm.fileExists(atPath: mdPath),
+              let sidecarAttrs = try? fm.attributesOfItem(atPath: diarizedPath),
+              let markdownAttrs = try? fm.attributesOfItem(atPath: mdPath),
+              let sidecarDate = sidecarAttrs[.modificationDate] as? Date,
+              let markdownDate = markdownAttrs[.modificationDate] as? Date else {
+            return false
+        }
+        return markdownDate >= sidecarDate
+    }
+
     /// Regenerate the .md next to a diarized JSON (confirmed names only).
-    /// Best-effort background — JSON is already saved by the viewer.
+    /// A speaker save must not silently leave a stale publishable transcript:
+    /// report readiness failures, subprocess failures, and stale output in the
+    /// same status surface used by the rest of the app.
     private func rewriteTranscriptMarkdown(diarizedPath: String) {
-        guard ensureTranscriptionReady() else { return }
+        let mdPath = transcriptMarkdownPath(forDiarizedPath: diarizedPath)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: diarizedPath) else {
+            viewModel.syncStatus = "Transcript rewrite failed: sidecar not found"
+            viewModel.syncStatusLevel = .error
+            syncViewModelState()
+            log("rewrite-md skipped: sidecar not found at \(diarizedPath)")
+            return
+        }
+        guard ensureTranscriptionReady() else {
+            viewModel.syncStatus = "Transcript rewrite unavailable"
+            viewModel.syncStatusLevel = .error
+            syncViewModelState()
+            log("rewrite-md unavailable for \(diarizedPath): transcription pipeline is not ready")
+            return
+        }
+
+        viewModel.syncStatus = "Updating transcript Markdown…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        log("rewrite-md queued for \(diarizedPath) → \(mdPath)")
+
         runTranscription(arguments: ["rewrite-md", diarizedPath]) { [weak self] result in
-            if case .failure(let error) = result {
-                self?.log("rewrite-md failed for \(diarizedPath): \(error.localizedDescription)")
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                guard self.transcriptMarkdownIsCurrent(diarizedPath: diarizedPath) else {
+                    self.viewModel.syncStatus = "Transcript Markdown stale after rewrite"
+                    self.viewModel.syncStatusLevel = .error
+                    self.syncViewModelState()
+                    self.log("rewrite-md reported success but output is missing or older than the sidecar: \(mdPath)")
+                    return
+                }
+                self.viewModel.syncStatus = "Transcript Markdown updated"
+                self.viewModel.syncStatusLevel = .success
+                self.syncViewModelState()
+                self.log("rewrite-md completed and verified: \(mdPath)")
+            case .failure(let error):
+                let detail = error.localizedDescription
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                self.viewModel.syncStatus = detail.isEmpty
+                    ? "Transcript rewrite failed"
+                    : "Transcript rewrite failed: \(detail)"
+                self.viewModel.syncStatusLevel = .error
+                self.syncViewModelState()
+                self.log("rewrite-md failed for \(diarizedPath): \(detail)")
             }
         }
     }
