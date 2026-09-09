@@ -4582,17 +4582,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 "--print", "--output-format", "json",
                 prompt,
             ]
+            // Same fix as the interactive calendar assistant: the app's own
+            // PATH (launchd-inherited, no Homebrew/Node) would otherwise be
+            // handed down to this CLI and then to any npx-based MCP server.
+            var env = ProcessInfo.processInfo.environment
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            }
+            process.environment = env
             let output = Pipe()
             process.standardOutput = output
+            let errPipe = Pipe()
+            process.standardError = errPipe
+            var stderrData = Data()
+            let errQueue = DispatchQueue(label: "hidock.calendarSearch.stderr")
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                errQueue.sync { stderrData.append(chunk) }
+            }
             do {
                 try process.run()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard process.terminationStatus == 0,
                       let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else {
                     let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
-                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no usable result")
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no usable result (status \(process.terminationStatus))\(stderrText.isEmpty ? "" : ": \(stderrText)")")
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
@@ -4713,6 +4733,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with \(events.count) event(s): \(answer.prefix(240))")
                 DispatchQueue.main.async { completion(events.sorted { $0.start < $1.start }) }
             } catch {
+                errPipe.fileHandleForReading.readabilityHandler = nil
                 let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                 self?.log("Calendar search failed [\(searchKind)] after \(seconds)s: \(error.localizedDescription)")
                 DispatchQueue.main.async { completion([]) }
@@ -4969,13 +4990,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let iso = ISO8601DateFormatter()
         let end = start.addingTimeInterval(max(1, duration))
+        // Only mention the connector(s) the user actually selected in Settings
+        // — telling the model both are available regardless of the dropdown
+        // meant it could still reach for a provider the user had turned off
+        // (and never see why that attempt failed).
+        let connectorInstruction: String
+        switch viewModel.calendarProvider {
+        case "microsoft365":
+            connectorInstruction = "Use the connected Microsoft 365 calendar MCP only."
+        case "google":
+            connectorInstruction = "Use the connected Google Calendar MCP only."
+        default:
+            connectorInstruction = "Use the connected Microsoft 365 or Google Calendar MCP, whichever is available."
+        }
         // The CANDIDATE contract is what makes the answer actionable. Parsing the
         // prose was the alternative and it is a worse one: the structured search
         // already needs a `looksLikeEventTitle` guard because model commentary
         // kept being mistaken for event titles. One machine-readable line per
         // event keeps the prose free-form and the parsing exact.
         let context = """
-        You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). Use the connected Microsoft 365 or Google Calendar MCP when calendar information is needed. Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
+        You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). \(connectorInstruction) Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
 
         When you are confident about one or more specific events, end your reply with one line per event, after all prose, in exactly this form:
         CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <comma-separated attendee display names>
@@ -4995,9 +5029,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let sessionId, !sessionId.isEmpty { arguments += ["--resume", sessionId] }
             arguments.append(context)
             process.arguments = arguments
+            // The app itself runs with launchd's bare PATH (no Homebrew, no
+            // Node), which this CLI process would otherwise inherit — and then
+            // hand down again to any MCP server it spawns via npx. Without this,
+            // stdio MCP servers like google-calendar silently fail to connect
+            // with no visible error anywhere.
+            var env = ProcessInfo.processInfo.environment
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            }
+            process.environment = env
             let output = Pipe()
             process.standardOutput = output
-            process.standardError = Pipe()
+            let errPipe = Pipe()
+            process.standardError = errPipe
+            // Drain concurrently — the stdout read loop below blocks this
+            // thread until EOF, so an unread stderr pipe filling up would
+            // deadlock the CLI against its own diagnostic output.
+            var stderrData = Data()
+            let errQueue = DispatchQueue(label: "hidock.calendarAssistant.stderr")
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                errQueue.sync { stderrData.append(chunk) }
+            }
 
             var pending = Data()
             var replyText = ""
@@ -5073,13 +5128,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 if !pending.isEmpty { handle(pending) }
                 process.waitUntilExit()
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                let stderrTail = errPipe.fileHandleForReading.readDataToEndOfFile()
+                if !stderrTail.isEmpty { errQueue.sync { stderrData.append(stderrTail) } }
 
                 let answer = (finalReply ?? replyText).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard process.terminationStatus == 0, !answer.isEmpty else {
-                    self?.log("Calendar assistant CLI did not return a result (status \(process.terminationStatus))")
+                    let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    // The CLI's own stderr is the one place the real cause lives
+                    // (auth expired, MCP unreachable, npx missing, …) — surface
+                    // its last non-empty line instead of a fixed, reason-less string.
+                    let reason = stderrText.split(separator: "\n").last(where: { !$0.isEmpty })
+                        .map(String.init) ?? "exit code \(process.terminationStatus)"
+                    self?.log("Calendar assistant CLI did not return a result (status \(process.terminationStatus)): \(stderrText.isEmpty ? "no stderr" : stderrText)")
                     DispatchQueue.main.async {
                         onEvent(.finished(
-                            reply: "I couldn't reach the calendar connector. You can check its connection from the calendar menu.",
+                            reply: "I couldn't reach the calendar connector (\(reason)). You can check its connection from the calendar menu.",
                             sessionId: nextSession ?? sessionId, candidates: []
                         ))
                     }
@@ -5097,6 +5162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ))
                 }
             } catch {
+                errPipe.fileHandleForReading.readabilityHandler = nil
                 self?.log("Calendar assistant CLI failed: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     onEvent(.finished(reply: "Calendar assistant failed: \(error.localizedDescription)",
