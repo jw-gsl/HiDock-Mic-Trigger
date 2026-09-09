@@ -762,6 +762,26 @@ private struct CalendarAssistantMessage: Identifiable {
     var streaming: Bool = false
 }
 
+/// Unlike the calendar assistant, this one actually performs the fix itself —
+/// it runs the same tested `rediarize`/`recluster-with-anchors`/`rematch`/
+/// `rename-speaker`/`merge-speakers` commands the buttons above call, rather
+/// than proposing a change for a manual click. `.finished` carries the
+/// freshly-decoded transcript whenever the sidecar file actually changed, so
+/// the view can pick it up the same way `startRediarize` already does.
+enum TranscriptAssistantEvent {
+    case activity(String)
+    case partialReply(String)
+    case finished(reply: String, sessionId: String?, updatedTranscript: DiarizedTranscript?)
+}
+
+private struct TranscriptAssistantMessage: Identifiable {
+    enum Role { case user, assistant }
+    let id = UUID()
+    let role: Role
+    var text: String
+    var streaming: Bool = false
+}
+
 // MARK: - TranscriptViewerView
 
 struct TranscriptViewerView: View {
@@ -854,6 +874,11 @@ struct TranscriptViewerView: View {
     @State private var calendarAssistantRunning = false
     /// What the assistant is doing right now, from the CLI's own event stream.
     @State private var calendarAssistantActivity = ""
+    @State private var transcriptAssistantDraft = ""
+    @State private var transcriptAssistantMessages: [TranscriptAssistantMessage] = []
+    @State private var transcriptAssistantSessionId: String?
+    @State private var transcriptAssistantRunning = false
+    @State private var transcriptAssistantActivity = ""
     @State private var showTranscriptHistory = false
     @State private var transcriptVersions: [TranscriptVersion] = []
     @State private var pendingTranscriptRestore: TranscriptVersion?
@@ -951,6 +976,12 @@ struct TranscriptViewerView: View {
     /// called repeatedly with `.activity` / `.partialReply` and exactly once with
     /// `.finished`.
     var onCalendarAssistantTurn: ((String, Double, String, String?, @escaping (CalendarAssistantEvent) -> Void) -> Void)? = nil
+    /// A natural-language assistant scoped to this transcript's own diarized
+    /// JSON (`filePath`). It reads the sidecar and, when a fix is warranted,
+    /// actually runs it — never by hand-editing the JSON. The handler is
+    /// called repeatedly with `.activity` / `.partialReply` and exactly once
+    /// with `.finished`.
+    var onTranscriptAssistantTurn: ((String, String, String?, @escaping (TranscriptAssistantEvent) -> Void) -> Void)? = nil
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -1173,6 +1204,17 @@ struct TranscriptViewerView: View {
             // Speaker tools — grouped so the top bar stays clean.
             if hasSpeakers {
                 speakerToolsBar
+                Divider()
+            }
+
+            // Natural-language transcript fixes — e.g. "there were definitely
+            // 5 speakers, go through it more carefully". Between the tool
+            // buttons and the stats row so it reads as one of the speaker
+            // tools, not a separate feature.
+            if hasSpeakers, onTranscriptAssistantTurn != nil {
+                transcriptAssistantPanel
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                 Divider()
             }
 
@@ -1923,6 +1965,111 @@ struct TranscriptViewerView: View {
                     calendarAssistantSessionId = sessionId ?? calendarAssistantSessionId
                     calendarAssistantRunning = false
                     calendarAssistantActivity = ""
+                }
+            }
+        }
+    }
+
+    /// Always present (not gated behind a toggle like the calendar assistant)
+    /// — this is meant to read as one of the speaker tools above it, always
+    /// available for "actually this transcript needs work" feedback. Starts
+    /// as just the input line; the message history only takes space once
+    /// there's something to show.
+    private var transcriptAssistantPanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .foregroundColor(.accentColor)
+                Text("Tell it what's wrong with this transcript")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 7)
+
+            if !transcriptAssistantMessages.isEmpty {
+                Divider().padding(.top, 6)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(transcriptAssistantMessages) { message in
+                            if !message.text.isEmpty {
+                                Text(message.text)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                                    .padding(7)
+                                    .background(message.role == .user ? Color.accentColor.opacity(0.13) : Color.secondary.opacity(0.10))
+                                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                                    .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+                            }
+                        }
+                        if transcriptAssistantRunning {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text(transcriptAssistantActivity.isEmpty ? "Working…" : transcriptAssistantActivity)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+                .frame(height: 140)
+            }
+
+            Divider().padding(.top, transcriptAssistantMessages.isEmpty ? 6 : 0)
+            HStack(spacing: 6) {
+                TextField(
+                    "e.g. \"there were definitely 5 speakers, go through it more carefully\"",
+                    text: $transcriptAssistantDraft, axis: .vertical
+                )
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+                    .onSubmit { sendTranscriptAssistantMessage() }
+                Button(action: sendTranscriptAssistantMessage) {
+                    Image(systemName: "arrow.up.circle.fill").font(.title3)
+                }
+                .buttonStyle(.plain)
+                .disabled(transcriptAssistantRunning || transcriptAssistantDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(8)
+        }
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18)))
+    }
+
+    private func sendTranscriptAssistantMessage() {
+        let message = transcriptAssistantDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !transcriptAssistantRunning, let turn = onTranscriptAssistantTurn else { return }
+        transcriptAssistantDraft = ""
+        transcriptAssistantMessages.append(TranscriptAssistantMessage(role: .user, text: message))
+        transcriptAssistantRunning = true
+        transcriptAssistantActivity = "Starting…"
+        // One placeholder reply, filled in as the stream arrives — mirrors
+        // the calendar assistant's own placeholder-bubble approach.
+        transcriptAssistantMessages.append(TranscriptAssistantMessage(role: .assistant, text: "", streaming: true))
+        let replyIndex = transcriptAssistantMessages.count - 1
+        turn(filePath, message, transcriptAssistantSessionId) { event in
+            DispatchQueue.main.async {
+                guard transcriptAssistantMessages.indices.contains(replyIndex) else { return }
+                switch event {
+                case .activity(let what):
+                    transcriptAssistantActivity = what
+                case .partialReply(let text):
+                    transcriptAssistantMessages[replyIndex].text = text
+                case .finished(let reply, let sessionId, let updatedTranscript):
+                    transcriptAssistantMessages[replyIndex].text = reply
+                    transcriptAssistantMessages[replyIndex].streaming = false
+                    transcriptAssistantSessionId = sessionId ?? transcriptAssistantSessionId
+                    transcriptAssistantRunning = false
+                    transcriptAssistantActivity = ""
+                    if let updatedTranscript {
+                        applyRediarizedTranscript(updatedTranscript)
+                        onSpeakerReviewChanged?(filePath)
+                    }
                 }
             }
         }
