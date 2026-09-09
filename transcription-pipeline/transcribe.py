@@ -1428,20 +1428,18 @@ def _rewrite_sidecar_markdown(json_path: Path, data: dict) -> None:
         print(f"anchor-sweep: could not rewrite .md: {exc}", file=sys.stderr)
 
 
-def cmd_rewrite_md(args):
-    """Regenerate the .md next to a _diarized.json using confirmed-only labels.
+def _rewrite_and_verify_md(json_path: Path, data: dict, default_model: str) -> dict:
+    """Regenerate the sibling .md and verify it isn't stale versus the sidecar.
 
-    Used by the desktop app after Confirm / Clear / rename so the on-disk
-    transcript matches publishable names (Speaker N until confirmed). Does not
-    alter the JSON, but it does overwrite a versioned artifact, so it snapshots
-    like any other rewrite.
+    Shared by rewrite-md, rename-speaker, and merge-speakers so every path
+    that changes speaker_names/speaker_meta enforces the same guarantee: the
+    publishable Markdown is never older than the JSON it was derived from.
+    Treating a missing or stale sibling as a failure matters because the
+    desktop app (and any CLI caller) saves the sidecar first — a successful
+    rewrite must leave Markdown at least as new as that sidecar, otherwise a
+    speaker rename can appear saved while the publishable .md still shows the
+    old/generic name.
     """
-    import json as _json
-    json_path = Path(args.json_path).resolve()
-    if not json_path.exists():
-        print(f"File not found: {json_path}", file=sys.stderr)
-        sys.exit(1)
-    data = _json.loads(json_path.read_text(encoding="utf-8"))
     from shared.transcript_writer import write_transcript
     md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
     body_text = " ".join(
@@ -1450,7 +1448,7 @@ def cmd_rewrite_md(args):
         if seg.get("text")
     )
     # Preserve prior frontmatter model if present (best-effort).
-    model = "rewrite-md"
+    model = default_model
     try:
         if md_path.exists():
             from shared.transcript_writer import parse_frontmatter
@@ -1466,23 +1464,123 @@ def cmd_rewrite_md(args):
         model=model,
         diarized_result=data,
     )
-    # Treat a missing or stale sibling as a failed rewrite. The desktop app
-    # saves the sidecar first, so a successful rewrite must leave Markdown at
-    # least as new as that sidecar; otherwise speaker names can appear saved in
-    # the UI while the publishable .md remains generic.
     if not md_path.exists():
-        raise RuntimeError(f"rewrite-md did not create {md_path}")
+        raise RuntimeError(f"{default_model} did not create {md_path}")
     sidecar_mtime_ns = json_path.stat().st_mtime_ns
     md_mtime_ns = md_path.stat().st_mtime_ns
     if md_mtime_ns < sidecar_mtime_ns:
         raise RuntimeError(
-            f"rewrite-md produced stale output: {md_path} is older than {json_path}"
+            f"{default_model} produced stale output: {md_path} is older than {json_path}"
         )
+    return {"md_path": str(md_path), "sidecar_mtime_ns": sidecar_mtime_ns, "md_mtime_ns": md_mtime_ns}
+
+
+def cmd_rewrite_md(args):
+    """Regenerate the .md next to a _diarized.json using confirmed-only labels.
+
+    Used by the desktop app after Confirm / Clear / rename so the on-disk
+    transcript matches publishable names (Speaker N until confirmed). Does not
+    alter the JSON, but it does overwrite a versioned artifact, so it snapshots
+    like any other rewrite.
+    """
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    result = _rewrite_and_verify_md(json_path, data, default_model="rewrite-md")
+    print(_json.dumps({"status": "completed", **result}))
+
+
+def cmd_rename_speaker(args):
+    """Set one speaker's display name and refresh the Markdown.
+
+    Mirrors the desktop app's own rename path (commitRename): only
+    speaker_names/speaker_meta change, segment text and timing are untouched.
+    Exists so the transcript assistant (and any other CLI caller) can rename
+    a speaker without hand-editing the sidecar JSON — the same reliability
+    argument as every other transcript mutation in this file.
+    """
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    speaker_id = str(args.speaker_id)
+    name = args.name.strip()
+    if not name:
+        print("Name must not be empty", file=sys.stderr)
+        sys.exit(1)
+
+    snapshot_transcript(json_path, "Before rename-speaker (CLI)")
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    known_ids = {str(s.get("speaker_id")) for s in data.get("segments", [])}
+    if speaker_id not in known_ids:
+        print(f"No segments have speaker_id {speaker_id}; known ids: {sorted(known_ids)}", file=sys.stderr)
+        sys.exit(1)
+
+    speaker_names = data.setdefault("speaker_names", {})
+    speaker_meta = data.setdefault("speaker_meta", {})
+    speaker_names[speaker_id] = name
+    speaker_meta[speaker_id] = {"source": "user", "verified": True}
+
+    json_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    result = _rewrite_and_verify_md(json_path, data, default_model="rename-speaker")
     print(_json.dumps({
         "status": "completed",
-        "md_path": str(md_path),
-        "sidecar_mtime_ns": sidecar_mtime_ns,
-        "md_mtime_ns": md_mtime_ns,
+        "speaker_id": speaker_id,
+        "name": name,
+        "speaker_names": speaker_names,
+        **result,
+    }))
+
+
+def cmd_merge_speakers(args):
+    """Reassign every segment for one speaker id into another and refresh the Markdown.
+
+    Mirrors the desktop app's own merge path (mapSpeaker): the "from" speaker
+    is removed from speaker_names/speaker_meta/speaker_embeddings and every
+    segment that had it becomes "into". Segment text and timing are untouched.
+    """
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    from_id = str(args.from_id)
+    into_id = str(args.into_id)
+    if from_id == into_id:
+        print("--from-id and --into-id must differ", file=sys.stderr)
+        sys.exit(1)
+
+    snapshot_transcript(json_path, "Before merge-speakers (CLI)")
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    segments = data.get("segments", [])
+    into_value: object = int(into_id) if into_id.lstrip("-").isdigit() else into_id
+    moved = 0
+    for seg in segments:
+        if str(seg.get("speaker_id")) == from_id:
+            seg["speaker_id"] = into_value
+            moved += 1
+    if moved == 0:
+        known_ids = {str(s.get("speaker_id")) for s in segments}
+        print(f"No segments have speaker_id {from_id}; known ids: {sorted(known_ids)}", file=sys.stderr)
+        sys.exit(1)
+
+    data.get("speaker_names", {}).pop(from_id, None)
+    data.get("speaker_meta", {}).pop(from_id, None)
+    data.get("speaker_embeddings", {}).pop(from_id, None)
+
+    json_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    result = _rewrite_and_verify_md(json_path, data, default_model="merge-speakers")
+    print(_json.dumps({
+        "status": "completed",
+        "from": from_id,
+        "into": into_id,
+        "segments_moved": moved,
+        "speaker_names": data.get("speaker_names", {}),
+        **result,
     }))
 
 
@@ -2116,6 +2214,24 @@ def main():
     )
     p_rewrite.add_argument("json_path", help="Path to _diarized.json file")
     p_rewrite.set_defaults(func=cmd_rewrite_md)
+
+    p_rename_speaker = sub.add_parser(
+        "rename-speaker",
+        help="Set a speaker's display name and refresh the Markdown (mirrors the desktop app's rename)",
+    )
+    p_rename_speaker.add_argument("json_path", help="Path to _diarized.json file")
+    p_rename_speaker.add_argument("--speaker-id", required=True, help="Numeric speaker id (0-based) to rename")
+    p_rename_speaker.add_argument("--name", required=True, help="New display name")
+    p_rename_speaker.set_defaults(func=cmd_rename_speaker)
+
+    p_merge_speakers = sub.add_parser(
+        "merge-speakers",
+        help="Reassign one speaker's segments into another and refresh the Markdown (mirrors the desktop app's merge)",
+    )
+    p_merge_speakers.add_argument("json_path", help="Path to _diarized.json file")
+    p_merge_speakers.add_argument("--from-id", required=True, dest="from_id", help="Speaker id to merge away")
+    p_merge_speakers.add_argument("--into-id", required=True, dest="into_id", help="Speaker id to keep")
+    p_merge_speakers.set_defaults(func=cmd_merge_speakers)
 
     p_confidence = sub.add_parser(
         "speaker-confidence",
