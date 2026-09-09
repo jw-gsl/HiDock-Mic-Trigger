@@ -554,6 +554,20 @@ private struct WordTokensView: View {
     let selection: SegmentSelection?
     /// Word currently being spoken (karaoke highlight), or nil when not playing.
     var playingWord: Int? = nil
+    /// Only publish this word's frame while a selection drag is actually
+    /// under way. Every word previously carried a `GeometryReader`
+    /// unconditionally, and scrolling continuously changes every visible
+    /// word's frame in the named coordinate space — a rapid scroll fired the
+    /// preference-merge machinery across every mounted word many times a
+    /// second, pinning the main thread at 100% CPU long enough for macOS's
+    /// watchdog to kill the app (see docs/PLAN-transcript-scroll-hang.md).
+    /// Frames are only ever read for drag-to-select, so there is nothing to
+    /// publish outside a drag. The trade-off: the very first mouse-down of a
+    /// drag has no frame to resolve against yet (frames only start
+    /// publishing once the drag sets this true), so a precise single click
+    /// with no movement can miss its word — the gesture needs one further
+    /// onChanged tick, i.e. a small movement, before the first word resolves.
+    var trackFrames: Bool = false
 
     var body: some View {
         // Reads as a normal paragraph: each word carries its own
@@ -573,17 +587,19 @@ private struct WordTokensView: View {
                         inRange ? Color.blue.opacity(0.28)
                             : (isPlaying ? Color.yellow.opacity(0.45) : Color.clear)
                     )
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: TranscriptWordFramesKey.self,
-                                value: [
-                                    WordPosition(segmentIndex: segmentIndex, wordIndex: i):
-                                        proxy.frame(in: .named("transcriptWords"))
-                                ]
-                            )
+                    .background {
+                        if trackFrames {
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: TranscriptWordFramesKey.self,
+                                    value: [
+                                        WordPosition(segmentIndex: segmentIndex, wordIndex: i):
+                                            proxy.frame(in: .named("transcriptWords"))
+                                    ]
+                                )
+                            }
                         }
-                    )
+                    }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -609,6 +625,8 @@ private struct SegmentPlaybackControls: View {
     let words: [String]
     let timedWords: [DiarizedWord]?
     let selection: SegmentSelection?
+    /// See `WordTokensView.trackFrames`.
+    var trackFrames: Bool = false
 
     var body: some View {
         let isPlaying = audioPlayer.playingSegmentId == segment.id
@@ -636,7 +654,8 @@ private struct SegmentPlaybackControls: View {
             segmentIndex: segmentIndex,
             words: words,
             selection: selection,
-            playingWord: isPlaying ? audioPlayer.playingWordIndex : nil
+            playingWord: isPlaying ? audioPlayer.playingWordIndex : nil,
+            trackFrames: trackFrames
         )
     }
 }
@@ -798,6 +817,11 @@ struct TranscriptViewerView: View {
     /// view, or publishing them re-triggers the layout that publishes them.
     @State private var transcriptWordFrames = TranscriptWordFrameStore()
     @State private var selectionDragStart: WordPosition? = nil
+    /// True only while a word-selection drag is under way. See
+    /// `WordTokensView.trackFrames` — gates per-word `GeometryReader`s so a
+    /// rapid scroll doesn't fire the frame-preference machinery across every
+    /// mounted word every scroll tick (docs/PLAN-transcript-scroll-hang.md).
+    @State private var isSelectingWords = false
     /// Timestamp of the text just edited. Splitting a segment changes its view
     /// identity, so SwiftUI otherwise reconstructs the scroll view at the top.
     @State private var pendingTranscriptRestoreTime: Double?
@@ -2623,6 +2647,11 @@ struct TranscriptViewerView: View {
     private var transcriptSelectionGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("transcriptWords"))
             .onChanged { value in
+                // Frames only start publishing once this flips true, so the
+                // very first tick of a drag can have nothing to resolve yet
+                // — that's expected; the next tick (a small movement) has
+                // frames available. See WordTokensView.trackFrames.
+                if !isSelectingWords { isSelectingWords = true }
                 guard let position = transcriptWordPosition(at: value.location) else { return }
                 if selectionDragStart == nil {
                     selectionDragStart = position
@@ -2631,6 +2660,7 @@ struct TranscriptViewerView: View {
             }
             .onEnded { _ in
                 selectionDragStart = nil
+                isSelectingWords = false
             }
     }
 
@@ -2858,7 +2888,8 @@ struct TranscriptViewerView: View {
                     audioPath: audioPath,
                     words: words,
                     timedWords: timedWords,
-                    selection: selection
+                    selection: selection,
+                    trackFrames: isSelectingWords
                 )
 
                 Spacer(minLength: 0)
