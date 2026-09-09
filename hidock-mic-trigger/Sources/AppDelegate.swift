@@ -5116,6 +5116,226 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return "Running \(toolName)…"
     }
 
+    /// One turn of the transcript assistant. Unlike the calendar assistant,
+    /// this one is allowed to actually fix the transcript — but only by
+    /// running the same tested pipeline commands the speaker-tools buttons
+    /// already call (`rediarize`, `recluster-with-anchors`, `rematch`,
+    /// `rename-speaker`, `merge-speakers`), never by hand-editing the JSON.
+    /// Every one of those commands snapshots the sidecar before writing (the
+    /// same versioning the manual buttons rely on), so a bad call from the
+    /// model is recoverable through the existing transcript history UI.
+    private func runTranscriptAssistantTurn(
+        diarizedPath: String,
+        userMessage: String,
+        sessionId: String?,
+        onEvent: @escaping (TranscriptAssistantEvent) -> Void
+    ) {
+        guard ensureTranscriptionReady() else {
+            onEvent(.finished(reply: "The transcription pipeline is not ready.",
+                               sessionId: sessionId, updatedTranscript: nil))
+            return
+        }
+        let cliCandidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
+            + ["\(NSHomeDirectory())/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+        guard let claudePath = cliCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            onEvent(.finished(reply: "Claude CLI is not available. Open Calendar connection to set it up.",
+                               sessionId: sessionId, updatedTranscript: nil))
+            return
+        }
+        let pythonPath = transcriptionPythonPath
+        let scriptPath = transcriptionScriptPath
+        let beforeMtime = (try? FileManager.default.attributesOfItem(atPath: diarizedPath)[.modificationDate] as? Date) ?? nil
+
+        // Every action the model can take is spelled out as a literal, already-
+        // working command line — it never needs to guess flags, and each one
+        // already regenerates and verifies the transcript's Markdown, so the
+        // model never needs to touch anything but this one JSON path.
+        let prompt = """
+        You are HiDock's transcript assistant, looking at one meeting's diarized transcript sidecar at \(diarizedPath).
+
+        Start by reading it with the Read tool to see the current segments, speaker_names, and speaker_meta — never assume the current state.
+
+        You may correct speaker detection ONLY by running these exact commands with Bash — never edit the JSON file yourself, and never touch any file other than this one:
+        - Redetect the number of speakers from the audio: \(pythonPath) \(scriptPath) rediarize \(diarizedPath) --n-speakers <N>
+        - Re-cluster using already-confirmed speakers as anchors: \(pythonPath) \(scriptPath) recluster-with-anchors \(diarizedPath)
+        - Re-match generic speakers against the saved voice library: \(pythonPath) \(scriptPath) rematch \(diarizedPath)
+        - Rename one speaker: \(pythonPath) \(scriptPath) rename-speaker \(diarizedPath) --speaker-id <id> --name "<name>"
+        - Merge one speaker into another (the "from" speaker disappears): \(pythonPath) \(scriptPath) merge-speakers \(diarizedPath) --from-id <id> --into-id <id>
+
+        Use the transcript's own content — who says what, names people use for each other, context — to work out who each speaker actually is before renaming them. Read the result of each command before deciding the next step; re-read the transcript after rediarizing or reassigning, since speaker ids can change.
+
+        Explain briefly, in plain English, what you found and what you did. If you're unsure and would rather ask before acting, say so instead of guessing. Never claim to have made a change you did not actually run a command for.
+
+        User: \(userMessage)
+        """
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: claudePath)
+            process.currentDirectoryURL = URL(fileURLWithPath: self?.transcriptionRoot ?? NSHomeDirectory())
+            // Tool access is scoped to Read plus exactly these five command
+            // lines against this one transcript's path — nothing else on this
+            // machine is reachable through this session. `=` keeps the prompt
+            // and --resume from being swallowed into --allowedTools' variadic
+            // argument list.
+            let allowedCommands = ["rediarize", "recluster-with-anchors", "rematch", "rename-speaker", "merge-speakers"]
+                .map { "Bash(\(pythonPath) \(scriptPath) \($0) \(diarizedPath):*)" }
+                .joined(separator: ",")
+            var arguments = [
+                "--print", "--output-format", "stream-json",
+                "--include-partial-messages", "--verbose",
+                "--allowedTools=Read,\(allowedCommands)",
+                "--permission-prompts=none",
+                // Without an explicit mode this inherits whatever
+                // defaultMode the user's own Claude settings specify (which
+                // can be "auto" — full trust, ignoring --allowedTools
+                // entirely). "default" is what actually makes --allowedTools
+                // an enforced ceiling rather than a suggestion: verified by
+                // hand that under "auto" a command against a *different*
+                // file still ran, and under "default" it was denied.
+                "--permission-mode=default",
+            ]
+            if let sessionId, !sessionId.isEmpty { arguments += ["--resume", sessionId] }
+            arguments.append(prompt)
+            process.arguments = arguments
+            var env = ProcessInfo.processInfo.environment
+            if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
+                env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            }
+            process.environment = env
+            let output = Pipe()
+            process.standardOutput = output
+            let errPipe = Pipe()
+            process.standardError = errPipe
+            var stderrData = Data()
+            let errQueue = DispatchQueue(label: "hidock.transcriptAssistant.stderr")
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                errQueue.sync { stderrData.append(chunk) }
+            }
+
+            var pending = Data()
+            var replyText = ""
+            var finalReply: String?
+            var nextSession: String?
+            var lastPartialEmit = Date.distantPast
+            let partialReplyMinInterval: TimeInterval = 0.1
+
+            func handle(_ line: Data) {
+                guard !line.isEmpty,
+                      let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+                else { return }
+                if let session = event["session_id"] as? String, !session.isEmpty {
+                    nextSession = session
+                }
+                switch event["type"] as? String {
+                case "stream_event":
+                    guard let raw = event["event"] as? [String: Any] else { return }
+                    if let delta = raw["delta"] as? [String: Any],
+                       let chunk = delta["text"] as? String, !chunk.isEmpty {
+                        replyText += chunk
+                        let now = Date()
+                        if now.timeIntervalSince(lastPartialEmit) >= partialReplyMinInterval {
+                            lastPartialEmit = now
+                            DispatchQueue.main.async { onEvent(.partialReply(replyText)) }
+                        }
+                    }
+                    if let block = raw["content_block"] as? [String: Any],
+                       block["type"] as? String == "tool_use",
+                       let name = block["name"] as? String {
+                        let input = block["input"] as? [String: Any]
+                        DispatchQueue.main.async {
+                            onEvent(.activity(Self.friendlyTranscriptToolActivity(name, input: input)))
+                        }
+                    }
+                case "assistant":
+                    if let message = event["message"] as? [String: Any],
+                       let content = message["content"] as? [[String: Any]] {
+                        let text = content.compactMap { $0["text"] as? String }.joined()
+                        if !text.isEmpty { replyText = text }
+                    }
+                case "result":
+                    if let result = event["result"] as? String { finalReply = result }
+                default:
+                    break
+                }
+            }
+
+            do {
+                try process.run()
+                DispatchQueue.main.async { onEvent(.activity("Reading the transcript…")) }
+                let reader = output.fileHandleForReading
+                while true {
+                    let chunk = reader.availableData
+                    if chunk.isEmpty { break }
+                    pending.append(chunk)
+                    while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+                        let line = pending[pending.startIndex..<newline]
+                        pending.removeSubrange(pending.startIndex...newline)
+                        handle(Data(line))
+                    }
+                }
+                if !pending.isEmpty { handle(pending) }
+                process.waitUntilExit()
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                let stderrTail = errPipe.fileHandleForReading.readDataToEndOfFile()
+                if !stderrTail.isEmpty { errQueue.sync { stderrData.append(stderrTail) } }
+
+                let answer = (finalReply ?? replyText).trimmingCharacters(in: .whitespacesAndNewlines)
+                let afterMtime = (try? FileManager.default.attributesOfItem(atPath: diarizedPath)[.modificationDate] as? Date) ?? nil
+                let transcriptChanged = afterMtime != beforeMtime
+                let updatedTranscript = transcriptChanged ? self?.loadDiarizedTranscript(at: diarizedPath) : nil
+
+                guard process.terminationStatus == 0, !answer.isEmpty else {
+                    let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let reason = stderrText.split(separator: "\n").last(where: { !$0.isEmpty })
+                        .map(String.init) ?? "exit code \(process.terminationStatus)"
+                    self?.log("Transcript assistant CLI did not return a result (status \(process.terminationStatus)): \(stderrText.isEmpty ? "no stderr" : stderrText)")
+                    DispatchQueue.main.async {
+                        onEvent(.finished(
+                            reply: "I couldn't reach the assistant (\(reason)).\(transcriptChanged ? " It may have made changes before failing — reload if something looks off." : "")",
+                            sessionId: nextSession ?? sessionId, updatedTranscript: updatedTranscript
+                        ))
+                    }
+                    return
+                }
+                if transcriptChanged {
+                    self?.log("Transcript assistant changed \(diarizedPath)")
+                }
+                DispatchQueue.main.async {
+                    onEvent(.finished(reply: answer, sessionId: nextSession ?? sessionId,
+                                       updatedTranscript: updatedTranscript))
+                }
+            } catch {
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                self?.log("Transcript assistant CLI failed: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    onEvent(.finished(reply: "Transcript assistant failed: \(error.localizedDescription)",
+                                       sessionId: sessionId, updatedTranscript: nil))
+                }
+            }
+        }
+    }
+
+    /// Human wording for the transcript assistant's tool calls — names the
+    /// actual pipeline command rather than a generic "Running Bash…".
+    private static func friendlyTranscriptToolActivity(_ toolName: String, input: [String: Any]?) -> String {
+        if toolName == "Read" { return "Reading the transcript…" }
+        guard toolName == "Bash", let command = input?["command"] as? String else {
+            return "Running \(toolName)…"
+        }
+        if command.contains(" rediarize ") { return "Redetecting speakers…" }
+        if command.contains(" recluster-with-anchors ") { return "Re-clustering with confirmed speakers…" }
+        if command.contains(" rematch ") { return "Checking the voice library…" }
+        if command.contains(" rename-speaker ") { return "Renaming a speaker…" }
+        if command.contains(" merge-speakers ") { return "Merging speakers…" }
+        return "Working…"
+    }
+
     /// The prose, with the machine-readable CANDIDATE lines removed.
     ///
     /// `streaming` also hides a final line that is still only a *prefix* of
@@ -5318,6 +5538,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                                onEvent: onEvent)
                     ?? onEvent(.finished(reply: "Calendar assistant is unavailable.",
                                          sessionId: sessionId, candidates: []))
+            },
+            onTranscriptAssistantTurn: { [weak self] diarizedPath, message, sessionId, onEvent in
+                self?.runTranscriptAssistantTurn(diarizedPath: diarizedPath, userMessage: message,
+                                                  sessionId: sessionId, onEvent: onEvent)
+                    ?? onEvent(.finished(reply: "Transcript assistant is unavailable.",
+                                         sessionId: sessionId, updatedTranscript: nil))
             }
         )
 
