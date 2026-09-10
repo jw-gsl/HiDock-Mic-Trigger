@@ -319,6 +319,27 @@ final class HiDockViewModel: ObservableObject {
         }
     }
 
+    /// Paired devices the user has chosen to hide from the device strip and
+    /// stop auto-reconnecting — e.g. a HiDock they no longer own, without
+    /// deleting its recording history the way "Forget" does. Keyed by
+    /// `deviceId`. Sticky across launches, same shape as `hiddenStatuses`.
+    @Published var hiddenDeviceIds: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "hidockHiddenDeviceIds") ?? []) {
+        didSet {
+            UserDefaults.standard.set(Array(hiddenDeviceIds), forKey: "hidockHiddenDeviceIds")
+        }
+    }
+
+    /// Toggle a paired device in/out of the hidden set (drives the "Hide"/
+    /// "Unhide" action in the Manage Devices row).
+    func toggleDeviceHidden(_ deviceId: String) {
+        if hiddenDeviceIds.contains(deviceId) {
+            hiddenDeviceIds.remove(deviceId)
+        } else {
+            hiddenDeviceIds.insert(deviceId)
+        }
+    }
+
     /// Whether the recordings table is narrowed by any user-facing filter.
     /// Sorting and selection are deliberately not included: this reset is for
     /// visibility filters only.
