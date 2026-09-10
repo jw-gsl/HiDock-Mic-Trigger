@@ -2255,6 +2255,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let recording = self.viewModel.hidockRecordingActive
             let flapBackoff = usbTriggered && self.inUsbFlapBackoff
             let probeDevices = devices.filter { device in
+                // Hidden devices (e.g. hardware the user no longer owns) keep
+                // their paired entry and recording history, but stop being
+                // probed in the background — that's the whole point of
+                // hiding rather than forgetting them.
+                if self.viewModel.hiddenDeviceIds.contains(device.deviceId) { return false }
                 // Plaud is an API, not a USB device — a USB/audio device change
                 // is irrelevant to it, so don't re-probe it on USB churn.
                 if usbTriggered && device.deviceType == .plaud {

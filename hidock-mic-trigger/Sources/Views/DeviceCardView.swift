@@ -487,6 +487,7 @@ struct DeviceStripView: View {
     /// cards in the first row when the grid reflows.
     private var visibleDevices: [HiDockPairedDevice] {
         viewModel.syncPairedDevices
+            .filter { !viewModel.hiddenDeviceIds.contains($0.deviceId) }
             .filter { device in
                 switch device.deviceType {
                 case .hidock: return true

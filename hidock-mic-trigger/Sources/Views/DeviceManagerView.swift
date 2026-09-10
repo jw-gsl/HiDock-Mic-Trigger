@@ -5,6 +5,10 @@ struct DeviceManagerView: View {
     @State private var sortOrder: DeviceSortKey = .name
     @State private var filterType: String = "all" // "all", "hidock", "volume", "plaud"
     @State private var searchText = ""
+    /// Hidden devices are excluded from this list by default (mirrors them
+    /// being excluded from the device strip) — toggle this to manage/unhide
+    /// them, same idea as the recordings table's hidden-status Filter entry.
+    @State private var showHidden = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,6 +55,14 @@ struct DeviceManagerView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: .infinity)
+                }
+
+                if !viewModel.hiddenDeviceIds.isEmpty {
+                    Toggle(isOn: $showHidden) {
+                        Text("Show hidden (\(viewModel.hiddenDeviceIds.count))")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
                 }
 
                 HStack(spacing: 8) {
@@ -121,9 +133,11 @@ struct DeviceManagerView: View {
                                 isSignedOut: device.deviceType == .plaud
                                     && (viewModel.syncDeviceLastError[device.deviceId]?.0
                                         .localizedCaseInsensitiveContains("not signed in") ?? false),
+                                isHidden: viewModel.hiddenDeviceIds.contains(device.deviceId),
                                 onForget: { viewModel.onForgetDevice(device) },
                                 onSignOut: { viewModel.onSignOutPlaud(device) },
-                                onSignIn: { viewModel.onPairPlaud(device.plaudRegion ?? "us") }
+                                onSignIn: { viewModel.onPairPlaud(device.plaudRegion ?? "us") },
+                                onToggleHidden: { viewModel.toggleDeviceHidden(device.deviceId) }
                             )
                             Divider()
                                 .padding(.horizontal, 16)
@@ -151,6 +165,10 @@ struct DeviceManagerView: View {
 
     private var filteredDevices: [HiDockPairedDevice] {
         var devices = viewModel.syncPairedDevices
+
+        if !showHidden {
+            devices = devices.filter { !viewModel.hiddenDeviceIds.contains($0.deviceId) }
+        }
 
         if filterType == "hidock" {
             devices = devices.filter { $0.deviceType == .hidock }
@@ -198,9 +216,14 @@ struct DeviceRowView: View {
     let device: HiDockPairedDevice
     let isConnected: Bool
     let isSignedOut: Bool
+    /// Hidden from the device strip and skipped by auto-reconnect, but not
+    /// forgotten — its recording history is untouched. Reversible, unlike
+    /// "Forget".
+    var isHidden: Bool = false
     let onForget: () -> Void
     let onSignOut: () -> Void
     let onSignIn: () -> Void
+    var onToggleHidden: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -248,6 +271,15 @@ struct DeviceRowView: View {
                         .padding(.vertical, 2)
                         .background(Color.green.opacity(0.1))
                         .cornerRadius(4)
+                    }
+                    if isHidden {
+                        Text("Hidden")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.15))
+                            .cornerRadius(4)
                     }
                     Spacer()
                     Text(deviceTypeLabel)
@@ -319,6 +351,17 @@ struct DeviceRowView: View {
                         .controlSize(.small)
                     }
                 }
+                Button {
+                    onToggleHidden()
+                } label: {
+                    Text(isHidden ? "Unhide" : "Hide")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(isHidden
+                    ? "Show this device again and resume auto-reconnect"
+                    : "Hide this device from the list and stop auto-reconnecting — keeps its recording history, unlike Forget")
                 Button(role: .destructive) {
                     onForget()
                 } label: {
@@ -332,6 +375,7 @@ struct DeviceRowView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
+        .opacity(isHidden ? 0.55 : 1.0)
     }
 
     private var deviceIcon: String {
