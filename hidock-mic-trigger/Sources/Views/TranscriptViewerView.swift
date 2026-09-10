@@ -2179,6 +2179,18 @@ struct TranscriptViewerView: View {
         onLinkCalendarEvent?(audioPath, Double(transcriptDurationSeconds), event, false)
         if allSpeakersConfirmed {
             rediarizeStatus = .skipped("Calendar linked — all speakers are confirmed, so their assignments were left untouched.")
+        } else if hasAnchorNamedSpeakers, onReclusterWithLabels != nil,
+                  event.attendeeCount < 2 || uniqueSpeakerIds.count >= event.attendeeCount {
+            // At least one speaker is already confirmed, and we're not being
+            // asked to discover a speaker we haven't detected at all — reassign
+            // only the unconfirmed/generic turns using the confirmed ones as
+            // anchors. A full rediarize re-clusters from scratch, and its label
+            // preservation (`preserve_existing_speaker_labels`) is best-effort,
+            // matched by timestamp overlap — it can silently un-verify an
+            // already-confirmed speaker whenever the fresh cluster boundaries
+            // don't line up cleanly with the old ones, forcing a needless
+            // reconfirmation of someone who was already correct.
+            onReclusterWithLabels?(filePath, nil)
         } else {
             startRediarize(speakers: event.attendeeCount >= 2 ? event.attendeeCount : nil)
         }
