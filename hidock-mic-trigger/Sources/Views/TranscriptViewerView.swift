@@ -2989,10 +2989,40 @@ struct TranscriptViewerView: View {
                 // Refresh enrolled names when opening the editor so the
                 // dropdown is current (library may have grown since appear).
                 refreshLibraryNames()
+                // The rename popover grabs focus and can swallow the mouse-up
+                // that `transcriptSelectionGesture` needs to fire `.onEnded`
+                // (see `isSelectingWords`) — a click on this pill also feeds
+                // that `simultaneousGesture` since it's a click inside the
+                // segment list. Without this, a click here leaves
+                // `isSelectingWords` stuck `true`, keeping every word's
+                // `GeometryReader` mounted forever and pinning the main
+                // thread (see docs/PLAN-transcript-scroll-hang.md, 2026-09-17
+                // follow-up).
+                isSelectingWords = false
+                selectionDragStart = nil
             } label: {
                 speakerPillLabel(speakerId: speakerId)
+                    // Without this, only the opaque circle+text hit-test —
+                    // the padded background around them (most of the pill)
+                    // didn't register clicks, which is why a name felt hard
+                    // to hit and invited exactly the double-click that gets
+                    // stuck (see isSelectingWords comment above).
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            // A single click already opens the rename field with the whole
+            // name pre-selected (`selectPrefilledName`, below) — no
+            // double-click needed. The pointing-hand cursor is the only
+            // signal that this label is clickable at all, and the tooltip
+            // recovers the full name when the 112pt column truncates it.
+            .help(speakerName(for: speakerId))
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
         } else {
             // This form is used inside an outer assignment button. It must be
             // a label, not another Button, otherwise the inner control eats
