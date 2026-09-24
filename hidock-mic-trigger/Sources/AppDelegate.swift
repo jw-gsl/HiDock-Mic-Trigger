@@ -536,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         removeDeviceChangeListener()
         stoppingIntentionally = true
         stopTrigger()
+        TranscriptPublish.shared.flushOnQuit()
         UpdateChecker.installPendingUpdateIfNeeded()
     }
 
@@ -1483,6 +1484,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManual), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
+        menu.addItem(NSMenuItem.separator())
+        let publishSubmenu = NSMenu(title: "Transcripts on GitHub")
+        let autoPublishItem = NSMenuItem(title: "Auto-publish edits", action: #selector(toggleAutoPublishMenu(_:)), keyEquivalent: "")
+        autoPublishItem.target = self
+        autoPublishItem.state = TranscriptPublish.shared.isEnabled ? .on : .off
+        let syncNowItem = NSMenuItem(title: "Sync to GitHub Now", action: #selector(syncTranscriptsToGitHubMenu), keyEquivalent: "")
+        syncNowItem.target = self
+        let publishStatusItem = NSMenuItem(title: "Show Sync Status...", action: #selector(showPublishStatusMenu), keyEquivalent: "")
+        publishStatusItem.target = self
+        publishSubmenu.addItem(autoPublishItem)
+        publishSubmenu.addItem(syncNowItem)
+        publishSubmenu.addItem(publishStatusItem)
+        let publishItem = NSMenuItem(title: "Transcripts on GitHub", action: nil, keyEquivalent: "")
+        publishItem.submenu = publishSubmenu
+        menu.addItem(publishItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -3659,6 +3675,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     onUpdate(.failed(message))
                     break
                 }
+                TranscriptPublish.shared.schedule(diarizedPath: jsonPath)
                 let summary = self.rediarizeSummary(before: before, after: after)
                 self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
                 if !viewerShowsProgress {
@@ -6023,6 +6040,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Capture the *current* files before a caller changes them.  The commit is
     /// skipped when nothing has changed since the last snapshot.
     private func snapshotTranscriptArtifacts(_ diarizedPath: String, reason: String) {
+        // Publishing is a separate, debounced, post-write concern — see
+        // TranscriptPublish. The flush re-reads the files when it fires, so
+        // triggering from the pre-write snapshot point is safe; the verified
+        // rewrite-md completion re-schedules to catch slow operations.
+        TranscriptPublish.shared.schedule(diarizedPath: diarizedPath,
+                                          reason: Self.publishReason(fromSnapshot: reason))
         guard let root = ensureTranscriptHistoryRepository(for: diarizedPath) else { return }
         let artifacts = transcriptHistoryArtifacts(for: diarizedPath)
             .filter { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
@@ -6035,6 +6058,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if result.status != 0 {
             log("Could not snapshot transcript before change: \(result.output)")
         }
+    }
+
+    /// Snapshot messages read "Before renaming X → Y" (rollback flavour); the
+    /// publish repo's history should read as an edit log, so drop the prefix.
+    static func publishReason(fromSnapshot reason: String) -> String {
+        guard reason.hasPrefix("Before ") else { return reason }
+        var stripped = String(reason.dropFirst("Before ".count))
+        if let first = stripped.first {
+            stripped = String(first).uppercased() + stripped.dropFirst()
+        }
+        return stripped
+    }
+
+    // MARK: - Transcripts on GitHub menu
+
+    @objc private func toggleAutoPublishMenu(_ sender: NSMenuItem) {
+        if sender.state == .on {
+            UserDefaults.standard.set(false, forKey: TranscriptPublish.enabledKey)
+            sender.state = .off
+            return
+        }
+        // Transcripts are company meeting content: enabling publish must
+        // never point at a public repo. Verify with `gh` when it's available.
+        let workItem = DispatchWorkItem {
+            let visibility = Self.transcriptsRepoVisibility()
+            DispatchQueue.main.async {
+                if visibility == "PUBLIC" {
+                    let alert = NSAlert()
+                    alert.messageText = "Transcripts repo is public"
+                    alert.informativeText = "github.com/jw-gsl/Transcripts is visible to everyone. Make it private before HiDock publishes meeting transcripts to it."
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                    return
+                }
+                UserDefaults.standard.set(true, forKey: TranscriptPublish.enabledKey)
+                sender.state = .on
+                let confirm = NSAlert()
+                confirm.messageText = "Publish transcripts to GitHub?"
+                let suffix = visibility == nil
+                    ? " Could not verify repo visibility with gh — check it is private."
+                    : ""
+                confirm.informativeText = "All transcript .md files in ~/HiDock/Raw Transcripts will be committed and pushed to the private Transcripts repo. Future edits auto-publish after a short delay.\(suffix)"
+                confirm.addButton(withTitle: "Publish now")
+                confirm.addButton(withTitle: "Enable only")
+                if confirm.runModal() == .alertFirstButtonReturn {
+                    self.runManualTranscriptSync(reason: "Initial import")
+                }
+            }
+        }
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+    }
+
+    @objc private func syncTranscriptsToGitHubMenu() {
+        runManualTranscriptSync(reason: "Manual sync")
+    }
+
+    private func runManualTranscriptSync(reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "Publishing transcripts…"
+        alert.informativeText = "HiDock is copying and pushing the transcript .md files. This window can be closed — progress appears in the logs."
+        alert.addButton(withTitle: "OK")
+        TranscriptPublish.shared.syncNow(reason: reason) { ok, detail in
+            DispatchQueue.main.async {
+                let box = NSAlert()
+                box.messageText = ok ? "Transcripts synced" : "Transcript sync failed"
+                box.informativeText = detail
+                box.runModal()
+            }
+        }
+        _ = alert.runModal()
+    }
+
+    @objc private func showPublishStatusMenu() {
+        TranscriptPublish.shared.status { state, error in
+            let box = NSAlert()
+            guard let state else {
+                box.messageText = "Could not read publish status"
+                box.informativeText = error
+                box.runModal()
+                return
+            }
+            box.messageText = "Transcript publishing status"
+            var lines: [String] = []
+            lines.append("Auto-publish: \(TranscriptPublish.shared.isEnabled ? "on" : "off")")
+            lines.append("Pending commits: \(state["pending"] ?? 0)")
+            if let ok = state["clone_ok"] as? Bool, !ok {
+                lines.append("Publish clone: not created yet")
+            }
+            if let last = state["last_success"] as? String {
+                lines.append("Last success: \(last)")
+            }
+            if let error = state["last_error"] as? String {
+                lines.append("Last error: \(error)")
+            }
+            box.informativeText = lines.joined(separator: "\n")
+            box.runModal()
+        }
+    }
+
+    private static func transcriptsRepoVisibility() -> String? {
+        guard let gh = whichTool("gh") else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: gh)
+        process.arguments = ["repo", "view", "jw-gsl/Transcripts", "--json", "visibility"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let visibility = object["visibility"] as? String else { return nil }
+        return visibility
+    }
+
+    private static func whichTool(_ name: String) -> String? {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            let path = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
     }
 
     private func transcriptVersions(for diarizedPath: String) -> [TranscriptVersion] {
