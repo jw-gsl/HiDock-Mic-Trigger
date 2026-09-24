@@ -465,6 +465,13 @@ struct WordPosition: Hashable {
     let wordIndex: Int
 }
 
+/// Identifies one transcript row assigned to a freshly named speaker through
+/// the row pill's context menu.
+struct NamedRowRequest: Identifiable {
+    let segmentIndex: Int
+    var id: Int { segmentIndex }
+}
+
 /// Identifies a word selection that may span multiple diarized segments.
 struct SegmentSelection: Equatable, Identifiable {
     let anchor: WordPosition
@@ -831,6 +838,9 @@ struct TranscriptViewerView: View {
     /// separate from `selection` means the picker still acts on exactly the
     /// words the user right-clicked, even if the view refreshes underneath it.
     @State private var pendingNamedSelection: SegmentSelection?
+    /// A single transcript row being named through its pill's context menu —
+    /// the whole-row analogue of `pendingNamedSelection`.
+    @State private var pendingNamedSegment: NamedRowRequest?
     @State private var selectionPersonQuery = ""
     /// Deliberately a reference box, not `@State` holding the dictionary —
     /// see TranscriptWordFrameStore. Writing frames must not invalidate this
@@ -874,11 +884,20 @@ struct TranscriptViewerView: View {
     @State private var calendarAssistantRunning = false
     /// What the assistant is doing right now, from the CLI's own event stream.
     @State private var calendarAssistantActivity = ""
+    /// When the current turn started — a single tool call (e.g. a long
+    /// calendar search) can run for a while with no new `.activity`/
+    /// `.partialReply` event, which reads as a hang even though it isn't.
+    /// Ticking an elapsed-seconds counter off this is the only way to show
+    /// the turn is still alive during that silence.
+    @State private var calendarAssistantStartedAt: Date?
     @State private var transcriptAssistantDraft = ""
     @State private var transcriptAssistantMessages: [TranscriptAssistantMessage] = []
     @State private var transcriptAssistantSessionId: String?
     @State private var transcriptAssistantRunning = false
     @State private var transcriptAssistantActivity = ""
+    /// See `calendarAssistantStartedAt` — same reasoning, e.g. a `rediarize`
+    /// call can run for minutes with no CLI output until it completes.
+    @State private var transcriptAssistantStartedAt: Date?
     @State private var showTranscriptHistory = false
     @State private var transcriptVersions: [TranscriptVersion] = []
     @State private var pendingTranscriptRestore: TranscriptVersion?
@@ -976,12 +995,18 @@ struct TranscriptViewerView: View {
     /// called repeatedly with `.activity` / `.partialReply` and exactly once with
     /// `.finished`.
     var onCalendarAssistantTurn: ((String, Double, String, String?, @escaping (CalendarAssistantEvent) -> Void) -> Void)? = nil
+    /// Terminates the calendar assistant's underlying CLI process, if one is
+    /// running. The in-flight turn's `onEvent` still fires `.finished` once
+    /// the process actually exits — this only asks it to stop.
+    var onCalendarAssistantStop: (() -> Void)? = nil
     /// A natural-language assistant scoped to this transcript's own diarized
     /// JSON (`filePath`). It reads the sidecar and, when a fix is warranted,
     /// actually runs it — never by hand-editing the JSON. The handler is
     /// called repeatedly with `.activity` / `.partialReply` and exactly once
     /// with `.finished`.
     var onTranscriptAssistantTurn: ((String, String, String?, @escaping (TranscriptAssistantEvent) -> Void) -> Void)? = nil
+    /// See `onCalendarAssistantStop`.
+    var onTranscriptAssistantStop: (() -> Void)? = nil
 
     private var uniqueSpeakerIds: [Int] {
         Array(Set(transcript.segments.map(\.speakerId))).sorted()
@@ -1340,6 +1365,11 @@ struct TranscriptViewerView: View {
                 .frame(width: 300)
                 .padding(10)
         }
+        .popover(item: $pendingNamedSegment, arrowEdge: .bottom) { request in
+            segmentPersonPicker(segmentIndex: request.segmentIndex)
+                .frame(width: 300)
+                .padding(10)
+        }
         .confirmationDialog(
             "Merge speakers?",
             isPresented: Binding(get: { pendingMerge != nil }, set: { if !$0 { pendingMerge = nil } }),
@@ -1479,6 +1509,24 @@ struct TranscriptViewerView: View {
 
     @ViewBuilder
     private func selectionPersonPicker(selection: SegmentSelection) -> some View {
+        personPicker(title: "Name selected text") { name in
+            assignSelectionToNamedSpeaker(selection, name: name)
+            pendingNamedSelection = nil
+        }
+    }
+
+    @ViewBuilder
+    private func segmentPersonPicker(segmentIndex: Int) -> some View {
+        personPicker(title: "Name this row's speaker") { name in
+            assignSegmentToNamedSpeaker(segmentIndex, name: name)
+            pendingNamedSegment = nil
+        }
+    }
+
+    /// Searchable Voice Library picker shared by the word-selection flow and the
+    /// per-row pill menu; the caller decides what an accepted name is applied to.
+    @ViewBuilder
+    private func personPicker(title: String, onAssign: @escaping (String) -> Void) -> some View {
         let query = selectionPersonQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let invitedLibraryNames = calendarInvitedLibraryNames
         let invitedNewNames = calendarInvitedNewNames
@@ -1491,7 +1539,7 @@ struct TranscriptViewerView: View {
             .prefix(12)
 
         VStack(alignment: .leading, spacing: 8) {
-            Text("Name selected text")
+            Text(title)
                 .font(.headline)
             TextField("Search Voice Library or enter a name", text: $selectionPersonQuery)
                 .textFieldStyle(.roundedBorder)
@@ -1503,8 +1551,7 @@ struct TranscriptViewerView: View {
                     .foregroundColor(.secondary)
                 ForEach(Array(matches), id: \.self) { name in
                     Button(name) {
-                        assignSelectionToNamedSpeaker(selection, name: name)
-                        pendingNamedSelection = nil
+                        onAssign(name)
                     }
                     .buttonStyle(.plain)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1514,8 +1561,7 @@ struct TranscriptViewerView: View {
             if !query.isEmpty {
                 Divider()
                 Button("Use \"\(query)\" as a new person") {
-                    assignSelectionToNamedSpeaker(selection, name: query)
-                    pendingNamedSelection = nil
+                    onAssign(query)
                 }
             }
         }
@@ -1596,6 +1642,49 @@ struct TranscriptViewerView: View {
         }
 
         saveTranscript("Before reassigning selected text")
+    }
+
+    /// Reassign one whole transcript row to another speaker without requiring a
+    /// text selection — the pill-menu equivalent of `applySelection`, scoped to
+    /// a single segment rather than every turn of the speaker.
+    private func reassignSegment(index: Int, to newSpeakerId: Int) {
+        guard transcript.segments.indices.contains(index) else { return }
+        let segment = transcript.segments[index]
+        guard segment.speakerId != newSpeakerId else { return }
+
+        transcriptHistory.append(transcript)
+        transcript.segments[index].speakerId = newSpeakerId
+        pruneInactiveSpeakerState()
+        syncRediarizeSpeakerCount()
+        saveTranscript("Before reassigning one row to another speaker")
+
+        // Same enrolment behaviour as a contiguous word-range assignment: a
+        // real name gets this row's audio as a training sample.
+        if !isGenericName(speakerName(for: newSpeakerId)) {
+            onEnrollSpeaker(speakerName(for: newSpeakerId), audioPath, segment.start, segment.end)
+        }
+    }
+
+    /// Assign one row to a fresh speaker id and give that local speaker the
+    /// identity chosen by the reviewer — the whole-row analogue of
+    /// `assignSelectionToNamedSpeaker`.
+    private func assignSegmentToNamedSpeaker(_ index: Int, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              transcript.segments.indices.contains(index) else { return }
+        let newId = nextNewSpeakerId()
+
+        transcriptHistory.append(transcript)
+        transcript.segments[index].speakerId = newId
+        transcript.speakerNames["\(newId)"] = trimmed
+        setMeta(newId, source: "user", verified: true, confidence: nil)
+        pruneInactiveSpeakerState()
+        syncRediarizeSpeakerCount()
+        saveTranscript("Before assigning one row to \(trimmed)")
+        // Explicit human identification — enrol it, falling back to this row's
+        // audio since a brand-new local id has no diarizer centroid yet.
+        enrollConfirmed(trimmed, speakerId: newId)
+        refreshLibraryNames()
     }
 
     /// Split one diarized segment around a selected word range. New sidecars
@@ -1863,16 +1952,11 @@ struct TranscriptViewerView: View {
                         .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
                     }
                     if calendarAssistantRunning {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            // Name the step. "Searching calendar…" was shown for
-                            // the entire call regardless of what was happening.
-                            Text(calendarAssistantActivity.isEmpty ? "Working…" : calendarAssistantActivity)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
+                        assistantRunningRow(
+                            activity: calendarAssistantActivity,
+                            startedAt: calendarAssistantStartedAt,
+                            stop: onCalendarAssistantStop
+                        )
                     }
                 }
                 .padding(8)
@@ -1895,6 +1979,44 @@ struct TranscriptViewerView: View {
         .background(Color(NSColor.controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.18)))
+    }
+
+    /// The "still working" row shown under both assistant panels while a turn
+    /// is running: the CLI's own activity text, an elapsed-seconds counter so
+    /// a long silent tool call (e.g. `rediarize` on a big recording) still
+    /// reads as alive rather than hung, and a way to actually stop it.
+    @ViewBuilder
+    private func assistantRunningRow(activity: String, startedAt: Date?, stop: (() -> Void)?) -> some View {
+        TimelineView(.periodic(from: startedAt ?? .now, by: 1)) { context in
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                // Name the step. "Searching calendar…" was shown for the
+                // entire call regardless of what was happening.
+                Text(assistantRunningLabel(activity: activity, startedAt: startedAt, now: context.date))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                if let stop {
+                    Button {
+                        stop()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .help("Stop")
+                }
+            }
+        }
+    }
+
+    private func assistantRunningLabel(activity: String, startedAt: Date?, now: Date) -> String {
+        let base = activity.isEmpty ? "Working…" : activity
+        guard let startedAt else { return base }
+        let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
+        return "\(base) (\(elapsed)s)"
     }
 
     /// An event the assistant identified, with a one-click link.
@@ -1944,6 +2066,7 @@ struct TranscriptViewerView: View {
         calendarAssistantMessages.append(CalendarAssistantMessage(role: .user, text: message))
         calendarAssistantRunning = true
         calendarAssistantActivity = "Starting…"
+        calendarAssistantStartedAt = Date()
         // One placeholder reply, filled in as the stream arrives, so the text
         // grows in place rather than appearing all at once at the end.
         calendarAssistantMessages.append(
@@ -1965,6 +2088,7 @@ struct TranscriptViewerView: View {
                     calendarAssistantSessionId = sessionId ?? calendarAssistantSessionId
                     calendarAssistantRunning = false
                     calendarAssistantActivity = ""
+                    calendarAssistantStartedAt = nil
                 }
             }
         }
@@ -2004,14 +2128,11 @@ struct TranscriptViewerView: View {
                             }
                         }
                         if transcriptAssistantRunning {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.small)
-                                Text(transcriptAssistantActivity.isEmpty ? "Working…" : transcriptAssistantActivity)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
+                            assistantRunningRow(
+                                activity: transcriptAssistantActivity,
+                                startedAt: transcriptAssistantStartedAt,
+                                stop: onTranscriptAssistantStop
+                            )
                         }
                     }
                     .padding(8)
@@ -2048,6 +2169,7 @@ struct TranscriptViewerView: View {
         transcriptAssistantMessages.append(TranscriptAssistantMessage(role: .user, text: message))
         transcriptAssistantRunning = true
         transcriptAssistantActivity = "Starting…"
+        transcriptAssistantStartedAt = Date()
         // One placeholder reply, filled in as the stream arrives — mirrors
         // the calendar assistant's own placeholder-bubble approach.
         transcriptAssistantMessages.append(TranscriptAssistantMessage(role: .assistant, text: "", streaming: true))
@@ -2066,6 +2188,7 @@ struct TranscriptViewerView: View {
                     transcriptAssistantSessionId = sessionId ?? transcriptAssistantSessionId
                     transcriptAssistantRunning = false
                     transcriptAssistantActivity = ""
+                    transcriptAssistantStartedAt = nil
                     if let updatedTranscript {
                         applyRediarizedTranscript(updatedTranscript)
                         onSpeakerReviewChanged?(filePath)
@@ -3067,7 +3190,39 @@ struct TranscriptViewerView: View {
                     speakerPill(speakerId: segment.speakerId, interactive: true, context: "segment-\(idx)")
                         .frame(width: transcriptSpeakerColumnWidth, alignment: .leading)
                         .clipped()
-
+                        // Mirrors the select-text right-click menu, but without
+                        // requiring a selection: a whole-row reassignment, with
+                        // an explicit choice between fixing just this row or
+                        // every turn carrying this speaker.
+                        .contextMenu {
+                            Button("New speaker (this row only)") {
+                                reassignSegment(index: idx, to: nextNewSpeakerId())
+                            }
+                            Button("Name new speaker… (this row only)") {
+                                selectionPersonQuery = ""
+                                pendingNamedSegment = NamedRowRequest(segmentIndex: idx)
+                            }
+                            let otherSpeakers = uniqueSpeakerIds.filter { $0 != segment.speakerId }
+                            if !otherSpeakers.isEmpty {
+                                Divider()
+                                Menu("Assign to existing speaker") {
+                                    Section("This row only") {
+                                        ForEach(otherSpeakers, id: \.self) { targetId in
+                                            Button(speakerName(for: targetId)) {
+                                                reassignSegment(index: idx, to: targetId)
+                                            }
+                                        }
+                                    }
+                                    Section("All \(speakerName(for: segment.speakerId)) rows") {
+                                        ForEach(otherSpeakers, id: \.self) { targetId in
+                                            Button("Into \(speakerName(for: targetId))") {
+                                                mapSpeaker(from: segment.speakerId, to: targetId)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                 }
 
                 SegmentPlaybackControls(
@@ -3821,6 +3976,17 @@ struct TranscriptViewerView: View {
         // Save current state for undo
         transcriptHistory.append(transcript)
 
+        // `DiarizedSegment.id` is derived from `speakerId` (see its
+        // declaration), so reassigning every one of this speaker's segments
+        // gives all of them a new SwiftUI identity in the same instant. The
+        // `ForEach` below sees that as those rows being removed and different
+        // ones inserted rather than updated, which loses the ScrollView's
+        // position — the same failure mode `pendingTranscriptRestoreTime` was
+        // introduced to fix for word-range edits (see `applySelection`).
+        // Anchor on this speaker's first appearance so the merge doesn't drop
+        // the reader back at the top of a long transcript.
+        let restoreTime = transcript.segments.first(where: { $0.speakerId == sourceId })?.start
+
         // Reassign all segments from sourceId to targetId
         for i in transcript.segments.indices {
             if transcript.segments[i].speakerId == sourceId {
@@ -3828,6 +3994,7 @@ struct TranscriptViewerView: View {
                 transcript.segments[i].text = transcript.segments[i].text // trigger update
             }
         }
+        pendingTranscriptRestoreTime = restoreTime
         // Remove the old speaker name
         transcript.speakerNames.removeValue(forKey: "\(sourceId)")
         pruneInactiveSpeakerState()
