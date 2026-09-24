@@ -1426,6 +1426,8 @@ def _rewrite_sidecar_markdown(json_path: Path, data: dict) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - the JSON is already saved
         print(f"anchor-sweep: could not rewrite .md: {exc}", file=sys.stderr)
+        return
+    _publish_after_write(md_path, "anchor-sweep")
 
 
 def _rewrite_and_verify_md(json_path: Path, data: dict, default_model: str) -> dict:
@@ -1472,7 +1474,22 @@ def _rewrite_and_verify_md(json_path: Path, data: dict, default_model: str) -> d
         raise RuntimeError(
             f"{default_model} produced stale output: {md_path} is older than {json_path}"
         )
+    _publish_after_write(md_path, default_model)
     return {"md_path": str(md_path), "sidecar_mtime_ns": sidecar_mtime_ns, "md_mtime_ns": md_mtime_ns}
+
+
+def _publish_after_write(md_path: Path, reason: str) -> None:
+    """Best-effort publish of a freshly-written .md to the Transcripts repo.
+
+    Gated on the app's kill-switch (UserDefaults, default off). Never fails
+    the caller's command — publishing is downstream of the write.
+    """
+    try:
+        from shared.transcript_publish import publishing_enabled, sync
+        if publishing_enabled():
+            sync([md_path], reason=f"{reason} (CLI)")
+    except Exception as exc:  # noqa: BLE001 - publishing must never break a command
+        print(f"transcript-publish: skipped: {exc}", file=sys.stderr)
 
 
 def cmd_rewrite_md(args):

@@ -21,6 +21,7 @@
 		3D3FC97E0F944B74D4C6AA02 /* LEDFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F3C693C50E57C2B0A55EEE /* LEDFont.swift */; };
 		436B5396D59A9E156F0FC69A /* PlaudAuthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 969F101F4D1B0D742693FB9A /* PlaudAuthTests.swift */; };
 		45DC4CC1577241C81E24D11D /* TerminalPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F277B1943362D018D91C803 /* TerminalPane.swift */; };
+		489AAC780D60845205B5AC01 /* TranscriptPublish.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23EBCE58D06BD8BC06951C9B /* TranscriptPublish.swift */; };
 		4B509F0B9DA5EFF8A1C7F66D /* SummaryViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C462B0D4FB3CCE023603E77 /* SummaryViewerView.swift */; };
 		4DAF4865542482004C90F074 /* ImportedRecordings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */; };
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
@@ -45,6 +46,7 @@
 		AE7DEC1B14636DBD037EC45D /* DeviceCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */; };
 		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
 		C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27867D05F3E255C858BC3F1 /* TerminalView.swift */; };
+		D05118574AC0DE11B41E2C29 /* TranscriptPublishTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3690838333051C915E44090E /* TranscriptPublishTests.swift */; };
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
 		D53B2A0936AFFE19541AD099 /* ExtractorFailureMessageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84B4367B93FBEB217AB3A263 /* ExtractorFailureMessageTests.swift */; };
 		D670C09EF343FB58EC864F07 /* TemplatesManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64CFDC4C443317E33030EE5A /* TemplatesManagerView.swift */; };
@@ -72,12 +74,14 @@
 		0B8BA1C16C1E7AF997CB2B48 /* HuggingFaceToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuggingFaceToken.swift; sourceTree = "<group>"; };
 		145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceLibraryView.swift; sourceTree = "<group>"; };
 		22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsTableView.swift; sourceTree = "<group>"; };
+		23EBCE58D06BD8BC06951C9B /* TranscriptPublish.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPublish.swift; sourceTree = "<group>"; };
 		2588C13D72780DEF82479DD3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
 		29B035CBE2580FAE9A62ACD9 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
 		2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		2DCF345FDF47CF2D688B3E63 /* TranscriptionTimeoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionTimeoutTests.swift; sourceTree = "<group>"; };
 		31B89F67B0B891296A47A610 /* AgentChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChatView.swift; sourceTree = "<group>"; };
 		31F45B509F970DE308F947FD /* HelpersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpersTests.swift; sourceTree = "<group>"; };
+		3690838333051C915E44090E /* TranscriptPublishTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPublishTests.swift; sourceTree = "<group>"; };
 		3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncToolbarSection.swift; sourceTree = "<group>"; };
 		3CEB328428F33B788960056F /* LEDMatrixView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LEDMatrixView.swift; sourceTree = "<group>"; };
 		45ECA314D0E3BF8DDD56BEC3 /* SkippedTranscriptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkippedTranscriptions.swift; sourceTree = "<group>"; };
@@ -139,6 +143,7 @@
 				29B035CBE2580FAE9A62ACD9 /* ModelsTests.swift */,
 				969F101F4D1B0D742693FB9A /* PlaudAuthTests.swift */,
 				2DCF345FDF47CF2D688B3E63 /* TranscriptionTimeoutTests.swift */,
+				3690838333051C915E44090E /* TranscriptPublishTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -170,6 +175,7 @@
 				A168553CF6A253F63ABEB56C /* PlaudAuth.swift */,
 				45ECA314D0E3BF8DDD56BEC3 /* SkippedTranscriptions.swift */,
 				5917D14BDB00424EA7457723 /* SplitSources.swift */,
+				23EBCE58D06BD8BC06951C9B /* TranscriptPublish.swift */,
 				A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */,
 				F0F0DB81B248109A976C783F /* Views */,
 			);
@@ -384,6 +390,7 @@
 				D670C09EF343FB58EC864F07 /* TemplatesManagerView.swift in Sources */,
 				45DC4CC1577241C81E24D11D /* TerminalPane.swift in Sources */,
 				C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */,
+				489AAC780D60845205B5AC01 /* TranscriptPublish.swift in Sources */,
 				DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */,
 				80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */,
 				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,
@@ -402,6 +409,7 @@
 				0F10797C46358815E38F5F11 /* HelpersTests.swift in Sources */,
 				9C9AC2D1761397E2D6138BEC /* ModelsTests.swift in Sources */,
 				436B5396D59A9E156F0FC69A /* PlaudAuthTests.swift in Sources */,
+				D05118574AC0DE11B41E2C29 /* TranscriptPublishTests.swift in Sources */,
 				14EDA55439F1A1855801A181 /* TranscriptionTimeoutTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
