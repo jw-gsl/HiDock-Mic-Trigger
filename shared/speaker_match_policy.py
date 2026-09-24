@@ -48,6 +48,12 @@ from dataclasses import dataclass, field
 # confident the top score looks. A gap has to mean *something*.
 _MIN_MARGIN_FRACTION = 0.25
 
+# How much better someone outside the meeting must score than anyone inside it
+# before the calendar's attendee list is disregarded entirely. People do join
+# meetings they were not invited to, and a voice that matches this much better
+# is stronger evidence than the invite list.
+_OUTSIDER_TRUST_MARGIN = 0.10
+
 
 @dataclass
 class MatchDecision:
@@ -119,16 +125,102 @@ def _canonical(entries: list[dict]) -> str:
     )["name"]
 
 
+def _in_expected(name: str, expected: set[str]) -> bool:
+    """True when `name` is one of the expected people, allowing for aliases.
+
+    The calendar gives display names ("Harry Veening") while the library may
+    hold a bare first name ("Harry") or vice versa, so the same
+    first-name-extends-full-name rule used for alias collapse applies here.
+    """
+    n = str(name)
+    return any(e == n or alias_compatible(e, n) for e in expected)
+
+
 def decide(
     ranked: list[dict],
     threshold: float,
     min_margin: float,
+    expected_names: set[str] | list[str] | None = None,
 ) -> MatchDecision:
     """Resolve a ranked `[{"name", "score"}, ...]` list into an action.
 
     `ranked` must be sorted best-first, as both `_rank_library` and
     `library_scores` already return it.
+
+    `expected_names` — when known, the people the calendar says were in this
+    meeting. It is a *tie-breaker of last resort*, never a filter. See
+    `_decide_with_expected`.
     """
+    decision = _decide(ranked, threshold, min_margin)
+    if decision.matched or not expected_names:
+        return decision
+    return _decide_with_expected(
+        ranked, threshold, min_margin, set(map(str, expected_names)), decision
+    )
+
+
+def _decide_with_expected(
+    ranked: list[dict],
+    threshold: float,
+    min_margin: float,
+    expected: set[str],
+    refusal: MatchDecision,
+) -> MatchDecision:
+    """Retry a refused match among only the people known to be in the meeting.
+
+    Rec26 (2026-08-06) is the case this exists for. A 37-minute meeting with 7
+    invitees came back with 4 speakers and 1 name, and correcting it took 38
+    manual edits. Three of the eight refusals read:
+
+        Martin 0.513 leads Jurriaan Piek by only 0.125 (needed 0.224)
+        Martin 0.543 leads Joe Kraft by only 0.127 (needed 0.210)
+        Patrick Stephens 0.513 leads Sean Denton by only 0.067 (needed 0.224)
+
+    Not one of those five people was in the meeting. The library was searched
+    against everyone ever enrolled, so near-ties between strangers suppressed
+    matches for the people actually in the room. A runner-up who could not have
+    been speaking is no more evidence of ambiguity than the alias case above.
+
+    Two guards keep this honest, because the attendee list is *evidence, not
+    truth* — Rec26 also had Christian Cockroft in the room and not on the
+    invite:
+
+    1. It only runs when the unrestricted decision already refused. A confident
+       global match is never overridden, so a genuine non-invited attendee is
+       still named on the strength of their own voice.
+    2. It is abandoned when someone outside the meeting matches clearly better
+       than anyone inside it (`_OUTSIDER_TRUST_MARGIN`). That is the signature
+       of exactly such an uninvited attendee, and the voice is better evidence
+       than the invite list.
+
+    The absolute threshold is never relaxed — a narrower field cannot manufacture
+    confidence that was not there.
+    """
+    narrowed = [r for r in ranked if _in_expected(str(r["name"]), expected)]
+    if not narrowed:
+        return refusal
+
+    best_overall = float(ranked[0]["score"])
+    best_expected = float(narrowed[0]["score"])
+    if best_overall - best_expected >= _OUTSIDER_TRUST_MARGIN:
+        return refusal
+
+    retry = _decide(narrowed, threshold, min_margin)
+    if not retry.matched:
+        return refusal
+    return MatchDecision(
+        name=retry.name,
+        confidence=retry.confidence,
+        reason=f"{retry.reason} (among this meeting's attendees)",
+        alias_group=retry.alias_group,
+    )
+
+
+def _decide(
+    ranked: list[dict],
+    threshold: float,
+    min_margin: float,
+) -> MatchDecision:
     if not ranked:
         return MatchDecision(reason="no library candidates")
 

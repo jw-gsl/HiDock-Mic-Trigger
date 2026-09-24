@@ -4972,6 +4972,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         openTerminal(initialCommand: command)
     }
 
+    /// The in-flight assistant CLI process, if any — kept only so the Stop
+    /// button in the sidecar has something to terminate. Always read/written
+    /// on the main thread (assigned via `DispatchQueue.main.async` from the
+    /// worker queue that owns it) so there's no need for a lock.
+    private var calendarAssistantProcess: Process?
+    private var transcriptAssistantProcess: Process?
+
+    /// Called from the sidecar's Stop button. `.terminate()` sends SIGTERM;
+    /// the running turn's own read loop sees EOF, `waitUntilExit()` returns,
+    /// and the `terminationReason == .uncaughtSignal` check in the failure
+    /// branch below reports it as stopped rather than as a connector error.
+    func stopCalendarAssistant() {
+        calendarAssistantProcess?.terminate()
+    }
+
+    func stopTranscriptAssistant() {
+        transcriptAssistantProcess?.terminate()
+    }
+
     private func runCalendarAssistantTurn(
         audioPath: String,
         duration: Double,
@@ -5118,7 +5137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                DispatchQueue.main.async { onEvent(.activity("Asking the calendar assistant…")) }
+                DispatchQueue.main.async {
+                    self?.calendarAssistantProcess = process
+                    onEvent(.activity("Asking the calendar assistant…"))
+                }
                 let reader = output.fileHandleForReading
                 while true {
                     let chunk = reader.availableData
@@ -5139,6 +5161,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 let answer = (finalReply ?? replyText).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard process.terminationStatus == 0, !answer.isEmpty else {
+                    // `.terminate()` (the Stop button) delivers SIGTERM, which
+                    // always lands here since a signaled process never exits 0
+                    // — report it as stopped, not as a connector failure.
+                    if process.terminationReason == .uncaughtSignal {
+                        self?.log("Calendar assistant CLI stopped by user")
+                        DispatchQueue.main.async {
+                            self?.calendarAssistantProcess = nil
+                            onEvent(.finished(reply: "Stopped.", sessionId: nextSession ?? sessionId, candidates: []))
+                        }
+                        return
+                    }
                     let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     // The CLI's own stderr is the one place the real cause lives
@@ -5148,6 +5181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         .map(String.init) ?? "exit code \(process.terminationStatus)"
                     self?.log("Calendar assistant CLI did not return a result (status \(process.terminationStatus)): \(stderrText.isEmpty ? "no stderr" : stderrText)")
                     DispatchQueue.main.async {
+                        self?.calendarAssistantProcess = nil
                         onEvent(.finished(
                             reply: "I couldn't reach the calendar connector (\(reason)). You can check its connection from the calendar menu.",
                             sessionId: nextSession ?? sessionId, candidates: []
@@ -5160,6 +5194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self?.log("Calendar assistant offered \(candidates.count) linkable event(s)")
                 }
                 DispatchQueue.main.async {
+                    self?.calendarAssistantProcess = nil
                     onEvent(.finished(
                         reply: Self.strippingCandidateLines(answer),
                         sessionId: nextSession ?? sessionId,
@@ -5170,6 +5205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 self?.log("Calendar assistant CLI failed: \(error.localizedDescription)")
                 DispatchQueue.main.async {
+                    self?.calendarAssistantProcess = nil
                     onEvent(.finished(reply: "Calendar assistant failed: \(error.localizedDescription)",
                                       sessionId: sessionId, candidates: []))
                 }
@@ -5267,6 +5303,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 // hand that under "auto" a command against a *different*
                 // file still ran, and under "default" it was denied.
                 "--permission-mode=default",
+                // This turn only ever needs Read + the five Bash commands
+                // above — no MCP server does anything useful here. Without
+                // this, the CLI still starts every MCP server configured
+                // globally (calendar, browser automation, search, …) before
+                // it can answer at all, and one of those hanging on startup
+                // (an auth prompt it can't show, a slow `npx` fetch) stalls
+                // the whole turn with zero visible activity — this is what
+                // read as "no updates for a long time". No `--mcp-config`
+                // means the effective MCP set is empty.
+                "--strict-mcp-config",
             ]
             if let sessionId, !sessionId.isEmpty { arguments += ["--resume", sessionId] }
             arguments.append(prompt)
@@ -5337,7 +5383,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
             do {
                 try process.run()
-                DispatchQueue.main.async { onEvent(.activity("Reading the transcript…")) }
+                DispatchQueue.main.async {
+                    self?.transcriptAssistantProcess = process
+                    onEvent(.activity("Reading the transcript…"))
+                }
                 let reader = output.fileHandleForReading
                 while true {
                     let chunk = reader.availableData
@@ -5361,12 +5410,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let updatedTranscript = transcriptChanged ? self?.loadDiarizedTranscript(at: diarizedPath) : nil
 
                 guard process.terminationStatus == 0, !answer.isEmpty else {
+                    if process.terminationReason == .uncaughtSignal {
+                        self?.log("Transcript assistant CLI stopped by user")
+                        DispatchQueue.main.async {
+                            self?.transcriptAssistantProcess = nil
+                            onEvent(.finished(
+                                reply: "Stopped.\(transcriptChanged ? " It may have made changes before stopping — reload if something looks off." : "")",
+                                sessionId: nextSession ?? sessionId, updatedTranscript: updatedTranscript
+                            ))
+                        }
+                        return
+                    }
                     let stderrText = errQueue.sync { String(data: stderrData, encoding: .utf8) ?? "" }
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     let reason = stderrText.split(separator: "\n").last(where: { !$0.isEmpty })
                         .map(String.init) ?? "exit code \(process.terminationStatus)"
                     self?.log("Transcript assistant CLI did not return a result (status \(process.terminationStatus)): \(stderrText.isEmpty ? "no stderr" : stderrText)")
                     DispatchQueue.main.async {
+                        self?.transcriptAssistantProcess = nil
                         onEvent(.finished(
                             reply: "I couldn't reach the assistant (\(reason)).\(transcriptChanged ? " It may have made changes before failing — reload if something looks off." : "")",
                             sessionId: nextSession ?? sessionId, updatedTranscript: updatedTranscript
@@ -5378,6 +5439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self?.log("Transcript assistant changed \(diarizedPath)")
                 }
                 DispatchQueue.main.async {
+                    self?.transcriptAssistantProcess = nil
                     onEvent(.finished(reply: answer, sessionId: nextSession ?? sessionId,
                                        updatedTranscript: updatedTranscript))
                 }
@@ -5385,6 +5447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 self?.log("Transcript assistant CLI failed: \(error.localizedDescription)")
                 DispatchQueue.main.async {
+                    self?.transcriptAssistantProcess = nil
                     onEvent(.finished(reply: "Transcript assistant failed: \(error.localizedDescription)",
                                        sessionId: sessionId, updatedTranscript: nil))
                 }
@@ -5610,12 +5673,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     ?? onEvent(.finished(reply: "Calendar assistant is unavailable.",
                                          sessionId: sessionId, candidates: []))
             },
+            onCalendarAssistantStop: { [weak self] in self?.stopCalendarAssistant() },
             onTranscriptAssistantTurn: { [weak self] diarizedPath, message, sessionId, onEvent in
                 self?.runTranscriptAssistantTurn(diarizedPath: diarizedPath, userMessage: message,
                                                   sessionId: sessionId, onEvent: onEvent)
                     ?? onEvent(.finished(reply: "Transcript assistant is unavailable.",
                                          sessionId: sessionId, updatedTranscript: nil))
-            }
+            },
+            onTranscriptAssistantStop: { [weak self] in self?.stopTranscriptAssistant() }
         )
 
         // Host as a tab in the right pane (one per transcript — re-opening the
