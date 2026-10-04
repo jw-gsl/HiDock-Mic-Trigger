@@ -1142,6 +1142,16 @@ final class HiDockViewModel: ObservableObject {
     /// Run `models.py capability <key>` and store the parsed report in
     /// `modelCapabilities`. Read-only — never changes model state.
     var onCheckModelCapability: (String) -> Void = { _ in }
+    /// Remote-service reachability results for remote backends, keyed by
+    /// registry key. Populated by the "Check connection" action; transient.
+    @Published var remoteServiceChecks: [String: String] = [:]
+    /// Registry keys whose remote-check is currently running.
+    @Published var remoteServiceChecking: Set<String> = []
+    /// Run `models.py remote-check <key>`; stores a status string per key.
+    var onCheckRemoteService: (String) -> Void = { _ in }
+    /// Persist a hardware-gate affirmation (`models.py set-hardware-gate`),
+    /// then refresh statuses so greyed rows ungrey. Args: (gateKey, affirmed).
+    var onSetHardwareGate: (String, Bool) -> Void = { _, _ in }
     var onShowModelManager: () -> Void = {}
 
     // MARK: - AI summariser engine

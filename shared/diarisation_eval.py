@@ -445,9 +445,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Force the bounded turn-reassignment loop on")
     parser.add_argument("--no-refine-assignments", dest="refine_assignments",
                         action="store_false", help="Force it off")
-    parser.add_argument("--backend", choices=("sortformer", "pyannote", "lite"),
+    parser.add_argument("--backend", choices=("sortformer", "pyannote", "lite", "nemotron"),
                         help="Force a diarization backend for this run only; "
-                             "your pipeline_backends.json is left alone")
+                             "your pipeline_backends.json is left alone. "
+                             "nemotron dials out to the sidecar on your NVIDIA "
+                             "host — confirm it answers first: "
+                             "models.py remote-check diarize_nemotron")
     parser.add_argument("--list", action="store_true",
                         help="Only list the corpus; do not diarise")
     args = parser.parse_args(argv)
