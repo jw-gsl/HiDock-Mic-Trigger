@@ -33,6 +33,10 @@ struct SyncHeaderSection: View {
             // status / storage / filter rows any more.
             DeviceStripView(viewModel: viewModel)
 
+            if let problem = viewModel.calendarConnectorProblem {
+                CalendarConnectorBanner(viewModel: viewModel, problem: problem)
+            }
+
             // GitHub-style meeting-activity heatmap — one square per day over
             // the last year, intensity = meetings recorded that day, hover for
             // the day's stats. Shown once there are recordings to plot. Its

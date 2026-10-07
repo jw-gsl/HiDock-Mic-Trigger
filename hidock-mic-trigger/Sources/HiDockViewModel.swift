@@ -1173,6 +1173,27 @@ final class HiDockViewModel: ObservableObject {
     ]
     var onSetCalendarProvider: (String) -> Void = { _ in }
 
+    /// Set when a calendar lookup could not reach the calendar at all (lapsed
+    /// connector authorisation, Claude CLI missing or erroring). Shown as a
+    /// persistent banner so it can't pass for "no meeting found"; cleared by
+    /// the next lookup that genuinely reaches the calendar.
+    struct CalendarConnectorProblem: Equatable {
+        var summary: String
+        var fix: String
+        /// Claude's own words (or the CLI's stderr), for the banner's detail.
+        var detail: String
+        var since: Date
+        /// Recordings whose lookup failed this way, retried by "Check again".
+        var affectedPaths: [String]
+    }
+    @Published var calendarConnectorProblem: CalendarConnectorProblem?
+    @Published var calendarConnectorRetrying: Bool = false
+    /// Open the embedded terminal with Claude running and reconnect steps shown.
+    var onFixCalendarConnector: () -> Void = {}
+    /// Re-run the lookups that failed; the banner clears if one gets through.
+    var onRetryCalendarConnector: () -> Void = {}
+    var onDismissCalendarConnectorProblem: () -> Void = {}
+
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
     /// Open Claude Code in the CLI pane to refine an existing template file.
