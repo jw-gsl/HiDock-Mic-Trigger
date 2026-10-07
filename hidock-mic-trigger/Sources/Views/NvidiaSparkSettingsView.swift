@@ -41,12 +41,12 @@ struct NvidiaSparkSettingsView: View {
                     Button("Remove") {
                         NemotronAccess.token.delete()
                         redacted = nil
-                        message = "Token removed."
+                        message = nil
                     }
                     .controlSize(.small)
                 } else {
                     // SecureField: never rendered, screenshotted or recorded.
-                    SecureField("paste the service's X-Auth-Token", text: $tokenEntry)
+                    SecureField("Paste the Spark's access token", text: $tokenEntry)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption.monospaced())
                         .frame(maxWidth: 300)
@@ -56,10 +56,17 @@ struct NvidiaSparkSettingsView: View {
                         .disabled(tokenEntry.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            Text(message ?? "The token is the contents of ~/.nemo-diar-token on the Spark. It is kept in your Keychain and passed to the pipeline in memory only.")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if let message {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if redacted == nil {
+                Text("Find the token in ~/.nemo-diar-token on the Spark. It's kept in your Keychain, never in a file.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.top, 2)
     }
@@ -74,7 +81,7 @@ struct NvidiaSparkSettingsView: View {
         }
         UserDefaults.standard.set(value, forKey: NemotronAccess.endpointKey)
         endpointEntry = NemotronAccess.endpoint
-        message = "Host saved."
+        message = nil
         onCheck()
     }
 
@@ -83,7 +90,7 @@ struct NvidiaSparkSettingsView: View {
             try NemotronAccess.token.save(tokenEntry)
             tokenEntry = ""
             redacted = NemotronAccess.token.redacted()
-            message = "Token saved to your Keychain — checking it now."
+            message = nil  // the connection check below reports the outcome
             onCheck()
         } catch {
             message = error.localizedDescription

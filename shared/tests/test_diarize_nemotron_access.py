@@ -59,16 +59,16 @@ def test_endpoint_comes_from_the_app(monkeypatch):
 
 def test_no_token_is_not_available(sidecar):
     ok, why = diarize_nemotron.available()
-    assert not ok and "no token set" in why
+    assert not ok and "no token saved yet" in why
 
 
 def test_wrong_token_is_rejected(sidecar, monkeypatch):
     monkeypatch.setenv("HIDOCK_NEMOTRON_TOKEN", "nope")
     ok, why = diarize_nemotron.available()
-    assert not ok and "rejected" in why
+    assert not ok and "didn't accept" in why
 
 
 def test_right_token_is_available(sidecar, monkeypatch):
     monkeypatch.setenv("HIDOCK_NEMOTRON_TOKEN", TOKEN)
     ok, why = diarize_nemotron.available()
-    assert ok and "token accepted" in why
+    assert ok and why.startswith("Connected to 127") and "token accepted" in why

@@ -973,7 +973,7 @@ struct ModelRowView: View {
                             get: { status.hardwareGateAffirmed },
                             set: { onSetHardwareGate($0) }
                         )) {
-                            Text("I have an NVIDIA DGX Spark (or another NVIDIA GPU host)")
+                            Text("I have an NVIDIA DGX Spark")
                                 .font(.caption)
                         }
                         .toggleStyle(.switch)
@@ -1018,7 +1018,7 @@ struct ModelRowView: View {
                     if let remoteStatus {
                         Text(remoteStatus)
                             .font(.caption2)
-                            .foregroundColor(remoteStatus.hasPrefix("reachable") ? .green : .orange)
+                            .foregroundColor(remoteStatus.hasPrefix("\u{2713}") ? .green : .orange)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -1033,7 +1033,7 @@ struct ModelRowView: View {
                 } else if status.remoteService {
                     // Nothing installs locally — selection is the only
                     // action, and reachability is checked inline.
-                    Text("Runs remotely")
+                    Text("On your Spark")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else if status.builtIn {
