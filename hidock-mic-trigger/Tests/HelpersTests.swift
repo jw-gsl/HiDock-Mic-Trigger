@@ -492,3 +492,37 @@ final class TimestampBearingStemTests: XCTestCase {
         XCTAssertEqual(timestampBearingStem("intro-to-swift"), "intro-to-swift")
     }
 }
+
+final class AttendeeNameTests: XCTestCase {
+
+    func testSurnameFirstIsFlipped() {
+        XCTAssertEqual(normalizeAttendeeName("Robins, Justin"), "Justin Robins")
+        XCTAssertEqual(normalizeAttendeeName("  O'Neill, Mary-Kate "), "Mary-Kate O'Neill")
+    }
+
+    func testOrdinaryAndOddNamesAreLeftAlone() {
+        XCTAssertEqual(normalizeAttendeeName("Jeff Chow"), "Jeff Chow")
+        XCTAssertEqual(normalizeAttendeeName("Room 4, Floor 2"), "Room 4, Floor 2")
+        XCTAssertEqual(normalizeAttendeeName("a, b, c"), "a, b, c")
+    }
+
+    /// The Rec50 invite, as Claude returned it with semicolons.
+    func testSemicolonListKeepsSurnameFirstNamesWhole() {
+        XCTAssertEqual(splitAttendeeNames("Ellen Barss; Ian Reay; Robins, Justin; Jeff Chow"),
+                       ["Ellen Barss", "Ian Reay", "Justin Robins", "Jeff Chow"])
+    }
+
+    /// The Rec50 failure: a comma-only list that had cut "Robins, Justin" in two.
+    func testCommaListRejoinsASplitSurnameFirstName() {
+        XCTAssertEqual(splitAttendeeNames("Ellen Barss, Ian Reay, James Whiting, Jeff Chow, Robins, Justin"),
+                       ["Ellen Barss", "Ian Reay", "James Whiting", "Jeff Chow", "Justin Robins"])
+    }
+
+    func testCommaListOfFirstNamesOnlyIsNotPaired() {
+        XCTAssertEqual(splitAttendeeNames("Ian, Bob, Caro"), ["Ian", "Bob", "Caro"])
+    }
+
+    func testUnavailableAndBulletsAreDropped() {
+        XCTAssertEqual(splitAttendeeNames("- Jeff Chow\n• unavailable\n* Ian Reay"), ["Jeff Chow", "Ian Reay"])
+    }
+}

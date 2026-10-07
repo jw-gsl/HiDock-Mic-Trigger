@@ -227,3 +227,59 @@ func timestampBearingStem(_ stem: String) -> String {
     guard let range = body.range(of: "-to-") else { return body }
     return String(body[body.startIndex..<range.lowerBound])
 }
+
+/// "Robins, Justin" → "Justin Robins". Outlook/Exchange directories list people
+/// surname-first; everywhere else in the app (voice library, transcript
+/// speakers) names are "First Last", so a surname-first attendee would never
+/// match the voice it belongs to. Only a single comma between two plain name
+/// parts is flipped — anything else is returned unchanged.
+func normalizeAttendeeName(_ raw: String) -> String {
+    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let parts = name.components(separatedBy: ",")
+    guard parts.count == 2 else { return name }
+    let surname = parts[0].trimmingCharacters(in: .whitespaces)
+    let given = parts[1].trimmingCharacters(in: .whitespaces)
+    let plain: (String) -> Bool = { part in
+        !part.isEmpty && part.split(separator: " ").count <= 3
+            && part.unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) || " '-.".unicodeScalars.contains($0) }
+    }
+    guard plain(surname), plain(given) else { return name }
+    return "\(given) \(surname)"
+}
+
+/// Split an attendee list from a calendar reply into names.
+///
+/// Semicolons/newlines are the separators we ask for, and when present commas
+/// are left alone: they're part of "Surname, First" names. A comma-only list
+/// is split on commas, but there a surname-first name has already been cut in
+/// two ("…, Robins, Justin" became the attendees "Justin" and "Robins" on
+/// Rec50, 2026-10-06), so two adjacent single-word pieces are rejoined when
+/// the rest of the list is full names — in such a list a lone word is far
+/// more likely half a name than someone known only by one word.
+func splitAttendeeNames(_ text: String) -> [String] {
+    let clean: (String) -> String = {
+        $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•")))
+    }
+    let useful: (String) -> Bool = { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
+    if text.contains(";") || text.contains("\n") {
+        return text.components(separatedBy: CharacterSet(charactersIn: ";\n"))
+            .map(clean).filter(useful).map(normalizeAttendeeName)
+    }
+    let pieces = text.components(separatedBy: ",").map(clean).filter(useful)
+    let singleWord: (String) -> Bool = { !$0.contains(" ") }
+    let fullNames = pieces.filter { !singleWord($0) }.count
+    guard fullNames > 0 else { return pieces }
+    var names: [String] = []
+    var index = 0
+    while index < pieces.count {
+        let piece = pieces[index]
+        if singleWord(piece), index + 1 < pieces.count, singleWord(pieces[index + 1]) {
+            names.append("\(pieces[index + 1]) \(piece)")  // "Robins, Justin"
+            index += 2
+        } else {
+            names.append(piece)
+            index += 1
+        }
+    }
+    return names
+}
