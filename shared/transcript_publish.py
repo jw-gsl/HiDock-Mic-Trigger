@@ -41,12 +41,11 @@ if __package__ in (None, ""):  # direct execution without PYTHONPATH
 
 from shared.transcript_history import git_path  # noqa: E402
 
-# HTTPS, not SSH: this machine authenticates to GitHub via gh's keyring token
-# over HTTPS (the hidock-tools repo itself pushes over HTTPS); no GitHub SSH
-# key is provisioned here (only a 1Password-sealed key for `mini`, which also
-# prompts per push under BatchMode). The SSH URL still works via --remote if a
-# key is ever set up.
-DEFAULT_REMOTE = "https://github.com/jw-gsl/Transcripts.git"
+# The target repo is a user setting (Settings → Transcripts on GitHub →
+# Repository), stored in the app's UserDefaults so terminal runs publish to
+# the same place. HTTPS by default: authentication goes through gh's keyring
+# token; an SSH URL also works if one is entered.
+REMOTE_DEFAULT_KEY = "transcriptsGitHubRepo"
 DEFAULT_TRANSCRIPTS_DIR = Path.home() / "HiDock" / "Raw Transcripts"
 PUBLISH_CLONE_DIR = Path.home() / "HiDock" / ".transcripts-git"
 MERGE_GROUPS_FILE = Path.home() / "HiDock" / "merge_groups.json"
@@ -80,6 +79,39 @@ def publishing_enabled() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0 and completed.stdout.strip() == "1"
+
+
+def normalize_remote(value: str | None) -> str | None:
+    """``owner/repo``, a github.com URL or an SSH URL → a git remote URL."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", text):
+        name = text[:-4] if text.endswith(".git") else text
+        return f"https://github.com/{name}.git"
+    if re.match(r"https?://github\.com/[^/]+/[^/]+?/?$", text):
+        text = text.rstrip("/")
+        return text if text.endswith(".git") else text + ".git"
+    if text.startswith(("git@", "ssh://", "https://", "http://", "file://")):
+        return text
+    return None
+
+
+def configured_remote() -> str | None:
+    """The repo the user chose in the app (or $HIDOCK_TRANSCRIPTS_REMOTE)."""
+    env = os.environ.get("HIDOCK_TRANSCRIPTS_REMOTE")
+    if env:
+        return normalize_remote(env)
+    try:
+        completed = subprocess.run(
+            ["defaults", "read", APP_BUNDLE_ID, REMOTE_DEFAULT_KEY],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return normalize_remote(completed.stdout.strip())
 
 
 def _now_iso() -> str:
@@ -171,18 +203,28 @@ def _is_clone(clone: Path) -> bool:
     return (clone / ".git").is_dir()
 
 
-def ensure_clone(clone: Path | None = None, remote: str = DEFAULT_REMOTE) -> Path | None:
+def ensure_clone(clone: Path | None = None, remote: str | None = None) -> Path | None:
     """Clone the publish repo if absent. Returns the clone path or None."""
     clone = clone or PUBLISH_CLONE_DIR
-    if git_path() is None:
+    if git_path() is None or not remote:
         return None
     if _is_clone(clone):
         status, output = _run_git(clone, ["remote", "get-url", "origin"])
         if status != 0:
             return None
-        if output.strip() != remote:
-            _run_git(clone, ["remote", "set-url", "origin", remote])
-        return clone
+        if output.strip() == remote:
+            return clone
+        # A different repo was chosen. Never repoint this clone: its history
+        # belongs to the old repo and would be pushed into the new one. Set it
+        # aside (unpushed commits stay recoverable) and start fresh.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            clone.rename(clone.with_name(f"{clone.name}.previous-{stamp}"))
+        except OSError as exc:
+            _record_error(clone, f"could not switch repo: {exc}")
+            return None
+        _write_state(clone, last_error=None, pending=0, visibility=None,
+                     visibility_checked_epoch=0, visibility_repo=None)
     try:
         clone.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -305,7 +347,7 @@ def _web_url(remote: str) -> str | None:
 def scan(
     transcripts_dir: Path | None = None,
     clone: Path | None = None,
-    remote: str = DEFAULT_REMOTE,
+    remote: str | None = None,
     since: float | None = None,
     merge_groups: Path | None = None,
 ) -> dict:
@@ -323,6 +365,7 @@ def scan(
     """
     directory = transcripts_dir or DEFAULT_TRANSCRIPTS_DIR
     clone_dir = clone or PUBLISH_CLONE_DIR
+    remote = remote or configured_remote() or ""
     result: dict = {"ok": False, "web_url": _web_url(remote), "branch": "main",
                     "files": {}, "changed": [], "deleted": []}
     try:
@@ -397,17 +440,19 @@ def _private_or_refuse(clone: Path, remote: str) -> str:
     a repo can be made public later. Non-GitHub remotes (tests) are skipped,
     and an unverifiable check doesn't block — gh may simply be missing.
     """
-    slug = _remote_slug(remote)
+    slug = _remote_slug(remote or "")
     if slug is None:
         return ""
     state = _read_state(clone)
     checked = state.get("visibility_checked_epoch") or 0
-    visibility = state.get("visibility")
+    # The cached answer is only good for the repo it was asked about.
+    visibility = state.get("visibility") if state.get("visibility_repo") == slug else None
     if visibility != "PRIVATE" or time.time() - checked > VISIBILITY_RECHECK_SECONDS:
         result = check_remote_visibility(remote)
         if result["verified"]:
             visibility = result["visibility"]
-            _write_state(clone, visibility=visibility, visibility_checked_epoch=time.time())
+            _write_state(clone, visibility=visibility, visibility_checked_epoch=time.time(),
+                         visibility_repo=slug)
     if visibility == "PUBLIC":
         return f"refusing to push: github.com/{slug} is PUBLIC — make it private first"
     return ""
@@ -439,7 +484,7 @@ def sync(
     all_md: bool = False,
     transcripts_dir: Path | None = None,
     clone: Path | None = None,
-    remote: str = DEFAULT_REMOTE,
+    remote: str | None = None,
     push: bool = True,
     body: str = "",
     merge_groups: Path | None = None,
@@ -451,6 +496,10 @@ def sync(
     is (re)copied, which also picks up edits made outside the app.
     """
     result = {"ok": False, "committed": 0, "pushed": False, "pending": 0, "detail": ""}
+    remote = remote or configured_remote()
+    if not remote:
+        result["detail"] = "no repository set (Settings → Transcripts on GitHub → Repository)"
+        return result
     with _publish_lock(clone or PUBLISH_CLONE_DIR) as acquired:
         if not acquired:
             result["detail"] = "another publish is still running; will retry"
@@ -519,7 +568,7 @@ def _sync_locked(result, md_paths, reason, *, all_md, transcripts_dir, clone,
     return result
 
 
-def _do_push(clone_dir: Path, result: dict, remote: str = DEFAULT_REMOTE) -> dict:
+def _do_push(clone_dir: Path, result: dict, remote: str | None = None) -> dict:
     refusal = _private_or_refuse(clone_dir, remote)
     if refusal:
         result["detail"] = refusal
@@ -566,14 +615,16 @@ def status(clone: Path | None = None) -> dict:
     return state
 
 
-def check_remote_visibility(remote: str = DEFAULT_REMOTE) -> dict:
+def check_remote_visibility(remote: str | None = None) -> dict:
     """Ask `gh` whether the target repo is private. Refuses public remotes.
 
     Transcripts are company meeting content: pushing to a public repo is the
     one failure mode this module must never allow. If `gh` is unavailable the
     caller cannot verify — treated as unknown, and sync stays opt-in anyway.
     """
-    slug = _remote_slug(remote) or "jw-gsl/Transcripts"
+    slug = _remote_slug(remote or "")
+    if slug is None:
+        return {"verified": False, "visibility": None}
     gh = next((path for path in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh")
                if os.access(path, os.X_OK)), "gh")
     try:
@@ -594,7 +645,7 @@ def check_remote_visibility(remote: str = DEFAULT_REMOTE) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Publish transcript .md files to github.com/jw-gsl/Transcripts",
+        description="Publish transcript .md files to the private GitHub repo set in HiDock",
     )
     parser.add_argument("md_paths", nargs="*", help="transcript .md files to publish")
     parser.add_argument("--all", action="store_true",
@@ -603,7 +654,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"override transcripts folder (default {DEFAULT_TRANSCRIPTS_DIR})")
     parser.add_argument("--clone", default=None,
                         help=f"override publish clone dir (default {PUBLISH_CLONE_DIR})")
-    parser.add_argument("--remote", default=DEFAULT_REMOTE)
+    parser.add_argument("--remote", default=None,
+                        help="owner/repo or git URL (default: the repo set in HiDock)")
     parser.add_argument("--reason", default="Transcript update")
     parser.add_argument("--body", default="",
                         help="commit message body (e.g. per-transcript edit summary)")
@@ -619,6 +671,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-visibility", action="store_true",
                         help="report whether the remote repo is private, then exit")
     args = parser.parse_args(argv)
+    if args.remote and normalize_remote(args.remote) is None:
+        print(f"transcript-publish: not a repository: {args.remote}", file=sys.stderr)
+        return 2
+    args.remote = normalize_remote(args.remote) or configured_remote()
 
     if args.check_visibility:
         print(json.dumps(check_remote_visibility(args.remote)))

@@ -1191,6 +1191,11 @@ final class HiDockViewModel: ObservableObject {
     /// Outcome of the last manual action, shown under the Settings toggle.
     @Published var transcriptPublishLastResult: String?
     var onSetTranscriptPublishing: (Bool) -> Void = { _ in }
+    /// The saved target repo (`owner/repo`); empty until the user sets one.
+    @Published var transcriptsRepo = ""
+    /// Feedback under the Repository field (validation, private check).
+    @Published var transcriptsRepoMessage: String?
+    var onSetTranscriptsRepo: (String) -> Void = { _ in }
     var onSyncTranscriptsNow: () -> Void = {}
     var onOpenTranscriptsRepo: () -> Void = {}
 

@@ -340,3 +340,52 @@ def test_scan_flags_unpushed_commits(tmp_path, remote_repo, transcripts):
     report = transcript_publish.scan(transcripts_dir=transcripts, clone=clone,
                                      remote=f"file://{remote_repo}")
     assert report["files"]["Rec1"] == {"commits": 2, "state": "unpushed"}
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("someone/Transcripts", "https://github.com/someone/Transcripts.git"),
+    ("someone/Transcripts.git", "https://github.com/someone/Transcripts.git"),
+    ("https://github.com/someone/Transcripts", "https://github.com/someone/Transcripts.git"),
+    ("https://github.com/someone/Transcripts/", "https://github.com/someone/Transcripts.git"),
+    ("git@github.com:someone/Transcripts.git", "git@github.com:someone/Transcripts.git"),
+    ("", None),
+    ("not a repo", None),
+])
+def test_normalize_remote(value, expected):
+    assert transcript_publish.normalize_remote(value) == expected
+
+
+def test_sync_without_a_repository_refuses(tmp_path, transcripts, monkeypatch):
+    monkeypatch.setattr(transcript_publish, "configured_remote", lambda: None)
+    (transcripts / "Rec1.md").write_text("x\n", encoding="utf-8")
+    result = transcript_publish.sync([transcripts / "Rec1.md"], clone=tmp_path / "clone",
+                                     transcripts_dir=transcripts)
+    assert not result["ok"] and "no repository set" in result["detail"]
+
+
+def test_switching_repo_starts_a_fresh_clone(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    (transcripts / "Rec1.md").write_text("old repo\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Rec1.md"])
+
+    other = tmp_path / "Other.git"
+    other.mkdir()
+    _git(other, "init", "--bare", "--quiet", "--initial-branch=main")
+    (transcripts / "Rec2.md").write_text("new repo\n", encoding="utf-8")
+    result = _sync(transcripts, other, clone, md_paths=[transcripts / "Rec2.md"])
+    assert result["ok"] and result["pushed"]
+    # Only what was published *to the new repo* is there — no old history.
+    assert _git(other, "ls-tree", "--name-only", "main").splitlines() == ["Rec2.md"]
+    assert _git(other, "rev-list", "--count", "main") == "1"
+    assert list(tmp_path.glob("clone.previous-*")), "old clone kept for recovery"
+
+
+def test_visibility_cache_is_per_repo(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    transcript_publish._write_state(clone, visibility="PRIVATE",
+                                    visibility_checked_epoch=9e12, visibility_repo="a/One")
+    monkeypatch.setattr(transcript_publish, "check_remote_visibility",
+                        lambda remote: {"verified": True, "visibility": "PUBLIC"})
+    assert transcript_publish._private_or_refuse(clone, "https://github.com/a/One.git") == ""
+    assert "PUBLIC" in transcript_publish._private_or_refuse(clone, "https://github.com/b/Two.git")

@@ -55,4 +55,23 @@ final class TranscriptPublishTests: XCTestCase {
         XCTAssertEqual(title, "Update 2 transcripts")
         XCTAssertEqual(body, "- Rec49: Updated\n- Rec50: Transcribed")
     }
+
+    func testRepoSlugAcceptsTheFormsTheFieldAllows() {
+        XCTAssertEqual(TranscriptPublish.repoSlug(from: "someone/Transcripts"), "someone/Transcripts")
+        XCTAssertEqual(TranscriptPublish.repoSlug(from: " https://github.com/someone/Transcripts/ "), "someone/Transcripts")
+        XCTAssertEqual(TranscriptPublish.repoSlug(from: "https://github.com/someone/Transcripts.git"), "someone/Transcripts")
+        XCTAssertEqual(TranscriptPublish.repoSlug(from: "git@github.com:someone/Transcripts.git"), "someone/Transcripts")
+        XCTAssertNil(TranscriptPublish.repoSlug(from: "Transcripts"))
+        XCTAssertNil(TranscriptPublish.repoSlug(from: "a/b/c"))
+        XCTAssertNil(TranscriptPublish.repoSlug(from: nil))
+    }
+
+    func testSyncResultIsReadableNotJSON() {
+        XCTAssertEqual(TranscriptPublish.describe(result: ["ok": true, "committed": 1, "pushed": true, "pending": 0, "detail": ""]),
+                       "1 commit pushed")
+        XCTAssertEqual(TranscriptPublish.describe(result: ["ok": true, "committed": 0, "pushed": false, "pending": 0, "detail": "no changes"]),
+                       "nothing changed")
+        XCTAssertEqual(TranscriptPublish.describe(result: ["ok": false, "detail": "push failed: auth"]),
+                       "push failed: auth")
+    }
 }

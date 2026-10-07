@@ -36,6 +36,32 @@ final class TranscriptPublish {
     /// published and untouched since before then are left alone by the scan,
     /// so "Enable only" really means "from now on".
     static let enabledSinceKey = "publishTranscriptsToGitHubSince"
+    /// The target repo as the user typed it (`owner/repo` or a URL). Shared
+    /// with `transcript_publish.py`, which reads the same key for terminal runs.
+    static let repoKey = "transcriptsGitHubRepo"
+
+    static var configuredRepo: String? {
+        let value = UserDefaults.standard.string(forKey: repoKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (value?.isEmpty ?? true) ? nil : value
+    }
+
+    /// `owner/repo` from the forms the Repository field accepts, or nil for
+    /// anything that isn't a GitHub repo.
+    static func repoSlug(from input: String?) -> String? {
+        var text = (input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["https://github.com/", "http://github.com/", "git@github.com:", "ssh://git@github.com/"]
+            where text.lowercased().hasPrefix(prefix) {
+            text = String(text.dropFirst(prefix.count))
+        }
+        while text.hasSuffix("/") { text.removeLast() }
+        if text.hasSuffix(".git") { text.removeLast(4) }
+        let parts = text.split(separator: "/", omittingEmptySubsequences: false)
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.allSatisfy(allowed.contains) })
+        else { return nil }
+        return "\(parts[0])/\(parts[1])"
+    }
 
     /// Per-transcript publish state from the last scan, for the file list.
     struct FileStatus: Equatable {
@@ -292,6 +318,7 @@ final class TranscriptPublish {
         scanRunning = true
         lastScan = Date()
         var arguments = ["--scan", "--transcripts-dir", transcriptsDir()]
+        if let repo = Self.configuredRepo { arguments += ["--remote", repo] }
         let since = UserDefaults.standard.double(forKey: Self.enabledSinceKey)
         if since > 0 { arguments += ["--since", String(since)] }
         runScript(arguments) { [weak self] object in
@@ -473,7 +500,11 @@ final class TranscriptPublish {
                 return
             }
 
-            var arguments = [Self.publishScriptPath, "--reason", reason,
+            guard let repo = Self.configuredRepo else {
+                completion((false, "no repository set (Settings → Transcripts on GitHub → Repository)"))
+                return
+            }
+            var arguments = [Self.publishScriptPath, "--remote", repo, "--reason", reason,
                              "--transcripts-dir", transcriptsDir]
             if !body.isEmpty { arguments += ["--body", body] }
             if allMD { arguments.append("--all") }
@@ -519,12 +550,25 @@ final class TranscriptPublish {
             // The script prints one JSON line; surface its human detail.
             var summary = out.isEmpty ? err : out
             if let data = out.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let detail = object["detail"] as? String, !detail.isEmpty {
-                summary = detail
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                summary = Self.describe(result: object)
             }
             completion((process.terminationStatus == 0, summary))
         }
+    }
+
+    /// One readable line for a sync result (never the raw JSON).
+    static func describe(result object: [String: Any]) -> String {
+        if let detail = object["detail"] as? String, !detail.isEmpty, detail != "no changes" || object["ok"] as? Bool != true {
+            return detail
+        }
+        let committed = object["committed"] as? Int ?? 0
+        let pushed = object["pushed"] as? Bool ?? false
+        let pending = object["pending"] as? Int ?? 0
+        if committed > 0 && pushed { return "\(committed) commit pushed" }
+        if pushed { return "pushed \(pending == 0 ? "earlier commits" : "")".trimmingCharacters(in: .whitespaces) }
+        if committed > 0 { return "committed locally, \(pending) waiting to push" }
+        return "nothing changed"
     }
 
     // MARK: - Paths (mirrors AppDelegate's resolution, kept self-contained)

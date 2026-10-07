@@ -700,9 +700,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onDismissTranscriptPublishProblem = { [weak self] in self?.viewModel.transcriptPublishProblem = nil }
         viewModel.onShowTranscriptPublishStatus = { [weak self] in self?.showPublishStatusMenu() }
         viewModel.onSetTranscriptPublishing = { [weak self] enable in self?.setTranscriptPublishing(enable) }
+        viewModel.onSetTranscriptsRepo = { [weak self] input in self?.setTranscriptsRepo(input) }
         viewModel.onSyncTranscriptsNow = { [weak self] in self?.runManualTranscriptSync(reason: "Manual sync") }
         viewModel.onOpenTranscriptsRepo = {
-            if let url = URL(string: "https://github.com/jw-gsl/Transcripts") { NSWorkspace.shared.open(url) }
+            guard let slug = TranscriptPublish.repoSlug(from: TranscriptPublish.configuredRepo),
+                  let url = URL(string: "https://github.com/\(slug)") else { return }
+            NSWorkspace.shared.open(url)
         }
         viewModel.onOpenPublishedTranscript = { stem, history in
             guard let url = TranscriptPublish.shared.githubURL(forStem: stem, history: history) else { return }
@@ -6132,6 +6135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if self.viewModel.publishFileStatus != states { self.viewModel.publishFileStatus = states }
             if self.viewModel.publishSettlingStems != settling { self.viewModel.publishSettlingStems = settling }
         }
+        // Publishing predates the Repository setting: an install that already
+        // publishes keeps its original target rather than silently stopping.
+        if publisher.isEnabled, TranscriptPublish.configuredRepo == nil {
+            UserDefaults.standard.set("jw-gsl/Transcripts", forKey: TranscriptPublish.repoKey)
+        }
+        viewModel.transcriptsRepo = TranscriptPublish.configuredRepo ?? ""
         viewModel.transcriptPublishEnabled = publisher.isEnabled
         publisher.onProblem = { [weak self] problem in
             guard let self else { return }
@@ -6159,29 +6168,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         guard !viewModel.transcriptPublishBusy else { return }
+        guard let repo = TranscriptPublish.configuredRepo else {
+            viewModel.transcriptPublishLastResult = nil
+            viewModel.transcriptsRepoMessage = "Enter a private GitHub repository first."
+            return
+        }
+        let slug = TranscriptPublish.repoSlug(from: repo)
         viewModel.transcriptPublishBusy = true
-        viewModel.transcriptPublishLastResult = "Checking the Transcripts repo is private…"
+        viewModel.transcriptPublishLastResult = "Checking \(slug ?? repo) is private…"
         // Transcripts are company meeting content: enabling publish must
         // never point at a public repo. Verify with `gh` when it's available.
         DispatchQueue.global(qos: .userInitiated).async {
-            let visibility = Self.transcriptsRepoVisibility()
+            let check = slug.map(Self.checkTranscriptsRepo) ?? .unverifiable("not a GitHub repo")
             DispatchQueue.main.async {
                 self.viewModel.transcriptPublishBusy = false
                 self.viewModel.transcriptPublishLastResult = nil
-                if visibility == "PUBLIC" {
+                if case .publicRepo = check {
                     let alert = NSAlert()
                     alert.messageText = "Transcripts repo is public"
-                    alert.informativeText = "github.com/jw-gsl/Transcripts is visible to everyone. Make it private before HiDock publishes meeting transcripts to it."
+                    alert.informativeText = "\(slug ?? repo) is visible to everyone. Make it private before HiDock publishes meeting transcripts to it."
                     alert.alertStyle = .warning
                     alert.runModal()
                     return
                 }
+                if case .notFound(let detail) = check {
+                    self.viewModel.transcriptsRepoMessage = "\(slug ?? repo) wasn't found on GitHub: \(detail)"
+                    return
+                }
                 let confirm = NSAlert()
                 confirm.messageText = "Publish transcripts to GitHub?"
-                let suffix = visibility == nil
-                    ? "\n\nCould not verify the repo is private with gh — check it before continuing."
-                    : ""
-                confirm.informativeText = "Transcripts are pushed to the private github.com/jw-gsl/Transcripts repo. Each one is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Merge pieces are left out.\n\nPublish everything now, or only transcripts that are new or change from now on?\(suffix)"
+                var suffix = ""
+                if case .unverifiable(let why) = check {
+                    suffix = "\n\nCould not verify the repo is private (\(why)) — check it before continuing."
+                }
+                confirm.informativeText = "Transcripts are pushed to the private \(slug ?? repo) repo. Each one is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Merge pieces are left out.\n\nPublish everything now, or only transcripts that are new or change from now on?\(suffix)"
                 confirm.addButton(withTitle: "Only new and changed")
                 confirm.addButton(withTitle: "Publish everything now")
                 confirm.addButton(withTitle: "Cancel")
@@ -6194,6 +6214,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if choice == .alertSecondButtonReturn {
                     self.runManualTranscriptSync(reason: "Initial import")
                 } else {
+                    TranscriptPublish.shared.scan()
+                }
+            }
+        }
+    }
+
+    /// Save a new target repository after checking it exists and is private.
+    /// Switching while publishing is on asks how to seed the new repo; the old
+    /// repo's local copy is set aside by the publisher, never pushed across.
+    private func setTranscriptsRepo(_ input: String) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let slug = TranscriptPublish.repoSlug(from: trimmed) else {
+            viewModel.transcriptsRepoMessage = "Enter a GitHub repository as owner/repo or its github.com URL."
+            return
+        }
+        guard slug != TranscriptPublish.repoSlug(from: TranscriptPublish.configuredRepo) else {
+            viewModel.transcriptsRepoMessage = nil
+            return
+        }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptsRepoMessage = "Checking \(slug)…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let check = Self.checkTranscriptsRepo(slug)
+            DispatchQueue.main.async {
+                self.viewModel.transcriptPublishBusy = false
+                switch check {
+                case .publicRepo:
+                    self.viewModel.transcriptsRepoMessage = "\(slug) is public — make it private first. Not saved."
+                    return
+                case .notFound(let detail):
+                    self.viewModel.transcriptsRepoMessage = "\(slug) wasn't found (create it on GitHub as a private repo first). \(detail)"
+                    return
+                case .unverifiable(let why):
+                    self.viewModel.transcriptsRepoMessage = "Saved, but couldn't confirm it's private: \(why)"
+                case .privateRepo:
+                    self.viewModel.transcriptsRepoMessage = "Saved — \(slug) is private."
+                }
+                let wasPublishing = TranscriptPublish.shared.isEnabled && TranscriptPublish.configuredRepo != nil
+                UserDefaults.standard.set(slug, forKey: TranscriptPublish.repoKey)
+                self.viewModel.transcriptsRepo = slug
+                self.log("TranscriptPublish: repository set to \(slug)")
+                guard wasPublishing else { return }
+                let confirm = NSAlert()
+                confirm.messageText = "Publish to \(slug) from now on?"
+                confirm.informativeText = "Future transcripts go to \(slug). The local copy of the previous repo is set aside, not pushed to the new one.\n\nCopy all transcripts into \(slug) now, or only ones that are new or change from now on?"
+                confirm.addButton(withTitle: "Only new and changed")
+                confirm.addButton(withTitle: "Publish everything now")
+                if confirm.runModal() == .alertSecondButtonReturn {
+                    self.runManualTranscriptSync(reason: "Initial import")
+                } else {
+                    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
                     TranscriptPublish.shared.scan()
                 }
             }
@@ -6249,21 +6320,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private static func transcriptsRepoVisibility() -> String? {
-        guard let gh = whichTool("gh") else { return nil }
+    enum RepoCheck: Equatable {
+        case privateRepo, publicRepo
+        case notFound(String)
+        /// gh missing or not signed in — existence and visibility unknown.
+        case unverifiable(String)
+    }
+
+    /// Ask `gh` whether `owner/repo` exists and is private. Blocking: call
+    /// off the main thread.
+    private static func checkTranscriptsRepo(_ slug: String) -> RepoCheck {
+        guard let gh = whichTool("gh") else { return .unverifiable("the GitHub CLI (gh) isn't installed") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gh)
-        process.arguments = ["repo", "view", "jw-gsl/Transcripts", "--json", "visibility"]
+        process.arguments = ["repo", "view", slug, "--json", "visibility"]
         let pipe = Pipe()
+        let errPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
+        process.standardError = errPipe
+        do { try process.run() } catch { return .unverifiable(error.localizedDescription) }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let errText = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let visibility = object["visibility"] as? String else { return nil }
-        return visibility
+        if process.terminationStatus == 0,
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let visibility = object["visibility"] as? String {
+            return visibility == "PUBLIC" ? .publicRepo : .privateRepo
+        }
+        if errText.localizedCaseInsensitiveContains("could not resolve") || errText.contains("404") {
+            return .notFound(errText)
+        }
+        return .unverifiable(errText.isEmpty ? "gh couldn't check it" : errText)
     }
 
     private static func whichTool(_ name: String) -> String? {

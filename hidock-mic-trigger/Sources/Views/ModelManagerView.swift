@@ -143,6 +143,8 @@ struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
     /// Stages are collapsed by default; this holds the expanded ones.
     @State private var expandedStages: Set<String> = []
+    /// Unsaved text in the Transcripts-on-GitHub Repository field.
+    @State private var repoDraft = ""
     /// Held on the view model so other windows can open straight to a tab
     /// (the main window's GitHub button opens Settings).
     private var tab: ModelManagerTab { viewModel.modelManagerTab }
@@ -301,9 +303,31 @@ struct ModelManagerView: View {
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
-                .disabled(viewModel.transcriptPublishBusy)
+                .disabled(viewModel.transcriptPublishBusy || viewModel.transcriptsRepo.isEmpty)
+                .help(viewModel.transcriptsRepo.isEmpty ? "Enter and save a repository first" : "")
             }
-            Text("Publishes each transcript's .md to the private github.com/jw-gsl/Transcripts repo once it has settled — 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Edits made in Obsidian are picked up too. Audio, JSON and merge pieces are never published.")
+            HStack(spacing: 6) {
+                Text("Repository").font(.caption)
+                TextField("owner/repo", text: $repoDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospaced())
+                    .frame(maxWidth: 260)
+                    .onSubmit { viewModel.onSetTranscriptsRepo(repoDraft) }
+                if repoDraft.trimmingCharacters(in: .whitespaces) != viewModel.transcriptsRepo {
+                    Button("Save") { viewModel.onSetTranscriptsRepo(repoDraft) }
+                        .controlSize(.small)
+                        .disabled(viewModel.transcriptPublishBusy)
+                }
+            }
+            .onAppear { repoDraft = viewModel.transcriptsRepo }
+            .onChange(of: viewModel.transcriptsRepo) { saved in repoDraft = saved }
+            if let message = viewModel.transcriptsRepoMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(message.hasPrefix("Saved") ? .secondary : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Publishes each transcript's .md to a private GitHub repository of your choice (create it on GitHub first) once it has settled — 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Edits made in Obsidian are picked up too. Audio, JSON and merge pieces are never published.")
                 .font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if viewModel.transcriptPublishEnabled {
