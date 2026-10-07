@@ -691,6 +691,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onConfirmCalendarSuggestion = { [weak self] path in self?.confirmCalendarSuggestion(for: path) }
         viewModel.onRejectCalendarSuggestion = { [weak self] path in self?.rejectCalendarSuggestion(for: path) }
         viewModel.onLookupCalendarForRecording = { [weak self] path in self?.lookupCalendarOnDemand(path) }
+        viewModel.onFixCalendarConnector = { [weak self] in self?.openCalendarMCPOnboarding() }
+        viewModel.onRetryCalendarConnector = { [weak self] in self?.retryCalendarConnector() }
+        viewModel.onDismissCalendarConnectorProblem = { [weak self] in self?.viewModel.calendarConnectorProblem = nil }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
         viewModel.onReconnectDevice = { [weak self] deviceId in self?.reconnectDevice(deviceId: deviceId) }
@@ -4537,6 +4540,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
             + ["\(NSHomeDirectory())/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
         guard let claudePath = cliCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            reportCalendarConnectorProblem(
+                summary: "Calendar lookup can't run: the Claude CLI wasn't found",
+                fix: "Install Claude Code (it should be at ~/.local/bin/claude), then press Check again.",
+                detail: "Looked in PATH, ~/.local/bin, /opt/homebrew/bin and /usr/local/bin.",
+                audioPath: audioPath
+            )
             DispatchQueue.main.async { completion([]) }
             return
         }
@@ -4618,10 +4627,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 else {
                     let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                     self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no usable result (status \(process.terminationStatus))\(stderrText.isEmpty ? "" : ": \(stderrText)")")
+                    self?.reportCalendarConnectorProblem(
+                        summary: "Calendar lookup failed: the Claude CLI exited with status \(process.terminationStatus)",
+                        fix: "Press Fix in Terminal to check Claude is signed in, then press Check again.",
+                        detail: stderrText.isEmpty ? "No error output." : String(stderrText.prefix(400)),
+                        audioPath: audioPath
+                    )
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
                 let answer = root["result"] as? String ?? ""
+                // A lapsed connector is not "no meeting". Claude says so in
+                // prose ("the Microsoft 365 connector isn't authorised"), which
+                // the negative signals below would otherwise swallow as
+                // no-match — exactly how a week of meetings went unlinked with
+                // nothing visible in the app.
+                if root["is_error"] as? Bool == true || calendarReplyIsConnectorFailure(answer) {
+                    let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s: CONNECTOR UNAVAILABLE for \((audioPath as NSString).lastPathComponent): \(answer.prefix(400))")
+                    self?.reportCalendarConnectorUnavailable(answer: answer, audioPath: audioPath)
+                    DispatchQueue.main.async { completion([]) }
+                    return
+                }
                 // A negative answer must not be parsed as an event. The regex
                 // below looks for a bold span followed by a time range, which a
                 // refusal satisfies whenever the model helpfully volunteers the
@@ -4642,7 +4669,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 ]
                 if negativeSignals.contains(where: { lowered.contains($0) }) {
                     let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
-                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no match for \((audioPath as NSString).lastPathComponent)")
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no match for \((audioPath as NSString).lastPathComponent): \(answer.prefix(240))")
+                    self?.calendarConnectorReached()
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
@@ -4736,11 +4764,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                 self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with \(events.count) event(s): \(answer.prefix(240))")
+                self?.calendarConnectorReached()
                 DispatchQueue.main.async { completion(events.sorted { $0.start < $1.start }) }
             } catch {
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                 self?.log("Calendar search failed [\(searchKind)] after \(seconds)s: \(error.localizedDescription)")
+                self?.reportCalendarConnectorProblem(
+                    summary: "Calendar lookup failed: couldn't run the Claude CLI",
+                    fix: "Press Fix in Terminal to check Claude works, then press Check again.",
+                    detail: error.localizedDescription,
+                    audioPath: audioPath
+                )
                 DispatchQueue.main.async { completion([]) }
             }
         }
@@ -4962,14 +4997,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    // MARK: - Calendar connector health
+
+    /// The connector name as Claude's `/mcp` menu lists it, for instructions.
+    private var calendarConnectorName: String {
+        viewModel.calendarProvider == "google" ? "Google Calendar" : "claude.ai Microsoft 365"
+    }
+
+    /// The calendar lookup reached the calendar and Claude could not use it.
+    private func reportCalendarConnectorUnavailable(answer: String, audioPath: String) {
+        reportCalendarConnectorProblem(
+            summary: "Calendar isn't connected: meeting lookups are failing",
+            fix: "Press Fix in Terminal, type /mcp in Claude, choose “\(calendarConnectorName)” and sign in, then press Check again.",
+            detail: answer.trimmingCharacters(in: .whitespacesAndNewlines),
+            audioPath: audioPath
+        )
+    }
+
+    /// Record a lookup that never reached the calendar. Safe from any thread.
+    /// Notifies once per outage rather than once per recording.
+    private func reportCalendarConnectorProblem(summary: String, fix: String, detail: String, audioPath: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if var existing = self.viewModel.calendarConnectorProblem {
+                existing.summary = summary
+                existing.fix = fix
+                existing.detail = detail
+                if !existing.affectedPaths.contains(audioPath) { existing.affectedPaths.append(audioPath) }
+                self.viewModel.calendarConnectorProblem = existing
+                return
+            }
+            self.viewModel.calendarConnectorProblem = .init(
+                summary: summary, fix: fix, detail: detail, since: Date(), affectedPaths: [audioPath]
+            )
+            self.log("Calendar connector problem raised: \(summary)")
+            self.postNotification(title: "HiDock: calendar lookups failing", body: "\(summary). \(fix)")
+        }
+    }
+
+    /// A lookup got a real answer from the calendar, so any outage is over.
+    private func calendarConnectorReached() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.viewModel.calendarConnectorProblem != nil else { return }
+            self.viewModel.calendarConnectorProblem = nil
+            self.log("Calendar connector reachable again; cleared the warning")
+        }
+    }
+
+    /// Open the embedded terminal with Claude running and the reconnect steps
+    /// above it. Reconnecting a claude.ai connector is only possible from an
+    /// interactive Claude session (`/mcp`), so the terminal is the fix.
     private func openCalendarMCPOnboarding() {
-        let command = """
-        printf '\\nHiDock calendar MCP setup\\nThe native Mac Calendar search is available above. To connect or refresh Claude Microsoft 365 MCP, run the following if it is not already listed as Connected:\\n\\n'
-        claude mcp list
-        printf '\\nTo add Microsoft 365 MCP if needed:\\nclaude mcp add --transport http --scope user microsoft365-calendar https://microsoft365.mcp.claude.com/mcp\\nThen follow the browser sign-in and run claude mcp list again.\\n\\n'
-        printf 'To add Google Calendar MCP if needed:\\nclaude mcp add --scope user google-calendar -- npx -y @cocal/google-calendar-mcp\\nThen complete its browser sign-in and run claude mcp list again.\\n\\n'
+        showSyncWindow()
+        viewModel.cliPaneMode = .terminal
+        viewModel.cliPaneVisible = true
+        let claude = claudeExecutablePath().map { "\"\($0)\"" } ?? "claude"
+        let steps = """
+        printf '\\n\\033[1mHiDock: reconnect the calendar\\033[0m\\n\
+          1. In Claude below, type /mcp and press Return\\n\
+          2. Select “\(calendarConnectorName)” and choose Authenticate (or Reconnect)\\n\
+          3. Finish signing in in the browser\\n\
+          4. Type /exit, then press Check again on the HiDock calendar banner\\n\\n'
         """
-        openTerminal(initialCommand: command)
+        viewModel.terminalController.runCommand("\(steps); \(claude)")
+    }
+
+    /// Re-run the lookups that failed during the outage, one at a time, and
+    /// stop at the first one that still can't reach the calendar.
+    private func retryCalendarConnector() {
+        guard let problem = viewModel.calendarConnectorProblem, !viewModel.calendarConnectorRetrying else { return }
+        viewModel.calendarConnectorRetrying = true
+        log("Retrying \(problem.affectedPaths.count) calendar lookup(s) after connector problem")
+        retryCalendarLookups(problem.affectedPaths)
+    }
+
+    private func retryCalendarLookups(_ paths: [String]) {
+        guard let path = paths.first else {
+            viewModel.calendarConnectorRetrying = false
+            return
+        }
+        let rest = Array(paths.dropFirst())
+        guard FileManager.default.fileExists(atPath: path), calendarLinkedEvent(for: path) == nil else {
+            retryCalendarLookups(rest)
+            return
+        }
+        let duration = ImportedRecordingsStore.probeDuration(at: path)
+        findClaudeCalendarEvents(audioPath: path, duration: duration) { [weak self] events in
+            guard let self else { return }
+            if events.count == 1, let event = events.first {
+                self.saveCalendarSuggestion(event, for: path)
+                self.log("Calendar suggestion pending confirmation for \((path as NSString).lastPathComponent) → \(event.title)")
+            }
+            // Reports land on main before this completion, so a still-raised
+            // problem means this attempt failed too: no point trying the rest.
+            if self.viewModel.calendarConnectorProblem != nil {
+                self.viewModel.calendarConnectorRetrying = false
+                return
+            }
+            self.retryCalendarLookups(rest)
+        }
     }
 
     /// The in-flight assistant CLI process, if any — kept only so the Stop

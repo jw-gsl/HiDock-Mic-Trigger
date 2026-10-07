@@ -227,3 +227,33 @@ func timestampBearingStem(_ stem: String) -> String {
     guard let range = body.range(of: "-to-") else { return body }
     return String(body[body.startIndex..<range.lowerBound])
 }
+
+/// Whether a `claude --print` calendar reply means the calendar connector
+/// could not be reached at all, as opposed to "it looked and found nothing".
+///
+/// The two used to be indistinguishable: a lapsed Microsoft 365 authorisation
+/// produced "I couldn't check your calendar. The Microsoft 365 connector isn't
+/// authorised in this session", the negative-signal check logged it as "no
+/// match", and every recording from 2026-10-01 onwards silently lost its
+/// meeting with nothing in the UI to say why.
+///
+/// An explicit NO_MATCH, or a reply that lists events in the requested
+/// `Time:` shape, is a real answer even if it mentions access in passing
+/// (for example "attendee data unavailable").
+func calendarReplyIsConnectorFailure(_ answer: String) -> Bool {
+    let lowered = answer.lowercased()
+    if lowered.trimmingCharacters(in: .whitespacesAndNewlines) == "no_match" { return false }
+    if answer.range(of: #"(?im)^\s*Time:\s*\d{1,2}:\d{2}"#, options: .regularExpression) != nil {
+        return false
+    }
+    let signals = [
+        "authoris", "authoriz", "authenticat", "/mcp", "sign in", "log in",
+        "connector isn't", "connector is not", "connector not",
+        "not connected", "isn't connected", "no access to", "don't have access",
+        "do not have access", "can't access", "cannot access", "unable to access",
+        "couldn't check", "could not check", "unable to check",
+        "no calendar tool", "no calendar mcp", "tools aren't available",
+        "tools are not available", "not available in this session",
+    ]
+    return signals.contains { lowered.contains($0) }
+}
