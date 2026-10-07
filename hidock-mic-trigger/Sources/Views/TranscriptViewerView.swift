@@ -829,6 +829,12 @@ struct TranscriptViewerView: View {
         let name: String
     }
     @State var rediarizeNSpeakers: Int = 2
+    /// Whether the reviewer has set the Redetect count themselves. Until they
+    /// do, the stepper reads "Auto" and Redetect lets the diarizer find the
+    /// count. It used to start at the *current* count and force it: Rec46
+    /// (2026-10-07) had 4 speakers from a 4-speaker-capped model, and a plain
+    /// Redetect merged Nemotron's 6 back down to those 4.
+    @State var rediarizeCountChosen = false
     @State private var rediarizeStatus: TranscriptRediarizeStatus?
     @State var transcriptHistory: [DiarizedTranscript] = []
     /// Layer 1 v2 — currently active word selection, which may span several
@@ -1771,10 +1777,18 @@ struct TranscriptViewerView: View {
                     .padding(12)
             }
             if onRediarize != nil {
-                Stepper("\(rediarizeNSpeakers)", value: $rediarizeNSpeakers, in: rediarizeSpeakerRange)
+                Stepper(rediarizeCountChosen ? "\(rediarizeNSpeakers)" : "Auto",
+                        value: Binding(
+                            get: { rediarizeNSpeakers },
+                            set: { rediarizeNSpeakers = $0; rediarizeCountChosen = true }
+                        ),
+                        in: rediarizeSpeakerRange)
                     .font(.subheadline.weight(.medium))
-                    .frame(width: 58)
-                    .help("Number of speakers to use when you press Redetect. Adjust it if the detected count is wrong.")
+                    .frame(width: rediarizeCountChosen ? 58 : 72)
+                    .help(rediarizeCountChosen
+                          ? "Redetect will look for exactly this many speakers. Double-click to go back to Auto."
+                          : "Auto: Redetect finds the number of speakers itself. Use the arrows to require a specific number.")
+                    .onTapGesture(count: 2) { rediarizeCountChosen = false; syncRediarizeSpeakerCount() }
             }
             Button {
                 showCalendarPicker = true
@@ -1861,13 +1875,13 @@ struct TranscriptViewerView: View {
                     .help("Refine this transcript with the configured automatic diarizer. Existing confirmed and legacy-named people stay anchored; generic or provisional parts may be re-split, and oversized blocks are capped for readability.")
 
                     Button {
-                        startRediarize(speakers: rediarizeNSpeakers)
+                        startRediarize(speakers: rediarizeCountChosen ? rediarizeNSpeakers : nil)
                     } label: {
                         Label(isRediarizing ? "Redetecting…" : "Redetect", systemImage: "person.2.wave.2")
                     }
                     .fixedSize()
                     .disabled(isRediarizing)
-                    .help("Redetect speakers from the audio using the expected count shown in the stepper. Confirmed and legacy-named people are preserved where the timestamps support them; other assignments may change.")
+                    .help("Redetect speakers from the audio from scratch — automatically, or with the number you set beside Speakers. Confirmed and legacy-named people are preserved where the timestamps support them; other assignments may change.")
 
                 }
 
@@ -2295,7 +2309,6 @@ struct TranscriptViewerView: View {
         linkedCalendarEvent = event
         suggestedCalendarEvent = event
         selectedCalendarCandidate = nil
-        if event.attendeeCount >= 2 { rediarizeNSpeakers = event.attendeeCount }
         // Save the calendar context before the speaker pass.  The sidecar
         // owns this particular run so its `@State` transcript updates in
         // place rather than leaving the reviewer with stale speaker blocks.
@@ -2315,7 +2328,11 @@ struct TranscriptViewerView: View {
             // reconfirmation of someone who was already correct.
             onReclusterWithLabels?(filePath, nil)
         } else {
-            startRediarize(speakers: event.attendeeCount >= 2 ? event.attendeeCount : nil)
+            // No forced count. The linked meeting is saved first, and the
+            // pipeline uses its invite list as a ceiling (merge down, never
+            // split up) — the invitee count as an explicit target would invent
+            // speakers for invitees who never spoke. Same as the table's confirm.
+            startRediarize(speakers: nil)
         }
         showCalendarPicker = false
     }
