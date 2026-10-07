@@ -6242,6 +6242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTHONPATH"] = self.repoRoot
             // Gated models (pyannote) authenticate with this; absent otherwise.
             HuggingFaceToken.inject(into: &env)
+            NemotronAccess.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
@@ -8314,6 +8315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptPath, "set-active", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
             let outPipe = Pipe()
             let errPipe = Pipe()
             process.standardOutput = outPipe
@@ -8358,6 +8362,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptPath, "remote-check", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = Pipe()
@@ -10526,6 +10533,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // was created by an earlier build (so its ACL no longer matches) every
             // one of those reads raised an access prompt. Only pyannote is gated,
             // so a Parakeet + Sortformer pipeline now never touches the Keychain.
+            // The Spark's endpoint and token, for the Nemotron diarizer. A
+            // missing token is cached as such, so this costs no Keychain prompt.
+            NemotronAccess.inject(into: &env)
             if self.anyGatedModelInPlay {
                 HuggingFaceToken.inject(into: &env)
             }

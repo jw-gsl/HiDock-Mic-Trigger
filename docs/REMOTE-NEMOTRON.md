@@ -47,6 +47,17 @@ backend (registry `remote_service: True`).
 
 ## Mac side
 
+**Setup in the app (2026-10-07):** Models page → Nemotron row → switch on
+"I have an NVIDIA DGX Spark" → Host (defaults to ember) and Token. The token
+is the contents of `~/.nemo-diar-token` on the Spark; it is stored in the
+Keychain (`com.hidock.tools.nemotron`, app-only access, same handling as the
+Hugging Face token) and passed to Python as `HIDOCK_NEMOTRON_TOKEN` /
+`HIDOCK_NEMOTRON_ENDPOINT`, never written to disk. Check connection verifies
+reachability *and* the token (a bogus profile → 400 means accepted, 401 means
+missing/wrong) without running the model; set-active uses the same check, so
+Nemotron can't be selected with a bad token.
+
+
 - `shared/diarize_nemotron.py` — client; config in config.toml:
   `[nemotron] endpoint`, `auth_token_file`, `profile`
   (offline|low|very_low|ultra_low — offline is the accuracy profile,

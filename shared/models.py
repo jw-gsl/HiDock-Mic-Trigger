@@ -903,10 +903,9 @@ def get_model_status() -> dict[str, dict]:
             "hardware_gated": info.get("hardware_gated", False),
             "hardware_gate_key": info.get("hardware_gate_key", ""),
             "hardware_gate_affirmed": _hardware_gate_affirmed(key),
+            # Remote backends reuse "gate_note" (above) for the endpoint note
+            # the UI shows inline on the row.
             "remote_service": info.get("remote_service", False),
-            # Remote backends also carry a gate note about the endpoint;
-            # the UI shows it inline on the row when the gate is open.
-            "gate_note": info.get("gate_note", ""),
         }
     return statuses
 

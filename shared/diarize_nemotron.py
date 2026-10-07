@@ -24,13 +24,13 @@ ember); its README documents the NeMo-from-source install.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-import numpy as np
 
 _DEFAULT_ENDPOINT = "http://ember.tail17bf47.ts.net:8890/diarize"
 _TIMEOUT_S = 1800.0  # a two-hour meeting is still minutes on GPU, but bound it
@@ -46,10 +46,22 @@ def _nemotron_config() -> dict:
 
 
 def endpoint() -> str:
+    """The /diarize URL. The app passes the host it was given on the Models
+    page as HIDOCK_NEMOTRON_ENDPOINT (base URL); config.toml is the fallback
+    for terminal runs."""
+    base = os.environ.get("HIDOCK_NEMOTRON_ENDPOINT", "").strip().rstrip("/")
+    if base:
+        return base if base.endswith("/diarize") else base + "/diarize"
     return _nemotron_config().get("endpoint", _DEFAULT_ENDPOINT)
 
 
 def _auth_token() -> str | None:
+    """The service's X-Auth-Token. The app supplies it from the Keychain as
+    HIDOCK_NEMOTRON_TOKEN; a token file named in config.toml is the fallback
+    for terminal runs."""
+    env = os.environ.get("HIDOCK_NEMOTRON_TOKEN", "").strip()
+    if env:
+        return env
     path = _nemotron_config().get("auth_token_file", "")
     if not path:
         return None
@@ -61,17 +73,53 @@ def _auth_token() -> str | None:
         return None
 
 
+# A profile the sidecar is guaranteed to reject. It checks the token before
+# the profile, so this answers "is the token right?" without running the model:
+# 401 = token missing/wrong, 400 = token accepted.
+_AUTH_PROBE_PROFILE = "__hidock_auth_check__"
+
+
+def check_auth() -> tuple[bool, str]:
+    """Whether the sidecar accepts our token. Never raises."""
+    token = _auth_token()
+    body = (f"profile={_AUTH_PROBE_PROFILE}").encode()
+    req = urllib.request.Request(endpoint(), data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    if token:
+        req.add_header("X-Auth-Token", token)
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True, "token accepted"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return False, ("no token set — paste it on the Models page"
+                           if not token else "the Spark rejected the token")
+        if exc.code in (400, 422):
+            return True, "token accepted"
+        return False, f"unexpected HTTP {exc.code} from the auth check"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"auth check failed: {exc}"
+
+
 def available() -> tuple[bool, str]:
-    """Check the sidecar is reachable and healthy. Never raises."""
+    """Check the sidecar is reachable, healthy and accepts our token.
+
+    The token matters as much as reachability: /health needs none, so a
+    reachable-only check would let Nemotron be selected and then fail with
+    401 on the first real meeting. Never raises.
+    """
     url = endpoint().replace("/diarize", "/health")
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
             body = json.loads(resp.read().decode())
-        if body.get("ok"):
-            return True, f"reachable ({body.get('model', 'unknown')})"
-        return False, "sidecar answered but not healthy"
     except Exception as exc:  # noqa: BLE001
         return False, f"{url}: {exc}"
+    if not body.get("ok"):
+        return False, "sidecar answered but not healthy"
+    authorised, why = check_auth()
+    if not authorised:
+        return False, why
+    return True, f"{body.get('model', 'unknown')} at {url.rsplit('/health', 1)[0]} · {why}"
 
 
 def _post_diarize(wav_bytes: bytes, profile: str) -> dict:

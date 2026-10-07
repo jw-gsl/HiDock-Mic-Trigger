@@ -722,7 +722,7 @@ struct ModelRowView: View {
                             ? "Active — currently used for \(friendlyStage(status.stage))"
                             : (status.installed
                                 ? "Set as active for \(friendlyStage(status.stage))"
-                                : "Download first to select this backend")))
+                                : "Download first to select this backend"))))
         } else {
             // Single-option stage. Same radio vocabulary as everywhere else: a
             // green tick here made Speaker Embeddings look like a different kind
@@ -889,7 +889,7 @@ struct ModelRowView: View {
                             get: { status.hardwareGateAffirmed },
                             set: { onSetHardwareGate($0) }
                         )) {
-                            Text("Do you have an NVIDIA GPU host? (e.g. NVIDIA DGX Spark)")
+                            Text("I have an NVIDIA DGX Spark (or another NVIDIA GPU host)")
                                 .font(.caption)
                         }
                         .toggleStyle(.switch)
@@ -909,6 +909,7 @@ struct ModelRowView: View {
                     }
                 }
                 if status.remoteService && status.hardwareGateAffirmed {
+                    NvidiaSparkSettingsView(onCheck: onCheckRemote)
                     if remoteChecking {
                         HStack(spacing: 6) {
                             ProgressView()
@@ -927,13 +928,14 @@ struct ModelRowView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .help("Ping the diarization service (default: http://ember.tail17bf47.ts.net:8890 — change it via config.toml [nemotron] endpoint)")
+                        .help("Checks the Spark answers and accepts the token, without running the model")
                         .padding(.top, 2)
                     }
                     if let remoteStatus {
                         Text(remoteStatus)
                             .font(.caption2)
                             .foregroundColor(remoteStatus.hasPrefix("reachable") ? .green : .orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
