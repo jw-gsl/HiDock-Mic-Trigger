@@ -1143,6 +1143,7 @@ final class HiDockViewModel: ObservableObject {
     /// `modelCapabilities`. Read-only — never changes model state.
     var onCheckModelCapability: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
+    @Published var modelManagerTab: ModelManagerTab = .models
 
     // MARK: - AI summariser engine
     /// Which CLI runs Summarise / Ask AI (claude/codex/gemini/ollama/auto).
@@ -1185,6 +1186,13 @@ final class HiDockViewModel: ObservableObject {
     @Published var publishFileStatus: [String: TranscriptPublish.FileStatus] = [:]
     @Published var publishSettlingStems: Set<String> = []
     var onOpenPublishedTranscript: (_ stem: String, _ history: Bool) -> Void = { _, _ in }
+    /// A visibility check or manual sync is running (Settings shows a spinner).
+    @Published var transcriptPublishBusy = false
+    /// Outcome of the last manual action, shown under the Settings toggle.
+    @Published var transcriptPublishLastResult: String?
+    var onSetTranscriptPublishing: (Bool) -> Void = { _ in }
+    var onSyncTranscriptsNow: () -> Void = {}
+    var onOpenTranscriptsRepo: () -> Void = {}
 
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}

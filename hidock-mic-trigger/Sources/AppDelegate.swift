@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var deviceManagerWindow: NSWindow?
     private var plaudLoginController: PlaudLoginWindowController?
     private var terminalWindow: NSWindow?
+    /// Kept so the Settings toggle and the status-bar menu tick stay in step.
+    private var autoPublishMenuItem: NSMenuItem?
     private weak var speakerLabelsMenuItem: NSMenuItem?
     private var importedRecordings: [ImportedRecordingEntry] = []
     /// Filenames the user has opted out of transcribing. Persisted to
@@ -697,6 +699,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRetryTranscriptPublish = { TranscriptPublish.shared.retryNow() }
         viewModel.onDismissTranscriptPublishProblem = { [weak self] in self?.viewModel.transcriptPublishProblem = nil }
         viewModel.onShowTranscriptPublishStatus = { [weak self] in self?.showPublishStatusMenu() }
+        viewModel.onSetTranscriptPublishing = { [weak self] enable in self?.setTranscriptPublishing(enable) }
+        viewModel.onSyncTranscriptsNow = { [weak self] in self?.runManualTranscriptSync(reason: "Manual sync") }
+        viewModel.onOpenTranscriptsRepo = {
+            if let url = URL(string: "https://github.com/jw-gsl/Transcripts") { NSWorkspace.shared.open(url) }
+        }
         viewModel.onOpenPublishedTranscript = { stem, history in
             guard let url = TranscriptPublish.shared.githubURL(forStem: stem, history: history) else { return }
             NSWorkspace.shared.open(url)
@@ -1498,6 +1505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let autoPublishItem = NSMenuItem(title: "Auto-publish edits", action: #selector(toggleAutoPublishMenu(_:)), keyEquivalent: "")
         autoPublishItem.target = self
         autoPublishItem.state = TranscriptPublish.shared.isEnabled ? .on : .off
+        autoPublishMenuItem = autoPublishItem
         let syncNowItem = NSMenuItem(title: "Sync to GitHub Now", action: #selector(syncTranscriptsToGitHubMenu), keyEquivalent: "")
         syncNowItem.target = self
         let publishStatusItem = NSMenuItem(title: "Show Sync Status...", action: #selector(showPublishStatusMenu), keyEquivalent: "")
@@ -6138,17 +6146,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func toggleAutoPublishMenu(_ sender: NSMenuItem) {
-        if sender.state == .on {
+        setTranscriptPublishing(!TranscriptPublish.shared.isEnabled)
+    }
+
+    /// Single path for switching publishing on/off, used by the status-bar
+    /// menu and the Settings section.
+    private func setTranscriptPublishing(_ enable: Bool) {
+        guard enable else {
             UserDefaults.standard.set(false, forKey: TranscriptPublish.enabledKey)
-            sender.state = .off
             viewModel.transcriptPublishEnabled = false
+            autoPublishMenuItem?.state = .off
             return
         }
+        guard !viewModel.transcriptPublishBusy else { return }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptPublishLastResult = "Checking the Transcripts repo is private…"
         // Transcripts are company meeting content: enabling publish must
         // never point at a public repo. Verify with `gh` when it's available.
-        let workItem = DispatchWorkItem {
+        DispatchQueue.global(qos: .userInitiated).async {
             let visibility = Self.transcriptsRepoVisibility()
             DispatchQueue.main.async {
+                self.viewModel.transcriptPublishBusy = false
+                self.viewModel.transcriptPublishLastResult = nil
                 if visibility == "PUBLIC" {
                     let alert = NSAlert()
                     alert.messageText = "Transcripts repo is public"
@@ -6157,45 +6176,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     alert.runModal()
                     return
                 }
-                UserDefaults.standard.set(true, forKey: TranscriptPublish.enabledKey)
-                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
-                sender.state = .on
-                self.viewModel.transcriptPublishEnabled = true
-                TranscriptPublish.shared.scan()
                 let confirm = NSAlert()
                 confirm.messageText = "Publish transcripts to GitHub?"
                 let suffix = visibility == nil
-                    ? " Could not verify repo visibility with gh — check it is private."
+                    ? "\n\nCould not verify the repo is private with gh — check it before continuing."
                     : ""
-                confirm.informativeText = "All transcript .md files in ~/HiDock/Raw Transcripts will be committed and pushed to the private Transcripts repo. After that, each transcript is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished.\(suffix)"
-                confirm.addButton(withTitle: "Publish now")
-                confirm.addButton(withTitle: "Enable only")
-                if confirm.runModal() == .alertFirstButtonReturn {
+                confirm.informativeText = "Transcripts are pushed to the private github.com/jw-gsl/Transcripts repo. Each one is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Merge pieces are left out.\n\nPublish everything now, or only transcripts that are new or change from now on?\(suffix)"
+                confirm.addButton(withTitle: "Only new and changed")
+                confirm.addButton(withTitle: "Publish everything now")
+                confirm.addButton(withTitle: "Cancel")
+                let choice = confirm.runModal()
+                guard choice != .alertThirdButtonReturn else { return }
+                UserDefaults.standard.set(true, forKey: TranscriptPublish.enabledKey)
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
+                self.autoPublishMenuItem?.state = .on
+                self.viewModel.transcriptPublishEnabled = true
+                if choice == .alertSecondButtonReturn {
                     self.runManualTranscriptSync(reason: "Initial import")
+                } else {
+                    TranscriptPublish.shared.scan()
                 }
             }
         }
-        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
     }
 
     @objc private func syncTranscriptsToGitHubMenu() {
         runManualTranscriptSync(reason: "Manual sync")
     }
 
+    /// Publish everything now. Progress and the outcome show in the Settings
+    /// section (and the banner on failure) rather than a blocking alert.
     private func runManualTranscriptSync(reason: String) {
-        let alert = NSAlert()
-        alert.messageText = "Publishing transcripts…"
-        alert.informativeText = "HiDock is copying and pushing the transcript .md files. This window can be closed — progress appears in the logs."
-        alert.addButton(withTitle: "OK")
-        TranscriptPublish.shared.syncNow(reason: reason) { ok, detail in
-            DispatchQueue.main.async {
-                let box = NSAlert()
-                box.messageText = ok ? "Transcripts synced" : "Transcript sync failed"
-                box.informativeText = detail
-                box.runModal()
-            }
+        guard !viewModel.transcriptPublishBusy else { return }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptPublishLastResult = "Publishing…"
+        TranscriptPublish.shared.syncNow(reason: reason) { [weak self] ok, detail in
+            guard let self else { return }
+            self.viewModel.transcriptPublishBusy = false
+            let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
+            self.viewModel.transcriptPublishLastResult = ok
+                ? "Synced at \(time)\(detail.isEmpty ? "" : " — \(detail)")"
+                : "Sync failed at \(time): \(detail)"
+            self.log("TranscriptPublish: manual sync (\(reason)) \(ok ? "ok" : "failed"): \(detail)")
         }
-        _ = alert.runModal()
     }
 
     @objc private func showPublishStatusMenu() {

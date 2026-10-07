@@ -143,7 +143,9 @@ struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
     /// Stages are collapsed by default; this holds the expanded ones.
     @State private var expandedStages: Set<String> = []
-    @State private var tab: ModelManagerTab = .models
+    /// Held on the view model so other windows can open straight to a tab
+    /// (the main window's GitHub button opens Settings).
+    private var tab: ModelManagerTab { viewModel.modelManagerTab }
     /// Model rows whose description/provenance block is showing. Collapsed by
     /// default: twelve rows of 2–4 line descriptions buried the six words that
     /// actually matter, which is which one is on.
@@ -185,7 +187,7 @@ struct ModelManagerView: View {
             .padding(.top, 16)
             .padding(.bottom, 10)
 
-            Picker("", selection: $tab) {
+            Picker("", selection: $viewModel.modelManagerTab) {
                 ForEach(ModelManagerTab.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
@@ -274,8 +276,66 @@ struct ModelManagerView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
+
+                Divider()
+
+                githubPublishSection
             }
         }
+    }
+
+    /// Transcripts on GitHub — the same switch as the status-bar menu item,
+    /// with live state so it's clear whether publishing is actually working.
+    private var githubPublishSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "icloud.and.arrow.up").foregroundColor(.indigo)
+                Text("Transcripts on GitHub").fontWeight(.medium)
+                Spacer()
+                if viewModel.transcriptPublishBusy {
+                    ProgressView().controlSize(.small)
+                }
+                Toggle("", isOn: Binding(
+                    get: { viewModel.transcriptPublishEnabled },
+                    set: { viewModel.onSetTranscriptPublishing($0) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .disabled(viewModel.transcriptPublishBusy)
+            }
+            Text("Publishes each transcript's .md to the private github.com/jw-gsl/Transcripts repo once it has settled — 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Edits made in Obsidian are picked up too. Audio, JSON and merge pieces are never published.")
+                .font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if viewModel.transcriptPublishEnabled {
+                Text(publishSummary)
+                    .font(.caption)
+                    .foregroundColor(viewModel.transcriptPublishProblem == nil ? .secondary : .red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Sync now") { viewModel.onSyncTranscriptsNow() }
+                        .disabled(viewModel.transcriptPublishBusy)
+                    Button("Status…") { viewModel.onShowTranscriptPublishStatus() }
+                    Button("Open repo") { viewModel.onOpenTranscriptsRepo() }
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+    }
+
+    private var publishSummary: String {
+        if let problem = viewModel.transcriptPublishProblem {
+            return "Not publishing: \(problem)"
+        }
+        let states = viewModel.publishFileStatus.values
+        let synced = states.filter { $0.state == "synced" }.count
+        let settling = viewModel.publishSettlingStems.count
+        var parts = ["\(synced) on GitHub"]
+        if settling > 0 { parts.append("\(settling) waiting to settle") }
+        if let last = viewModel.transcriptPublishLastResult { parts.append(last) }
+        return parts.joined(separator: " · ")
     }
 
     @ViewBuilder
