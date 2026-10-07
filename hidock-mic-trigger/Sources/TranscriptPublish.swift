@@ -127,6 +127,41 @@ final class TranscriptPublish {
         URL(fileURLWithPath: "\(NSHomeDirectory())/HiDock/.transcripts-git.pending.json")
     }
 
+    /// The last scan's per-file states, so the file list shows them the
+    /// moment the app opens instead of going blank until a rescan finishes.
+    private static var statusCacheURL: URL {
+        URL(fileURLWithPath: "\(NSHomeDirectory())/HiDock/.transcripts-git.status.json")
+    }
+
+    private struct StatusCache: Codable {
+        var files: [String: [String: Int]]  // stem → ["commits": n]; state kept separately
+        var states: [String: String]
+        var webURL: String?
+        var branch: String
+    }
+
+    private func loadStatusCache() {
+        guard let data = try? Data(contentsOf: Self.statusCacheURL),
+              let cache = try? JSONDecoder().decode(StatusCache.self, from: data) else { return }
+        var states: [String: FileStatus] = [:]
+        for (stem, state) in cache.states {
+            states[stem] = FileStatus(state: state, commits: cache.files[stem]?["commits"] ?? 0)
+        }
+        fileStatus = states
+        webURL = cache.webURL
+        branch = cache.branch
+    }
+
+    private func saveStatusCache() {
+        let cache = StatusCache(
+            files: fileStatus.mapValues { ["commits": $0.commits] },
+            states: fileStatus.mapValues(\.state),
+            webURL: webURL, branch: branch)
+        if let data = try? JSONEncoder().encode(cache) {
+            try? data.write(to: Self.statusCacheURL, options: .atomic)
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Load the persisted settling set and start the settle timer.
@@ -136,6 +171,11 @@ final class TranscriptPublish {
            let saved = try? JSONDecoder().decode([String: PendingTranscript].self, from: data) {
             pending = saved
         }
+        // Show what was known at quit straight away, then refresh it now
+        // rather than on the first tick a minute later.
+        loadStatusCache()
+        publishStatus()
+        if isEnabled { scan() }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: tickSeconds, repeats: true) { [weak self] _ in
             self?.tick()
@@ -326,10 +366,15 @@ final class TranscriptPublish {
                 guard let self else { return }
                 self.scanRunning = false
                 guard let object, object["ok"] as? Bool == true else {
-                    self.log("scan failed")
+                    self.log("scan failed — file list publish states not refreshed")
                     return
                 }
                 self.applyScan(object)
+                let counts = Dictionary(grouping: self.fileStatus.values, by: \.state).mapValues(\.count)
+                    .sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+                let queued = (object["changed"] as? [Any])?.count ?? 0
+                let removed = (object["deleted"] as? [Any])?.count ?? 0
+                self.log("scan: \(counts); queued \(queued) changed, \(removed) removed")
             }
         }
     }
@@ -343,6 +388,7 @@ final class TranscriptPublish {
                                       commits: value["commits"] as? Int ?? 0)
         }
         fileStatus = states
+        saveStatusCache()
         for path in object["changed"] as? [String] ?? [] {
             let modified = Self.latestModification(forMarkdownPath: path) ?? Date()
             let state = states[Self.stem(ofMarkdownPath: path)]?.state
