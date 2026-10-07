@@ -8375,7 +8375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 let reachable = parsed?["reachable"] as? Bool ?? false
                 let detail = parsed?["detail"] as? String ?? "no response from check"
-                let result = reachable ? "reachable (\u{2713}) \(detail)" : "unreachable: \(detail)"
+                let result = reachable ? "\u{2713} \(detail)" : "\u{2717} \(detail)"
                 DispatchQueue.main.async {
                     self?.viewModel.remoteServiceChecking.remove(key)
                     self?.viewModel.remoteServiceChecks[key] = result

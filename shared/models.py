@@ -282,7 +282,7 @@ MODEL_REGISTRY = {
     # token. The gate here is *hardware*: the UI shows a "Do you have an
     # NVIDIA GPU host?" toggle and only enables selection once it's on.
     "diarize_nemotron": {
-        "name": "Nemotron 3 Diarization (8-speaker, remote NVIDIA host)",
+        "name": "NVIDIA Nemotron 3 — on your DGX Spark",
         "stage": "diarization",
         "stage_label": "Speaker Diarization",
         "category": "pipeline",
@@ -291,10 +291,9 @@ MODEL_REGISTRY = {
         "remote_service": True,
         "hardware_gated": True,
         "hardware_gate_key": "has_nvidia_host",
-        "gate_note": "Runs on an NVIDIA GPU host (e.g. NVIDIA DGX Spark) on "
-                     "your network — not on this Mac. Enable the toggle above, "
-                     "then set the sidecar endpoint in Advanced. OpenMDW 1.1; "
-                     "no Hugging Face account needed.",
+        "gate_note": "Runs on your Spark over the network, not on this Mac. "
+                     "Up to 8 speakers; a 30-minute meeting takes well under "
+                     "a minute.",
         "licence": "OpenMDW 1.1 (commercial use allowed)",
         "distributable": True,
         "size_mb": 0,

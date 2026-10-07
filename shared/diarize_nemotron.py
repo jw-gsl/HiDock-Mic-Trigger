@@ -92,8 +92,8 @@ def check_auth() -> tuple[bool, str]:
             return True, "token accepted"
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
-            return False, ("no token set — paste it on the Models page"
-                           if not token else "the Spark rejected the token")
+            return False, ("no token saved yet" if not token
+                           else "the Spark didn't accept this token — check it and save it again")
         if exc.code in (400, 422):
             return True, "token accepted"
         return False, f"unexpected HTTP {exc.code} from the auth check"
@@ -113,13 +113,15 @@ def available() -> tuple[bool, str]:
         with urllib.request.urlopen(url, timeout=5) as resp:
             body = json.loads(resp.read().decode())
     except Exception as exc:  # noqa: BLE001
-        return False, f"{url}: {exc}"
+        return False, f"can't reach the Spark at {url.rsplit('/health', 1)[0]} — is it on and on your network? ({exc})"
     if not body.get("ok"):
-        return False, "sidecar answered but not healthy"
+        return False, "the Spark answered but its diarization service isn't ready"
     authorised, why = check_auth()
     if not authorised:
         return False, why
-    return True, f"{body.get('model', 'unknown')} at {url.rsplit('/health', 1)[0]} · {why}"
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or url).split(".")[0]
+    return True, f"Connected to {host} — {why}"
 
 
 def _post_diarize(wav_bytes: bytes, profile: str) -> dict:
