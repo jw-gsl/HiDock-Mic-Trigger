@@ -1,6 +1,8 @@
 """Tests for shared/transcript_publish.py against a local file:// remote."""
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,6 +19,12 @@ def _git(cwd: Path, *args: str) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout.strip()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_merge_groups(tmp_path, monkeypatch):
+    """Never read the user's real ~/HiDock/merge_groups.json in tests."""
+    monkeypatch.setattr(transcript_publish, "MERGE_GROUPS_FILE", tmp_path / "no-merges.json")
 
 
 @pytest.fixture()
@@ -273,3 +281,62 @@ def _short_lock(original):
     def wrapper(clone, timeout=300.0):
         return original(clone, timeout=0.2)
     return wrapper
+
+
+def _merge_file(tmp_path, children):
+    path = tmp_path / "merge_groups.json"
+    path.write_text(json.dumps([{"outputName": "Merged-x.mp3", "childNames": children}]),
+                    encoding="utf-8")
+    return path
+
+
+def test_merge_pieces_are_not_published_and_are_removed(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    for name in ("Rec1", "Rec2", "Merged-Rec1-to-Rec2"):
+        (transcripts / f"{name}.md").write_text(f"{name}\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, all_md=True)  # before the merge existed
+    groups = _merge_file(tmp_path, ["Rec1.hda", "Rec2.hda"])
+    result = _sync(transcripts, remote_repo, clone, all_md=True, merge_groups=groups)
+    assert result["ok"]
+    files = _git(remote_repo, "ls-tree", "--name-only", "main").splitlines()
+    assert files == ["Merged-Rec1-to-Rec2.md"]
+
+
+def test_scan_reports_states_counts_and_work(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    (transcripts / "Synced.md").write_text("a\n", encoding="utf-8")
+    (transcripts / "Edited.md").write_text("b\n", encoding="utf-8")
+    (transcripts / "Gone.md").write_text("c\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, all_md=True)
+    (transcripts / "Edited.md").write_text("b2\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Edited.md"])
+    (transcripts / "Edited.md").write_text("b3 edited in Obsidian\n", encoding="utf-8")
+    (transcripts / "Gone.md").unlink()
+    (transcripts / "Fresh.md").write_text("d\n", encoding="utf-8")
+    old = transcripts / "Old.md"
+    old.write_text("e\n", encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))
+    (transcripts / "Piece.md").write_text("f\n", encoding="utf-8")
+
+    report = transcript_publish.scan(
+        transcripts_dir=transcripts, clone=clone, remote=f"file://{remote_repo}",
+        since=2_000_000, merge_groups=_merge_file(tmp_path, ["Piece.hda"]))
+    files = report["files"]
+    assert files["Synced"] == {"commits": 1, "state": "synced"}
+    assert files["Edited"] == {"commits": 2, "state": "changed"}
+    assert files["Fresh"]["state"] == "new"
+    assert files["Old"]["state"] == "unpublished"
+    assert files["Piece"]["state"] == "excluded"
+    assert sorted(Path(p).name for p in report["changed"]) == ["Edited.md", "Fresh.md"]
+    assert [Path(p).name for p in report["deleted"]] == ["Gone.md"]
+
+
+def test_scan_flags_unpushed_commits(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    (transcripts / "Rec1.md").write_text("x\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Rec1.md"])
+    (transcripts / "Rec1.md").write_text("y\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Rec1.md"], push=False)
+    report = transcript_publish.scan(transcripts_dir=transcripts, clone=clone,
+                                     remote=f"file://{remote_repo}")
+    assert report["files"]["Rec1"] == {"commits": 2, "state": "unpushed"}

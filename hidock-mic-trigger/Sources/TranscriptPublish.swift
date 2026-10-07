@@ -32,6 +32,16 @@ final class TranscriptPublish {
 
     /// Kill-switch. Default **off** — nothing pushes until the user enables it.
     static let enabledKey = "publishTranscriptsToGitHub"
+    /// When publishing was switched on (epoch seconds). Transcripts never
+    /// published and untouched since before then are left alone by the scan,
+    /// so "Enable only" really means "from now on".
+    static let enabledSinceKey = "publishTranscriptsToGitHubSince"
+
+    /// Per-transcript publish state from the last scan, for the file list.
+    struct FileStatus: Equatable {
+        var state: String
+        var commits: Int
+    }
 
     var isEnabled: Bool {
         UserDefaults.standard.bool(forKey: Self.enabledKey)
@@ -40,7 +50,13 @@ final class TranscriptPublish {
     let settleSeconds: TimeInterval = 10 * 60
     let reviewHoldSeconds: TimeInterval = 12 * 60 * 60
     let retryBackoffSeconds: TimeInterval = 15 * 60
+    /// Reconciliation: catches edits made outside HiDock (Obsidian, an
+    /// editor, a terminal run with publishing off), deletions, and anything a
+    /// missed trigger would otherwise leave unpublished.
+    let scanIntervalSeconds: TimeInterval = 30 * 60
     private let tickSeconds: TimeInterval = 60
+    private var lastScan: Date?
+    private var scanRunning = false
 
     struct PendingTranscript: Codable, Equatable {
         var lastActivity: Date
@@ -69,6 +85,12 @@ final class TranscriptPublish {
     var transcriptsDir: () -> String = { "\(NSHomeDirectory())/HiDock/Raw Transcripts" }
     /// Called on main: a problem description, or nil once publishing works again.
     var onProblem: (String?) -> Void = { _ in }
+    /// Called on main whenever the settling set or scanned file states change:
+    /// (states by stem, settling stems, GitHub web URL, branch).
+    var onStatusChanged: ([String: FileStatus], Set<String>, String?, String) -> Void = { _, _, _, _ in }
+    private(set) var fileStatus: [String: FileStatus] = [:]
+    private(set) var webURL: String?
+    private(set) var branch = "main"
     var log: (String) -> Void = { NSLog("TranscriptPublish: \($0)") }
 
     private let workQueue = DispatchQueue(label: "hidock.transcript-publish.run")
@@ -95,6 +117,7 @@ final class TranscriptPublish {
     }
 
     private func persistPending() {
+        publishStatus()
         let url = Self.pendingStoreURL
         if pending.isEmpty {
             try? FileManager.default.removeItem(at: url)
@@ -128,6 +151,16 @@ final class TranscriptPublish {
             self.persistPending()
         }
         if Thread.isMainThread { record() } else { DispatchQueue.main.async(execute: record) }
+    }
+
+    /// A change the app didn't make (found by the scan). Its settle clock
+    /// starts at the file's own modification time, so an edit made hours ago
+    /// is ready at once while one still being typed in Obsidian keeps waiting.
+    func noteExternalChange(mdPath: String, modified: Date, reason: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isEnabled, pending[mdPath] == nil else { return }
+        pending[mdPath] = PendingTranscript(lastActivity: modified, reasons: [reason])
+        persistPending()
     }
 
     /// Mark the recordings named in a pipeline command as being worked on.
@@ -187,8 +220,35 @@ final class TranscriptPublish {
         }.sorted()
     }
 
+    /// Files can change without the app knowing (a step that names no file,
+    /// an external editor). Any write to the transcript or its sidecar after
+    /// the last known activity restarts the settle clock.
+    private func absorbDiskChanges() {
+        var changed = false
+        for (path, entry) in pending {
+            let latest = Self.latestModification(forMarkdownPath: path)
+            if let latest, latest > entry.lastActivity.addingTimeInterval(1) {
+                pending[path]?.lastActivity = latest
+                changed = true
+            }
+        }
+        if changed { persistPending() }
+    }
+
+    static func latestModification(forMarkdownPath path: String) -> Date? {
+        let diarized = path.hasSuffix(".md") ? String(path.dropLast(3)) + "_diarized.json" : path
+        return [path, diarized].compactMap {
+            (try? FileManager.default.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+        }.max()
+    }
+
     private func tick() {
-        guard isEnabled, !syncRunning else { return }
+        guard isEnabled else { return }
+        if !scanRunning, lastScan.map({ Date().timeIntervalSince($0) >= scanIntervalSeconds }) ?? true {
+            scan()
+        }
+        guard !syncRunning else { return }
+        absorbDiskChanges()
         if let retryNotBefore, Date() < retryNotBefore { return }
         let ready = readyPaths()
         guard !ready.isEmpty else { return }
@@ -211,12 +271,96 @@ final class TranscriptPublish {
                     self.retryNotBefore = nil
                     self.log("published \(ready.count) transcript(s): \(title)")
                     self.onProblem(nil)
+                    self.scan()
                 } else {
                     self.retryNotBefore = Date().addingTimeInterval(self.retryBackoffSeconds)
                     self.log("publish failed, retrying in \(Int(self.retryBackoffSeconds / 60)) min: \(detail)")
                     self.onProblem(detail)
                 }
             }
+        }
+    }
+
+    // MARK: - Reconciliation scan
+
+    /// Compare the transcripts folder with what's published (read-only), feed
+    /// anything out of step into the settle queue, and refresh the per-file
+    /// states the file list shows.
+    func scan() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isEnabled, !scanRunning else { return }
+        scanRunning = true
+        lastScan = Date()
+        var arguments = ["--scan", "--transcripts-dir", transcriptsDir()]
+        let since = UserDefaults.standard.double(forKey: Self.enabledSinceKey)
+        if since > 0 { arguments += ["--since", String(since)] }
+        runScript(arguments) { [weak self] object in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scanRunning = false
+                guard let object, object["ok"] as? Bool == true else {
+                    self.log("scan failed")
+                    return
+                }
+                self.applyScan(object)
+            }
+        }
+    }
+
+    private func applyScan(_ object: [String: Any]) {
+        webURL = object["web_url"] as? String
+        branch = object["branch"] as? String ?? "main"
+        var states: [String: FileStatus] = [:]
+        for (stem, value) in object["files"] as? [String: [String: Any]] ?? [:] {
+            states[stem] = FileStatus(state: value["state"] as? String ?? "unpublished",
+                                      commits: value["commits"] as? Int ?? 0)
+        }
+        fileStatus = states
+        for path in object["changed"] as? [String] ?? [] {
+            let modified = Self.latestModification(forMarkdownPath: path) ?? Date()
+            let state = states[Self.stem(ofMarkdownPath: path)]?.state
+            noteExternalChange(mdPath: path, modified: modified,
+                               reason: state == "new" ? "Added" : "Edited outside HiDock")
+        }
+        for path in object["deleted"] as? [String] ?? [] {
+            let superseded = states[Self.stem(ofMarkdownPath: path)]?.state == "excluded"
+            noteExternalChange(mdPath: path, modified: .distantPast,
+                               reason: superseded ? "Replaced by merged transcript" : "Removed transcript")
+        }
+        publishStatus()
+    }
+
+    private func publishStatus() {
+        let settling = Set(pending.keys.map(Self.stem(ofMarkdownPath:)))
+        onStatusChanged(fileStatus, settling, webURL, branch)
+    }
+
+    /// The transcript's page on GitHub, once it has been published.
+    func githubURL(forStem stem: String, history: Bool = false) -> URL? {
+        guard let webURL, (fileStatus[stem]?.commits ?? 0) > 0 else { return nil }
+        let name = "\(stem).md".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? stem
+        return URL(string: "\(webURL)/\(history ? "commits" : "blob")/\(branch)/\(name)")
+    }
+
+    /// Run the publish script with extra arguments and parse its JSON output.
+    private func runScript(_ extra: [String], completion: @escaping ([String: Any]?) -> Void) {
+        workQueue.async {
+            guard let python = Self.pythonPath else { completion(nil); return }
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: Self.sharedDir)
+            process.executableURL = URL(fileURLWithPath: python)
+            process.arguments = [Self.publishScriptPath] + extra
+            var env = ProcessInfo.processInfo.environment
+            env["HOME"] = NSHomeDirectory()
+            env["PYTHONPATH"] = Self.repoRoot
+            process.environment = env
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do { try process.run() } catch { completion(nil); return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            completion(try? JSONSerialization.jsonObject(with: data) as? [String: Any])
         }
     }
 
@@ -273,6 +417,7 @@ final class TranscriptPublish {
                     self.retryNotBefore = nil
                 }
                 self.onProblem(ok ? nil : detail)
+                self.scan()
                 completion?((ok, detail))
             }
         }

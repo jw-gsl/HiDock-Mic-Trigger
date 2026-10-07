@@ -130,7 +130,7 @@ struct RecordingsTableView: View {
                 if showExtraColumns {
                     headerButton("Size", key: "size", width: 70)
                 }
-                Text("").frame(width: 70) // actions
+                Text("").frame(width: Self.actionsColumnWidth) // actions
                 // Meeting is last: it is the widest, most variable cell, so
                 // trailing it keeps every fixed-width column aligned.
                 headerButton("Meeting", key: nil, width: 260, flexible: true)
@@ -405,12 +405,14 @@ struct RecordingsTableView: View {
                     .foregroundColor(.accentColor)
                     .help("Show in Finder")
                 }
+                PublishStatusIcon(viewModel: viewModel,
+                                  stem: ((group.outputPath as NSString).lastPathComponent as NSString).deletingPathExtension)
                 Image(systemName: "arrow.triangle.merge")
                     .font(.caption2)
                     .foregroundColor(.blue)
                     .help("Merged from \(group.childNames.count) recordings")
             }
-            .frame(width: 70, alignment: .leading)
+            .frame(width: Self.actionsColumnWidth, alignment: .leading)
 
             // Meeting. A merge parent used to show a hardcoded dash on the reasoning
             // that it "carries no calendar link of its own" — but the merged file is
@@ -526,6 +528,8 @@ struct RecordingsTableView: View {
     /// Reserving one width aligns the text column regardless of which state a row is
     /// in — and keeps it aligned with rows whose leading glyph is a button.
     private static let meetingIconWidth: CGFloat = 15
+    /// Folder + GitHub publish icon (with commit count) + trim/merge markers.
+    static let actionsColumnWidth: CGFloat = 104
 
     /// Blue calendar-with-magnifying-glass: "search the calendar for this meeting".
     ///
@@ -957,6 +961,8 @@ struct RecordingsTableView: View {
                     .foregroundColor(.accentColor)
                     .help("Show in Finder")
                 }
+                PublishStatusIcon(viewModel: viewModel,
+                                  stem: (entry.recording.outputName as NSString).deletingPathExtension)
                 // Indicator icons, right of the folder button:
                 //   - scissors: the local file was trimmed in-place;
                 //     flagged in state.json so refreshes preserve it
@@ -982,7 +988,7 @@ struct RecordingsTableView: View {
                         .help("Included in a merge group")
                 }
             }
-            .frame(width: 70, alignment: .leading)
+            .frame(width: Self.actionsColumnWidth, alignment: .leading)
 
             meetingCell(entry)
                 .frame(minWidth: 0, maxWidth: 260, alignment: .leading)

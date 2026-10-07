@@ -44,6 +44,7 @@
 		AC57E3CA0C77C0F9F234F8A8 /* DeviceManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 073D5356B516B86E1A36D08A /* DeviceManagerView.swift */; };
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 		AE7DEC1B14636DBD037EC45D /* DeviceCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */; };
+		B3C9A2C39C6AB708F9992443 /* PublishStatusIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD4349987570F91E3F9E960B /* PublishStatusIcon.swift */; };
 		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
 		C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27867D05F3E255C858BC3F1 /* TerminalView.swift */; };
 		D05118574AC0DE11B41E2C29 /* TranscriptPublishTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3690838333051C915E44090E /* TranscriptPublishTests.swift */; };
@@ -113,6 +114,7 @@
 		A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCardView.swift; sourceTree = "<group>"; };
 		A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedRecordings.swift; sourceTree = "<group>"; };
 		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
+		AD4349987570F91E3F9E960B /* PublishStatusIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PublishStatusIcon.swift; sourceTree = "<group>"; };
 		AE4C739396ED67A480F1FD17 /* hidock-mic-trigger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "hidock-mic-trigger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B5F68B06FC3DEABDDE7A5112 /* LEDSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LEDSettings.swift; sourceTree = "<group>"; };
 		CCF782CB9A8B025C303FDF5D /* LEDMatrix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LEDMatrix.swift; sourceTree = "<group>"; };
@@ -199,6 +201,7 @@
 				925471D0B0CE21311E8EADC6 /* MicTriggerSection.swift */,
 				95B0A8C5446AA42C053B684F /* ModelManagerView.swift */,
 				2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */,
+				AD4349987570F91E3F9E960B /* PublishStatusIcon.swift */,
 				22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */,
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
 				4C462B0D4FB3CCE023603E77 /* SummaryViewerView.swift */,
@@ -383,6 +386,7 @@
 				F86651607F00054F72662894 /* Models.swift in Sources */,
 				7FF62130484590EB95B9C3E9 /* OnboardingView.swift in Sources */,
 				6AFC1F19EBD2DE7583548074 /* PlaudAuth.swift in Sources */,
+				B3C9A2C39C6AB708F9992443 /* PublishStatusIcon.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,
 				1F28538F2F1601D254A85E9C /* SkippedTranscriptions.swift in Sources */,
 				159FDEE1D4C7748ABBAB8D03 /* SplitSources.swift in Sources */,

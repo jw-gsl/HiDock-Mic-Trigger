@@ -697,6 +697,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onRetryTranscriptPublish = { TranscriptPublish.shared.retryNow() }
         viewModel.onDismissTranscriptPublishProblem = { [weak self] in self?.viewModel.transcriptPublishProblem = nil }
         viewModel.onShowTranscriptPublishStatus = { [weak self] in self?.showPublishStatusMenu() }
+        viewModel.onOpenPublishedTranscript = { stem, history in
+            guard let url = TranscriptPublish.shared.githubURL(forStem: stem, history: history) else { return }
+            NSWorkspace.shared.open(url)
+        }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
         viewModel.onReconnectDevice = { [weak self] deviceId in self?.reconnectDevice(deviceId: deviceId) }
@@ -6115,6 +6119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         publisher.log = { [weak self] message in self?.log("TranscriptPublish: \(message)") }
+        publisher.onStatusChanged = { [weak self] states, settling, _, _ in
+            guard let self else { return }
+            if self.viewModel.publishFileStatus != states { self.viewModel.publishFileStatus = states }
+            if self.viewModel.publishSettlingStems != settling { self.viewModel.publishSettlingStems = settling }
+        }
+        viewModel.transcriptPublishEnabled = publisher.isEnabled
         publisher.onProblem = { [weak self] problem in
             guard let self else { return }
             let wasHealthy = self.viewModel.transcriptPublishProblem == nil
@@ -6131,6 +6141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if sender.state == .on {
             UserDefaults.standard.set(false, forKey: TranscriptPublish.enabledKey)
             sender.state = .off
+            viewModel.transcriptPublishEnabled = false
             return
         }
         // Transcripts are company meeting content: enabling publish must
@@ -6147,7 +6158,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     return
                 }
                 UserDefaults.standard.set(true, forKey: TranscriptPublish.enabledKey)
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
                 sender.state = .on
+                self.viewModel.transcriptPublishEnabled = true
+                TranscriptPublish.shared.scan()
                 let confirm = NSAlert()
                 confirm.messageText = "Publish transcripts to GitHub?"
                 let suffix = visibility == nil

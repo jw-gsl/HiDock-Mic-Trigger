@@ -49,6 +49,7 @@ from shared.transcript_history import git_path  # noqa: E402
 DEFAULT_REMOTE = "https://github.com/jw-gsl/Transcripts.git"
 DEFAULT_TRANSCRIPTS_DIR = Path.home() / "HiDock" / "Raw Transcripts"
 PUBLISH_CLONE_DIR = Path.home() / "HiDock" / ".transcripts-git"
+MERGE_GROUPS_FILE = Path.home() / "HiDock" / "merge_groups.json"
 # Below this many sources, or above this share of the published files, a
 # prune is treated as "the transcripts folder looks wrong" and skipped.
 PRUNE_MAX_FRACTION = 0.2
@@ -266,6 +267,123 @@ def _prune_missing(sources: list[Path], clone: Path) -> str:
     return ""
 
 
+def superseded_stems(merge_groups: Path | None = None) -> set[str]:
+    """Recording stems replaced by a merged recording.
+
+    A merge's pieces keep their own transcripts locally, but the merged
+    transcript is the one that matters; publishing both puts the same meeting
+    in the repo twice. Read from the app's merge_groups.json so terminal runs
+    agree with the app.
+    """
+    path = merge_groups or MERGE_GROUPS_FILE
+    try:
+        groups = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    stems: set[str] = set()
+    for group in groups if isinstance(groups, list) else []:
+        for name in group.get("childNames") or []:
+            stems.add(Path(str(name)).stem)
+    return stems
+
+
+def _drop_superseded(clone: Path, superseded: set[str]) -> None:
+    for stem in superseded:
+        published = clone / f"{stem}.md"
+        if published.is_file():
+            try:
+                published.unlink()
+            except OSError:
+                pass
+
+
+def _web_url(remote: str) -> str | None:
+    slug = _remote_slug(remote)
+    return f"https://github.com/{slug}" if slug else None
+
+
+def scan(
+    transcripts_dir: Path | None = None,
+    clone: Path | None = None,
+    remote: str = DEFAULT_REMOTE,
+    since: float | None = None,
+    merge_groups: Path | None = None,
+) -> dict:
+    """Compare the transcripts folder with the published clone. Never raises.
+
+    Read-only: nothing is copied or committed. Returns per-transcript state
+    for the app's file list plus the work a sync would have to do, which is
+    how edits made outside HiDock (Obsidian, a text editor, a terminal run
+    with publishing off) or a missed trigger still get published.
+
+    States: ``synced`` (published content matches), ``unpushed`` (committed,
+    not yet on GitHub), ``changed`` (local differs from published),
+    ``new`` (never published and modified after ``since``), ``unpublished``
+    (never published, older than ``since``), ``excluded`` (merge piece).
+    """
+    directory = transcripts_dir or DEFAULT_TRANSCRIPTS_DIR
+    clone_dir = clone or PUBLISH_CLONE_DIR
+    result: dict = {"ok": False, "web_url": _web_url(remote), "branch": "main",
+                    "files": {}, "changed": [], "deleted": []}
+    try:
+        sources = {path.name: path for path in directory.glob("*.md")}
+    except OSError:
+        return result
+    superseded = superseded_stems(merge_groups)
+    is_clone = _is_clone(clone_dir)
+    commits: dict[str, int] = {}
+    unpushed: set[str] = set()
+    if is_clone:
+        _, branch = _run_git(clone_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+        result["branch"] = branch.strip() or "main"
+        status, log = _run_git(clone_dir, ["log", "--pretty=format:", "--name-only", "HEAD"])
+        if status == 0:
+            for line in log.splitlines():
+                if line.endswith(".md"):
+                    commits[line] = commits.get(line, 0) + 1
+        status, log = _run_git(clone_dir, ["log", "--pretty=format:", "--name-only",
+                                           f"origin/{result['branch']}..HEAD"])
+        if status == 0:
+            unpushed = {line for line in log.splitlines() if line.endswith(".md")}
+        elif commits:
+            unpushed = set(commits)  # nothing on the remote yet
+    for name, source in sorted(sources.items()):
+        stem = source.stem
+        published = clone_dir / name
+        entry = {"commits": commits.get(name, 0)}
+        if stem in superseded:
+            entry["state"] = "excluded"
+        elif published.is_file():
+            try:
+                same = published.read_bytes() == source.read_bytes()
+            except OSError:
+                same = False
+            if not same:
+                entry["state"] = "changed"
+                result["changed"].append(str(source))
+            elif name in unpushed:
+                entry["state"] = "unpushed"
+            else:
+                entry["state"] = "synced"
+        else:
+            try:
+                modified = source.stat().st_mtime
+            except OSError:
+                modified = 0.0
+            if since is None or modified >= since:
+                entry["state"] = "new"
+                result["changed"].append(str(source))
+            else:
+                entry["state"] = "unpublished"
+        result["files"][stem] = entry
+    if is_clone:
+        for published in clone_dir.glob("*.md"):
+            if published.name not in sources or published.stem in superseded:
+                result["deleted"].append(str(directory / published.name))
+    result["ok"] = True
+    return result
+
+
 def _remote_slug(remote: str) -> str | None:
     match = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", remote)
     return match.group(1) if match else None
@@ -324,6 +442,7 @@ def sync(
     remote: str = DEFAULT_REMOTE,
     push: bool = True,
     body: str = "",
+    merge_groups: Path | None = None,
 ) -> dict:
     """Publish transcript markdown to the remote. Never raises.
 
@@ -338,11 +457,12 @@ def sync(
             return result
         return _sync_locked(result, md_paths, reason, all_md=all_md,
                             transcripts_dir=transcripts_dir, clone=clone,
-                            remote=remote, push=push, body=body)
+                            remote=remote, push=push, body=body,
+                            merge_groups=merge_groups)
 
 
 def _sync_locked(result, md_paths, reason, *, all_md, transcripts_dir, clone,
-                 remote, push, body) -> dict:
+                 remote, push, body, merge_groups) -> dict:
     clone_dir = ensure_clone(clone, remote)
     if clone_dir is None:
         result["detail"] = "publish clone unavailable (no git, or clone failed)"
@@ -355,12 +475,15 @@ def _sync_locked(result, md_paths, reason, *, all_md, transcripts_dir, clone,
             sources = sorted(directory.glob("*.md"))
         except OSError:
             sources = []
+    superseded = superseded_stems(merge_groups)
     prune_warning = ""
     if all_md:
         prune_warning = _prune_missing(sources, clone_dir)
     sources.extend(Path(p) for p in (md_paths or []))
+    sources = [path for path in sources if path.stem not in superseded]
 
     _copy_markdown(sources, clone_dir)
+    _drop_superseded(clone_dir, superseded)
     _run_git(clone_dir, ["add", "-A", "--", "*.md"])
     status, output = _run_git(clone_dir, ["status", "--porcelain", "--", "*.md"])
     changed = [line for line in output.splitlines() if line.strip()]
@@ -488,12 +611,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="commit locally only (offline/dry runs)")
     parser.add_argument("--status", action="store_true",
                         help="print last sync state as JSON and exit")
+    parser.add_argument("--scan", action="store_true",
+                        help="report per-transcript publish state and pending work as JSON")
+    parser.add_argument("--since", type=float, default=None,
+                        help="with --scan: never-published transcripts older than this "
+                             "epoch are left alone (publishing was enabled after them)")
     parser.add_argument("--check-visibility", action="store_true",
                         help="report whether the remote repo is private, then exit")
     args = parser.parse_args(argv)
 
     if args.check_visibility:
         print(json.dumps(check_remote_visibility(args.remote)))
+        return 0
+    if args.scan:
+        print(json.dumps(scan(
+            transcripts_dir=Path(args.transcripts_dir) if args.transcripts_dir else None,
+            clone=Path(args.clone) if args.clone else None,
+            remote=args.remote,
+            since=args.since,
+        )))
         return 0
     if args.status:
         print(json.dumps(status(Path(args.clone) if args.clone else None)))

@@ -1179,6 +1179,12 @@ final class HiDockViewModel: ObservableObject {
     var onRetryTranscriptPublish: () -> Void = {}
     var onDismissTranscriptPublishProblem: () -> Void = {}
     var onShowTranscriptPublishStatus: () -> Void = {}
+    /// Per-transcript GitHub state (by recording stem) for the file list's
+    /// publish icon. Empty while publishing is off.
+    @Published var transcriptPublishEnabled = false
+    @Published var publishFileStatus: [String: TranscriptPublish.FileStatus] = [:]
+    @Published var publishSettlingStems: Set<String> = []
+    var onOpenPublishedTranscript: (_ stem: String, _ history: Bool) -> Void = { _, _ in }
 
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
