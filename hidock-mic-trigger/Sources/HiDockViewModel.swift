@@ -1173,6 +1173,13 @@ final class HiDockViewModel: ObservableObject {
     ]
     var onSetCalendarProvider: (String) -> Void = { _ in }
 
+    /// Why settled transcripts aren't reaching the GitHub repo (auth, network,
+    /// public repo, diverged remote), or nil while publishing works.
+    @Published var transcriptPublishProblem: String?
+    var onRetryTranscriptPublish: () -> Void = {}
+    var onDismissTranscriptPublishProblem: () -> Void = {}
+    var onShowTranscriptPublishStatus: () -> Void = {}
+
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
     /// Open Claude Code in the CLI pane to refine an existing template file.

@@ -50,6 +50,7 @@
 		D0DA62924A664A5011685A7A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2588C13D72780DEF82479DD3 /* Helpers.swift */; };
 		D53B2A0936AFFE19541AD099 /* ExtractorFailureMessageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84B4367B93FBEB217AB3A263 /* ExtractorFailureMessageTests.swift */; };
 		D670C09EF343FB58EC864F07 /* TemplatesManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64CFDC4C443317E33030EE5A /* TemplatesManagerView.swift */; };
+		D7180DAF793983172701BCD3 /* TranscriptPublishBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AF92B7DB871503C0F17D94D /* TranscriptPublishBanner.swift */; };
 		DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 820C64D02A011DC869B43307 /* TranscriptViewerView.swift */; };
 		E097C68039ECFC82D82485A9 /* FeedbackHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F83927AD38553744398E73 /* FeedbackHistoryView.swift */; };
 		E3D3880ABBFBA5275121A145 /* AgentTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 854AEE9D0A6EC90AA53D80CD /* AgentTranscriptView.swift */; };
@@ -73,6 +74,7 @@
 		073D5356B516B86E1A36D08A /* DeviceManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceManagerView.swift; sourceTree = "<group>"; };
 		0B8BA1C16C1E7AF997CB2B48 /* HuggingFaceToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuggingFaceToken.swift; sourceTree = "<group>"; };
 		145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceLibraryView.swift; sourceTree = "<group>"; };
+		1AF92B7DB871503C0F17D94D /* TranscriptPublishBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPublishBanner.swift; sourceTree = "<group>"; };
 		22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsTableView.swift; sourceTree = "<group>"; };
 		23EBCE58D06BD8BC06951C9B /* TranscriptPublish.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPublish.swift; sourceTree = "<group>"; };
 		2588C13D72780DEF82479DD3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
@@ -206,6 +208,7 @@
 				5F277B1943362D018D91C803 /* TerminalPane.swift */,
 				E27867D05F3E255C858BC3F1 /* TerminalView.swift */,
 				F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */,
+				1AF92B7DB871503C0F17D94D /* TranscriptPublishBanner.swift */,
 				820C64D02A011DC869B43307 /* TranscriptViewerView.swift */,
 				8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */,
 				145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */,
@@ -391,6 +394,7 @@
 				45DC4CC1577241C81E24D11D /* TerminalPane.swift in Sources */,
 				C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */,
 				489AAC780D60845205B5AC01 /* TranscriptPublish.swift in Sources */,
+				D7180DAF793983172701BCD3 /* TranscriptPublishBanner.swift in Sources */,
 				DB9F5C7F1AA18A5FE600F8B7 /* TranscriptViewerView.swift in Sources */,
 				80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */,
 				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,

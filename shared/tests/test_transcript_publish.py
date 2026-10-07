@@ -180,3 +180,96 @@ def test_unreachable_remote_records_error_never_raises(tmp_path, transcripts):
     )
     assert not result["ok"]
     assert "clone failed" in result["detail"] or result["pending"] == 0
+
+
+def test_commit_body_lists_edit_summary(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    (transcripts / "Rec1.md").write_text("v1\n", encoding="utf-8")
+    result = _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Rec1.md"],
+                   reason="Rec1: renamed speaker", body="- Rec1: Renamed 1 → Jeff\n- Rec1: Merged 2 into 1")
+    assert result["ok"]
+    body = _git(remote_repo, "log", "-1", "--pretty=%b", "main")
+    assert "Renamed 1 → Jeff" in body and "Merged 2 into 1" in body
+
+
+def test_missing_named_source_deletes_published_copy(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    (transcripts / "Rec1.md").write_text("one\n", encoding="utf-8")
+    (transcripts / "Rec2.md").write_text("two\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone,
+          md_paths=[transcripts / "Rec1.md", transcripts / "Rec2.md"])
+    (transcripts / "Rec2.md").unlink()
+    result = _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Rec2.md"],
+                   reason="Removed Rec2")
+    assert result["ok"] and result["pushed"]
+    files = _git(remote_repo, "ls-tree", "--name-only", "main").splitlines()
+    assert files == ["Rec1.md"]
+
+
+def test_all_sync_prunes_a_few_stale_files(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    for index in range(10):
+        (transcripts / f"Rec{index}.md").write_text(f"{index}\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, all_md=True)
+    (transcripts / "Rec3.md").unlink()
+    result = _sync(transcripts, remote_repo, clone, all_md=True, reason="Manual sync")
+    assert result["ok"]
+    files = _git(remote_repo, "ls-tree", "--name-only", "main").splitlines()
+    assert "Rec3.md" not in files and len(files) == 9
+
+
+def test_all_sync_refuses_mass_prune(tmp_path, remote_repo, transcripts):
+    clone = tmp_path / "clone"
+    for index in range(10):
+        (transcripts / f"Rec{index}.md").write_text(f"{index}\n", encoding="utf-8")
+    _sync(transcripts, remote_repo, clone, all_md=True)
+    for index in range(1, 10):
+        (transcripts / f"Rec{index}.md").unlink()
+    result = _sync(transcripts, remote_repo, clone, all_md=True)
+    assert "skipped removing 9 of 10" in result["detail"]
+    assert len(_git(remote_repo, "ls-tree", "--name-only", "main").splitlines()) == 10
+
+
+def test_clone_failure_is_visible_in_status(tmp_path, transcripts):
+    clone = tmp_path / "clone"
+    (transcripts / "Rec1.md").write_text("x\n", encoding="utf-8")
+    result = _sync(transcripts, tmp_path / "does-not-exist.git", clone,
+                   md_paths=[transcripts / "Rec1.md"])
+    assert not result["ok"]
+    state = transcript_publish.status(clone)
+    assert state["clone_ok"] is False
+    assert "clone failed" in (state.get("last_error") or "")
+
+
+def test_public_github_remote_is_refused(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    monkeypatch.setattr(transcript_publish, "check_remote_visibility",
+                        lambda remote: {"verified": True, "visibility": "PUBLIC"})
+    refusal = transcript_publish._private_or_refuse(
+        clone, "https://github.com/jw-gsl/Transcripts.git")
+    assert "PUBLIC" in refusal
+
+
+def test_private_check_skips_non_github_remotes(tmp_path, monkeypatch):
+    def boom(remote):
+        raise AssertionError("must not query gh for a file:// remote")
+    monkeypatch.setattr(transcript_publish, "check_remote_visibility", boom)
+    assert transcript_publish._private_or_refuse(tmp_path, "file:///tmp/x.git") == ""
+
+
+def test_concurrent_sync_waits_for_lock(tmp_path, remote_repo, transcripts, monkeypatch):
+    clone = tmp_path / "clone"
+    (transcripts / "Rec1.md").write_text("x\n", encoding="utf-8")
+    with transcript_publish._publish_lock(clone) as held:
+        assert held
+        monkeypatch.setattr(transcript_publish, "_publish_lock",
+                            _short_lock(transcript_publish._publish_lock))
+        result = _sync(transcripts, remote_repo, clone, md_paths=[transcripts / "Rec1.md"])
+    assert not result["ok"] and "another publish" in result["detail"]
+
+
+def _short_lock(original):
+    def wrapper(clone, timeout=300.0):
+        return original(clone, timeout=0.2)
+    return wrapper

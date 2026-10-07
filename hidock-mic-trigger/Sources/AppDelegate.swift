@@ -407,6 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         setupMainMenu()
         setupStatusItem()
         wireViewModel()
+        configureTranscriptPublishing()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         // Skipped: loadCachedRecordings() used to fire a short-timeout
@@ -536,7 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         removeDeviceChangeListener()
         stoppingIntentionally = true
         stopTrigger()
-        TranscriptPublish.shared.flushOnQuit()
+        // No publish on quit: settling transcripts are persisted and finish
+        // settling after the next launch, so quitting is never held up by git.
         UpdateChecker.installPendingUpdateIfNeeded()
     }
 
@@ -692,6 +694,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onConfirmCalendarSuggestion = { [weak self] path in self?.confirmCalendarSuggestion(for: path) }
         viewModel.onRejectCalendarSuggestion = { [weak self] path in self?.rejectCalendarSuggestion(for: path) }
         viewModel.onLookupCalendarForRecording = { [weak self] path in self?.lookupCalendarOnDemand(path) }
+        viewModel.onRetryTranscriptPublish = { TranscriptPublish.shared.retryNow() }
+        viewModel.onDismissTranscriptPublishProblem = { [weak self] in self?.viewModel.transcriptPublishProblem = nil }
+        viewModel.onShowTranscriptPublishStatus = { [weak self] in self?.showPublishStatusMenu() }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
         viewModel.onReconnectDevice = { [weak self] deviceId in self?.reconnectDevice(deviceId: deviceId) }
@@ -4959,6 +4964,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// user must explicitly confirm it before its attendee data refines an
     /// already-diarised transcript.
     private func suggestCalendarMeeting(afterTranscriptionOf audioPath: String) {
+        // Every completed transcription passes through here, so it doubles as
+        // the "new transcript" trigger for GitHub publishing.
+        TranscriptPublish.shared.noteActivity(mdPath: transcriptMarkdownPath(forAudioPath: audioPath),
+                                              reason: "Transcribed")
         // A confirmed meeting is the answer this search would be looking for.
         // Re-running it costs an MCP/EventKit round-trip and, on the no-match
         // branch below, would re-diarise a transcript the user has already
@@ -6073,6 +6082,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Transcripts on GitHub menu
 
+    private func transcriptMarkdownPath(forAudioPath audioPath: String) -> String {
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let stem = ((audioPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        return "\(dir)/\(stem).md"
+    }
+
+    /// Audio paths the app knows for a recording stem (device downloads,
+    /// imports and merges all land in `syncEntries` / merged outputs).
+    private func audioPaths(forStem stem: String) -> [String] {
+        syncEntries.map(\.recording.outputPath)
+            .filter { (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == stem }
+    }
+
+    private func configureTranscriptPublishing() {
+        let publisher = TranscriptPublish.shared
+        publisher.transcriptsDir = { [weak self] in
+            self?.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        }
+        publisher.isAwaitingReview = { [weak self] stem in
+            guard let self else { return false }
+            return self.audioPaths(forStem: stem).contains { self.suggestedCalendarEvent(for: $0) != nil }
+        }
+        publisher.isBusyElsewhere = { [weak self] stem in
+            guard let self else { return false }
+            let matches: (String) -> Bool = {
+                (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == stem
+            }
+            if self.viewModel.calendarLookupInProgress.contains(where: matches) { return true }
+            return self.pendingTranscriptionQueue.contains {
+                matches($0.path) && ($0.status == .queued || $0.status == .transcribing)
+            }
+        }
+        publisher.log = { [weak self] message in self?.log("TranscriptPublish: \(message)") }
+        publisher.onProblem = { [weak self] problem in
+            guard let self else { return }
+            let wasHealthy = self.viewModel.transcriptPublishProblem == nil
+            self.viewModel.transcriptPublishProblem = problem
+            if let problem, wasHealthy {
+                self.postNotification(title: "HiDock: transcripts not reaching GitHub",
+                                      body: "\(problem) — retrying every 15 minutes.")
+            }
+        }
+        publisher.start()
+    }
+
     @objc private func toggleAutoPublishMenu(_ sender: NSMenuItem) {
         if sender.state == .on {
             UserDefaults.standard.set(false, forKey: TranscriptPublish.enabledKey)
@@ -6099,7 +6153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let suffix = visibility == nil
                     ? " Could not verify repo visibility with gh — check it is private."
                     : ""
-                confirm.informativeText = "All transcript .md files in ~/HiDock/Raw Transcripts will be committed and pushed to the private Transcripts repo. Future edits auto-publish after a short delay.\(suffix)"
+                confirm.informativeText = "All transcript .md files in ~/HiDock/Raw Transcripts will be committed and pushed to the private Transcripts repo. After that, each transcript is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished.\(suffix)"
                 confirm.addButton(withTitle: "Publish now")
                 confirm.addButton(withTitle: "Enable only")
                 if confirm.runModal() == .alertFirstButtonReturn {
@@ -6142,6 +6196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             box.messageText = "Transcript publishing status"
             var lines: [String] = []
             lines.append("Auto-publish: \(TranscriptPublish.shared.isEnabled ? "on" : "off")")
+            lines.append("Settling (not yet committed): \(TranscriptPublish.shared.pending.count)")
             lines.append("Pending commits: \(state["pending"] ?? 0)")
             if let ok = state["clone_ok"] as? Bool, !ok {
                 lines.append("Publish clone: not created yet")
@@ -8044,6 +8099,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for path in transcriptArtifacts {
             try? FileManager.default.removeItem(atPath: path)
         }
+        // The published copy is deleted once this settles (its source is gone).
+        TranscriptPublish.shared.noteActivity(mdPath: "\(transcriptDir)/\(stem).md", reason: "Removed transcript")
 
         // Summaries are matched by the "<stem> - <Type> - …" prefix — same
         // lookup findSummaryPath uses. A `contains(stem)` sweep was
@@ -10562,6 +10619,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             arguments.append(contentsOf: ["--summarize-engine", summarizeEngine])
         }
         log("runTranscription: \(arguments.joined(separator: " "))")
+        // Anything the pipeline is doing to a recording holds back its GitHub
+        // publish until it finishes (see TranscriptPublish's settle rule).
+        let publishWork = TranscriptPublish.shared.beginWork(arguments: arguments)
+        let originalCompletion = completion
+        let completion: (Result<Data, Error>) -> Void = { result in
+            TranscriptPublish.shared.endWork(publishWork)
+            originalCompletion(result)
+        }
         transcriptionDispatchQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
@@ -10595,6 +10660,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             // Force unbuffered Python output so PROGRESS lines arrive immediately
             env["PYTHONUNBUFFERED"] = "1"
+            // The app publishes through TranscriptPublish once a transcript has
+            // settled. transcribe.py's own publish-after-write is for terminal
+            // runs only; here it would push synchronously on this serial queue
+            // and race the app's publisher for the same git clone.
+            env["HIDOCK_PUBLISH_TO_GITHUB"] = "0"
             process.environment = env
 
             let outPipe = Pipe()
