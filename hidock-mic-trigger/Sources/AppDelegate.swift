@@ -4119,7 +4119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
            // EventKit hands back the address itself as `name` for some accounts;
            // run those through the same tidy-up rather than storing an email.
            !resolved.contains("@") {
-            return resolved
+            return normalizeAttendeeName(resolved)
         }
         let address = attendee.url.absoluteString
             .replacingOccurrences(of: "mailto:", with: "")
@@ -4571,7 +4571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("Calendar search started [\(searchKind)] for \((audioPath as NSString).lastPathComponent), local recording \(localStart)–\(localEnd)\(requestedMeeting.map { ", query=\($0)" } ?? "")")
         let prompt = """
-        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses):
+        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses; write each name as "First Last", never "Last, First"):
         Title: <event title>
         Time: <HH:mm> – <HH:mm>
         Organiser: <display name>
@@ -5036,7 +5036,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). \(connectorInstruction) Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
 
         When you are confident about one or more specific events, end your reply with one line per event, after all prose, in exactly this form:
-        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <comma-separated attendee display names>
+        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <attendee display names, separated by semicolons, each as "First Last">
         Emit no CANDIDATE line if you are unsure — a wrong one would attach the recording to the wrong meeting. Never mention the CANDIDATE lines in your prose.
 
         User: \(userMessage)
@@ -5525,9 +5525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                   end > start
             else { continue }
             let attendees = fields.count >= 4
-                ? fields[3].split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
+                ? splitAttendeeNames(fields[3])
                 : []
             let id = "\(title)|\(start.timeIntervalSince1970)"
             guard seen.insert(id).inserted else { continue }
@@ -11825,7 +11823,7 @@ func parseEnrichedAttendees(_ reply: String) -> [String]? {
     var seen = Set<String>()
     let names: [String] = raw.compactMap { value in
         guard let text = value as? String else { return nil }
-        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = normalizeAttendeeName(text)
         guard !name.isEmpty, name.caseInsensitiveCompare("unavailable") != .orderedSame,
               seen.insert(name.lowercased()).inserted
         else { return nil }
@@ -11868,14 +11866,11 @@ func calendarAttendeeNames(in answer: String, region: NSRange) -> [String] {
     var names: [String] = []
     if let organiser = calendarOrganiserExpression.firstMatch(in: answer, range: region),
        let nameRange = Range(organiser.range(at: 1), in: answer) {
-        names.append(String(answer[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines))
+        names.append(normalizeAttendeeName(String(answer[nameRange])))
     }
     if let block = calendarAttendeesExpression.firstMatch(in: answer, range: region),
        let namesRange = Range(block.range(at: 1), in: answer) {
-        names += String(answer[namesRange])
-            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•"))) }
-            .filter { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
+        names += splitAttendeeNames(String(answer[namesRange]))
     }
     return Array(Set(names)).sorted()
 }
