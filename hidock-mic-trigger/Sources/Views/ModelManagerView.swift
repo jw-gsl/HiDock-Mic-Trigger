@@ -62,6 +62,19 @@ struct ModelStatus: Identifiable {
     /// True when downloading or running this model authenticates with a Hugging
     /// Face token. Only pyannote's diarizer is gated today.
     var gated: Bool = false
+    /// Explainer shown when `gated`, `hardwareGated`, or a remote service is
+    /// involved — the what-do-I-need-to-do text, straight from the registry.
+    var gateNote: String = ""
+    /// True when this model needs hardware the user must affirm owning before
+    /// it becomes selectable (e.g. an NVIDIA GPU host for Nemotron 3).
+    var hardwareGated: Bool = false
+    /// Config key the affirmation is stored under (`hardware_gates.<key>`).
+    var hardwareGateKey: String = ""
+    /// Current affirmation state for `hardwareGateKey`.
+    var hardwareGateAffirmed: Bool = false
+    /// True when inference runs on another machine; the row then offers a
+    /// "Check connection" action backed by `models.py remote-check`.
+    var remoteService: Bool = false
 
     /// Short badge text for the licence, or nil when there is nothing to say.
     /// Only models with a known licence position get a badge; a model outside
@@ -565,7 +578,13 @@ struct ModelManagerView: View {
             onDownload: { viewModel.onDownloadModelByKey(status.id) },
             onDelete: { viewModel.onDeleteModelByKey(status.id) },
             onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
-            onCheckCapability: { viewModel.onCheckModelCapability(status.id) }
+            onCheckCapability: { viewModel.onCheckModelCapability(status.id) },
+            remoteStatus: viewModel.remoteServiceChecks[status.id],
+            remoteChecking: viewModel.remoteServiceChecking.contains(status.id),
+            onCheckRemote: { viewModel.onCheckRemoteService(status.id) },
+            onSetHardwareGate: { affirmed in
+                viewModel.onSetHardwareGate(status.hardwareGateKey, affirmed)
+            }
         )
     }
 
@@ -660,6 +679,18 @@ struct ModelRowView: View {
     let onDelete: () -> Void
     let onSetActive: () -> Void
     let onCheckCapability: () -> Void
+    /// Remote-service reachability string ("reachable (...)" / failure
+    /// detail) for remote backends, after the user hits Check connection.
+    let remoteStatus: String?
+    let remoteChecking: Bool
+    let onCheckRemote: () -> Void
+    /// Affirm or revoke ownership of the hardware this model needs.
+    let onSetHardwareGate: (Bool) -> Void
+
+    /// Hardware-gated rows are greyed out and unselectable until the inline
+    /// "I have one" toggle is on — a remote backend nobody can reach would
+    /// otherwise fail mid-meeting in the Python layer instead of here.
+    private var gateBlocked: Bool { status.hardwareGated && !status.hardwareGateAffirmed }
 
     /// A radio-style indicator for which backend is active within a
     /// stage. Tapping a not-currently-active installed row promotes
@@ -670,27 +701,28 @@ struct ModelRowView: View {
     private var selector: some View {
         if allowSelection {
             Button {
-                if status.installed && !status.active && !status.planned {
+                if status.installed && !status.active && !status.planned && !gateBlocked {
                     onSetActive()
                 }
             } label: {
                 Image(systemName: status.active
                       ? "largecircle.fill.circle"
-                      : (status.installed ? "circle" : "circle.dashed"))
+                      : (status.installed && !gateBlocked ? "circle" : "circle.dashed"))
                     .font(.title2)
-                    .foregroundColor(status.active ? .accentColor : (status.installed ? .secondary : .secondary.opacity(0.4)))
+                    .foregroundColor(status.active ? .accentColor : (status.installed && !gateBlocked ? .secondary : .secondary.opacity(0.4)))
             }
             .buttonStyle(.plain)
-            .disabled(status.planned || !status.installed || status.active)
+            .disabled(status.planned || !status.installed || status.active || gateBlocked)
             .help(
-                status.planned
-                    ? "Planned for the next model bake-off — not yet integrated into live review"
-                    : (status.active
-                        ? "Active — currently used for \(friendlyStage(status.stage))"
-                        : (status.installed
-                            ? "Set as active for \(friendlyStage(status.stage))"
-                            : "Download first to select this backend"))
-            )
+                gateBlocked
+                    ? (status.gateNote.isEmpty ? "Locked — needs hardware you have not confirmed owning" : status.gateNote)
+                    : (status.planned
+                        ? "Planned for the next model bake-off — not yet integrated into live review"
+                        : (status.active
+                            ? "Active — currently used for \(friendlyStage(status.stage))"
+                            : (status.installed
+                                ? "Set as active for \(friendlyStage(status.stage))"
+                                : "Download first to select this backend"))))
         } else {
             // Single-option stage. Same radio vocabulary as everywhere else: a
             // green tick here made Speaker Embeddings look like a different kind
@@ -847,6 +879,65 @@ struct ModelRowView: View {
                     capabilityReportView(report)
                         .padding(.top, 4)
                 }
+
+                // Hardware gate: a plain Yes/No ownership question. Off =
+                // the row is greyed (see `selector`); on = selectable, and
+                // a connection check is offered next to it.
+                if status.hardwareGated {
+                    HStack(spacing: 8) {
+                        Toggle(isOn: Binding(
+                            get: { status.hardwareGateAffirmed },
+                            set: { onSetHardwareGate($0) }
+                        )) {
+                            Text("I have an NVIDIA DGX Spark")
+                                .font(.caption)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .help("Nemotron 3 runs on the NVIDIA host over your network — this Mac has no NVIDIA GPU, so without a host this backend can never run.")
+                        if !status.hardwareGateAffirmed {
+                            Text("— locked")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.top, 4)
+                    if !status.gateNote.isEmpty {
+                        Text(status.gateNote)
+                            .font(.caption2.italic())
+                            .foregroundColor(.secondary)
+                    }
+                }
+                if status.remoteService && status.hardwareGateAffirmed {
+                    NvidiaSparkSettingsView(onCheck: onCheckRemote)
+                    if remoteChecking {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Checking connection...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.top, 2)
+                    } else {
+                        Button {
+                            onCheckRemote()
+                        } label: {
+                            Label("Check connection", systemImage: "cable.connector")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("Checks the Spark answers and accepts the token, without running the model")
+                        .padding(.top, 2)
+                    }
+                    if let remoteStatus {
+                        Text(remoteStatus)
+                            .font(.caption2)
+                            .foregroundColor(remoteStatus.hasPrefix("\u{2713}") ? .green : .orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
 
             VStack {
@@ -855,6 +946,12 @@ struct ModelRowView: View {
                     // no Download/Delete actions; the row's only action is
                     // "Check compatibility" (inline, above).
                     EmptyView()
+                } else if status.remoteService {
+                    // Nothing installs locally — selection is the only
+                    // action, and reachability is checked inline.
+                    Text("On your Spark")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 } else if status.builtIn {
                     // Always available; nothing to download or delete.
                     Text("Always on")

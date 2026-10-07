@@ -805,6 +805,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
         viewModel.onSetActiveModelByKey = { [weak self] key in self?.setActiveModelByKey(key) }
+        viewModel.onCheckRemoteService = { [weak self] key in self?.checkRemoteService(key) }
+        viewModel.onSetHardwareGate = { [weak self] gateKey, affirmed in
+            self?.setHardwareGate(gateKey, affirmed: affirmed)
+        }
         viewModel.onCheckModelCapability = { [weak self] key in self?.checkModelCapability(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
@@ -6238,6 +6242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTHONPATH"] = self.repoRoot
             // Gated models (pyannote) authenticate with this; absent otherwise.
             HuggingFaceToken.inject(into: &env)
+            NemotronAccess.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
@@ -8211,7 +8216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 capability: info["capability"] as? String,
                                 distributable: info["distributable"] as? Bool,
                                 licence: info["licence"] as? String,
-                                gated: info["gated"] as? Bool ?? false
+                                gated: info["gated"] as? Bool ?? false,
+                                gateNote: info["gate_note"] as? String ?? "",
+                                hardwareGated: info["hardware_gated"] as? Bool ?? false,
+                                hardwareGateKey: info["hardware_gate_key"] as? String ?? "",
+                                hardwareGateAffirmed: info["hardware_gate_affirmed"] as? Bool ?? false,
+                                remoteService: info["remote_service"] as? Bool ?? false
                             )
                         }
                         self.viewModel.modelStatuses = statuses
@@ -8305,17 +8315,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptPath, "set-active", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            do {
+                try process.run()
+                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                errPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                // Hardware-gated or unreachable remote backends are refused
+                // by models.py with a JSON error; surface the reason instead
+                // of silently doing nothing.
+                if process.terminationStatus != 0,
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let message = parsed["error"] as? String {
+                    DispatchQueue.main.async { self?.log("Cannot set active model \(key): \(message)") }
+                } else {
+                    DispatchQueue.main.async {
+                        self?.log("Set active model: \(key)")
+                    }
+                }
+                DispatchQueue.main.async {
+                    self?.refreshModelStatuses()
+                }
+            } catch {
+                self?.log("Failed to set active model \(key): \(error)")
+            }
+        }
+    }
+
+    /// Run `shared/models.py remote-check <key>` for a remote-service backend
+    /// (e.g. the Nemotron sidecar on an NVIDIA host). The result string lands
+    /// in viewModel.remoteServiceChecks[key] and renders inline on the row.
+    private func checkRemoteService(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.remoteServiceChecking.insert(key)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "remote-check", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let reachable = parsed?["reachable"] as? Bool ?? false
+                let detail = parsed?["detail"] as? String ?? "no response from check"
+                let result = reachable ? "\u{2713} \(detail)" : "\u{2717} \(detail)"
+                DispatchQueue.main.async {
+                    self?.viewModel.remoteServiceChecking.remove(key)
+                    self?.viewModel.remoteServiceChecks[key] = result
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.viewModel.remoteServiceChecking.remove(key)
+                    self?.viewModel.remoteServiceChecks[key] = "check failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Persist the "Do you have an NVIDIA GPU host?" affirmation
+    /// (`models.py set-hardware-gate <gateKey> <true|false>`), then refresh
+    /// statuses so the row ungreys (or re-greys) immediately.
+    private func setHardwareGate(_ gateKey: String, affirmed: Bool) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "set-hardware-gate", gateKey, affirmed ? "true" : "false"]
             process.standardOutput = Pipe()
             process.standardError = Pipe()
             do {
                 try process.run()
                 process.waitUntilExit()
                 DispatchQueue.main.async {
-                    self?.log("Set active model: \(key)")
+                    self?.log("Hardware gate \(gateKey) = \(affirmed)")
                     self?.refreshModelStatuses()
                 }
             } catch {
-                self?.log("Failed to set active model \(key): \(error)")
+                self?.log("Failed to set hardware gate \(gateKey): \(error)")
             }
         }
     }
@@ -10438,6 +10533,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // was created by an earlier build (so its ACL no longer matches) every
             // one of those reads raised an access prompt. Only pyannote is gated,
             // so a Parakeet + Sortformer pipeline now never touches the Keychain.
+            // The Spark's endpoint and token, for the Nemotron diarizer. A
+            // missing token is cached as such, so this costs no Keychain prompt.
+            NemotronAccess.inject(into: &env)
             if self.anyGatedModelInPlay {
                 HuggingFaceToken.inject(into: &env)
             }

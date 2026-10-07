@@ -274,6 +274,32 @@ MODEL_REGISTRY = {
         "depends_on": "Self-contained (no supporting models needed)",
         "description": "State-of-the-art end-to-end neural diarization (CC-BY-4.0). Handles up to 4 speakers with much better per-turn accuracy than the lite pipeline. Includes its own VAD and speaker representation — does not use the Silero / TitaNet entries below. CPU-only on macOS. Installing also installs the NeMo toolkit (~2 GB).",
     },
+    # Nemotron 3 Diarization — remote backend for machines with an NVIDIA
+    # GPU host (DGX Spark / any Ampere+ box). The Mac cannot run it (NVIDIA
+    # GPUs only, per the model card); this entry drives `shared.diarize_nemotron`,
+    # a thin HTTP client to the sidecar on ember over the tailnet.
+    # NOT `gated` in the HF sense — OpenMDW 1.1, no licence acceptance, no
+    # token. The gate here is *hardware*: the UI shows a "Do you have an
+    # NVIDIA GPU host?" toggle and only enables selection once it's on.
+    "diarize_nemotron": {
+        "name": "NVIDIA Nemotron 3 — on your DGX Spark",
+        "stage": "diarization",
+        "stage_label": "Speaker Diarization",
+        "category": "pipeline",
+        "backend_key": "nemotron",
+        "built_in": False,           # no download — runs remotely
+        "remote_service": True,
+        "hardware_gated": True,
+        "hardware_gate_key": "has_nvidia_host",
+        "gate_note": "Runs on your Spark over the network, not on this Mac. "
+                     "Up to 8 speakers; a 30-minute meeting takes well under "
+                     "a minute.",
+        "licence": "OpenMDW 1.1 (commercial use allowed)",
+        "distributable": True,
+        "size_mb": 0,
+        "depends_on": "Sidecar service on the NVIDIA host (see docs/REMOTE-NEMOTRON.md)",
+        "description": "Open-weight 100M-param diarizer, #1 on Voice Arena Diarization-Bench (14.72% DER with overlap). Up to 8 speakers, arrival-time-ordered stable labels, strong overlap handling. Inference runs on your NVIDIA host over the local network — audio never leaves it; nothing is sent to the cloud.",
+    },
     "speaker_embed": {
         "name": "TitaNet",
         "filename": "speaker_embedding.onnx",
@@ -612,6 +638,68 @@ def set_active_backend(stage: str, backend_key: str) -> dict[str, str]:
     return backends
 
 
+# ── Hardware gate (remote GPU-host models) ───────────────────────────────────
+
+def _ensure_repo_on_path() -> None:
+    """When invoked as a plain script, the repo root isn't on sys.path —
+    add it before any `shared.` import (same pattern as pipeline_dispatch
+    and the `capability` CLI branch)."""
+    if not __package__:
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+
+
+def _hardware_gate_affirmed(key: str) -> bool:
+    """Whether the user affirmed owning the hardware a gated remote model needs.
+
+    The gate is *ownership*, not install: e.g. Nemotron 3 Diarization runs on
+    an NVIDIA host and the Mac has no NVIDIA GPU, so selecting it without
+    owning such a host would always fail at run time. The affirmation lives in
+    the user config (`config_store`), keyed per gate — default false.
+    """
+    info = MODEL_REGISTRY.get(key, {})
+    gate_key = info.get("hardware_gate_key")
+    if not gate_key:
+        return True  # not hardware-gated
+    try:
+        _ensure_repo_on_path()
+        from shared.config_store import get_config
+        return bool(get_config().get("hardware_gates", gate_key, False))
+    except Exception:  # noqa: BLE001 - an unreadable config means not affirmed
+        return False
+
+
+def remote_service_check(key: str) -> dict:
+    """Ping a remote-service backend's sidecar. Never raises.
+
+    Returns {"reachable": bool, "detail": str}. For non-remote keys returns a
+    trivially-positive result so callers don't need to special-case."""
+    info = MODEL_REGISTRY.get(key, {})
+    if not info.get("remote_service"):
+        return {"reachable": True, "detail": "local backend"}
+    backend_key = info.get("backend_key", key)
+    try:
+        _ensure_repo_on_path()
+        if backend_key == "nemotron":
+            from shared.diarize_nemotron import available
+            ok, detail = available()
+            return {"reachable": ok, "detail": detail}
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not fatal
+        return {"reachable": False, "detail": str(exc)}
+    return {"reachable": False, "detail": f"no reachability check for {backend_key}"}
+
+
+def set_hardware_gate(gate_key: str, affirmed: bool) -> dict:
+    """Persist a hardware-gate affirmation for the UI toggle."""
+    _ensure_repo_on_path()
+    from shared.config_store import get_config
+    cfg = get_config()
+    cfg.set("hardware_gates", gate_key, bool(affirmed))
+    cfg.save()
+    return {"ok": True, "gate": gate_key, "affirmed": bool(affirmed)}
+
+
 # ── Speaker Identity Review candidate switching ──────────────────────────────
 
 # Which candidate directory each identity_review backend reviews from. Each
@@ -725,6 +813,15 @@ def get_model_status() -> dict[str, dict]:
             file_size = 0
             filename = None
             url = None
+        elif info.get("remote_service"):
+            # Runs on another machine (e.g. the Nemotron sidecar on an NVIDIA
+            # host). Nothing installs locally; reachability is checked
+            # on-demand by the app via the backend's available(), not here —
+            # get_model_status() runs on every Models-page render.
+            installed = True
+            file_size = 0
+            filename = None
+            url = None
         elif info.get("managed_externally"):
             # Weights are managed by an external tool (e.g. parakeet-mlx via
             # the HuggingFace hub cache) — the registry `url` is an info page,
@@ -798,6 +895,16 @@ def get_model_status() -> dict[str, dict]:
             # Surfaced so the app can read that credential only when something
             # actually needs it, instead of on every pipeline subprocess.
             "gated": info.get("gated", False),
+            "gate_note": info.get("gate_note", ""),
+            # Hardware-gated models (remote GPU services) are greyed out until
+            # the user affirms they own the hardware — distinct from the HF
+            # licence gate: no token involved, just honesty about capability.
+            "hardware_gated": info.get("hardware_gated", False),
+            "hardware_gate_key": info.get("hardware_gate_key", ""),
+            "hardware_gate_affirmed": _hardware_gate_affirmed(key),
+            # Remote backends reuse "gate_note" (above) for the endpoint note
+            # the UI shows inline on the row.
+            "remote_service": info.get("remote_service", False),
         }
     return statuses
 
@@ -916,6 +1023,29 @@ def _cli():
         if not stage:
             print(json.dumps({"ok": False, "error": f"Model {key} has no stage"}))
             sys.exit(1)
+        # Hardware-gated remote models (e.g. Nemotron on an NVIDIA host)
+        # refuse activation until the user affirmed owning the hardware AND
+        # the service actually answers. A selection that can never run is
+        # worse than none: the pipeline would fail mid-meeting, deep in the
+        # backend's HTTP layer, instead of here at selection time.
+        if info.get("hardware_gated") and not _hardware_gate_affirmed(key):
+            print(json.dumps({
+                "ok": False,
+                "error": (info.get("gate_note")
+                          or "This model needs hardware you have not confirmed owning."),
+                "hardware_gate": info.get("hardware_gate_key", ""),
+            }))
+            sys.exit(1)
+        if info.get("remote_service"):
+            check = remote_service_check(key)
+            if not check.get("reachable"):
+                print(json.dumps({
+                    "ok": False,
+                    "error": (f"{info['name']} service is not reachable: "
+                              f"{check.get('detail', 'unknown')}"),
+                    "unreachable": True,
+                }))
+                sys.exit(1)
         result: dict = {}
         if stage == "identity_review":
             # Sync active.json to the chosen candidate FIRST — if it fails,
@@ -931,6 +1061,24 @@ def _cli():
     elif command == "backends":
         # Dump the current backend selection for debugging/inspection.
         print(json.dumps(load_pipeline_backends(), indent=2))
+
+    elif command == "remote-check":
+        if len(sys.argv) < 3:
+            print("Usage: models.py remote-check <model_key>", file=sys.stderr)
+            sys.exit(1)
+        key = sys.argv[2]
+        if key not in MODEL_REGISTRY:
+            print(json.dumps({"ok": False, "error": f"Unknown model key: {key}"}))
+            sys.exit(1)
+        print(json.dumps(remote_service_check(key)))
+
+    elif command == "set-hardware-gate":
+        if len(sys.argv) < 4:
+            print("Usage: models.py set-hardware-gate <gate_key> <true|false>",
+                  file=sys.stderr)
+            sys.exit(1)
+        affirmed = sys.argv[3].strip().lower() in ("true", "1", "yes", "on")
+        print(json.dumps(set_hardware_gate(sys.argv[2], affirmed)))
 
     elif command == "capability":
         if len(sys.argv) < 3:
