@@ -20,6 +20,13 @@ from typing import Iterable
 
 _GENERIC_RE = re.compile(r"^Speaker \d+$")
 _MIN_OVERLAP_SECONDS = 0.75
+# A fresh cluster inherits a confirmed name only when most of its own speech
+# was that person's before. Absolute overlap alone was not enough: on Rec45
+# (2026-10-08) "James Whiting" was the only confirmed name, Nemotron's
+# boundaries differ from Sortformer's, so every fresh speaker overlapped some
+# of James's old segments by more than 0.75 s — all five took his name and
+# were merged into one, and each re-run fed the next.
+_MIN_OVERLAP_SHARE = 0.5
 
 
 def _is_generic(name: str | None) -> bool:
@@ -133,6 +140,7 @@ def preserve_existing_speaker_labels(
     original_meta = diarized_result.get("speaker_meta") or {}
     original_embeddings = diarized_result.get("speaker_embeddings") or {}
     cluster_order: list[str] = []
+    cluster_seconds: dict[str, float] = {}
     cluster_scores: dict[str, dict[str, float]] = {}
     cluster_meta: dict[str, dict[str, dict]] = {}
     for segment in segments:
@@ -144,6 +152,7 @@ def preserve_existing_speaker_labels(
             end = float(segment.get("end", 0.0))
         except (TypeError, ValueError):
             continue
+        cluster_seconds[cluster] = cluster_seconds.get(cluster, 0.0) + max(0.0, end - start)
         for anchor_start, anchor_end, name, meta in anchors:
             overlap = _overlap(start, end, anchor_start, anchor_end)
             if overlap <= 0:
@@ -161,6 +170,8 @@ def preserve_existing_speaker_labels(
         name, overlap = max(scores.items(), key=lambda item: item[1])
         if overlap < _MIN_OVERLAP_SECONDS:
             continue
+        if overlap < _MIN_OVERLAP_SHARE * cluster_seconds.get(cluster, 0.0):
+            continue  # mostly someone else: a stray overlap, not this person
         cluster_to_name[cluster] = name
         cluster_to_meta[cluster] = dict(cluster_meta[cluster][name])
 

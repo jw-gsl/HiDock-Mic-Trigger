@@ -991,6 +991,40 @@ def cmd_status(_args):
     print(json.dumps(lookup))
 
 
+def _carry_over_concurrent_speaker_tags(
+    json_path: Path, loaded_mtime_ns: int, diarized_result: dict, n_speakers: int | None,
+) -> dict:
+    """Keep speaker tags the reviewer made while a re-diarisation was running.
+
+    A re-run reads the sidecar once, takes a minute or so, then writes its
+    result. Confirming a meeting starts one, and people naturally start tagging
+    speakers straight away — every tag is written to the sidecar meanwhile and
+    was then overwritten (Rec45, 2026-10-08). If the file changed under us,
+    re-read it and carry its confirmed names onto the fresh speakers by the same
+    overlap rule the run already used for older labels. Best effort: on any
+    failure the result is returned unchanged.
+    """
+    import json as _json
+    try:
+        if json_path.stat().st_mtime_ns == loaded_mtime_ns:
+            return diarized_result
+        latest = _json.loads(json_path.read_text(encoding="utf-8"))
+        from shared.merge_speaker_labels import preserve_existing_speaker_labels
+        merged = preserve_existing_speaker_labels(
+            diarized_result, latest, min_speakers=n_speakers,
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose the run over this
+        print(f"WARN: could not carry over tags made during re-diarisation: {exc}",
+              file=sys.stderr)
+        return diarized_result
+    before = set((diarized_result.get("speaker_names") or {}).values())
+    carried = sorted(set((merged.get("speaker_names") or {}).values()) - before)
+    print("Speaker tags made during re-diarisation: "
+          + (f"kept {', '.join(carried)}" if carried else "none to carry over"),
+          file=sys.stderr)
+    return merged
+
+
 def cmd_rediarize(args):
     """Re-run speaker diarization on an existing transcript without re-transcribing."""
     import json as _json
@@ -1002,6 +1036,7 @@ def cmd_rediarize(args):
 
     snapshot_transcript(json_path, "Before re-diarisation (CLI)")
     data = _json.loads(json_path.read_text(encoding="utf-8"))
+    loaded_mtime_ns = json_path.stat().st_mtime_ns
     audio_path = data.get("audio_file", "")
     if not Path(audio_path).exists():
         print(f"Audio file not found: {audio_path}", file=sys.stderr)
@@ -1105,6 +1140,13 @@ def cmd_rediarize(args):
                 seg["text"] = apply_corrections(seg["text"])
     except ImportError:
         pass
+
+    # Tags made while this ran (confirming or renaming a speaker in the viewer)
+    # were written to the sidecar after `data` was read. Saving the result
+    # as-is would silently undo them, so carry them over first.
+    diarized_result = _carry_over_concurrent_speaker_tags(
+        json_path, loaded_mtime_ns, diarized_result, n_speakers,
+    )
 
     # Save back
     json_path.write_text(
