@@ -366,3 +366,82 @@ func chooseCalendarEvent(
     }
     return CalendarMatchDecision(event: best, reason: "dominant overlap (\(summary))")
 }
+
+/// The calendar event a diarised transcript's speakers were matched against,
+/// from the `calendar_context` block the pipeline writes into `_diarized.json`.
+///
+/// Lets a confirmation skip re-diarising when the transcript was already
+/// diarised against the suggested meeting during transcription.
+func calendarEventIdDiarisedAgainst(diarizedJSONPath path: String) -> String? {
+    guard let data = FileManager.default.contents(atPath: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let context = json["calendar_context"] as? [String: Any],
+          let id = context["calendar_event_id"] as? String, !id.isEmpty
+    else { return nil }
+    return id
+}
+
+/// Break a timing tie between calendar events using what was said.
+///
+/// Used only after `chooseCalendarEvent` finds no clear winner by time, e.g. a
+/// recording that runs evenly across two meetings, or two meetings booked over
+/// the same slot. Each event scores one point for every invitee *only it has*
+/// who is named in the transcript (first name or full name), and half a point
+/// for every distinctive word of its title that comes up. Invitees shared by
+/// every candidate (usually the person recording) tell them apart in no way
+/// and are ignored. An event wins with at least 1.5 points and a 1.5-point
+/// lead, and only if it overlaps at least a fifth of the recording, so a talk
+/// that mentions next week's meeting can't pull a recording into it.
+func chooseCalendarEventFromTranscript(
+    _ events: [CalendarMeetingCandidate],
+    transcript: String,
+    recordingStart: Date,
+    recordingEnd: Date
+) -> CalendarMatchDecision {
+    guard events.count > 1 else { return CalendarMatchDecision(event: nil, reason: "nothing to compare") }
+    let text = " " + transcript.lowercased()
+        .map { $0.isLetter || $0.isNumber ? $0 : " " }
+        .reduce(into: "") { $0.append($1) } + " "
+    func said(_ phrase: String) -> Bool {
+        let words = phrase.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        guard !words.isEmpty else { return false }
+        return text.contains(" " + words.joined(separator: " ") + " ")
+    }
+    let normalised = { (name: String) in name.lowercased().trimmingCharacters(in: .whitespaces) }
+    let shared = events.dropFirst().reduce(Set(events[0].attendeeNames.map(normalised))) {
+        $0.intersection($1.attendeeNames.map(normalised))
+    }
+    let titleStopWords: Set<String> = [
+        "meeting", "call", "sync", "catch", "chat", "with", "and", "the", "for", "team",
+        "weekly", "daily", "review", "session", "discussion", "update", "check", "teams",
+    ]
+    let recordingLength = max(1, recordingEnd.timeIntervalSince(recordingStart))
+
+    struct Evidence { let event: CalendarMeetingCandidate; let score: Double; let detail: String }
+    let evidence = events.map { event -> Evidence in
+        let names = event.attendeeNames.filter { !shared.contains(normalised($0)) }.filter { name in
+            let first = name.split(separator: " ").first.map(String.init) ?? name
+            return said(name) || (first.count >= 3 && said(first))
+        }
+        let titleWords = Set(event.title.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+            .filter { $0.count >= 4 && !titleStopWords.contains($0) })
+            .filter(said)
+        let score = Double(names.count) + 0.5 * Double(titleWords.count)
+        let parts = (names.isEmpty ? [] : ["named " + names.joined(separator: ", ")])
+            + (titleWords.isEmpty ? [] : ["said " + titleWords.sorted().joined(separator: ", ")])
+        return Evidence(event: event, score: score,
+                        detail: "\(event.title) \(score)" + (parts.isEmpty ? "" : " (\(parts.joined(separator: "; ")))"))
+    }.sorted { $0.score > $1.score }
+
+    let summary = evidence.map(\.detail).joined(separator: ", ")
+    let best = evidence[0], runnerUp = evidence[1]
+    let overlap = max(0, min(best.event.end, recordingEnd).timeIntervalSince(max(best.event.start, recordingStart)))
+    guard best.score >= 1.5, best.score - runnerUp.score >= 1.5 else {
+        return CalendarMatchDecision(event: nil, reason: "transcript doesn't settle it: \(summary)")
+    }
+    guard overlap >= 0.2 * recordingLength else {
+        return CalendarMatchDecision(event: nil, reason: "transcript points at \(best.event.title), but it barely overlaps: \(summary)")
+    }
+    return CalendarMatchDecision(event: best.event, reason: "transcript: \(summary)")
+}
