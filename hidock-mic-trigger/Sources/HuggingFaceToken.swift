@@ -160,6 +160,11 @@ enum HuggingFaceToken {
         // Ask before reading, so we can tell a promptless read from one that
         // raised a dialog. Cheap, and the only way to know a repair is due.
         let neededPrompt = !isReadableWithoutPrompting()
+        // A test host or ad-hoc build would prompt, then take the item over.
+        if neededPrompt && !KeychainAccessPolicy.mayPrompt {
+            cache = .notFound
+            return nil
+        }
         let token = readStoredToken()
         if let token, neededPrompt, rewriteWithSelfOwnedAccess(token) {
             NSLog("HuggingFaceToken: repaired Keychain access — this build now owns "

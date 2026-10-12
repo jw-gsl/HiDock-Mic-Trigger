@@ -1,4 +1,32 @@
 import Foundation
+import Security
+
+/// Whether this process may raise a Keychain prompt or take ownership of an item.
+///
+/// Only the deployed app, signed with the team's Developer ID, is named in the
+/// items' access lists. `xcodebuild test` launches an ad-hoc-signed copy of the
+/// app as its test host, and that copy reads the tokens at launch: every test
+/// run raised "HiDock Mic Trigger wants to use … in your keychain". Allowing
+/// it was worse — the repair step then re-saved the item owned by the test
+/// copy, so the real app asked next. Unsigned and test builds now read
+/// silently or go without.
+enum KeychainAccessPolicy {
+    static let mayPrompt: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        if env["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil {
+            return false
+        }
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return false }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation),
+                                            &info) == errSecSuccess,
+              let details = info as? [String: Any] else { return false }
+        return details[kSecCodeInfoTeamIdentifier as String] != nil
+    }()
+}
 
 /// A single secret in the login Keychain, readable by this app without
 /// prompting. The same storage rules as `HuggingFaceToken` (see there for the
@@ -70,6 +98,10 @@ final class KeychainSecret {
         case .unread: break
         }
         let neededPrompt = !isReadableWithoutPrompting()
+        if neededPrompt && !KeychainAccessPolicy.mayPrompt {
+            cache = .notFound
+            return nil
+        }
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
