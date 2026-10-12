@@ -257,3 +257,56 @@ func calendarReplyIsConnectorFailure(_ answer: String) -> Bool {
     ]
     return signals.contains { lowered.contains($0) }
 }
+
+/// Which of several overlapping calendar events a recording belongs to, if any.
+///
+/// Recordings start a minute early and run a minute over, so on a day of
+/// back-to-back meetings every lookup returns the meeting itself plus a sliver
+/// of its neighbour. Requiring exactly one event left all of those unlinked
+/// (Rec61–63, 2026-10-09: 30 min of "Jordan & James" against 1½ min of the
+/// next call). An event wins when it covers a real share of the recording and
+/// clearly outweighs everything else; a recording split evenly across two
+/// meetings stays ambiguous and goes to the user, as before.
+///
+/// Events with one or no invitee ("Swimming", focus time) count half: an empty
+/// list can also mean the connector didn't return invitees, so they're
+/// discounted rather than dropped. The result is still only a suggestion that
+/// the user confirms.
+struct CalendarMatchDecision {
+    let event: CalendarMeetingCandidate?
+    /// Why, in a form fit for the log.
+    let reason: String
+}
+
+func chooseCalendarEvent(
+    _ events: [CalendarMeetingCandidate],
+    recordingStart: Date,
+    recordingEnd: Date
+) -> CalendarMatchDecision {
+    if events.isEmpty { return CalendarMatchDecision(event: nil, reason: "no events") }
+    if events.count == 1 { return CalendarMatchDecision(event: events[0], reason: "only event") }
+
+    let recordingLength = max(1, recordingEnd.timeIntervalSince(recordingStart))
+    func overlap(_ e: CalendarMeetingCandidate) -> TimeInterval {
+        max(0, min(e.end, recordingEnd).timeIntervalSince(max(e.start, recordingStart)))
+    }
+    func score(_ e: CalendarMeetingCandidate) -> TimeInterval {
+        overlap(e) * (e.attendeeCount >= 2 ? 1 : 0.5)
+    }
+    let ranked = events.sorted { score($0) > score($1) }
+    let best = ranked[0], runnerUp = ranked[1]
+    let bestOverlap = overlap(best)
+    let eventLength = max(1, best.end.timeIntervalSince(best.start))
+    let minutes = { (t: TimeInterval) in String(format: "%.1f min", t / 60) }
+    let summary = ranked.map { "\($0.title) \(minutes(overlap($0)))" }.joined(separator: ", ")
+
+    // A real share of either the recording or the meeting: a short recording
+    // inside a long meeting, or a whole meeting inside a long recording.
+    guard bestOverlap >= 0.5 * recordingLength || bestOverlap >= 0.5 * eventLength else {
+        return CalendarMatchDecision(event: nil, reason: "no event covers most of the recording (\(summary))")
+    }
+    guard score(runnerUp) * 3 <= score(best) else {
+        return CalendarMatchDecision(event: nil, reason: "no clear winner (\(summary))")
+    }
+    return CalendarMatchDecision(event: best, reason: "dominant overlap (\(summary))")
+}
