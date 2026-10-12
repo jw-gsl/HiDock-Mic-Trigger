@@ -706,12 +706,6 @@ enum TranscriptRediarizeStatus {
     case failed(String)
 }
 
-private enum ReassignScope: String, CaseIterable, Identifiable {
-    case allMeeting = "All meeting"
-    case reviewedThrough = "Reviewed until…"
-    var id: String { rawValue }
-}
-
 /// A calendar event offered as speaker-count context for this recording.
 struct CalendarMeetingCandidate: Identifiable, Hashable {
     let id: String
@@ -855,13 +849,9 @@ struct TranscriptViewerView: View {
     /// Timestamp of the text just edited. Splitting a segment changes its view
     /// identity, so SwiftUI otherwise reconstructs the scroll view at the top.
     @State private var pendingTranscriptRestoreTime: Double?
-    @State private var showReassignOptions = false
     @State private var showSpeakerToolsHelp = false
     @State private var voiceCheckRunning = false
     @State private var voiceCheckResult: VoiceCheckResult?
-    @State private var reassignScope: ReassignScope = .allMeeting
-    @State private var reviewedUntilMinutes = 0
-    @State private var reviewedUntilSeconds = 0
     @State private var calendarCandidates: [CalendarMeetingCandidate] = []
     @State private var calendarLoading = false
     @State private var linkedCalendarEvent: CalendarMeetingCandidate?
@@ -1932,33 +1922,7 @@ struct TranscriptViewerView: View {
                     }
                     .fixedSize()
                     .disabled(isRediarizing)
-                    .help("Redetect speakers from the audio using the expected count shown in the stepper. Confirmed and legacy-named people are preserved where the timestamps support them; other assignments may change.")
-
-                }
-
-                if onRematch != nil {
-                    Button {
-                        onRematch?(filePath)
-                    } label: {
-                        Label("Rematch", systemImage: "sparkle.magnifyingglass")
-                    }
-                    .fixedSize()
-                    .help("Rematch only generic, unconfirmed speakers against the saved Voice Library. It uses stored embeddings when available, re-embeds older sidecars when needed, and leaves confirmed or named people unchanged.")
-                }
-
-                if onReclusterWithLabels != nil, hasAnchorNamedSpeakers {
-                    Button {
-                        showReassignOptions = true
-                    } label: {
-                        Label("Reassign", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .fixedSize()
-                    .help("Use confirmed people in this meeting to correct unconfirmed turns. Choose the whole meeting or only the reviewed portion as evidence.")
-                    .popover(isPresented: $showReassignOptions, arrowEdge: .bottom) {
-                        reassignOptions
-                            .frame(width: 315)
-                            .padding(12)
-                    }
+                    .help("Start speaker detection again from the audio. Use it when who-spoke-when is badly wrong, such as two people merged into one. Confirmed names carry over where the timing supports them; everything else may change.")
                 }
             }
             .buttonStyle(.bordered)
@@ -2275,29 +2239,16 @@ struct TranscriptViewerView: View {
         Int(ceil(transcript.segments.map(\.end).max() ?? 0))
     }
 
-    private var reviewedUntilValue: Double {
-        Double(reviewedUntilMinutes * 60 + reviewedUntilSeconds)
-    }
-
-    private var reviewedUntilIsValid: Bool {
-        reviewedUntilValue > 0 && reviewedUntilValue <= Double(transcriptDurationSeconds)
-    }
 
     private var speakerToolsHelp: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Speaker tools")
                 .font(.headline)
             Text("Refine").font(.subheadline.weight(.semibold))
-            Text("Checks every line against the saved voices of this meeting's people and suggests corrections, including a speaker whose name is wrong. Nothing changes until you apply them.")
+            Text("Checks every line against the saved voices of this meeting's people and suggests corrections: lines that belong to someone else, a speaker whose name is wrong, and names for speakers still called \"Speaker N\". Nothing changes until you apply them. Best after confirming names.")
                 .font(.caption)
             Text("Redetect").font(.subheadline.weight(.semibold))
-            Text("Reruns detection using the selected expected speaker count. Use only when the speaker breaks themselves need redoing.")
-                .font(.caption)
-            Text("Rematch").font(.subheadline.weight(.semibold))
-            Text("Matches generic speakers against the saved Voice Library; confirmed labels stay unchanged.")
-                .font(.caption)
-            Text("Reassign").font(.subheadline.weight(.semibold))
-            Text("Uses confirmed people in this meeting to correct other turns. In Reviewed until mode, every later label is cleared and reassessed.")
+            Text("Starts speaker detection again from the audio — automatically, or with the count set beside Speakers. Use it when who-spoke-when is badly wrong (two people merged into one). Confirmed names carry over where the timing supports them.")
                 .font(.caption)
         }
     }
@@ -2615,65 +2566,6 @@ struct TranscriptViewerView: View {
                 && (onLoadCalendarRejection?(audioPath) ?? false)
             if linkedCalendarEvent == nil && suggestedCalendarEvent == nil && !calendarCheckRejected && calendarCandidates.isEmpty {
                 loadCalendarCandidates()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var reassignOptions: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Reassign unconfirmed turns")
-                .font(.headline)
-            Text("Choose which reviewed labels should guide the rest of this meeting.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Picker("Evidence", selection: $reassignScope) {
-                ForEach(ReassignScope.allCases) { scope in
-                    Text(scope.rawValue).tag(scope)
-                }
-            }
-            .pickerStyle(.radioGroup)
-
-            if reassignScope == .reviewedThrough {
-                HStack(spacing: 6) {
-                    Text("Reviewed until")
-                    TextField("0", value: $reviewedUntilMinutes, formatter: Self.timeComponentFormatter)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 38)
-                    Text("min")
-                        .font(.caption)
-                    Stepper("", value: $reviewedUntilMinutes, in: 0...max(0, transcriptDurationSeconds / 60))
-                        .labelsHidden()
-                        .controlSize(.small)
-                    TextField("0", value: $reviewedUntilSeconds, formatter: Self.timeComponentFormatter)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 38)
-                    Text("sec")
-                        .font(.caption)
-                    Stepper("", value: $reviewedUntilSeconds, in: 0...59)
-                        .labelsHidden()
-                        .controlSize(.small)
-                }
-                Text("Labels up to this time stay fixed. All later labels are treated as unreviewed, then reassessed against them.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                if !reviewedUntilIsValid {
-                    Text("Choose a time within this recording.")
-                        .font(.caption2)
-                        .foregroundColor(.red)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("Cancel") { showReassignOptions = false }
-                Button("Reassign") {
-                    let cutoff = reassignScope == .reviewedThrough ? reviewedUntilValue : nil
-                    onReclusterWithLabels?(filePath, cutoff)
-                    showReassignOptions = false
-                }
-                .disabled(reassignScope == .reviewedThrough && !reviewedUntilIsValid)
-                .keyboardShortcut(.defaultAction)
             }
         }
     }
