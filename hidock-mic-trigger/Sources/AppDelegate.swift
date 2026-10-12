@@ -4290,7 +4290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         audioPath: String,
         duration: Double,
         event: CalendarMeetingCandidate,
-        rediarizeAfterLink: Bool = true
+        rediarizeAfterLink: Bool = true,
+        onSaved: (() -> Void)? = nil
     ) {
         // Enrich *before* writing the sidecar and re-diarising, not after: the
         // attendee list becomes `allowed_names`, so a re-diarisation kicked off with
@@ -4298,7 +4299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // arrive too late to matter.
         guard event.attendeeCount >= eventKitAttendeeCap else {
             finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
-                                       event: event, rediarizeAfterLink: rediarizeAfterLink)
+                                       event: event, rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
             return
         }
         enrichAttendees(for: event) { [weak self] enriched in
@@ -4314,7 +4315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 )
             }
             self.finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
-                                            event: resolved, rediarizeAfterLink: rediarizeAfterLink)
+                                            event: resolved, rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
         }
     }
 
@@ -4354,8 +4355,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         audioPath: String,
         duration: Double,
         event: CalendarMeetingCandidate,
-        rediarizeAfterLink: Bool = true
+        rediarizeAfterLink: Bool = true,
+        onSaved: (() -> Void)? = nil
     ) {
+        // Whatever happens below, the caller's follow-up (the sidecar's own
+        // speaker pass) runs once the context is on disk, never before it.
+        defer { onSaved?() }
         guard let payload = calendarContextPayload(event: event, audioPath: audioPath, duration: duration) else { return }
         let audioURL = URL(fileURLWithPath: audioPath)
         let destination = audioURL.deletingLastPathComponent()
@@ -5116,6 +5121,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// The meeting to suggest for a transcribed recording: by time first,
+    /// then by what was said when time alone can't decide.
+    private func pickCalendarEvent(
+        _ events: [CalendarMeetingCandidate],
+        audioPath: String,
+        duration: Double
+    ) -> CalendarMeetingCandidate? {
+        if let event = calendarEventToSuggest(events, audioPath: audioPath, duration: duration) { return event }
+        guard events.count > 1, let start = calendarRecordingStart(for: audioPath),
+              let transcript = loadDiarizedTranscript(at: diarizedTranscriptPath(forAudioPath: audioPath))
+        else { return nil }
+        let decision = chooseCalendarEventFromTranscript(
+            events, transcript: transcript.segments.map(\.text).joined(separator: " "),
+            recordingStart: start, recordingEnd: start.addingTimeInterval(max(1, duration)))
+        log("Calendar match for \((audioPath as NSString).lastPathComponent) from the transcript: "
+            + "\(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
+        return decision.event
+    }
+
     private func resolveCalendarSuggestion(
         for audioPath: String,
         events: [CalendarMeetingCandidate],
@@ -5124,16 +5148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         calendarPrelookups[audioPath] = nil
         let name = (audioPath as NSString).lastPathComponent
         let diarized = diarizedTranscriptPath(forAudioPath: audioPath)
-        var chosen = calendarEventToSuggest(events, audioPath: audioPath, duration: duration)
-        if chosen == nil, events.count > 1, let start = calendarRecordingStart(for: audioPath),
-           let transcript = loadDiarizedTranscript(at: diarized) {
-            let decision = chooseCalendarEventFromTranscript(
-                events, transcript: transcript.segments.map(\.text).joined(separator: " "),
-                recordingStart: start, recordingEnd: start.addingTimeInterval(max(1, duration)))
-            log("Calendar match for \(name) from the transcript: \(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
-            chosen = decision.event
-        }
-        guard let event = chosen else {
+        guard let event = pickCalendarEvent(events, audioPath: audioPath, duration: duration) else {
             try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
             log("No unambiguous calendar match for \(name); keeping initial speaker detection")
             return
@@ -5932,13 +5947,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onLoadCalendarRejection: { [weak self] audioPath in self?.hasCalendarRejection(for: audioPath) ?? false },
             onClearCalendarRejection: { [weak self] audioPath in self?.clearCalendarRejection(for: audioPath) },
             onLoadCalendarEvent: { [weak self] audioPath in self?.calendarLinkedEvent(for: audioPath) },
-            onLinkCalendarEvent: { [weak self] audioPath, duration, event, rediarizeAfterLink in
-                self?.linkCalendarEvent(
+            onLinkCalendarEvent: { [weak self] audioPath, duration, event, rediarizeAfterLink, onSaved in
+                guard let self else { onSaved(); return }
+                self.linkCalendarEvent(
                     audioPath: audioPath,
                     duration: duration,
                     event: event,
-                    rediarizeAfterLink: rediarizeAfterLink
+                    rediarizeAfterLink: rediarizeAfterLink,
+                    onSaved: onSaved
                 )
+            },
+            onChooseCalendarEvent: { [weak self] audioPath, duration, events in
+                self?.pickCalendarEvent(events, audioPath: audioPath, duration: duration)
             },
             onRemoveCalendarEvent: { [weak self] audioPath in
                 self?.removeCalendarEvent(audioPath: audioPath)
@@ -11089,40 +11109,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // user can always open/copy the raw transcript while a likely meeting
         // is pending in either the table or the sidecar.
         enqueueTranscriptions(entries.map(\.recording.outputPath))
-    }
-
-    /// Calendar is a gate before automatic/manual transcription, not an
-    /// afterthought. A strong single match becomes a persisted pending review
-    /// row; no audio processing starts until the user accepts or rejects it.
-    private func calendarGateTranscription(entries: [HiDockSyncRecordingEntry], readyPaths: [String]) {
-        guard let entry = entries.first else {
-            if !readyPaths.isEmpty { enqueueTranscriptions(readyPaths) }
-            return
-        }
-        let remaining = Array(entries.dropFirst())
-        let path = entry.recording.outputPath
-        if calendarMeetingTitle(for: path) != nil {
-            calendarGateTranscription(entries: remaining, readyPaths: readyPaths + [path])
-            return
-        }
-        if suggestedCalendarEvent(for: path) != nil {
-            // It is already visibly awaiting a decision in the table.
-            calendarGateTranscription(entries: remaining, readyPaths: readyPaths)
-            return
-        }
-        findClaudeCalendarEvents(audioPath: path, duration: entry.recording.duration) { [weak self] events in
-            guard let self else { return }
-            if let event = self.calendarEventToSuggest(events, audioPath: path, duration: entry.recording.duration) {
-                self.saveCalendarSuggestion(event, for: path)
-                self.log("Calendar gate: pending confirmation for \(entry.recording.outputName) → \(event.title)")
-                self.viewModel.syncStatus = "Meeting pending: \(entry.recording.outputName)"
-                self.viewModel.syncStatusLevel = .warning
-                self.syncViewModelState()
-                self.calendarGateTranscription(entries: remaining, readyPaths: readyPaths)
-            } else {
-                self.calendarGateTranscription(entries: remaining, readyPaths: readyPaths + [path])
-            }
-        }
     }
 
     private func enqueueTranscriptions(_ paths: [String]) {
