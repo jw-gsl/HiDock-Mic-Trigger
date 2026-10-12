@@ -11,6 +11,7 @@
 		0611823F814712E911A4A965 /* LEDSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94086136A7CC97670B3B2B31 /* LEDSettingsView.swift */; };
 		0E25BCD2E614608483B71F88 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = 8435D345AA8EB021E3428350 /* MarkdownUI */; };
 		0F10797C46358815E38F5F11 /* HelpersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31F45B509F970DE308F947FD /* HelpersTests.swift */; };
+		1340A8ED21A39B5F203408F9 /* VoiceCheckView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28D0EE0384D0BC4BB5ECC0EF /* VoiceCheckView.swift */; };
 		14EDA55439F1A1855801A181 /* TranscriptionTimeoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DCF345FDF47CF2D688B3E63 /* TranscriptionTimeoutTests.swift */; };
 		159FDEE1D4C7748ABBAB8D03 /* SplitSources.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5917D14BDB00424EA7457723 /* SplitSources.swift */; };
 		1F28538F2F1601D254A85E9C /* SkippedTranscriptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45ECA314D0E3BF8DDD56BEC3 /* SkippedTranscriptions.swift */; };
@@ -73,6 +74,7 @@
 		145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceLibraryView.swift; sourceTree = "<group>"; };
 		22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsTableView.swift; sourceTree = "<group>"; };
 		2588C13D72780DEF82479DD3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
+		28D0EE0384D0BC4BB5ECC0EF /* VoiceCheckView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCheckView.swift; sourceTree = "<group>"; };
 		29B035CBE2580FAE9A62ACD9 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
 		2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		2DCF345FDF47CF2D688B3E63 /* TranscriptionTimeoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionTimeoutTests.swift; sourceTree = "<group>"; };
@@ -202,6 +204,7 @@
 				F90D50DA0EC091AFF02046E3 /* TranscriptionQueueView.swift */,
 				820C64D02A011DC869B43307 /* TranscriptViewerView.swift */,
 				8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */,
+				28D0EE0384D0BC4BB5ECC0EF /* VoiceCheckView.swift */,
 				145A2C9124D762A218C0E053 /* VoiceLibraryView.swift */,
 				A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */,
 			);
@@ -388,6 +391,7 @@
 				80CF21F2B2DF465551198551 /* TranscriptionQueueView.swift in Sources */,
 				C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */,
 				E5355AFCAF4C4FC90E9C4727 /* UpdateChecker.swift in Sources */,
+				1340A8ED21A39B5F203408F9 /* VoiceCheckView.swift in Sources */,
 				32CB8DC2FB8F5920A75F9D12 /* VoiceLibraryView.swift in Sources */,
 				F3CB2D177D38A5309EB86E29 /* VoiceTrainingView.swift in Sources */,
 				AD93D86A995B04A1FBB51A18 /* main.swift in Sources */,

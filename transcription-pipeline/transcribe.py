@@ -1203,6 +1203,39 @@ def cmd_recluster_with_anchors(args):
     print(_json.dumps(summary))
 
 
+def cmd_voice_check(args):
+    """Propose line and speaker corrections from the meeting's saved voices,
+    or apply the ones the reviewer accepted (--apply moves.json)."""
+    import json as _json
+    json_path = Path(args.json_path).resolve()
+    if not json_path.exists():
+        print(f"File not found: {json_path}", file=sys.stderr)
+        sys.exit(1)
+    from shared import voice_check
+    if not args.apply:
+        progress(5)
+        result = voice_check.run(json_path, on_progress=lambda f: progress(5 + int(f * 90)))
+        progress(100)
+        # Errors travel in the JSON too, so the app can show the reason.
+        print(_json.dumps(result))
+        return
+
+    moves = _json.loads(Path(args.apply).read_text(encoding="utf-8"))
+    snapshot_transcript(json_path, "Before accepting voice-check suggestions")
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    summary = voice_check.apply_moves(data, moves)
+    json_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        from shared.transcript_writer import write_transcript
+        md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+        body_text = " ".join(seg.get("text", "").strip() for seg in data.get("segments", []) if seg.get("text"))
+        write_transcript(md_path, body_text, source_path=Path(data.get("audio_file", "")),
+                         model="voice-check", diarized_result=data)
+    except Exception as exc:
+        print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+    print(_json.dumps(summary))
+
+
 def cmd_rematch(args):
     """Re-match still-generic speakers in an existing transcript against the
     current voice library (used after enrolling new voices). Never overwrites a
@@ -2145,6 +2178,14 @@ def main():
         ),
     )
     p_recluster.set_defaults(func=cmd_recluster_with_anchors)
+
+    p_voice_check = sub.add_parser(
+        "voice-check",
+        help="Check each line against the meeting's saved voices and propose corrections",
+    )
+    p_voice_check.add_argument("json_path", help="Path to _diarized.json file")
+    p_voice_check.add_argument("--apply", help="JSON list of accepted moves ({index, to_name}) to apply")
+    p_voice_check.set_defaults(func=cmd_voice_check)
 
     p_rematch = sub.add_parser(
         "rematch",

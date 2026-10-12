@@ -857,6 +857,8 @@ struct TranscriptViewerView: View {
     @State private var pendingTranscriptRestoreTime: Double?
     @State private var showReassignOptions = false
     @State private var showSpeakerToolsHelp = false
+    @State private var voiceCheckRunning = false
+    @State private var voiceCheckResult: VoiceCheckResult?
     @State private var reassignScope: ReassignScope = .allMeeting
     @State private var reviewedUntilMinutes = 0
     @State private var reviewedUntilSeconds = 0
@@ -932,6 +934,11 @@ struct TranscriptViewerView: View {
     /// Re-match still-generic speakers in THIS transcript against the voice
     /// library (`rematch` verb). Optional so older call-sites keep compiling.
     var onRematch: ((String) -> Void)?
+    /// Check every line against the saved voices of this meeting's people
+    /// (`voice-check`). Optional so older call-sites keep compiling.
+    var onVoiceCheck: ((String, @escaping (VoiceCheckResult) -> Void) -> Void)? = nil
+    /// Apply the accepted voice-check moves; returns the updated transcript.
+    var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?) -> Void) -> Void)? = nil
     /// Enrol a speaker from the diarized sidecar's stored centroid (name,
     /// jsonPath, speakerId) — a far better voiceprint than one short segment.
     /// Falls back to onEnrollSpeaker (audio) when nil.
@@ -1025,6 +1032,40 @@ struct TranscriptViewerView: View {
     /// let the pipeline report how far it actually got.
     private var rediarizeSpeakerRange: ClosedRange<Int> {
         2...max(20, uniqueSpeakerIds.count)
+    }
+
+    private func startVoiceCheck() {
+        guard let check = onVoiceCheck else { return }
+        voiceCheckRunning = true
+        check(filePath) { result in
+            DispatchQueue.main.async {
+                voiceCheckRunning = false
+                if let error = result.error {
+                    rediarizeStatus = .failed("Voice check: \(error)")
+                } else if let note = result.note {
+                    rediarizeStatus = .skipped("Voice check: \(note)")
+                } else if (result.lines ?? []).isEmpty && (result.speakers ?? []).isEmpty {
+                    rediarizeStatus = .skipped("Voice check: every line sounds like the person it's assigned to (\(result.checked ?? 0) checked).")
+                } else {
+                    voiceCheckResult = result
+                }
+            }
+        }
+    }
+
+    private func applyVoiceCheck(_ moves: [VoiceCheckMove]) {
+        guard let apply = onApplyVoiceCheck, !moves.isEmpty else { return }
+        // Applying takes about a second; the re-diarising banner would mislead.
+        apply(filePath, moves) { updated in
+            DispatchQueue.main.async {
+                guard let updated else {
+                    rediarizeStatus = .failed("Couldn't apply the voice-check changes.")
+                    return
+                }
+                applyRediarizedTranscript(updated)
+                rediarizeStatus = .skipped("Voice check: moved \(moves.count) line\(moves.count == 1 ? "" : "s"). Undo is in the transcript history.")
+            }
+        }
     }
 
     private var isRediarizing: Bool {
@@ -1850,15 +1891,44 @@ struct TranscriptViewerView: View {
         // apply library or meeting-specific identity work.
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                if onRediarize != nil {
+                if onVoiceCheck != nil {
+                    // Refine used to rerun the diarizer with no count — the
+                    // same call as Redetect on Auto. It now checks each line
+                    // against the meeting's saved voices instead, which is what
+                    // catches the errors left after names are confirmed.
                     Button {
-                        startRediarize(speakers: nil)
+                        startVoiceCheck()
                     } label: {
-                        Label("Refine", systemImage: "wand.and.stars")
+                        Label(voiceCheckRunning ? "Checking voices…" : "Refine", systemImage: "wand.and.stars")
                     }
                     .fixedSize()
-                    .disabled(isRediarizing)
-                    .help("Refine this transcript with the configured automatic diarizer. Existing confirmed and legacy-named people stay anchored; generic or provisional parts may be re-split, and oversized blocks are capped for readability.")
+                    .disabled(isRediarizing || voiceCheckRunning)
+                    .help("Check every line against the saved voices of the people in this meeting, and suggest lines (or whole speakers) that sound like someone else. Nothing changes until you apply the suggestions. Best after confirming names.")
+                    .popover(isPresented: Binding(get: { voiceCheckResult != nil },
+                                                  set: { if !$0 { voiceCheckResult = nil } }),
+                             arrowEdge: .bottom) {
+                        if let result = voiceCheckResult {
+                            VoiceCheckPanel(
+                                result: result,
+                                linesOfSpeaker: { id in
+                                    transcript.segments.enumerated()
+                                        .filter { String($0.element.speakerId) == id }
+                                        .map { (index: $0.offset, start: $0.element.start) }
+                                },
+                                onPlay: { start, end in
+                                    audioPlayer.play(audioPath: audioPath, start: start, end: end,
+                                                     segmentId: "voice-check-\(start)")
+                                },
+                                onApply: { moves in
+                                    voiceCheckResult = nil
+                                    applyVoiceCheck(moves)
+                                },
+                                onCancel: { voiceCheckResult = nil }
+                            )
+                        }
+                    }
+                }
+                if onRediarize != nil {
 
                     Button {
                         startRediarize(speakers: rediarizeNSpeakers)
@@ -2223,7 +2293,7 @@ struct TranscriptViewerView: View {
             Text("Speaker tools")
                 .font(.headline)
             Text("Refine").font(.subheadline.weight(.semibold))
-            Text("Reruns automatic speaker detection while preserving confirmed labels where possible.")
+            Text("Checks every line against the saved voices of this meeting's people and suggests corrections, including a speaker whose name is wrong. Nothing changes until you apply them.")
                 .font(.caption)
             Text("Redetect").font(.subheadline.weight(.semibold))
             Text("Reruns detection using the selected expected speaker count. Use only when the speaker breaks themselves need redoing.")

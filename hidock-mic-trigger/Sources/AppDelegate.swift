@@ -3577,6 +3577,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Propose corrections by comparing each line with the saved voices of the
+    /// meeting's people. Read-only: nothing is written until the reviewer
+    /// accepts proposals (`applyVoiceCheck`).
+    private func runVoiceCheck(jsonPath: String, completion: @escaping (VoiceCheckResult) -> Void) {
+        guard ensureTranscriptionReady() else {
+            completion(.failure("The transcription pipeline is not ready."))
+            return
+        }
+        log("Voice check: \(jsonPath)")
+        viewModel.speakerWorkFile = recordingFileName(forTranscript: jsonPath)
+        viewModel.speakerWorkStage = "Checking voices…"
+        syncViewModelState()
+        runTranscription(arguments: ["voice-check", jsonPath], timeout: 1800) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.viewModel.speakerWorkFile = nil
+                self.viewModel.speakerWorkStage = ""
+                self.syncViewModelState()
+                switch result {
+                case .success(let data):
+                    // The JSON is the last `{` line; PROGRESS lines come first.
+                    let line = String(decoding: data, as: UTF8.self)
+                        .split(separator: "\n").last(where: { $0.hasPrefix("{") }).map(String.init) ?? ""
+                    let decoder = JSONDecoder()
+                    decoder.keyDecodingStrategy = .convertFromSnakeCase
+                    guard let parsed = try? decoder.decode(VoiceCheckResult.self, from: Data(line.utf8)) else {
+                        self.log("Voice check returned no readable result")
+                        completion(.failure("The voice check returned no readable result."))
+                        return
+                    }
+                    self.log("Voice check: \(parsed.lines?.count ?? 0) line and \(parsed.speakers?.count ?? 0) speaker suggestion(s), "
+                             + "\(parsed.checked ?? 0) lines checked\(parsed.error.map { ", error: \($0)" } ?? "")")
+                    completion(parsed)
+                case .failure(let error):
+                    self.log("Voice check failed: \(error.localizedDescription)")
+                    completion(.failure(error.localizedDescription))
+                }
+            }
+        }
+    }
+
+    private func applyVoiceCheck(jsonPath: String, moves: [VoiceCheckMove],
+                                 completion: @escaping (DiarizedTranscript?) -> Void) {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let movesURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hidock-voice-check-\(UUID().uuidString).json")
+        guard let data = try? encoder.encode(moves), (try? data.write(to: movesURL)) != nil else {
+            completion(nil)
+            return
+        }
+        snapshotTranscriptArtifacts(jsonPath, reason: "Before accepting voice-check suggestions")
+        runTranscription(arguments: ["voice-check", jsonPath, "--apply", movesURL.path]) { [weak self] result in
+            try? FileManager.default.removeItem(at: movesURL)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.log("Voice check: applied \(moves.count) move(s) to \(jsonPath)")
+                    self.refreshSpeakerReview(forDiarizedPath: jsonPath)
+                    completion(self.loadDiarizedTranscript(at: jsonPath))
+                case .failure(let error):
+                    self.log("Voice check apply failed: \(error.localizedDescription)")
+                    completion(nil)
+                }
+            }
+        }
+    }
+
     /// Record an explicit reviewer decision. Confirmed/corrected names teach
     /// the naming-candidate library; unknowns are audit-only. Paused while the
     /// HiDock is recording so an embedding pass cannot compete with capture.
@@ -5589,6 +5658,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             },
             onRematch: { [weak self] jsonPath in
                 self?.rematchTranscript(jsonPath: jsonPath)
+            },
+            onVoiceCheck: { [weak self] jsonPath, completion in
+                guard let self else { completion(.failure("The app is shutting down.")); return }
+                self.runVoiceCheck(jsonPath: jsonPath, completion: completion)
+            },
+            onApplyVoiceCheck: { [weak self] jsonPath, moves, completion in
+                guard let self else { completion(nil); return }
+                self.applyVoiceCheck(jsonPath: jsonPath, moves: moves, completion: completion)
             },
             onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
                 self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)
