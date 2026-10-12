@@ -115,3 +115,21 @@ def test_renaming_a_speaker_keeps_the_lines_that_really_are_them():
     assert speaker["suggested"] == "Chris Wildsmith"
     assert speaker["kept"] == [2]
     assert [m["index"] for m in speaker["moves"]] == [0, 1]
+
+
+def test_unnamed_speaker_is_named_from_anyone_saved():
+    # "Speaker 4" isn't on the invite; their voice is saved under Ian.
+    data = {
+        "speaker_names": {"0": "Jeff Chow", "3": "Speaker 4"},
+        "speaker_meta": {"0": {"verified": True}},
+        "segments": [
+            {"start": 0.0, "end": 5.0, "speaker_id": 0, "text": "Jeff"},
+            {"start": 5.0, "end": 10.0, "speaker_id": 3, "text": "Ian really"},
+        ],
+    }
+    voices = {0.0: JEFF, 5.0: IAN}
+    lib = _library(**{"Jeff Chow": [(JEFF, "Rec1")], "Ian Reay": [(IAN, "Rec2")]})
+    result = voice_check.propose(data, lambda s, e: voices.get(s), lib, scorer="max",
+                                 threshold=0.5, min_margin=0.2, people=["Jeff Chow"])
+    assert [(s["name"], s["suggested"]) for s in result["speakers"]] == [("Speaker 4", "Ian Reay")]
+    assert result["lines"] == []

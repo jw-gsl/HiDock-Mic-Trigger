@@ -54,12 +54,13 @@ def meeting_people(data: dict, audio_path: Path | None = None) -> list[str]:
     return sorted(names)
 
 
-def _restricted_library(library: dict, people: list[str], recording: str | None) -> dict:
-    """Only this meeting's people, and none of this recording's own samples."""
-    wanted = {p.casefold(): p for p in people}
+def _restricted_library(library: dict, people: list[str] | None, recording: str | None) -> dict:
+    """Only this meeting's people (everyone when None), and none of this
+    recording's own samples."""
+    wanted = None if people is None else {p.casefold(): p for p in people}
     speakers = {}
     for name, entry in (library.get("speakers") or {}).items():
-        if name.casefold() not in wanted:
+        if wanted is not None and name.casefold() not in wanted:
             continue
         entry = copy.deepcopy(entry)
         samples = entry.get("samples") or []
@@ -107,13 +108,22 @@ def propose(
         "people": people, "voices_known": known, "lines": [], "speakers": [],
         "checked": 0, "skipped_short": 0,
     }
-    if len(known) < 2:
+    meta = data.get("speaker_meta") or {}
+    unnamed = {
+        sid for sid, name in (data.get("speaker_names") or {}).items()
+        if is_generic_name(str(name)) and (meta.get(sid) or {}).get("verified") is not True
+    }
+    # Line checks compare people within the meeting, so they need two voices.
+    # A still-unnamed speaker can be named from anyone saved (what Rematch did).
+    check_lines = len(known) >= 2
+    if not check_lines and not unnamed:
         result["note"] = ("Need saved voices for at least two of this meeting's people; "
                           f"have {len(known)}.")
         return result
+    everyone = _restricted_library(library, None, recording) if unnamed else None
 
-    def ranked(vector: np.ndarray) -> list[tuple[str, float]]:
-        return [(r["name"], float(r["score"])) for r in _rank_library(sub, vector, scorer)]
+    def ranked(vector: np.ndarray, within: dict | None = None) -> list[tuple[str, float]]:
+        return [(r["name"], float(r["score"])) for r in _rank_library(within or sub, vector, scorer)]
 
     def score_of(ranks: list[tuple[str, float]], name: str) -> float:
         return next((s for n, s in ranks if n.casefold() == name.casefold()), 0.0)
@@ -139,6 +149,8 @@ def propose(
         result["checked"] += 1
         speaker_id = seg.get("speaker_id")
         by_speaker.setdefault(str(speaker_id), []).append(vector)
+        if not check_lines:
+            continue
         ranks = ranked(vector)
         if not ranks:
             continue
@@ -159,12 +171,23 @@ def propose(
     for speaker_id, vectors in sorted(by_speaker.items()):
         centroid = np.mean(vectors, axis=0)
         centroid = centroid / max(float(np.linalg.norm(centroid)), 1e-10)
-        ranks = ranked(centroid)
-        if not ranks:
-            continue
         current = _speaker_name(data, speaker_id)
-        top, top_score = ranks[0]
-        current_score = score_of(ranks, current)
+        if speaker_id in unnamed:
+            # Naming an unnamed speaker: anyone saved, if one person clearly
+            # stands out from the next.
+            ranks = ranked(centroid, everyone)
+            if not ranks:
+                continue
+            top, top_score = ranks[0]
+            current_score = ranks[1][1] if len(ranks) > 1 else 0.0
+        elif check_lines:
+            ranks = ranked(centroid)
+            if not ranks:
+                continue
+            top, top_score = ranks[0]
+            current_score = score_of(ranks, current)
+        else:
+            continue
         if top.casefold() != current.casefold() and top_score >= threshold \
                 and top_score - current_score >= min_margin:
             # Renaming the whole speaker must not sweep up the lines that
