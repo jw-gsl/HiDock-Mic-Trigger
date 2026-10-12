@@ -1143,6 +1143,7 @@ final class HiDockViewModel: ObservableObject {
     /// `modelCapabilities`. Read-only — never changes model state.
     var onCheckModelCapability: (String) -> Void = { _ in }
     var onShowModelManager: () -> Void = {}
+    @Published var modelManagerTab: ModelManagerTab = .models
 
     // MARK: - AI summariser engine
     /// Which CLI runs Summarise / Ask AI (claude/codex/gemini/ollama/auto).
@@ -1172,6 +1173,31 @@ final class HiDockViewModel: ObservableObject {
         ("google", "Google Calendar"),
     ]
     var onSetCalendarProvider: (String) -> Void = { _ in }
+
+    /// Why settled transcripts aren't reaching the GitHub repo (auth, network,
+    /// public repo, diverged remote), or nil while publishing works.
+    @Published var transcriptPublishProblem: String?
+    var onRetryTranscriptPublish: () -> Void = {}
+    var onDismissTranscriptPublishProblem: () -> Void = {}
+    var onShowTranscriptPublishStatus: () -> Void = {}
+    /// Per-transcript GitHub state (by recording stem) for the file list's
+    /// publish icon. Empty while publishing is off.
+    @Published var transcriptPublishEnabled = false
+    @Published var publishFileStatus: [String: TranscriptPublish.FileStatus] = [:]
+    @Published var publishSettlingStems: Set<String> = []
+    var onOpenPublishedTranscript: (_ stem: String, _ history: Bool) -> Void = { _, _ in }
+    /// A visibility check or manual sync is running (Settings shows a spinner).
+    @Published var transcriptPublishBusy = false
+    /// Outcome of the last manual action, shown under the Settings toggle.
+    @Published var transcriptPublishLastResult: String?
+    var onSetTranscriptPublishing: (Bool) -> Void = { _ in }
+    /// The saved target repo (`owner/repo`); empty until the user sets one.
+    @Published var transcriptsRepo = ""
+    /// Feedback under the Repository field (validation, private check).
+    @Published var transcriptsRepoMessage: String?
+    var onSetTranscriptsRepo: (String) -> Void = { _ in }
+    var onSyncTranscriptsNow: () -> Void = {}
+    var onOpenTranscriptsRepo: () -> Void = {}
 
     // MARK: - Summary Templates Manager
     var onShowTemplatesManager: () -> Void = {}
