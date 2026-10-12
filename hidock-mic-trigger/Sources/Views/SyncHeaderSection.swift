@@ -33,6 +33,9 @@ struct SyncHeaderSection: View {
             // status / storage / filter rows any more.
             DeviceStripView(viewModel: viewModel)
 
+            if let problem = viewModel.transcriptPublishProblem {
+                TranscriptPublishBanner(viewModel: viewModel, problem: problem)
+            }
             if let problem = viewModel.calendarConnectorProblem {
                 CalendarConnectorBanner(viewModel: viewModel, problem: problem)
             }

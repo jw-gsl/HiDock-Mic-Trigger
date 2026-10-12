@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var deviceManagerWindow: NSWindow?
     private var plaudLoginController: PlaudLoginWindowController?
     private var terminalWindow: NSWindow?
+    /// Kept so the Settings toggle and the status-bar menu tick stay in step.
+    private var autoPublishMenuItem: NSMenuItem?
     private weak var speakerLabelsMenuItem: NSMenuItem?
     private var importedRecordings: [ImportedRecordingEntry] = []
     /// Filenames the user has opted out of transcribing. Persisted to
@@ -407,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         setupMainMenu()
         setupStatusItem()
         wireViewModel()
+        configureTranscriptPublishing()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         // Skipped: loadCachedRecordings() used to fire a short-timeout
@@ -536,6 +539,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         removeDeviceChangeListener()
         stoppingIntentionally = true
         stopTrigger()
+        // No publish on quit: settling transcripts are persisted and finish
+        // settling after the next launch, so quitting is never held up by git.
         UpdateChecker.installPendingUpdateIfNeeded()
     }
 
@@ -691,6 +696,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onConfirmCalendarSuggestion = { [weak self] path in self?.confirmCalendarSuggestion(for: path) }
         viewModel.onRejectCalendarSuggestion = { [weak self] path in self?.rejectCalendarSuggestion(for: path) }
         viewModel.onLookupCalendarForRecording = { [weak self] path in self?.lookupCalendarOnDemand(path) }
+        viewModel.onRetryTranscriptPublish = { TranscriptPublish.shared.retryNow() }
+        viewModel.onDismissTranscriptPublishProblem = { [weak self] in self?.viewModel.transcriptPublishProblem = nil }
+        viewModel.onShowTranscriptPublishStatus = { [weak self] in self?.showPublishStatusMenu() }
+        viewModel.onSetTranscriptPublishing = { [weak self] enable in self?.setTranscriptPublishing(enable) }
+        viewModel.onSetTranscriptsRepo = { [weak self] input in self?.setTranscriptsRepo(input) }
+        viewModel.onSyncTranscriptsNow = { [weak self] in self?.runManualTranscriptSync(reason: "Manual sync") }
+        viewModel.onOpenTranscriptsRepo = {
+            guard let slug = TranscriptPublish.repoSlug(from: TranscriptPublish.configuredRepo),
+                  let url = URL(string: "https://github.com/\(slug)") else { return }
+            NSWorkspace.shared.open(url)
+        }
+        viewModel.onOpenPublishedTranscript = { stem, history in
+            guard let url = TranscriptPublish.shared.githubURL(forStem: stem, history: history) else { return }
+            NSWorkspace.shared.open(url)
+        }
         viewModel.onFixCalendarConnector = { [weak self] in self?.openCalendarMCPOnboarding() }
         viewModel.onRetryCalendarConnector = { [weak self] in self?.retryCalendarConnector() }
         viewModel.onDismissCalendarConnectorProblem = { [weak self] in self?.viewModel.calendarConnectorProblem = nil }
@@ -808,6 +828,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
         viewModel.onSetActiveModelByKey = { [weak self] key in self?.setActiveModelByKey(key) }
+        viewModel.onCheckRemoteService = { [weak self] key in self?.checkRemoteService(key) }
+        viewModel.onSetHardwareGate = { [weak self] gateKey, affirmed in
+            self?.setHardwareGate(gateKey, affirmed: affirmed)
+        }
         viewModel.onCheckModelCapability = { [weak self] key in self?.checkModelCapability(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
@@ -1486,6 +1510,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManual), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
+        menu.addItem(NSMenuItem.separator())
+        let publishSubmenu = NSMenu(title: "Transcripts on GitHub")
+        let autoPublishItem = NSMenuItem(title: "Auto-publish edits", action: #selector(toggleAutoPublishMenu(_:)), keyEquivalent: "")
+        autoPublishItem.target = self
+        autoPublishItem.state = TranscriptPublish.shared.isEnabled ? .on : .off
+        autoPublishMenuItem = autoPublishItem
+        let syncNowItem = NSMenuItem(title: "Sync to GitHub Now", action: #selector(syncTranscriptsToGitHubMenu), keyEquivalent: "")
+        syncNowItem.target = self
+        let publishStatusItem = NSMenuItem(title: "Show Sync Status...", action: #selector(showPublishStatusMenu), keyEquivalent: "")
+        publishStatusItem.target = self
+        publishSubmenu.addItem(autoPublishItem)
+        publishSubmenu.addItem(syncNowItem)
+        publishSubmenu.addItem(publishStatusItem)
+        let publishItem = NSMenuItem(title: "Transcripts on GitHub", action: nil, keyEquivalent: "")
+        publishItem.submenu = publishSubmenu
+        menu.addItem(publishItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -3662,6 +3702,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     onUpdate(.failed(message))
                     break
                 }
+                TranscriptPublish.shared.schedule(diarizedPath: jsonPath)
                 let summary = self.rediarizeSummary(before: before, after: after)
                 self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
                 if !viewerShowsProgress {
@@ -4122,7 +4163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
            // EventKit hands back the address itself as `name` for some accounts;
            // run those through the same tidy-up rather than storing an email.
            !resolved.contains("@") {
-            return resolved
+            return normalizeAttendeeName(resolved)
         }
         let address = attendee.url.absoluteString
             .replacingOccurrences(of: "mailto:", with: "")
@@ -4580,7 +4621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("Calendar search started [\(searchKind)] for \((audioPath as NSString).lastPathComponent), local recording \(localStart)–\(localEnd)\(requestedMeeting.map { ", query=\($0)" } ?? "")")
         let prompt = """
-        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses):
+        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses; write each name as "First Last", never "Last, First"):
         Title: <event title>
         Time: <HH:mm> – <HH:mm>
         Organiser: <display name>
@@ -4977,6 +5018,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// user must explicitly confirm it before its attendee data refines an
     /// already-diarised transcript.
     private func suggestCalendarMeeting(afterTranscriptionOf audioPath: String) {
+        // Every completed transcription passes through here, so it doubles as
+        // the "new transcript" trigger for GitHub publishing.
+        TranscriptPublish.shared.noteActivity(mdPath: transcriptMarkdownPath(forAudioPath: audioPath),
+                                              reason: "Transcribed")
         // A confirmed meeting is the answer this search would be looking for.
         // Re-running it costs an MCP/EventKit round-trip and, on the no-match
         // branch below, would re-diarise a transcript the user has already
@@ -5162,7 +5207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). \(connectorInstruction) Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
 
         When you are confident about one or more specific events, end your reply with one line per event, after all prose, in exactly this form:
-        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <comma-separated attendee display names>
+        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <attendee display names, separated by semicolons, each as "First Last">
         Emit no CANDIDATE line if you are unsure — a wrong one would attach the recording to the wrong meeting. Never mention the CANDIDATE lines in your prose.
 
         User: \(userMessage)
@@ -5651,9 +5696,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                   end > start
             else { continue }
             let attendees = fields.count >= 4
-                ? fields[3].split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
+                ? splitAttendeeNames(fields[3])
                 : []
             let id = "\(title)|\(start.timeIntervalSince1970)"
             guard seen.insert(id).inserted else { continue }
@@ -6149,6 +6192,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Capture the *current* files before a caller changes them.  The commit is
     /// skipped when nothing has changed since the last snapshot.
     private func snapshotTranscriptArtifacts(_ diarizedPath: String, reason: String) {
+        // Publishing is a separate, debounced, post-write concern — see
+        // TranscriptPublish. The flush re-reads the files when it fires, so
+        // triggering from the pre-write snapshot point is safe; the verified
+        // rewrite-md completion re-schedules to catch slow operations.
+        TranscriptPublish.shared.schedule(diarizedPath: diarizedPath,
+                                          reason: Self.publishReason(fromSnapshot: reason))
         guard let root = ensureTranscriptHistoryRepository(for: diarizedPath) else { return }
         let artifacts = transcriptHistoryArtifacts(for: diarizedPath)
             .filter { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
@@ -6161,6 +6210,284 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if result.status != 0 {
             log("Could not snapshot transcript before change: \(result.output)")
         }
+    }
+
+    /// Snapshot messages read "Before renaming X → Y" (rollback flavour); the
+    /// publish repo's history should read as an edit log, so drop the prefix.
+    static func publishReason(fromSnapshot reason: String) -> String {
+        guard reason.hasPrefix("Before ") else { return reason }
+        var stripped = String(reason.dropFirst("Before ".count))
+        if let first = stripped.first {
+            stripped = String(first).uppercased() + stripped.dropFirst()
+        }
+        return stripped
+    }
+
+    // MARK: - Transcripts on GitHub menu
+
+    private func transcriptMarkdownPath(forAudioPath audioPath: String) -> String {
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let stem = ((audioPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        return "\(dir)/\(stem).md"
+    }
+
+    /// Audio paths the app knows for a recording stem (device downloads,
+    /// imports and merges all land in `syncEntries` / merged outputs).
+    private func audioPaths(forStem stem: String) -> [String] {
+        syncEntries.map(\.recording.outputPath)
+            .filter { (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == stem }
+    }
+
+    private func configureTranscriptPublishing() {
+        let publisher = TranscriptPublish.shared
+        publisher.transcriptsDir = { [weak self] in
+            self?.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        }
+        publisher.isAwaitingReview = { [weak self] stem in
+            guard let self else { return false }
+            return self.audioPaths(forStem: stem).contains { self.suggestedCalendarEvent(for: $0) != nil }
+        }
+        publisher.isBusyElsewhere = { [weak self] stem in
+            guard let self else { return false }
+            let matches: (String) -> Bool = {
+                (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == stem
+            }
+            if self.viewModel.calendarLookupInProgress.contains(where: matches) { return true }
+            return self.pendingTranscriptionQueue.contains {
+                matches($0.path) && ($0.status == .queued || $0.status == .transcribing)
+            }
+        }
+        publisher.log = { [weak self] message in self?.log("TranscriptPublish: \(message)") }
+        publisher.onStatusChanged = { [weak self] states, settling, _, _ in
+            guard let self else { return }
+            if self.viewModel.publishFileStatus != states { self.viewModel.publishFileStatus = states }
+            if self.viewModel.publishSettlingStems != settling { self.viewModel.publishSettlingStems = settling }
+        }
+        // Publishing predates the Repository setting: an install that already
+        // publishes keeps its original target rather than silently stopping.
+        if publisher.isEnabled, TranscriptPublish.configuredRepo == nil {
+            UserDefaults.standard.set("jw-gsl/Transcripts", forKey: TranscriptPublish.repoKey)
+        }
+        viewModel.transcriptsRepo = TranscriptPublish.configuredRepo ?? ""
+        viewModel.transcriptPublishEnabled = publisher.isEnabled
+        publisher.onProblem = { [weak self] problem in
+            guard let self else { return }
+            let wasHealthy = self.viewModel.transcriptPublishProblem == nil
+            self.viewModel.transcriptPublishProblem = problem
+            if let problem, wasHealthy {
+                self.postNotification(title: "HiDock: transcripts not reaching GitHub",
+                                      body: "\(problem) — retrying every 15 minutes.")
+            }
+        }
+        publisher.start()
+    }
+
+    @objc private func toggleAutoPublishMenu(_ sender: NSMenuItem) {
+        setTranscriptPublishing(!TranscriptPublish.shared.isEnabled)
+    }
+
+    /// Single path for switching publishing on/off, used by the status-bar
+    /// menu and the Settings section.
+    private func setTranscriptPublishing(_ enable: Bool) {
+        guard enable else {
+            UserDefaults.standard.set(false, forKey: TranscriptPublish.enabledKey)
+            viewModel.transcriptPublishEnabled = false
+            autoPublishMenuItem?.state = .off
+            return
+        }
+        guard !viewModel.transcriptPublishBusy else { return }
+        guard let repo = TranscriptPublish.configuredRepo else {
+            viewModel.transcriptPublishLastResult = nil
+            viewModel.transcriptsRepoMessage = "Enter a private GitHub repository first."
+            return
+        }
+        let slug = TranscriptPublish.repoSlug(from: repo)
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptPublishLastResult = "Checking \(slug ?? repo) is private…"
+        // Transcripts are company meeting content: enabling publish must
+        // never point at a public repo. Verify with `gh` when it's available.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let check = slug.map(Self.checkTranscriptsRepo) ?? .unverifiable("not a GitHub repo")
+            DispatchQueue.main.async {
+                self.viewModel.transcriptPublishBusy = false
+                self.viewModel.transcriptPublishLastResult = nil
+                if case .publicRepo = check {
+                    let alert = NSAlert()
+                    alert.messageText = "Transcripts repo is public"
+                    alert.informativeText = "\(slug ?? repo) is visible to everyone. Make it private before HiDock publishes meeting transcripts to it."
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                    return
+                }
+                if case .notFound(let detail) = check {
+                    self.viewModel.transcriptsRepoMessage = "\(slug ?? repo) wasn't found on GitHub: \(detail)"
+                    return
+                }
+                let confirm = NSAlert()
+                confirm.messageText = "Publish transcripts to GitHub?"
+                var suffix = ""
+                if case .unverifiable(let why) = check {
+                    suffix = "\n\nCould not verify the repo is private (\(why)) — check it before continuing."
+                }
+                confirm.informativeText = "Transcripts are pushed to the private \(slug ?? repo) repo. Each one is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Merge pieces are left out.\n\nPublish everything now, or only transcripts that are new or change from now on?\(suffix)"
+                confirm.addButton(withTitle: "Only new and changed")
+                confirm.addButton(withTitle: "Publish everything now")
+                confirm.addButton(withTitle: "Cancel")
+                let choice = confirm.runModal()
+                guard choice != .alertThirdButtonReturn else { return }
+                UserDefaults.standard.set(true, forKey: TranscriptPublish.enabledKey)
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
+                self.autoPublishMenuItem?.state = .on
+                self.viewModel.transcriptPublishEnabled = true
+                if choice == .alertSecondButtonReturn {
+                    self.runManualTranscriptSync(reason: "Initial import")
+                } else {
+                    TranscriptPublish.shared.scan()
+                }
+            }
+        }
+    }
+
+    /// Save a new target repository after checking it exists and is private.
+    /// Switching while publishing is on asks how to seed the new repo; the old
+    /// repo's local copy is set aside by the publisher, never pushed across.
+    private func setTranscriptsRepo(_ input: String) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let slug = TranscriptPublish.repoSlug(from: trimmed) else {
+            viewModel.transcriptsRepoMessage = "Enter a GitHub repository as owner/repo or its github.com URL."
+            return
+        }
+        guard slug != TranscriptPublish.repoSlug(from: TranscriptPublish.configuredRepo) else {
+            viewModel.transcriptsRepoMessage = nil
+            return
+        }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptsRepoMessage = "Checking \(slug)…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let check = Self.checkTranscriptsRepo(slug)
+            DispatchQueue.main.async {
+                self.viewModel.transcriptPublishBusy = false
+                switch check {
+                case .publicRepo:
+                    self.viewModel.transcriptsRepoMessage = "\(slug) is public — make it private first. Not saved."
+                    return
+                case .notFound(let detail):
+                    self.viewModel.transcriptsRepoMessage = "\(slug) wasn't found (create it on GitHub as a private repo first). \(detail)"
+                    return
+                case .unverifiable(let why):
+                    self.viewModel.transcriptsRepoMessage = "Saved, but couldn't confirm it's private: \(why)"
+                case .privateRepo:
+                    self.viewModel.transcriptsRepoMessage = "Saved — \(slug) is private."
+                }
+                let wasPublishing = TranscriptPublish.shared.isEnabled && TranscriptPublish.configuredRepo != nil
+                UserDefaults.standard.set(slug, forKey: TranscriptPublish.repoKey)
+                self.viewModel.transcriptsRepo = slug
+                self.log("TranscriptPublish: repository set to \(slug)")
+                guard wasPublishing else { return }
+                let confirm = NSAlert()
+                confirm.messageText = "Publish to \(slug) from now on?"
+                confirm.informativeText = "Future transcripts go to \(slug). The local copy of the previous repo is set aside, not pushed to the new one.\n\nCopy all transcripts into \(slug) now, or only ones that are new or change from now on?"
+                confirm.addButton(withTitle: "Only new and changed")
+                confirm.addButton(withTitle: "Publish everything now")
+                if confirm.runModal() == .alertSecondButtonReturn {
+                    self.runManualTranscriptSync(reason: "Initial import")
+                } else {
+                    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
+                    TranscriptPublish.shared.scan()
+                }
+            }
+        }
+    }
+
+    @objc private func syncTranscriptsToGitHubMenu() {
+        runManualTranscriptSync(reason: "Manual sync")
+    }
+
+    /// Publish everything now. Progress and the outcome show in the Settings
+    /// section (and the banner on failure) rather than a blocking alert.
+    private func runManualTranscriptSync(reason: String) {
+        guard !viewModel.transcriptPublishBusy else { return }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptPublishLastResult = "Publishing…"
+        TranscriptPublish.shared.syncNow(reason: reason) { [weak self] ok, detail in
+            guard let self else { return }
+            self.viewModel.transcriptPublishBusy = false
+            let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
+            self.viewModel.transcriptPublishLastResult = ok
+                ? "Synced at \(time)\(detail.isEmpty ? "" : " — \(detail)")"
+                : "Sync failed at \(time): \(detail)"
+            self.log("TranscriptPublish: manual sync (\(reason)) \(ok ? "ok" : "failed"): \(detail)")
+        }
+    }
+
+    @objc private func showPublishStatusMenu() {
+        TranscriptPublish.shared.status { state, error in
+            let box = NSAlert()
+            guard let state else {
+                box.messageText = "Could not read publish status"
+                box.informativeText = error
+                box.runModal()
+                return
+            }
+            box.messageText = "Transcript publishing status"
+            var lines: [String] = []
+            lines.append("Auto-publish: \(TranscriptPublish.shared.isEnabled ? "on" : "off")")
+            lines.append("Settling (not yet committed): \(TranscriptPublish.shared.pending.count)")
+            lines.append("Pending commits: \(state["pending"] ?? 0)")
+            if let ok = state["clone_ok"] as? Bool, !ok {
+                lines.append("Publish clone: not created yet")
+            }
+            if let last = state["last_success"] as? String {
+                lines.append("Last success: \(last)")
+            }
+            if let error = state["last_error"] as? String {
+                lines.append("Last error: \(error)")
+            }
+            box.informativeText = lines.joined(separator: "\n")
+            box.runModal()
+        }
+    }
+
+    enum RepoCheck: Equatable {
+        case privateRepo, publicRepo
+        case notFound(String)
+        /// gh missing or not signed in — existence and visibility unknown.
+        case unverifiable(String)
+    }
+
+    /// Ask `gh` whether `owner/repo` exists and is private. Blocking: call
+    /// off the main thread.
+    private static func checkTranscriptsRepo(_ slug: String) -> RepoCheck {
+        guard let gh = whichTool("gh") else { return .unverifiable("the GitHub CLI (gh) isn't installed") }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: gh)
+        process.arguments = ["repo", "view", slug, "--json", "visibility"]
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+        do { try process.run() } catch { return .unverifiable(error.localizedDescription) }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let errText = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        process.waitUntilExit()
+        if process.terminationStatus == 0,
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let visibility = object["visibility"] as? String {
+            return visibility == "PUBLIC" ? .publicRepo : .privateRepo
+        }
+        if errText.localizedCaseInsensitiveContains("could not resolve") || errText.contains("404") {
+            return .notFound(errText)
+        }
+        return .unverifiable(errText.isEmpty ? "gh couldn't check it" : errText)
+    }
+
+    private static func whichTool(_ name: String) -> String? {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            let path = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
     }
 
     private func transcriptVersions(for diarizedPath: String) -> [TranscriptVersion] {
@@ -6364,6 +6691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTHONPATH"] = self.repoRoot
             // Gated models (pyannote) authenticate with this; absent otherwise.
             HuggingFaceToken.inject(into: &env)
+            NemotronAccess.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
@@ -8025,6 +8353,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for path in transcriptArtifacts {
             try? FileManager.default.removeItem(atPath: path)
         }
+        // The published copy is deleted once this settles (its source is gone).
+        TranscriptPublish.shared.noteActivity(mdPath: "\(transcriptDir)/\(stem).md", reason: "Removed transcript")
 
         // Summaries are matched by the "<stem> - <Type> - …" prefix — same
         // lookup findSummaryPath uses. A `contains(stem)` sweep was
@@ -8337,7 +8667,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 capability: info["capability"] as? String,
                                 distributable: info["distributable"] as? Bool,
                                 licence: info["licence"] as? String,
-                                gated: info["gated"] as? Bool ?? false
+                                gated: info["gated"] as? Bool ?? false,
+                                gateNote: info["gate_note"] as? String ?? "",
+                                hardwareGated: info["hardware_gated"] as? Bool ?? false,
+                                hardwareGateKey: info["hardware_gate_key"] as? String ?? "",
+                                hardwareGateAffirmed: info["hardware_gate_affirmed"] as? Bool ?? false,
+                                remoteService: info["remote_service"] as? Bool ?? false
                             )
                         }
                         self.viewModel.modelStatuses = statuses
@@ -8431,17 +8766,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptPath, "set-active", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            do {
+                try process.run()
+                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                errPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                // Hardware-gated or unreachable remote backends are refused
+                // by models.py with a JSON error; surface the reason instead
+                // of silently doing nothing.
+                if process.terminationStatus != 0,
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let message = parsed["error"] as? String {
+                    DispatchQueue.main.async { self?.log("Cannot set active model \(key): \(message)") }
+                } else {
+                    DispatchQueue.main.async {
+                        self?.log("Set active model: \(key)")
+                    }
+                }
+                DispatchQueue.main.async {
+                    self?.refreshModelStatuses()
+                }
+            } catch {
+                self?.log("Failed to set active model \(key): \(error)")
+            }
+        }
+    }
+
+    /// Run `shared/models.py remote-check <key>` for a remote-service backend
+    /// (e.g. the Nemotron sidecar on an NVIDIA host). The result string lands
+    /// in viewModel.remoteServiceChecks[key] and renders inline on the row.
+    private func checkRemoteService(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.remoteServiceChecking.insert(key)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "remote-check", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let reachable = parsed?["reachable"] as? Bool ?? false
+                let detail = parsed?["detail"] as? String ?? "no response from check"
+                let result = reachable ? "\u{2713} \(detail)" : "\u{2717} \(detail)"
+                DispatchQueue.main.async {
+                    self?.viewModel.remoteServiceChecking.remove(key)
+                    self?.viewModel.remoteServiceChecks[key] = result
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.viewModel.remoteServiceChecking.remove(key)
+                    self?.viewModel.remoteServiceChecks[key] = "check failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Persist the "Do you have an NVIDIA GPU host?" affirmation
+    /// (`models.py set-hardware-gate <gateKey> <true|false>`), then refresh
+    /// statuses so the row ungreys (or re-greys) immediately.
+    private func setHardwareGate(_ gateKey: String, affirmed: Bool) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "set-hardware-gate", gateKey, affirmed ? "true" : "false"]
             process.standardOutput = Pipe()
             process.standardError = Pipe()
             do {
                 try process.run()
                 process.waitUntilExit()
                 DispatchQueue.main.async {
-                    self?.log("Set active model: \(key)")
+                    self?.log("Hardware gate \(gateKey) = \(affirmed)")
                     self?.refreshModelStatuses()
                 }
             } catch {
-                self?.log("Failed to set active model \(key): \(error)")
+                self?.log("Failed to set hardware gate \(gateKey): \(error)")
             }
         }
     }
@@ -10543,6 +10963,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             arguments.append(contentsOf: ["--summarize-engine", summarizeEngine])
         }
         log("runTranscription: \(arguments.joined(separator: " "))")
+        // Anything the pipeline is doing to a recording holds back its GitHub
+        // publish until it finishes (see TranscriptPublish's settle rule).
+        let publishWork = TranscriptPublish.shared.beginWork(arguments: arguments)
+        let originalCompletion = completion
+        let completion: (Result<Data, Error>) -> Void = { result in
+            TranscriptPublish.shared.endWork(publishWork)
+            originalCompletion(result)
+        }
         transcriptionDispatchQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
@@ -10564,6 +10992,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // was created by an earlier build (so its ACL no longer matches) every
             // one of those reads raised an access prompt. Only pyannote is gated,
             // so a Parakeet + Sortformer pipeline now never touches the Keychain.
+            // The Spark's endpoint and token, for the Nemotron diarizer. A
+            // missing token is cached as such, so this costs no Keychain prompt.
+            NemotronAccess.inject(into: &env)
             if self.anyGatedModelInPlay {
                 HuggingFaceToken.inject(into: &env)
             }
@@ -10576,6 +11007,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             // Force unbuffered Python output so PROGRESS lines arrive immediately
             env["PYTHONUNBUFFERED"] = "1"
+            // The app publishes through TranscriptPublish once a transcript has
+            // settled. transcribe.py's own publish-after-write is for terminal
+            // runs only; here it would push synchronously on this serial queue
+            // and race the app's publisher for the same git clone.
+            env["HIDOCK_PUBLISH_TO_GITHUB"] = "0"
             process.environment = env
 
             let outPipe = Pipe()
@@ -11951,7 +12387,7 @@ func parseEnrichedAttendees(_ reply: String) -> [String]? {
     var seen = Set<String>()
     let names: [String] = raw.compactMap { value in
         guard let text = value as? String else { return nil }
-        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = normalizeAttendeeName(text)
         guard !name.isEmpty, name.caseInsensitiveCompare("unavailable") != .orderedSame,
               seen.insert(name.lowercased()).inserted
         else { return nil }
@@ -11994,14 +12430,11 @@ func calendarAttendeeNames(in answer: String, region: NSRange) -> [String] {
     var names: [String] = []
     if let organiser = calendarOrganiserExpression.firstMatch(in: answer, range: region),
        let nameRange = Range(organiser.range(at: 1), in: answer) {
-        names.append(String(answer[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines))
+        names.append(normalizeAttendeeName(String(answer[nameRange])))
     }
     if let block = calendarAttendeesExpression.firstMatch(in: answer, range: region),
        let namesRange = Range(block.range(at: 1), in: answer) {
-        names += String(answer[namesRange])
-            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•"))) }
-            .filter { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
+        names += splitAttendeeNames(String(answer[namesRange]))
     }
     return Array(Set(names)).sorted()
 }

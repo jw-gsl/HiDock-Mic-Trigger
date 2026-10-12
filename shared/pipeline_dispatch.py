@@ -95,6 +95,17 @@ def diarize(
     crashes on whichever backend the user happens to have selected.
     """
     backend = _active("diarization", "lite")
+    if backend == "nemotron":
+        # Remote 8-speaker diarizer on an NVIDIA host (sidecar over the
+        # local network). Absorbs the Sortformer refinements like pyannote.
+        from shared.diarize_nemotron import diarize as nemotron_diarize
+        return nemotron_diarize(
+            audio_path,
+            whisper_segments,
+            n_speakers=n_speakers,
+            calendar_context=calendar_context,
+            **backend_options,
+        )
     if backend == "pyannote":
         # Clusters embeddings globally instead of predicting a fixed speaker set
         # per window, so speaker count is an outcome rather than a capped

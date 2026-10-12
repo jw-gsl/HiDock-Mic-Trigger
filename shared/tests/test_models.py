@@ -33,11 +33,18 @@ def test_registry_entries_have_required_fields():
     #   - pip-installable: pip_package + pip_import_name
     #     (NeMo Sortformer adds nemo_model_name for HF cache lookup)
     #   - file-downloadable: filename + url + size_mb
+    #   - remote service: runs on another machine (Nemotron on an NVIDIA
+    #     host); nothing to download, so it must be hardware-gated instead
     common = {"name", "description", "stage", "backend_key"}
     for key, info in MODEL_REGISTRY.items():
         missing = common - set(info.keys())
         assert not missing, f"Model '{key}' missing fields: {missing}"
         if info.get("built_in"):
+            continue
+        if info.get("remote_service"):
+            assert info.get("hardware_gated") and info.get("hardware_gate_key"), (
+                f"{key}: a remote service must be hardware-gated so it can't be "
+                "selected on a machine that can't reach one")
             continue
         if info.get("pip_package"):
             assert info.get("pip_import_name"), (
@@ -89,6 +96,10 @@ def test_get_model_status_not_installed():
         if info.get("built_in"):
             assert status["installed"] is True, f"{key}: built-in should always be installed"
             assert status["file_size_bytes"] == 0
+        elif info.get("remote_service"):
+            # Nothing installs locally; availability is the remote check,
+            # not MODELS_DIR.
+            continue
         elif info.get("pip_package") or info.get("managed_externally"):
             # Pip-installable entries (NeMo Sortformer, TEN VAD) and
             # managed-externally entries (Parakeet via parakeet-mlx): skip —
@@ -112,7 +123,8 @@ def test_model_paths_resolve_to_models_dir():
         #   - pip_package: installed by pip into the venv
         if (info.get("managed_externally")
                 or info.get("built_in")
-                or info.get("pip_package")):
+                or info.get("pip_package")
+                or info.get("remote_service")):
             continue
         expected = MODELS_DIR / info["filename"]
         assert expected.parent == MODELS_DIR
