@@ -3580,7 +3580,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Propose corrections by comparing each line with the saved voices of the
     /// meeting's people. Read-only: nothing is written until the reviewer
     /// accepts proposals (`applyVoiceCheck`).
-    private func runVoiceCheck(jsonPath: String, completion: @escaping (VoiceCheckResult) -> Void) {
+    private func runVoiceCheck(jsonPath: String, onProgress: @escaping (Int) -> Void,
+                               completion: @escaping (VoiceCheckResult) -> Void) {
         guard ensureTranscriptionReady() else {
             completion(.failure("The transcription pipeline is not ready."))
             return
@@ -3589,7 +3590,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.speakerWorkFile = recordingFileName(forTranscript: jsonPath)
         viewModel.speakerWorkStage = "Checking voices…"
         syncViewModelState()
-        runTranscription(arguments: ["voice-check", jsonPath], timeout: 1800) { [weak self] result in
+        runTranscription(arguments: ["voice-check", jsonPath], timeout: 1800, onProgress: { pct in
+            DispatchQueue.main.async { onProgress(pct) }
+        }) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.viewModel.speakerWorkFile = nil
@@ -3689,23 +3692,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     ) {
         guard ensureTranscriptionReady() else {
             DispatchQueue.main.async {
-                onUpdate(.failed("The transcription pipeline is not ready."))
+                onUpdate(.failed("Redetect couldn't start: the transcription pipeline is not ready."))
             }
             return
         }
         log("Re-diarizing \(jsonPath) with \(nSpeakers.map { "\($0)" } ?? "auto") speakers")
-        // The sidecar reports its own progress in place ("Re-diarising… the
-        // transcript will update here when it finishes"), so repeating it in the
+        // The sidecar reports its own progress in place, so repeating it in the
         // main window is noise — the same message twice on one screen.
         let viewerShowsProgress = isTranscriptViewerOpen(diarizedPath: jsonPath)
         if !viewerShowsProgress {
-            viewModel.syncStatus = "Re-diarizing…"
+            viewModel.syncStatus = "Detecting speakers again…"
             viewModel.syncStatusLevel = .secondary
         }
         // The row spinner stays either way: it is the only cue in the table that
         // a confirmation started work, and the sidecar cannot show that.
         viewModel.speakerWorkFile = recordingFileName(forTranscript: jsonPath)
-        viewModel.speakerWorkStage = nSpeakers.map { "Matching \($0) speakers…" } ?? "Matching speakers…"
+        viewModel.speakerWorkStage = nSpeakers.map { "Detecting \($0) speakers…" } ?? "Detecting speakers…"
         syncViewModelState()
 
         snapshotTranscriptArtifacts(jsonPath, reason: "Before re-diarisation")
@@ -3721,27 +3723,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case .success:
                 guard let before = before,
                       let after = self.loadDiarizedTranscript(at: jsonPath) else {
-                    let message = "The re-diarized sidecar could not be loaded."
+                    let message = "Redetect finished but the updated transcript couldn't be read."
                     self.log(message)
-                    self.viewModel.syncStatus = "Re-diarization failed"
+                    self.viewModel.syncStatus = "Speaker detection failed"
                     self.viewModel.syncStatusLevel = .error
                     onUpdate(.failed(message))
                     break
                 }
                 let summary = self.rediarizeSummary(before: before, after: after)
-                self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
+                self.log("Re-diarization complete (\(summary.changedSegmentAssignments) lines changed speaker)")
                 if !viewerShowsProgress {
-                    self.viewModel.syncStatus = summary.hasChanges
-                        ? "Re-diarization complete — \(summary.changedSegmentAssignments) segment assignments changed"
-                        : "Re-diarization complete — no changes"
+                    self.viewModel.syncStatus = summary.description
                     self.viewModel.syncStatusLevel = .success
                 }
                 onUpdate(.completed(summary, after))
             case .failure(let error):
                 self.log("Re-diarization failed: \(error.localizedDescription)")
-                self.viewModel.syncStatus = "Re-diarization failed"
+                self.viewModel.syncStatus = "Speaker detection failed"
                 self.viewModel.syncStatusLevel = .error
-                onUpdate(.failed(error.localizedDescription))
+                onUpdate(.failed("Redetect failed: \(error.localizedDescription)"))
             }
             self.viewModel.speakerWorkFile = nil
             self.viewModel.speakerWorkStage = ""
@@ -3754,15 +3754,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// The pipeline's stage names, as the progress bar shows them. The pipeline
+    /// keeps its own names (the progress floors key on them).
+    static func plainStageName(_ label: String) -> String {
+        switch label {
+        case "Diarizing speakers": return "Detecting speakers"
+        case "Applying corrections": return "Tidying text"
+        case "Writing output": return "Saving"
+        default: return label
+        }
+    }
+
     /// The recording filename a transcript belongs to, for row-level busy state.
     private func recordingFileName(forTranscript jsonPath: String) -> String? {
         let stem = URL(fileURLWithPath: jsonPath)
             .deletingPathExtension().lastPathComponent
             .replacingOccurrences(of: "_diarized", with: "")
-        return syncEntries.first {
+        if let name = syncEntries.first(where: {
             URL(fileURLWithPath: $0.recording.outputPath)
                 .deletingPathExtension().lastPathComponent == stem
-        }?.recording.outputName
+        })?.recording.outputName {
+            return name
+        }
+        // Merged recordings have no sync entry; their rows key on the mp3 name.
+        return viewModel.mergedFileTranscriptPaths.first { _, transcript in
+            URL(fileURLWithPath: transcript).deletingPathExtension().lastPathComponent == stem
+        }?.key
     }
 
     /// Whether the transcript viewer is currently showing this transcript.
@@ -3795,14 +3812,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         before: DiarizedTranscript,
         after: DiarizedTranscript
     ) -> TranscriptRediarizeSummary {
-        let beforeCount = Set(before.segments.map(\.speakerId)).count
-        let afterCount = Set(after.segments.map(\.speakerId)).count
+        // Compare the names a reader sees, not internal ids: Rec63's re-run
+        // renamed speakers while keeping their ids and was reported as "no
+        // changes".
+        func shown(_ t: DiarizedTranscript, _ segment: DiarizedSegment) -> String {
+            t.speakerNames[String(segment.speakerId)] ?? "Speaker \(segment.speakerId + 1)"
+        }
+        let beforeCount = Set(before.segments.map { shown(before, $0) }).count
+        let afterCount = Set(after.segments.map { shown(after, $0) }).count
         let comparedCount = min(before.segments.count, after.segments.count)
         var changed = abs(before.segments.count - after.segments.count)
-        for index in 0..<comparedCount {
-            if before.segments[index].speakerId != after.segments[index].speakerId {
-                changed += 1
-            }
+        for index in 0..<comparedCount where shown(before, before.segments[index]) != shown(after, after.segments[index]) {
+            changed += 1
         }
         return TranscriptRediarizeSummary(
             beforeSpeakerCount: beforeCount,
@@ -5659,9 +5680,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onRematch: { [weak self] jsonPath in
                 self?.rematchTranscript(jsonPath: jsonPath)
             },
-            onVoiceCheck: { [weak self] jsonPath, completion in
+            onVoiceCheck: { [weak self] jsonPath, onProgress, completion in
                 guard let self else { completion(.failure("The app is shutting down.")); return }
-                self.runVoiceCheck(jsonPath: jsonPath, completion: completion)
+                self.runVoiceCheck(jsonPath: jsonPath, onProgress: onProgress, completion: completion)
             },
             onApplyVoiceCheck: { [weak self] jsonPath, moves, completion in
                 guard let self else { completion(nil); return }
@@ -11085,7 +11106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // to syncStatus, which rendered in a separate dot row
             // below the device cards — now hidden during transcription
             // to avoid two live indicators.
-            self.viewModel.transcriptionStatus = "\(label) \(current)/\(stageTotal)"
+            self.viewModel.transcriptionStatus = "\(Self.plainStageName(label)) \(current)/\(stageTotal)"
             self.syncViewModelState()
         }) { [weak self] result in
             guard let self = self else { return }

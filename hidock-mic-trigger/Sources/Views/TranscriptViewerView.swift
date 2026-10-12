@@ -675,6 +675,15 @@ struct TranscriptRediarizeSummary {
     var hasChanges: Bool {
         beforeSpeakerCount != afterSpeakerCount || changedSegmentAssignments > 0
     }
+
+    var description: String {
+        guard hasChanges else { return "Speakers redetected · nothing changed" }
+        let lines = changedSegmentAssignments == 1 ? "1 line" : "\(changedSegmentAssignments) lines"
+        let speakers = beforeSpeakerCount == afterSpeakerCount
+            ? "\(afterSpeakerCount) speakers"
+            : "\(beforeSpeakerCount) → \(afterSpeakerCount) speakers"
+        return "Speakers redetected · \(speakers) · \(lines) changed speaker"
+    }
 }
 
 /// A locally committed transcript snapshot. Audio is never versioned—only
@@ -702,7 +711,11 @@ struct TranscriptVersionDetail {
 enum TranscriptRediarizeStatus {
     case running
     case completed(TranscriptRediarizeSummary, DiarizedTranscript)
+    /// Finished: nothing to do, or done without a re-run. Shown in green.
     case skipped(String)
+    /// Neutral information or advice. Shown in grey.
+    case info(String)
+    /// Shown in red, as given: callers say what failed.
     case failed(String)
 }
 
@@ -851,6 +864,7 @@ struct TranscriptViewerView: View {
     @State private var pendingTranscriptRestoreTime: Double?
     @State private var showSpeakerToolsHelp = false
     @State private var voiceCheckRunning = false
+    @State private var voiceCheckProgress = 0
     @State private var voiceCheckResult: VoiceCheckResult?
     @State private var calendarCandidates: [CalendarMeetingCandidate] = []
     @State private var calendarLoading = false
@@ -926,7 +940,7 @@ struct TranscriptViewerView: View {
     var onRematch: ((String) -> Void)?
     /// Check every line against the saved voices of this meeting's people
     /// (`voice-check`). Optional so older call-sites keep compiling.
-    var onVoiceCheck: ((String, @escaping (VoiceCheckResult) -> Void) -> Void)? = nil
+    var onVoiceCheck: ((String, @escaping (Int) -> Void, @escaping (VoiceCheckResult) -> Void) -> Void)? = nil
     /// Apply the accepted voice-check moves; returns the updated transcript.
     var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?) -> Void) -> Void)? = nil
     /// Enrol a speaker from the diarized sidecar's stored centroid (name,
@@ -1027,15 +1041,17 @@ struct TranscriptViewerView: View {
     private func startVoiceCheck() {
         guard let check = onVoiceCheck else { return }
         voiceCheckRunning = true
-        check(filePath) { result in
+        voiceCheckProgress = 0
+        rediarizeStatus = nil
+        check(filePath, { pct in voiceCheckProgress = pct }) { result in
             DispatchQueue.main.async {
                 voiceCheckRunning = false
                 if let error = result.error {
-                    rediarizeStatus = .failed("Voice check: \(error)")
+                    rediarizeStatus = .failed("Refine failed: \(error)")
                 } else if let note = result.note {
-                    rediarizeStatus = .skipped("Voice check: \(note)")
+                    rediarizeStatus = .info("Refine: \(note)")
                 } else if (result.lines ?? []).isEmpty && (result.speakers ?? []).isEmpty {
-                    rediarizeStatus = .skipped("Voice check: every line sounds like the person it's assigned to (\(result.checked ?? 0) checked).")
+                    rediarizeStatus = .skipped("Refine: all \(result.checked ?? 0) lines checked sound like the person they're assigned to.")
                 } else {
                     voiceCheckResult = result
                 }
@@ -1049,11 +1065,11 @@ struct TranscriptViewerView: View {
         apply(filePath, moves) { updated in
             DispatchQueue.main.async {
                 guard let updated else {
-                    rediarizeStatus = .failed("Couldn't apply the voice-check changes.")
+                    rediarizeStatus = .failed("Refine couldn't apply the changes. The transcript is unchanged.")
                     return
                 }
                 applyRediarizedTranscript(updated)
-                rediarizeStatus = .skipped("Voice check: moved \(moves.count) line\(moves.count == 1 ? "" : "s"). Undo is in the transcript history.")
+                rediarizeStatus = .skipped("Refine: moved \(moves.count) line\(moves.count == 1 ? "" : "s"). You can undo this from the transcript history.")
             }
         }
     }
@@ -1870,7 +1886,16 @@ struct TranscriptViewerView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
         }
 
-        if let rediarizeStatus {
+        if voiceCheckRunning {
+            HStack(spacing: 6) {
+                ProgressView(value: Double(voiceCheckProgress), total: 100)
+                    .frame(width: 90)
+                Text("Refine: checking each line against saved voices… \(voiceCheckProgress)%")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 16)
+        } else if let rediarizeStatus {
             rediarizeStatusView(rediarizeStatus)
                 .padding(.horizontal, 16)
         }
@@ -2577,28 +2602,28 @@ struct TranscriptViewerView: View {
             HStack(spacing: 6) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Re-diarising… the transcript will update here when it finishes.")
+                Text("Detecting speakers again… the transcript updates here when it's done.")
             }
             .font(.caption)
             .foregroundColor(.secondary)
         case .completed(let summary, _):
             Label {
-                if summary.hasChanges {
-                    Text("Re-diarisation complete · \(summary.beforeSpeakerCount) → \(summary.afterSpeakerCount) speakers · \(summary.changedSegmentAssignments) segment assignments changed")
-                } else {
-                    Text("Re-diarisation complete · no changes")
-                }
+                Text(summary.description)
             } icon: {
                 Image(systemName: summary.hasChanges ? "checkmark.circle.fill" : "equal.circle.fill")
             }
             .font(.caption)
             .foregroundColor(summary.hasChanges ? .green : .secondary)
         case .skipped(let message):
-            Label(message, systemImage: "checkmark.shield.fill")
+            Label(message, systemImage: "checkmark.circle.fill")
                 .font(.caption)
                 .foregroundColor(.green)
+        case .info(let message):
+            Label(message, systemImage: "info.circle")
+                .font(.caption)
+                .foregroundColor(.secondary)
         case .failed(let message):
-            Label(message.isEmpty ? "Re-diarisation failed" : "Re-diarisation failed: \(message)", systemImage: "exclamationmark.triangle.fill")
+            Label(message.isEmpty ? "Something went wrong" : message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundColor(.red)
                 .lineLimit(2)

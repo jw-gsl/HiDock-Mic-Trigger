@@ -442,7 +442,11 @@ struct RecordingsTableView: View {
         let isAutoMatched = viewModel.mergedFileAutoMatched.contains(mp3Name)
         let path = viewModel.mergedFileTranscriptPaths[mp3Name]
 
-        if isTranscribed && isTagged {
+        if viewModel.speakerWorkFile == mp3Name {
+            ProgressView()
+                .controlSize(.mini)
+                .help(viewModel.speakerWorkStage)
+        } else if isTranscribed && isTagged {
             Button {
                 if let path = path {
                     viewModel.onOpenTranscriptViewer(path)
@@ -867,7 +871,9 @@ struct RecordingsTableView: View {
                 transcriptionFailed: viewModel.failedTranscriptionPaths.contains(entry.recording.outputPath),
                 transcriptionErrorMessage: viewModel.transcriptionErrorMessage(for: entry.recording.outputPath),
                 onRevealTranscript: viewModel.onRevealTranscript,
-                onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer
+                onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer,
+                speakerWorkStage: viewModel.speakerWorkFile == entry.recording.outputName
+                    ? viewModel.speakerWorkStage : nil
             )
             .frame(width: 56, alignment: .leading)
 
