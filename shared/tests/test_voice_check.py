@@ -97,3 +97,21 @@ def test_meeting_people_combines_names_and_invitees():
     data["speaker_names"]["3"] = "Speaker 4"
     data["calendar_context"] = {"calendar_candidate_names": ["Garry Clarke"]}
     assert voice_check.meeting_people(data) == ["Garry Clarke", "Ian Reay", "Jeff Chow", "Jordan Di Scola"]
+
+
+def test_renaming_a_speaker_keeps_the_lines_that_really_are_them():
+    # Speaker 0 "Jordan" is mostly Chris, but its third line is Jordan himself.
+    data = _data()
+    data["segments"].insert(2, {"start": 30.0, "end": 35.0, "speaker_id": 0, "text": "Jordan answering"})
+    voices = {**VOICE_AT, 30.0: JORDAN}
+    lib = _library(**{
+        "Chris Wildsmith": [(CHRIS, "Rec1")], "Jeff Chow": [(JEFF, "Rec1")],
+        "Ian Reay": [(IAN, "Rec2")], "Jordan Di Scola": [(JORDAN, "Rec3")],
+    })
+    result = voice_check.propose(
+        data, lambda s, e: voices.get(s), lib, scorer="max", threshold=0.5, min_margin=0.2,
+        people=["Jordan Di Scola", "Ian Reay", "Jeff Chow", "Chris Wildsmith"])
+    speaker = result["speakers"][0]
+    assert speaker["suggested"] == "Chris Wildsmith"
+    assert speaker["kept"] == [2]
+    assert [m["index"] for m in speaker["moves"]] == [0, 1]
