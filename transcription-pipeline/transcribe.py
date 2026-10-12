@@ -1755,6 +1755,36 @@ def cmd_library_duplicates(args):
     print(_json.dumps(payload))
 
 
+def cmd_voice_library_audit(args):
+    """Flag naming-library samples that sound like someone else; --apply sets
+    them aside (inactive, reversible with --restore). JSON on stdout."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from shared import voice_library_audit as audit
+    from shared.voice_candidate_review import _atomic_write, load_candidate_config
+
+    config = load_candidate_config(args.config) if args.config else load_candidate_config()
+    if not (config.get("available") and config.get("library_path")):
+        print(_json.dumps({"error": "no naming library is active"}))
+        sys.exit(1)
+    path = _Path(config["library_path"])
+    library = _json.loads(path.read_text(encoding="utf-8"))
+    if args.restore:
+        copy = audit.backup(path)
+        restored = audit.restore(library)
+        _atomic_write(path, library)
+        print(_json.dumps({"restored": restored, "backup": str(copy)}))
+        return
+    flagged = audit.audit(library)
+    result = {"library": str(path), "flagged": flagged}
+    if args.apply and flagged:
+        result["backup"] = str(audit.backup(path))
+        result["set_aside"] = audit.set_aside(library, flagged)
+        _atomic_write(path, library)
+    print(_json.dumps(result, ensure_ascii=False))
+
+
 def cmd_calendar_context(args):
     """Write a <stem>_calendar.json sidecar for an audio recording.
 
@@ -2406,6 +2436,15 @@ def main():
         default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
     )
     p_candidate_merge.set_defaults(func=cmd_merge_candidate_speakers)
+
+    p_lib_audit = sub.add_parser(
+        "voice-library-audit",
+        help="Flag naming-library samples that sound like someone else (--apply to set aside)",
+    )
+    p_lib_audit.add_argument("--apply", action="store_true", help="Set flagged samples aside (reversible)")
+    p_lib_audit.add_argument("--restore", action="store_true", help="Undo every set-aside")
+    p_lib_audit.add_argument("--config", default=None, help="Candidate config path (default: active)")
+    p_lib_audit.set_defaults(func=cmd_voice_library_audit)
 
     p_calendar = sub.add_parser(
         "calendar-context",
