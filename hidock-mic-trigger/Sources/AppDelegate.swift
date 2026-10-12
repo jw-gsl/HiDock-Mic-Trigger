@@ -4565,6 +4565,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// route uses the user's *already connected* Claude MCP configuration for
     /// calendars that are not synced into the local Calendar app (for example
     /// an M365 account the user has connected only in Claude).
+    /// The event a lookup should suggest, or nil when it's genuinely unclear.
+    /// See `chooseCalendarEvent` for the rule; this adds the recording window
+    /// and logs why several candidates did or didn't produce a suggestion.
+    private func calendarEventToSuggest(
+        _ events: [CalendarMeetingCandidate],
+        audioPath: String,
+        duration: Double
+    ) -> CalendarMeetingCandidate? {
+        guard events.count > 1 else { return events.first }
+        guard let start = calendarRecordingStart(for: audioPath) else { return nil }
+        let decision = chooseCalendarEvent(events, recordingStart: start,
+                                           recordingEnd: start.addingTimeInterval(max(1, duration)))
+        log("Calendar match for \((audioPath as NSString).lastPathComponent): \(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
+        return decision.event
+    }
+
     private func findClaudeCalendarEvents(
         audioPath: String,
         duration: Double,
@@ -4890,7 +4906,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.log("Calendar suggestion suppressed for \((audioPath as NSString).lastPathComponent): marked ad-hoc while lookup was running")
                 return
             }
-            if events.count == 1, let event = events.first {
+            if let event = self.calendarEventToSuggest(events, audioPath: audioPath, duration: duration) {
                 // A manual check clears a previous decline: the user is asking
                 // again, so the old "not this meeting" answer no longer applies.
                 self.clearCalendarRejection(for: audioPath)
@@ -5033,7 +5049,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
         findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
             guard let self else { return }
-            if events.count == 1, let event = events.first {
+            if let event = self.calendarEventToSuggest(events, audioPath: audioPath, duration: duration) {
                 self.saveCalendarSuggestion(event, for: audioPath)
                 self.log("Calendar suggestion pending confirmation for \((audioPath as NSString).lastPathComponent) → \(event.title)")
             } else {
@@ -5129,7 +5145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let duration = ImportedRecordingsStore.probeDuration(at: path)
         findClaudeCalendarEvents(audioPath: path, duration: duration) { [weak self] events in
             guard let self else { return }
-            if events.count == 1, let event = events.first {
+            if let event = self.calendarEventToSuggest(events, audioPath: path, duration: duration) {
                 self.saveCalendarSuggestion(event, for: path)
                 self.log("Calendar suggestion pending confirmation for \((path as NSString).lastPathComponent) → \(event.title)")
             }
@@ -11391,7 +11407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         findClaudeCalendarEvents(audioPath: path, duration: entry.recording.duration) { [weak self] events in
             guard let self else { return }
-            if events.count == 1, let event = events.first {
+            if let event = self.calendarEventToSuggest(events, audioPath: path, duration: entry.recording.duration) {
                 self.saveCalendarSuggestion(event, for: path)
                 self.log("Calendar gate: pending confirmation for \(entry.recording.outputName) → \(event.title)")
                 self.viewModel.syncStatus = "Meeting pending: \(entry.recording.outputName)"

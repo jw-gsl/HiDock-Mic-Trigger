@@ -559,3 +559,60 @@ final class CalendarReplyClassificationTests: XCTestCase {
         XCTAssertFalse(calendarReplyIsConnectorFailure(reply))
     }
 }
+
+/// Back-to-back meetings used to leave every recording unlinked, because each
+/// lookup also returned a sliver of the neighbouring meeting (2026-10-09).
+final class CalendarEventChoiceTests: XCTestCase {
+    private let day = Date(timeIntervalSince1970: 1_791_500_000)
+
+    private func at(_ minutes: Double) -> Date { day.addingTimeInterval(minutes * 60) }
+
+    private func event(_ title: String, _ from: Double, _ to: Double,
+                       invitees: Int = 2) -> CalendarMeetingCandidate {
+        CalendarMeetingCandidate(id: title, title: title, start: at(from), end: at(to),
+                                 attendeeNames: (0..<invitees).map { "Person \($0)" })
+    }
+
+    func testMeetingWinsOverNeighbourItSpillsInto() {
+        // Rec61: 12:59:39–13:31:43 against 13:00–13:30 and 13:30–14:00.
+        let decision = chooseCalendarEvent(
+            [event("Jordan & James", 0, 30), event("BT Team chat", 30, 60)],
+            recordingStart: at(-0.35), recordingEnd: at(31.7))
+        XCTAssertEqual(decision.event?.title, "Jordan & James")
+    }
+
+    func testPersonalBlockDoesNotBlockTheMeeting() {
+        // Rec63: 14:00–14:53 against a 14:00–15:00 working session and 14:45 Swimming.
+        let decision = chooseCalendarEvent(
+            [event("Diligence session", 0, 60, invitees: 8), event("Swimming", 45, 210, invitees: 1)],
+            recordingStart: at(0.9), recordingEnd: at(53.2))
+        XCTAssertEqual(decision.event?.title, "Diligence session")
+    }
+
+    func testRecordingSplitAcrossTwoMeetingsStaysAmbiguous() {
+        let decision = chooseCalendarEvent(
+            [event("First", 0, 30), event("Second", 30, 60)],
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testSmallSliversOfLongMeetingsAreNotEnough() {
+        // Neither event covers half of the recording or half of itself.
+        let decision = chooseCalendarEvent(
+            [event("All-hands", -120, 15), event("Later", 50, 200)],
+            recordingStart: at(0), recordingEnd: at(60))
+        XCTAssertNil(decision.event)
+    }
+
+    func testShortRecordingInsideLongMeetingIsMatched() {
+        let decision = chooseCalendarEvent(
+            [event("Workshop", 0, 180), event("Drop-in", 170, 200)],
+            recordingStart: at(60), recordingEnd: at(75))
+        XCTAssertEqual(decision.event?.title, "Workshop")
+    }
+
+    func testSingleEventIsReturnedUnchanged() {
+        let only = event("Catch-up", 0, 30)
+        XCTAssertEqual(chooseCalendarEvent([only], recordingStart: at(0), recordingEnd: at(30)).event, only)
+    }
+}
