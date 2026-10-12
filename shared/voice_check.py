@@ -120,6 +120,7 @@ def propose(
 
     segments = data.get("segments") or []
     by_speaker: dict[str, list[np.ndarray]] = {}
+    line_ranks: dict[int, list[tuple[str, float]]] = {}
     for index, seg in enumerate(segments):
         if on_progress:
             on_progress(index / max(1, len(segments)))
@@ -141,6 +142,7 @@ def propose(
         ranks = ranked(vector)
         if not ranks:
             continue
+        line_ranks[index] = ranks
         current = _speaker_name(data, speaker_id)
         top, top_score = ranks[0]
         current_score = score_of(ranks, current)
@@ -165,10 +167,24 @@ def propose(
         current_score = score_of(ranks, current)
         if top.casefold() != current.casefold() and top_score >= threshold \
                 and top_score - current_score >= min_margin:
+            # Renaming the whole speaker must not sweep up the lines that
+            # really are the current name. Rec63's "Jordan" was mostly Chris,
+            # but four of its lines were Jordan answering when asked; moving
+            # them all would have deleted Jordan from the meeting.
+            moves, kept = [], []
+            for index, seg in enumerate(segments):
+                if str(seg.get("speaker_id")) != speaker_id:
+                    continue
+                own = line_ranks.get(index)
+                if own and score_of(own, current) >= threshold \
+                        and score_of(own, current) - score_of(own, top) >= min_margin:
+                    kept.append(index)
+                else:
+                    moves.append({"index": index, "start": float(seg.get("start", 0))})
             result["speakers"].append({
                 "speaker_id": speaker_id, "name": current, "suggested": top,
                 "score": round(top_score, 3), "current_score": round(current_score, 3),
-                "lines": len(vectors),
+                "lines": len(moves) + len(kept), "moves": moves, "kept": kept,
             })
     return result
 

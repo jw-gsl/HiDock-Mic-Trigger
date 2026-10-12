@@ -1929,11 +1929,6 @@ struct TranscriptViewerView: View {
                         if let result = voiceCheckResult {
                             VoiceCheckPanel(
                                 result: result,
-                                linesOfSpeaker: { id in
-                                    transcript.segments.enumerated()
-                                        .filter { String($0.element.speakerId) == id }
-                                        .map { (index: $0.offset, start: $0.element.start) }
-                                },
                                 onPlay: { start, end in
                                     audioPlayer.play(audioPath: audioPath, start: start, end: end,
                                                      segmentId: "voice-check-\(start)")

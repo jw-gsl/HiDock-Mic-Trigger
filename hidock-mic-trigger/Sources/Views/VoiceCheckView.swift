@@ -15,12 +15,17 @@ struct VoiceCheckResult: Decodable {
     }
 
     struct Speaker: Decodable, Identifiable {
+        struct Move: Decodable { let index: Int; let start: Double }
         let speakerId: String
         let name: String
         let suggested: String
         let score: Double
         let currentScore: Double
         let lines: Int
+        /// The lines a rename moves: all of the speaker's, except `kept`.
+        let moves: [Move]
+        /// Lines that clearly are the current name, left where they are.
+        let kept: [Int]
         var id: String { speakerId }
     }
 
@@ -49,12 +54,10 @@ struct VoiceCheckMove: Encodable {
 ///
 /// Everything starts ticked: on Rec63 four in five proposals matched what the
 /// reviewer then did by hand, so unticking the odd wrong one is quicker than
-/// ticking the rest. Accepting a whole speaker moves all of its lines, and a
-/// line's own proposal still wins for that line.
+/// ticking the rest. Accepting a whole speaker moves its lines except those
+/// that clearly are the current name, and a line's own proposal still wins.
 struct VoiceCheckPanel: View {
     let result: VoiceCheckResult
-    /// Segment index and start time for every line of a speaker id.
-    let linesOfSpeaker: (String) -> [(index: Int, start: Double)]
     let onPlay: ((Double, Double) -> Void)?
     let onApply: ([VoiceCheckMove]) -> Void
     let onCancel: () -> Void
@@ -63,12 +66,10 @@ struct VoiceCheckPanel: View {
     @State private var acceptedLines: Set<Int>
 
     init(result: VoiceCheckResult,
-         linesOfSpeaker: @escaping (String) -> [(index: Int, start: Double)],
          onPlay: ((Double, Double) -> Void)? = nil,
          onApply: @escaping ([VoiceCheckMove]) -> Void,
          onCancel: @escaping () -> Void) {
         self.result = result
-        self.linesOfSpeaker = linesOfSpeaker
         self.onPlay = onPlay
         self.onApply = onApply
         self.onCancel = onCancel
@@ -79,7 +80,7 @@ struct VoiceCheckPanel: View {
     private var moves: [VoiceCheckMove] {
         var byIndex: [Int: VoiceCheckMove] = [:]
         for speaker in result.speakers ?? [] where acceptedSpeakers.contains(speaker.id) {
-            for line in linesOfSpeaker(speaker.speakerId) {
+            for line in speaker.moves {
                 byIndex[line.index] = VoiceCheckMove(index: line.index, toName: speaker.suggested, start: line.start)
             }
         }
@@ -116,8 +117,10 @@ struct VoiceCheckPanel: View {
                             Toggle(isOn: binding(for: speaker.id, in: $acceptedSpeakers)) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("“\(speaker.name)” sounds like \(speaker.suggested)")
-                                    Text(String(format: "%.2f vs %.2f · all %d lines", speaker.score,
-                                                speaker.currentScore, speaker.lines))
+                                    Text(String(format: "%.2f vs %.2f · moves %d of %d lines", speaker.score,
+                                                speaker.currentScore, speaker.moves.count, speaker.lines)
+                                         + (speaker.kept.isEmpty ? ""
+                                            : " · keeps \(speaker.kept.count) that sound like \(speaker.name)"))
                                         .font(.caption).foregroundColor(.secondary)
                                 }
                             }
