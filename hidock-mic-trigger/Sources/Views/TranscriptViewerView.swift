@@ -2318,18 +2318,15 @@ struct TranscriptViewerView: View {
                 rediarizeStatus = .skipped("Calendar linked — speakers were already matched against this meeting, so there was nothing to redo.")
             } else if allSpeakersConfirmed {
                 rediarizeStatus = .skipped("Calendar linked — all speakers are confirmed, so their assignments were left untouched.")
-            } else if hasAnchorNamedSpeakers, onReclusterWithLabels != nil,
+            } else if hasAnchorNamedSpeakers,
                       event.attendeeCount < 2 || uniqueSpeakerIds.count >= event.attendeeCount {
-                // At least one speaker is already confirmed, and we're not being
-                // asked to discover a speaker we haven't detected at all — reassign
-                // only the unconfirmed/generic turns using the confirmed ones as
-                // anchors. A full rediarize re-clusters from scratch, and its label
-                // preservation (`preserve_existing_speaker_labels`) is best-effort,
-                // matched by timestamp overlap — it can silently un-verify an
-                // already-confirmed speaker whenever the fresh cluster boundaries
-                // don't line up cleanly with the old ones, forcing a needless
-                // reconfirmation of someone who was already correct.
-                onReclusterWithLabels?(filePath, nil)
+                // Some speakers are already confirmed, so don't re-cluster from
+                // scratch: that can un-verify someone who was already right.
+                // This used to run Reassign (TitaNet anchors), which on this
+                // audio can't tell voices apart well enough to move lines.
+                // Refine checks against this meeting's people instead, and
+                // only with the reviewer's say-so.
+                rediarizeStatus = .skipped("Calendar linked — confirmed names kept. Use Refine to check the other lines against this meeting's people.")
             } else {
                 startRediarize(speakers: event.attendeeCount >= 2 ? event.attendeeCount : nil)
             }
