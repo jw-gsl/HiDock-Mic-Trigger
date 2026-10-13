@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Why the current suggestion for a recording was chosen (time, transcript,
     /// recurring, only event), saved with it for the decision log.
     private var calendarPickReason: [String: String] = [:]
+    private var reviewQualityTimer: Timer?
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceId: String? = nil
@@ -418,6 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         setupStatusItem()
         wireViewModel()
         configureTranscriptPublishing()
+        scheduleReviewQuality()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         // Skipped: loadCachedRecordings() used to fire a short-timeout
@@ -3674,6 +3676,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Completion gets the updated transcript and how many moves couldn't be
     /// applied (their line no longer exists).
+    /// Re-tune matching from the reviewer's decisions and refresh the
+    /// "Matching quality" summary: two minutes after launch (out of the way
+    /// of start-up work), then every six hours, and whenever Settings opens.
+    private func scheduleReviewQuality() {
+        viewModel.onRefreshReviewQuality = { [weak self] in self?.refreshReviewQuality() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in self?.refreshReviewQuality() }
+        reviewQualityTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.refreshReviewQuality()
+        }
+    }
+
+    private func refreshReviewQuality() {
+        guard !viewModel.reviewQualityBusy, !viewModel.hidockRecordingActive,
+              FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else { return }
+        viewModel.reviewQualityBusy = true
+        runTranscription(arguments: ["review-report", "--tune"], timeout: 300) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.viewModel.reviewQualityBusy = false
+                guard case .success(let data) = result,
+                      let start = data.firstIndex(of: UInt8(ascii: "{")),
+                      let json = try? JSONSerialization.jsonObject(with: data[start...]) as? [String: Any],
+                      let lines = json["summary"] as? [String] else {
+                    self.log("Matching quality refresh failed")
+                    return
+                }
+                self.viewModel.reviewQualityLines = lines
+                self.viewModel.reviewQualityUpdated = Date()
+                let tuning = json["tuning"] as? [String: Any]
+                let adjusted = (tuning?["refine_margin_adjust"] as? [String: Any])?.count ?? 0
+                self.log("Matching quality refreshed; \(adjusted) Refine pair(s) tuned")
+            }
+        }
+    }
+
     /// Remember skipped suggestions (review-feedback log) so Refine stops
     /// offering them and their accuracy can be measured.
     private func recordVoiceCheckSkips(jsonPath: String, moves: [VoiceCheckMove]) {
@@ -5372,7 +5409,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // before (a recurring meeting), when it's the only such candidate and
         // covers a fifth of the recording.
         let recordingEnd = start.addingTimeInterval(max(1, duration))
-        let confirmed = ReviewFeedbackLog.confirmedMeetingTitles()
+        // Tuning switches this off if those picks keep being declined.
+        let confirmed = ReviewFeedbackLog.recurringMeetingsEnabled() ? ReviewFeedbackLog.confirmedMeetingTitles() : [:]
         let recurring = events.filter { event in
             let overlap = max(0, min(event.end, recordingEnd).timeIntervalSince(max(event.start, start)))
             return (confirmed[event.title] ?? 0) >= 2 && overlap >= 0.2 * max(1, duration)

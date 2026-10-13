@@ -38,4 +38,13 @@ enum ReviewFeedbackLog {
         }
         return counts
     }
+
+    /// False once tuning has found that recurring-meeting picks are mostly
+    /// declined or swapped (see `review_feedback.tune`).
+    static func recurringMeetingsEnabled() -> Bool {
+        let url = directory.appendingPathComponent("tuning.json")
+        guard let data = try? Data(contentsOf: url),
+              let tuning = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return true }
+        return tuning["recurring_meetings"] as? Bool ?? true
+    }
 }
