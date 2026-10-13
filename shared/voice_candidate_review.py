@@ -679,6 +679,71 @@ def record_suggestion_outcome(
     return event
 
 
+def learn_from_lines(
+    sidecar_path: str | Path,
+    name: str,
+    ranges: list[tuple[float, float]],
+    *,
+    source: str,
+    config_path: str | Path = ACTIVE_CANDIDATE_CONFIG,
+    session=None,
+) -> dict:
+    """Save a verified clip of `name` from lines the reviewer assigned to them.
+
+    Confirming a speaker already teaches the library; this does the same for
+    individual lines — Refine suggestions the reviewer applied, or lines they
+    moved by hand — so a thinly-profiled person (Jordan Di Scola had 2 samples
+    on 2026-10-13) gains voice evidence from each corrected meeting. The same
+    `choose_verified_clip` check guards it: nothing is learned unless the lines
+    add up to a long-enough stretch that doesn't sound like someone else.
+    """
+    final = " ".join(str(name or "").split())
+    if not final or is_generic_name(final):
+        return {"enrolled": False, "reason": "not a real speaker name"}
+    sidecar = Path(sidecar_path).expanduser().resolve()
+    config = load_candidate_config(config_path)
+    if not config.get("available"):
+        return {"enrolled": False, "reason": str(config.get("reason") or "no naming library")}
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    audio = _resolve_audio(sidecar, data)
+    if audio is None or not audio.exists():
+        return {"enrolled": False, "reason": "source audio missing"}
+    turns = [LegacyTurn(float(a), float(b), final) for a, b in ranges if float(b) > float(a)]
+    model_path = Path(config["model_path"])
+    session = session or _get_speaker_embed_session(config["model_key"], model_path)
+    if session is None:
+        return {"enrolled": False, "reason": "candidate model unavailable"}
+    library_path = Path(config["library_path"])
+    library = json.loads(library_path.read_text(encoding="utf-8"))
+    selected, refusal = choose_verified_clip(
+        turns, final,
+        lambda start, end: _extract_audio_embedding(
+            audio, segment_start=start, segment_end=end,
+            session=session, neural_model_version=config["model_key"]),
+        library,
+        scorer=str(config.get("scorer") or "top3_median"),
+        recording=audio.stem,
+    )
+    if selected is None:
+        return {"enrolled": False, "reason": refusal}
+    quality = _audio_quality_from_path(
+        audio, segment_start=selected["segment_start"], segment_end=selected["segment_end"])
+    _enroll_into(
+        library, final, selected["embedding"],
+        embed_dim=selected["dimension"], model=selected["model"], source=source,
+        provenance={
+            "source_file": str(sidecar), "audio_file": str(audio.resolve()),
+            "segment_start": selected["segment_start"], "segment_end": selected["segment_end"],
+            "label_source": "user", "observed_name": final, "review_action": source,
+            "reviewed_at": _now(), "verification": selected.get("verification"), **quality,
+        },
+        max_samples=int(config.get("max_active_samples", _MAX_SAMPLES)),
+    )
+    _atomic_write(library_path, library)
+    return {"enrolled": True, "name": final, "clip_start": selected["segment_start"],
+            "clip_end": selected["segment_end"], "verification": selected.get("verification")}
+
+
 def list_candidate_speakers(
     config_path: str | Path = ACTIVE_CANDIDATE_CONFIG,
 ) -> list[dict]:

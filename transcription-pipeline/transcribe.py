@@ -1254,6 +1254,13 @@ def cmd_voice_check(args):
         print(f"File not found: {json_path}", file=sys.stderr)
         sys.exit(1)
     from shared import voice_check
+    from shared import review_feedback
+    recording = json_path.name.replace("_diarized.json", "")
+    if args.skip:
+        skipped = _json.loads(Path(args.skip).read_text(encoding="utf-8"))
+        review_feedback.record_refine(recording, "skipped", skipped)
+        print(_json.dumps({"recorded_skips": len(skipped)}))
+        return
     if not args.apply:
         progress(5)
         result = voice_check.run(json_path, on_progress=lambda f: progress(5 + int(f * 90)))
@@ -1267,6 +1274,22 @@ def cmd_voice_check(args):
     data = _json.loads(json_path.read_text(encoding="utf-8"))
     summary = voice_check.apply_moves(data, moves)
     json_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    review_feedback.record_refine(recording, "applied", moves)
+    # Learn each person's voice from the lines just given to them (verified).
+    learned = {}
+    by_name: dict[str, list[tuple[float, float]]] = {}
+    for move in moves:
+        seg = next((s for s in data.get("segments", [])
+                    if abs(float(s.get("start", 0)) - float(move.get("start", -1))) <= 0.05), None)
+        if seg:
+            by_name.setdefault(str(move["to_name"]), []).append((float(seg["start"]), float(seg["end"])))
+    try:
+        from shared.voice_candidate_review import learn_from_lines
+        for name, ranges in by_name.items():
+            learned[name] = learn_from_lines(json_path, name, ranges, source="refine")
+    except Exception as exc:  # learning is a bonus; never fail the apply
+        learned["error"] = str(exc)
+    summary["learned"] = learned
     try:
         from shared.transcript_writer import write_transcript
         md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
@@ -1276,6 +1299,23 @@ def cmd_voice_check(args):
     except Exception as exc:
         print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
     print(_json.dumps(summary))
+
+
+def cmd_learn_lines(args):
+    """Learn a person's voice from lines the reviewer assigned to them by hand."""
+    import json as _json
+    from shared.voice_candidate_review import learn_from_lines
+    ranges = [tuple(r) for r in _json.loads(Path(args.ranges).read_text(encoding="utf-8"))]
+    print(_json.dumps(learn_from_lines(Path(args.json_path), args.name, ranges, source="line-edit")))
+
+
+def cmd_review_report(args):
+    """How well Refine and calendar matching do on the reviewer's decisions,
+    and how much transcripts are corrected after diarisation (JSON)."""
+    import json as _json
+    from shared import review_feedback
+    folder = Path(args.transcripts).expanduser()
+    print(_json.dumps(review_feedback.report(folder, since=args.since), indent=2, ensure_ascii=False))
 
 
 def cmd_rematch(args):
@@ -2273,8 +2313,20 @@ def main():
         help="Check each line against the meeting's saved voices and propose corrections",
     )
     p_voice_check.add_argument("json_path", help="Path to _diarized.json file")
-    p_voice_check.add_argument("--apply", help="JSON list of accepted moves ({index, to_name}) to apply")
+    p_voice_check.add_argument("--apply", help="JSON list of accepted moves ({index, to_name, start, ...}) to apply")
+    p_voice_check.add_argument("--skip", help="JSON list of suggestions the reviewer skipped, to remember")
     p_voice_check.set_defaults(func=cmd_voice_check)
+
+    p_learn = sub.add_parser("learn-lines", help="Learn a voice from lines assigned to a person (verified)")
+    p_learn.add_argument("json_path")
+    p_learn.add_argument("--name", required=True)
+    p_learn.add_argument("--ranges", required=True, help="JSON list of [start, end] pairs")
+    p_learn.set_defaults(func=cmd_learn_lines)
+
+    p_report = sub.add_parser("review-report", help="Accuracy of Refine and calendar suggestions, and correction rates")
+    p_report.add_argument("--transcripts", default=str(Path.home() / "HiDock" / "Raw Transcripts"))
+    p_report.add_argument("--since", help="Only transcripts first saved after this date (git --since)")
+    p_report.set_defaults(func=cmd_review_report)
 
     p_rematch = sub.add_parser(
         "rematch",

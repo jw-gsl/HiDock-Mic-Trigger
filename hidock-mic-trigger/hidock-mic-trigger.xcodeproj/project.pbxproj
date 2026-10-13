@@ -49,6 +49,7 @@
 		AD93D86A995B04A1FBB51A18 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDAD4DE368D4BD1A70444DB /* main.swift */; };
 		AE7DEC1B14636DBD037EC45D /* DeviceCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */; };
 		B3C9A2C39C6AB708F9992443 /* PublishStatusIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD4349987570F91E3F9E960B /* PublishStatusIcon.swift */; };
+		BC838A301E2D504E887A2E37 /* ReviewFeedbackLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 626E05D309A32BB9BF064968 /* ReviewFeedbackLog.swift */; };
 		C3B2886AD652E1436FD91675 /* TrimAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEBF9E18D6B7C8459D3B987 /* TrimAudioView.swift */; };
 		C61F91CD361FBB12C0C0060F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27867D05F3E255C858BC3F1 /* TerminalView.swift */; };
 		C8A7A22B1D782FB1DB2F3DBD /* CalendarConnectorBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE2A2EDFC73E609050AE5ED /* CalendarConnectorBanner.swift */; };
@@ -101,6 +102,7 @@
 		5917D14BDB00424EA7457723 /* SplitSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitSources.swift; sourceTree = "<group>"; };
 		5F277B1943362D018D91C803 /* TerminalPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPane.swift; sourceTree = "<group>"; };
 		614034CD6D618507904C5FFA /* hidock-mic-trigger-tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "hidock-mic-trigger-tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		626E05D309A32BB9BF064968 /* ReviewFeedbackLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewFeedbackLog.swift; sourceTree = "<group>"; };
 		640A7BCEAB107C1993E023E0 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		64CFDC4C443317E33030EE5A /* TemplatesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplatesManagerView.swift; sourceTree = "<group>"; };
 		651E9570959AB1B72306DFE9 /* MainWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
@@ -189,6 +191,7 @@
 				ED5594D4170BD809E24E4CAC /* Models.swift */,
 				0F92612E18371CD32AD53FFE /* NemotronAccess.swift */,
 				A168553CF6A253F63ABEB56C /* PlaudAuth.swift */,
+				626E05D309A32BB9BF064968 /* ReviewFeedbackLog.swift */,
 				45ECA314D0E3BF8DDD56BEC3 /* SkippedTranscriptions.swift */,
 				5917D14BDB00424EA7457723 /* SplitSources.swift */,
 				23EBCE58D06BD8BC06951C9B /* TranscriptPublish.swift */,
@@ -407,6 +410,7 @@
 				6AFC1F19EBD2DE7583548074 /* PlaudAuth.swift in Sources */,
 				B3C9A2C39C6AB708F9992443 /* PublishStatusIcon.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,
+				BC838A301E2D504E887A2E37 /* ReviewFeedbackLog.swift in Sources */,
 				1F28538F2F1601D254A85E9C /* SkippedTranscriptions.swift in Sources */,
 				159FDEE1D4C7748ABBAB8D03 /* SplitSources.swift in Sources */,
 				332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */,

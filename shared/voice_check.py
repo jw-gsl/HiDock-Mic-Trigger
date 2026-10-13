@@ -295,5 +295,10 @@ def run(json_path: Path, *, on_progress: Callable[[float], None] | None = None) 
         people=meeting_people(data, audio_path),
         on_progress=on_progress,
     )
+    # Don't re-suggest what the reviewer already skipped for this recording,
+    # unless the evidence for it has grown since.
+    from shared.review_feedback import skipped_suggestions, suppress_skipped
+    result["lines"], result["suppressed_skipped"] = suppress_skipped(
+        result["lines"], skipped_suggestions(audio_path.stem))
     result["model"] = config.get("model_key")
     return result
