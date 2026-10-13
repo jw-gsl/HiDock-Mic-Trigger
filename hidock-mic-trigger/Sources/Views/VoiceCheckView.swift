@@ -105,7 +105,7 @@ struct VoiceCheckPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Voice check").font(.headline)
+            Text("Refine: suggested corrections").font(.headline)
             Text(summary).font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

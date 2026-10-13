@@ -83,11 +83,18 @@ struct TranscriptionIndicator: View {
     var transcriptionErrorMessage: String? = nil
     var onRevealTranscript: (String) -> Void = { _ in }
     var onOpenTranscriptViewer: ((String) -> Void)? = nil
+    /// What speaker work (Redetect, Refine) is running on this recording, if
+    /// any. Without it the row showed nothing while a confirmation re-ran.
+    var speakerWorkStage: String? = nil
 
     @State private var showingError = false
 
     var body: some View {
-        if entry.transcribed && entry.speakersTagged {
+        if let speakerWorkStage {
+            ProgressView()
+                .controlSize(.mini)
+                .help(speakerWorkStage)
+        } else if entry.transcribed && entry.speakersTagged {
             // Fully ready — green checkmark
             Button {
                 if let path = entry.transcriptPath {
