@@ -991,6 +991,40 @@ def cmd_status(_args):
     print(json.dumps(lookup))
 
 
+def _carry_over_concurrent_speaker_tags(
+    json_path: Path, loaded_mtime_ns: int, diarized_result: dict, n_speakers: int | None,
+) -> dict:
+    """Keep speaker tags the reviewer made while a re-diarisation was running.
+
+    A re-run reads the sidecar once, takes a minute or so, then writes its
+    result. Confirming a meeting starts one, and people naturally start tagging
+    speakers straight away — every tag is written to the sidecar meanwhile and
+    was then overwritten (Rec45, 2026-10-08). If the file changed under us,
+    re-read it and carry its confirmed names onto the fresh speakers by the same
+    overlap rule the run already used for older labels. Best effort: on any
+    failure the result is returned unchanged.
+    """
+    import json as _json
+    try:
+        if json_path.stat().st_mtime_ns == loaded_mtime_ns:
+            return diarized_result
+        latest = _json.loads(json_path.read_text(encoding="utf-8"))
+        from shared.merge_speaker_labels import preserve_existing_speaker_labels
+        merged = preserve_existing_speaker_labels(
+            diarized_result, latest, min_speakers=n_speakers,
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose the run over this
+        print(f"WARN: could not carry over tags made during re-diarisation: {exc}",
+              file=sys.stderr)
+        return diarized_result
+    before = set((diarized_result.get("speaker_names") or {}).values())
+    carried = sorted(set((merged.get("speaker_names") or {}).values()) - before)
+    print("Speaker tags made during re-diarisation: "
+          + (f"kept {', '.join(carried)}" if carried else "none to carry over"),
+          file=sys.stderr)
+    return merged
+
+
 def cmd_rediarize(args):
     """Re-run speaker diarization on an existing transcript without re-transcribing."""
     import json as _json
@@ -1002,6 +1036,7 @@ def cmd_rediarize(args):
 
     snapshot_transcript(json_path, "Before re-diarisation (CLI)")
     data = _json.loads(json_path.read_text(encoding="utf-8"))
+    loaded_mtime_ns = json_path.stat().st_mtime_ns
     audio_path = data.get("audio_file", "")
     if not Path(audio_path).exists():
         print(f"Audio file not found: {audio_path}", file=sys.stderr)
@@ -1105,6 +1140,13 @@ def cmd_rediarize(args):
                 seg["text"] = apply_corrections(seg["text"])
     except ImportError:
         pass
+
+    # Tags made while this ran (confirming or renaming a speaker in the viewer)
+    # were written to the sidecar after `data` was read. Saving the result
+    # as-is would silently undo them, so carry them over first.
+    diarized_result = _carry_over_concurrent_speaker_tags(
+        json_path, loaded_mtime_ns, diarized_result, n_speakers,
+    )
 
     # Save back
     json_path.write_text(
@@ -1459,6 +1501,8 @@ def _rewrite_sidecar_markdown(json_path: Path, data: dict) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - the JSON is already saved
         print(f"anchor-sweep: could not rewrite .md: {exc}", file=sys.stderr)
+        return
+    _publish_after_write(md_path, "anchor-sweep")
 
 
 def _rewrite_and_verify_md(json_path: Path, data: dict, default_model: str) -> dict:
@@ -1505,7 +1549,22 @@ def _rewrite_and_verify_md(json_path: Path, data: dict, default_model: str) -> d
         raise RuntimeError(
             f"{default_model} produced stale output: {md_path} is older than {json_path}"
         )
+    _publish_after_write(md_path, default_model)
     return {"md_path": str(md_path), "sidecar_mtime_ns": sidecar_mtime_ns, "md_mtime_ns": md_mtime_ns}
+
+
+def _publish_after_write(md_path: Path, reason: str) -> None:
+    """Best-effort publish of a freshly-written .md to the Transcripts repo.
+
+    Gated on the app's kill-switch (UserDefaults, default off). Never fails
+    the caller's command — publishing is downstream of the write.
+    """
+    try:
+        from shared.transcript_publish import publishing_enabled, sync
+        if publishing_enabled():
+            sync([md_path], reason=f"{reason} (CLI)")
+    except Exception as exc:  # noqa: BLE001 - publishing must never break a command
+        print(f"transcript-publish: skipped: {exc}", file=sys.stderr)
 
 
 def cmd_rewrite_md(args):
@@ -1694,6 +1753,36 @@ def cmd_library_duplicates(args):
         "naming_library": None if naming is None else str(naming),
     }
     print(_json.dumps(payload))
+
+
+def cmd_voice_library_audit(args):
+    """Flag naming-library samples that sound like someone else; --apply sets
+    them aside (inactive, reversible with --restore). JSON on stdout."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from shared import voice_library_audit as audit
+    from shared.voice_candidate_review import _atomic_write, load_candidate_config
+
+    config = load_candidate_config(args.config) if args.config else load_candidate_config()
+    if not (config.get("available") and config.get("library_path")):
+        print(_json.dumps({"error": "no naming library is active"}))
+        sys.exit(1)
+    path = _Path(config["library_path"])
+    library = _json.loads(path.read_text(encoding="utf-8"))
+    if args.restore:
+        copy = audit.backup(path)
+        restored = audit.restore(library)
+        _atomic_write(path, library)
+        print(_json.dumps({"restored": restored, "backup": str(copy)}))
+        return
+    flagged = audit.audit(library)
+    result = {"library": str(path), "flagged": flagged}
+    if args.apply and flagged:
+        result["backup"] = str(audit.backup(path))
+        result["set_aside"] = audit.set_aside(library, flagged)
+        _atomic_write(path, library)
+    print(_json.dumps(result, ensure_ascii=False))
 
 
 def cmd_calendar_context(args):
@@ -2347,6 +2436,15 @@ def main():
         default=str(Path.home() / "HiDock" / "Voice Library Candidates" / "active.json"),
     )
     p_candidate_merge.set_defaults(func=cmd_merge_candidate_speakers)
+
+    p_lib_audit = sub.add_parser(
+        "voice-library-audit",
+        help="Flag naming-library samples that sound like someone else (--apply to set aside)",
+    )
+    p_lib_audit.add_argument("--apply", action="store_true", help="Set flagged samples aside (reversible)")
+    p_lib_audit.add_argument("--restore", action="store_true", help="Undo every set-aside")
+    p_lib_audit.add_argument("--config", default=None, help="Candidate config path (default: active)")
+    p_lib_audit.set_defaults(func=cmd_voice_library_audit)
 
     p_calendar = sub.add_parser(
         "calendar-context",

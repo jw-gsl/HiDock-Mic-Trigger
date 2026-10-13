@@ -446,6 +446,102 @@ def suggest_for_transcript(
     return base_result
 
 
+# A confirmed speaker can still contain someone else's lines (Rec63, 2026-10-09:
+# 14 of Jeff's lines sat under Ian). Before a clip is learned as a person, it
+# must not sound clearly more like somebody else already in the library.
+_VERIFY_MARGIN = 0.15
+_VERIFY_CANDIDATE_CLIPS = 5
+# With no saved voice to compare against, a clip is only refused when it is
+# unmistakably a known person — the level seen for real mislabels in the
+# 2026-10-12 library audit (0.78–1.00).
+_NEW_PERSON_REJECT_SCORE = 0.8
+
+
+def _recording_stem(sample: dict) -> str:
+    audio = str(sample.get("audio_file") or "")
+    if audio:
+        return Path(audio).stem
+    return Path(str(sample.get("source_file") or "")).stem.replace("_diarized", "")
+
+
+def _library_without_recording(library: dict, stem: str) -> dict:
+    """The library minus every sample taken from one recording."""
+    speakers = {}
+    for name, entry in (library.get("speakers") or {}).items():
+        kept = [s for s in _samples_of(entry) if _recording_stem(s) != stem]
+        if kept:
+            speakers[name] = {**entry, "samples": kept}
+    return {"speakers": speakers}
+
+
+def _candidate_clips(turns: list[LegacyTurn]) -> list[dict]:
+    """The speaker's longest contiguous stretches, longest first."""
+    from shared.human_archive_evidence import _MAX_CLIP_SECONDS, _MIN_CLIP_SECONDS, _merge_turns
+
+    spans = sorted(((end - start, start, end) for start, end in _merge_turns(turns)
+                    if end - start >= _MIN_CLIP_SECONDS), reverse=True)
+    return [{"segment_start": round(start, 3), "segment_end": round(min(end, start + _MAX_CLIP_SECONDS), 3)}
+            for _, start, end in spans[:_VERIFY_CANDIDATE_CLIPS]]
+
+
+def choose_verified_clip(
+    turns: list[LegacyTurn],
+    name: str,
+    embed,
+    library: dict,
+    *,
+    scorer: str,
+    recording: str,
+) -> tuple[dict | None, str]:
+    """Pick the clip to learn `name` from, or refuse with the reason.
+
+    `embed(start, end) -> (embedding, dimension, model)`. Samples from this
+    same recording are ignored when comparing, so the speaker being confirmed
+    can't vouch for itself. A person with saved voices from at least two other
+    meetings gets the longest clip nobody else clearly beats; a newer person
+    gets the clip most like the speaker's other clips (its majority voice),
+    unless that is unmistakably someone already known.
+    """
+    clips = _candidate_clips(turns)
+    if not clips:
+        return None, "speaker has no suitable contiguous clip for learning"
+    reference = _library_without_recording(library, recording)
+    known_meetings = len({_recording_stem(s) for s in _samples_of(reference["speakers"].get(name) or {})})
+    scored = []
+    for clip in clips:
+        embedding, dimension, model = embed(clip["segment_start"], clip["segment_end"])
+        vector = np.asarray(embedding, dtype=np.float32)
+        ranks = _rank_library(reference, vector, scorer)
+        own = next((r["score"] for r in ranks if r["name"].casefold() == name.casefold()), None)
+        other = next((r for r in ranks if r["name"].casefold() != name.casefold()), None)
+        scored.append({**clip, "embedding": embedding, "dimension": dimension, "model": model,
+                       "vector": vector / max(float(np.linalg.norm(vector)), 1e-10),
+                       "own": own, "other": other})
+
+    if known_meetings >= 2:
+        for clip in scored:
+            other_score = clip["other"]["score"] if clip["other"] else None
+            if other_score is None or clip["own"] is None or other_score - clip["own"] < _VERIFY_MARGIN:
+                clip["verification"] = (f"matches saved voice ({clip['own']:.2f})"
+                                        if clip["own"] is not None else "no competing voice")
+                return clip, ""
+        best = max(scored, key=lambda c: c["other"]["score"])
+        return None, (f"no clip sounded like {name}: the closest is {best['other']['name']} "
+                      f"({best['other']['score']:.2f} vs {best['own']:.2f})")
+
+    if len(scored) > 1:
+        # Score first: list.sort empties the list while it runs.
+        agreement = [float(np.mean([float(c["vector"] @ d["vector"]) for d in scored if d is not c]))
+                     for c in scored]
+        scored = [c for _, c in sorted(zip(agreement, scored), key=lambda pair: -pair[0])]
+    clip = scored[0]
+    if clip["other"] and clip["other"]["score"] >= _NEW_PERSON_REJECT_SCORE:
+        return None, (f"the clip sounds like {clip['other']['name']} ({clip['other']['score']:.2f}), "
+                      f"who is already in the library")
+    clip["verification"] = "new voice: the speaker's most consistent clip"
+    return clip, ""
+
+
 def record_suggestion_outcome(
     sidecar_path: str | Path,
     *,
@@ -511,10 +607,6 @@ def record_suggestion_outcome(
             if str(segment.get("speaker_id")) == sid
             and float(segment.get("end", 0)) > float(segment.get("start", 0))
         ]
-        selected = _candidate_for_person(turns)
-        if selected is None:
-            raise ValueError("speaker has no suitable contiguous clip for learning")
-
         model_path = Path(config["model_path"])
         expected_hash = str(config.get("model_sha256") or "").lower()
         if expected_hash and _sha256(model_path) != expected_hash:
@@ -523,20 +615,28 @@ def record_suggestion_outcome(
         if session is None:
             raise ValueError("candidate model unavailable")
 
-        embedding, dimension, model = _extract_audio_embedding(
-            audio,
-            segment_start=selected["segment_start"],
-            segment_end=selected["segment_end"],
-            session=session,
-            neural_model_version=config["model_key"],
+        library_path = Path(config["library_path"])
+        library = json.loads(library_path.read_text(encoding="utf-8"))
+        selected, refusal = choose_verified_clip(
+            turns, final,
+            lambda start, end: _extract_audio_embedding(
+                audio, segment_start=start, segment_end=end,
+                session=session, neural_model_version=config["model_key"]),
+            library,
+            scorer=str(config.get("scorer") or "top3_median"),
+            recording=audio.stem,
         )
+        if selected is None:
+            # The review itself still counts; only the learning is withheld.
+            event["not_enrolled_reason"] = refusal
+            should_enroll = False
+    if should_enroll:
+        embedding, dimension, model = selected["embedding"], selected["dimension"], selected["model"]
         quality = _audio_quality_from_path(
             audio,
             segment_start=selected["segment_start"],
             segment_end=selected["segment_end"],
         )
-        library_path = Path(config["library_path"])
-        library = json.loads(library_path.read_text(encoding="utf-8"))
         provenance = {
             "source_file": str(sidecar),
             "audio_file": str(audio.resolve()),
@@ -549,6 +649,7 @@ def record_suggestion_outcome(
             "observed_name": saved_name,
             "review_action": action,
             "reviewed_at": event["recorded_at"],
+            "verification": selected.get("verification"),
             **quality,
         }
         _enroll_into(

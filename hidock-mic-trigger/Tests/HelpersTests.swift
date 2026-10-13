@@ -492,3 +492,196 @@ final class TimestampBearingStemTests: XCTestCase {
         XCTAssertEqual(timestampBearingStem("intro-to-swift"), "intro-to-swift")
     }
 }
+
+final class AttendeeNameTests: XCTestCase {
+
+    func testSurnameFirstIsFlipped() {
+        XCTAssertEqual(normalizeAttendeeName("Robins, Justin"), "Justin Robins")
+        XCTAssertEqual(normalizeAttendeeName("  O'Neill, Mary-Kate "), "Mary-Kate O'Neill")
+    }
+
+    func testOrdinaryAndOddNamesAreLeftAlone() {
+        XCTAssertEqual(normalizeAttendeeName("Jeff Chow"), "Jeff Chow")
+        XCTAssertEqual(normalizeAttendeeName("Room 4, Floor 2"), "Room 4, Floor 2")
+        XCTAssertEqual(normalizeAttendeeName("a, b, c"), "a, b, c")
+    }
+
+    /// The Rec50 invite, as Claude returned it with semicolons.
+    func testSemicolonListKeepsSurnameFirstNamesWhole() {
+        XCTAssertEqual(splitAttendeeNames("Ellen Barss; Ian Reay; Robins, Justin; Jeff Chow"),
+                       ["Ellen Barss", "Ian Reay", "Justin Robins", "Jeff Chow"])
+    }
+
+    /// The Rec50 failure: a comma-only list that had cut "Robins, Justin" in two.
+    func testCommaListRejoinsASplitSurnameFirstName() {
+        XCTAssertEqual(splitAttendeeNames("Ellen Barss, Ian Reay, James Whiting, Jeff Chow, Robins, Justin"),
+                       ["Ellen Barss", "Ian Reay", "James Whiting", "Jeff Chow", "Justin Robins"])
+    }
+
+    func testCommaListOfFirstNamesOnlyIsNotPaired() {
+        XCTAssertEqual(splitAttendeeNames("Ian, Bob, Caro"), ["Ian", "Bob", "Caro"])
+    }
+
+    func testUnavailableAndBulletsAreDropped() {
+        XCTAssertEqual(splitAttendeeNames("- Jeff Chow\n• unavailable\n* Ian Reay"), ["Jeff Chow", "Ian Reay"])
+    }
+}
+
+final class CalendarReplyClassificationTests: XCTestCase {
+
+    /// The reply that silently cost a week of meeting links (2026-10-07).
+    func testLapsedM365AuthorisationIsConnectorFailure() {
+        let reply = "I couldn't check your calendar. The Microsoft 365 connector isn't authorised in this session, so I have no access to it. To fix it, connect Microsoft 365 in your claude.ai connector settings."
+        XCTAssertTrue(calendarReplyIsConnectorFailure(reply))
+    }
+
+    func testNeedsAuthenticationIsConnectorFailure() {
+        XCTAssertTrue(calendarReplyIsConnectorFailure("The calendar MCP requires authentication. Run /mcp to sign in."))
+        XCTAssertTrue(calendarReplyIsConnectorFailure("I don't have access to any calendar tools in this session."))
+    }
+
+    func testExplicitNoMatchIsNotConnectorFailure() {
+        XCTAssertFalse(calendarReplyIsConnectorFailure("NO_MATCH"))
+        XCTAssertFalse(calendarReplyIsConnectorFailure("  NO_MATCH\n"))
+    }
+
+    func testPlainNoEventReplyIsNotConnectorFailure() {
+        XCTAssertFalse(calendarReplyIsConnectorFailure("No events overlap that window."))
+    }
+
+    func testEventListMentioningAccessIsNotConnectorFailure() {
+        let reply = """
+        Title: James & Hannah Weekly
+        Time: 10:00 – 10:30
+        Organiser: Hannah
+        Invitees: unavailable (I don't have access to the attendee list)
+        """
+        XCTAssertFalse(calendarReplyIsConnectorFailure(reply))
+    }
+}
+
+/// Back-to-back meetings used to leave every recording unlinked, because each
+/// lookup also returned a sliver of the neighbouring meeting (2026-10-09).
+final class CalendarEventChoiceTests: XCTestCase {
+    private let day = Date(timeIntervalSince1970: 1_791_500_000)
+
+    private func at(_ minutes: Double) -> Date { day.addingTimeInterval(minutes * 60) }
+
+    private func event(_ title: String, _ from: Double, _ to: Double,
+                       invitees: Int = 2) -> CalendarMeetingCandidate {
+        CalendarMeetingCandidate(id: title, title: title, start: at(from), end: at(to),
+                                 attendeeNames: (0..<invitees).map { "Person \($0)" })
+    }
+
+    func testMeetingWinsOverNeighbourItSpillsInto() {
+        // Rec61: 12:59:39–13:31:43 against 13:00–13:30 and 13:30–14:00.
+        let decision = chooseCalendarEvent(
+            [event("Jordan & James", 0, 30), event("BT Team chat", 30, 60)],
+            recordingStart: at(-0.35), recordingEnd: at(31.7))
+        XCTAssertEqual(decision.event?.title, "Jordan & James")
+    }
+
+    func testPersonalBlockDoesNotBlockTheMeeting() {
+        // Rec63: 14:00–14:53 against a 14:00–15:00 working session and 14:45 Swimming.
+        let decision = chooseCalendarEvent(
+            [event("Diligence session", 0, 60, invitees: 8), event("Swimming", 45, 210, invitees: 1)],
+            recordingStart: at(0.9), recordingEnd: at(53.2))
+        XCTAssertEqual(decision.event?.title, "Diligence session")
+    }
+
+    func testRecordingSplitAcrossTwoMeetingsStaysAmbiguous() {
+        let decision = chooseCalendarEvent(
+            [event("First", 0, 30), event("Second", 30, 60)],
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testSmallSliversOfLongMeetingsAreNotEnough() {
+        // Neither event covers half of the recording or half of itself.
+        let decision = chooseCalendarEvent(
+            [event("All-hands", -120, 15), event("Later", 50, 200)],
+            recordingStart: at(0), recordingEnd: at(60))
+        XCTAssertNil(decision.event)
+    }
+
+    func testShortRecordingInsideLongMeetingIsMatched() {
+        let decision = chooseCalendarEvent(
+            [event("Workshop", 0, 180), event("Drop-in", 170, 200)],
+            recordingStart: at(60), recordingEnd: at(75))
+        XCTAssertEqual(decision.event?.title, "Workshop")
+    }
+
+    func testSingleEventIsReturnedUnchanged() {
+        let only = event("Catch-up", 0, 30)
+        XCTAssertEqual(chooseCalendarEvent([only], recordingStart: at(0), recordingEnd: at(30)).event, only)
+    }
+}
+
+/// When timing can't decide, what was said can.
+final class CalendarTranscriptChoiceTests: XCTestCase {
+    private let day = Date(timeIntervalSince1970: 1_791_500_000)
+    private func at(_ minutes: Double) -> Date { day.addingTimeInterval(minutes * 60) }
+    private func event(_ title: String, _ from: Double, _ to: Double, _ people: [String]) -> CalendarMeetingCandidate {
+        CalendarMeetingCandidate(id: title, title: title, start: at(from), end: at(to), attendeeNames: people)
+    }
+
+    private lazy var evenSplit = [
+        event("Diligence working session", 0, 30, ["James Whiting", "Jeff Chow", "Ellen Barss"]),
+        event("AI Accelerator 101", 30, 60, ["James Whiting", "Jordan Di Scola"]),
+    ]
+
+    func testNamedInviteesSettleAnEvenSplit() {
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Thanks Jeff. Ellen, can you take the diligence numbers?",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertEqual(decision.event?.title, "Diligence working session")
+    }
+
+    func testSharedInviteeTellsThemApartInNoWay() {
+        // Only the recorder is named, and they're on both invites.
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "James here, let's get going.",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testCloseEvidenceStaysAmbiguous() {
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Jeff said Jordan would join later.",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testNamesMustBeWholeWords() {
+        // "Jeffrey" and "jordanian" are not Jeff or Jordan.
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Jeffrey from the jordanian office, diligence aside",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testBarelyOverlappingMeetingCannotWin() {
+        // Talking about the next meeting doesn't move the recording into it.
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Before Jordan's AI Accelerator session later…",
+            recordingStart: at(0), recordingEnd: at(32))
+        XCTAssertNil(decision.event)
+    }
+}
+
+final class CalendarDiarisedAgainstTests: XCTestCase {
+    func testReadsTheEventIdThePipelineRecorded() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())_diarized.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"segments":[],"calendar_context":{"calendar_event_id":"Catch-up|1791500000.0"}}"#.utf8).write(to: url)
+        XCTAssertEqual(calendarEventIdDiarisedAgainst(diarizedJSONPath: url.path), "Catch-up|1791500000.0")
+    }
+
+    func testNoContextMeansNotDiarisedAgainstAnything() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())_diarized.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"segments":[]}"#.utf8).write(to: url)
+        XCTAssertNil(calendarEventIdDiarisedAgainst(diarizedJSONPath: url.path))
+        XCTAssertNil(calendarEventIdDiarisedAgainst(diarizedJSONPath: "/nonexistent/x_diarized.json"))
+    }
+}

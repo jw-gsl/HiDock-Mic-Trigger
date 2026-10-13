@@ -337,3 +337,47 @@ def test_min_speakers_still_collapses_when_the_floor_allows_it():
     # Only two speakers requested, so collapsing to Alice + Bob is fine.
     result = preserve_existing_speaker_labels(fresh, previous, min_speakers=2)
     assert sorted(result["speaker_names"].values()) == ["Alice", "Bob"]
+
+
+def _seg(start, end, speaker_id):
+    return {"start": start, "end": end, "speaker_id": speaker_id, "speaker": f"Speaker {speaker_id + 1}", "text": "x"}
+
+
+def _speakers(result):
+    names = result.get("speaker_names", {})
+    return sorted({names.get(str(s["speaker_id"])) for s in result["segments"]})
+
+
+def test_one_confirmed_name_does_not_swallow_speakers_that_barely_overlap_it():
+    """Rec45 (2026-10-08): only James was confirmed, and every fresh speaker
+    overlapped a sliver of his old segments, so all of them took his name and
+    were merged into one. A sliver must not carry a name across."""
+    previous = {
+        "segments": [_seg(0, 60, 0), _seg(60, 120, 1), _seg(120, 180, 0), _seg(180, 240, 2)],
+        "speaker_names": {"0": "James Whiting", "1": "Speaker 2", "2": "Speaker 3"},
+        "speaker_meta": {"0": {"source": "user", "verified": True}},
+    }
+    # Fresh boundaries are shifted by a few seconds, so speakers 1 and 2 each
+    # overlap James's old segments briefly.
+    fresh = {
+        "segments": [_seg(0, 57, 0), _seg(57, 123, 1), _seg(123, 177, 0), _seg(177, 240, 2)],
+        "speaker_names": {"0": "Speaker 1", "1": "Speaker 2", "2": "Speaker 3"},
+    }
+    out = preserve_existing_speaker_labels(fresh, previous)
+    assert len(_speakers(out)) == 3
+    assert "James Whiting" in _speakers(out)
+
+
+def test_a_person_split_in_two_still_merges_back_under_their_name():
+    previous = {
+        "segments": [_seg(0, 100, 0), _seg(100, 140, 1)],
+        "speaker_names": {"0": "James Whiting", "1": "Speaker 2"},
+        "speaker_meta": {"0": {"source": "user", "verified": True}},
+    }
+    # The fresh run cut James into two clusters; both are mostly James.
+    fresh = {
+        "segments": [_seg(0, 50, 0), _seg(50, 100, 2), _seg(100, 140, 1)],
+        "speaker_names": {"0": "Speaker 1", "1": "Speaker 2", "2": "Speaker 3"},
+    }
+    out = preserve_existing_speaker_labels(fresh, previous)
+    assert _speakers(out) == ["James Whiting", "Speaker 2"]

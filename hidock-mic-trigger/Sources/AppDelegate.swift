@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var deviceManagerWindow: NSWindow?
     private var plaudLoginController: PlaudLoginWindowController?
     private var terminalWindow: NSWindow?
+    /// Kept so the Settings toggle and the status-bar menu tick stay in step.
+    private var autoPublishMenuItem: NSMenuItem?
     private weak var speakerLabelsMenuItem: NSMenuItem?
     private var importedRecordings: [ImportedRecordingEntry] = []
     /// Filenames the user has opted out of transcribing. Persisted to
@@ -79,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var deployApprovalTimer: Timer?
     private let mergeGroupsPath = "\(NSHomeDirectory())/HiDock/merge_groups.json"
     private var diarizeEnabled = false
+    private enum CalendarPrelookup { case pending, done([CalendarMeetingCandidate]) }
+    /// Calendar lookups started alongside transcription, by audio path.
+    private var calendarPrelookups: [String: CalendarPrelookup] = [:]
+    /// Transcribed before their lookup finished; resolved when it does.
+    private var calendarAwaitingTranscript: Set<String> = []
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceId: String? = nil
@@ -407,6 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         setupMainMenu()
         setupStatusItem()
         wireViewModel()
+        configureTranscriptPublishing()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         // Skipped: loadCachedRecordings() used to fire a short-timeout
@@ -536,6 +544,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         removeDeviceChangeListener()
         stoppingIntentionally = true
         stopTrigger()
+        // No publish on quit: settling transcripts are persisted and finish
+        // settling after the next launch, so quitting is never held up by git.
         UpdateChecker.installPendingUpdateIfNeeded()
     }
 
@@ -691,6 +701,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onConfirmCalendarSuggestion = { [weak self] path in self?.confirmCalendarSuggestion(for: path) }
         viewModel.onRejectCalendarSuggestion = { [weak self] path in self?.rejectCalendarSuggestion(for: path) }
         viewModel.onLookupCalendarForRecording = { [weak self] path in self?.lookupCalendarOnDemand(path) }
+        viewModel.onRetryTranscriptPublish = { TranscriptPublish.shared.retryNow() }
+        viewModel.onDismissTranscriptPublishProblem = { [weak self] in self?.viewModel.transcriptPublishProblem = nil }
+        viewModel.onShowTranscriptPublishStatus = { [weak self] in self?.showPublishStatusMenu() }
+        viewModel.onSetTranscriptPublishing = { [weak self] enable in self?.setTranscriptPublishing(enable) }
+        viewModel.onSetTranscriptsRepo = { [weak self] input in self?.setTranscriptsRepo(input) }
+        viewModel.onSyncTranscriptsNow = { [weak self] in self?.runManualTranscriptSync(reason: "Manual sync") }
+        viewModel.onOpenTranscriptsRepo = {
+            guard let slug = TranscriptPublish.repoSlug(from: TranscriptPublish.configuredRepo),
+                  let url = URL(string: "https://github.com/\(slug)") else { return }
+            NSWorkspace.shared.open(url)
+        }
+        viewModel.onOpenPublishedTranscript = { stem, history in
+            guard let url = TranscriptPublish.shared.githubURL(forStem: stem, history: history) else { return }
+            NSWorkspace.shared.open(url)
+        }
+        viewModel.onFixCalendarConnector = { [weak self] in self?.openCalendarMCPOnboarding() }
+        viewModel.onRetryCalendarConnector = { [weak self] in self?.retryCalendarConnector() }
+        viewModel.onDismissCalendarConnectorProblem = { [weak self] in self?.viewModel.calendarConnectorProblem = nil }
         viewModel.onDeleteLocalCopy = { [weak self] name in self?.deleteLocalCopy(name: name) }
         viewModel.onRemoveSelected = { [weak self] in self?.removeSelected() }
         viewModel.onReconnectDevice = { [weak self] deviceId in self?.reconnectDevice(deviceId: deviceId) }
@@ -805,6 +833,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onDownloadModelByKey = { [weak self] key in self?.downloadModelByKey(key) }
         viewModel.onDeleteModelByKey = { [weak self] key in self?.deleteModelByKey(key) }
         viewModel.onSetActiveModelByKey = { [weak self] key in self?.setActiveModelByKey(key) }
+        viewModel.onCheckRemoteService = { [weak self] key in self?.checkRemoteService(key) }
+        viewModel.onSetHardwareGate = { [weak self] gateKey, affirmed in
+            self?.setHardwareGate(gateKey, affirmed: affirmed)
+        }
         viewModel.onCheckModelCapability = { [weak self] key in self?.checkModelCapability(key) }
         viewModel.onSendFeedback = { [weak self] in self?.sendFeedback() }
         viewModel.onShowFeedbackHistory = { [weak self] in self?.showFeedbackHistory() }
@@ -1483,6 +1515,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManual), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
+        menu.addItem(NSMenuItem.separator())
+        let publishSubmenu = NSMenu(title: "Transcripts on GitHub")
+        let autoPublishItem = NSMenuItem(title: "Auto-publish edits", action: #selector(toggleAutoPublishMenu(_:)), keyEquivalent: "")
+        autoPublishItem.target = self
+        autoPublishItem.state = TranscriptPublish.shared.isEnabled ? .on : .off
+        autoPublishMenuItem = autoPublishItem
+        let syncNowItem = NSMenuItem(title: "Sync to GitHub Now", action: #selector(syncTranscriptsToGitHubMenu), keyEquivalent: "")
+        syncNowItem.target = self
+        let publishStatusItem = NSMenuItem(title: "Show Sync Status...", action: #selector(showPublishStatusMenu), keyEquivalent: "")
+        publishStatusItem.target = self
+        publishSubmenu.addItem(autoPublishItem)
+        publishSubmenu.addItem(syncNowItem)
+        publishSubmenu.addItem(publishStatusItem)
+        let publishItem = NSMenuItem(title: "Transcripts on GitHub", action: nil, keyEquivalent: "")
+        publishItem.submenu = publishSubmenu
+        menu.addItem(publishItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(quitItem)
 
@@ -3685,6 +3733,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func rediarizeTranscript(
         jsonPath: String,
         nSpeakers: Int?,
+        calendarContextPath: String? = nil,
         onUpdate: @escaping (TranscriptRediarizeStatus) -> Void
     ) {
         guard ensureTranscriptionReady() else {
@@ -3714,6 +3763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var args = ["rediarize", jsonPath]
         if let n = nSpeakers { args += ["--n-speakers", "\(n)"] }
+        if let calendarContextPath { args += ["--calendar-context", calendarContextPath] }
 
         runTranscription(arguments: args) { [weak self] result in
             guard let self = self else { return }
@@ -3728,6 +3778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     onUpdate(.failed(message))
                     break
                 }
+                TranscriptPublish.shared.schedule(diarizedPath: jsonPath)
                 let summary = self.rediarizeSummary(before: before, after: after)
                 self.log("Re-diarization complete (\(summary.changedSegmentAssignments) segment assignments changed)")
                 if !viewerShowsProgress {
@@ -4188,7 +4239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
            // EventKit hands back the address itself as `name` for some accounts;
            // run those through the same tidy-up rather than storing an email.
            !resolved.contains("@") {
-            return resolved
+            return normalizeAttendeeName(resolved)
         }
         let address = attendee.url.absoluteString
             .replacingOccurrences(of: "mailto:", with: "")
@@ -4349,7 +4400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         audioPath: String,
         duration: Double,
         event: CalendarMeetingCandidate,
-        rediarizeAfterLink: Bool = true
+        rediarizeAfterLink: Bool = true,
+        onSaved: (() -> Void)? = nil
     ) {
         // Enrich *before* writing the sidecar and re-diarising, not after: the
         // attendee list becomes `allowed_names`, so a re-diarisation kicked off with
@@ -4357,7 +4409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // arrive too late to matter.
         guard event.attendeeCount >= eventKitAttendeeCap else {
             finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
-                                       event: event, rediarizeAfterLink: rediarizeAfterLink)
+                                       event: event, rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
             return
         }
         enrichAttendees(for: event) { [weak self] enriched in
@@ -4373,21 +4425,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 )
             }
             self.finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
-                                            event: resolved, rediarizeAfterLink: rediarizeAfterLink)
+                                            event: resolved, rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
         }
     }
 
-    private func finishLinkingCalendarEvent(
-        audioPath: String,
-        duration: Double,
+    /// The `_calendar.json` document the pipeline reads for one event: the
+    /// attendee list it narrows speaker names to and caps the count by.
+    private func calendarContextPayload(
         event: CalendarMeetingCandidate,
-        rediarizeAfterLink: Bool = true
-    ) {
+        audioPath: String,
+        duration: Double
+    ) -> [String: Any]? {
         captureRecordingTimeZone(for: audioPath)
-        guard let recordingStart = calendarRecordingStart(for: audioPath) else { return }
+        guard let recordingStart = calendarRecordingStart(for: audioPath) else { return nil }
         let recordingTimeZone = recordingTimeZone(for: audioPath)
         let iso = ISO8601DateFormatter()
-        let payload: [String: Any] = [
+        return [
             "source": "macos-eventkit",
             "recording_start": iso.string(from: recordingStart),
             "recording_end": iso.string(from: recordingStart.addingTimeInterval(max(1, duration))),
@@ -4406,6 +4459,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 },
             ]],
         ]
+    }
+
+    private func finishLinkingCalendarEvent(
+        audioPath: String,
+        duration: Double,
+        event: CalendarMeetingCandidate,
+        rediarizeAfterLink: Bool = true,
+        onSaved: (() -> Void)? = nil
+    ) {
+        // Whatever happens below, the caller's follow-up (the sidecar's own
+        // speaker pass) runs once the context is on disk, never before it.
+        defer { onSaved?() }
+        guard let payload = calendarContextPayload(event: event, audioPath: audioPath, duration: duration) else { return }
         let audioURL = URL(fileURLWithPath: audioPath)
         let destination = audioURL.deletingLastPathComponent()
             .appendingPathComponent("\(audioURL.deletingPathExtension().lastPathComponent)_calendar.json")
@@ -4416,6 +4482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // been explicitly linked (from either the table or sidecar), it
             // must not reappear as a second, stale decision on reopening.
             try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
+            try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
             clearCalendarRejection(for: audioPath)
             updateCalendarMeeting(event, for: audioPath)
             updateCalendarSuggestion(title: nil, for: audioPath)
@@ -4443,7 +4510,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 .flatMap { $0.transcribed ? $0.transcriptPath : nil }
             if rediarizeAfterLink, let transcriptPath = entryTranscript ?? mergedTranscript {
                 let diarized = transcriptPath.replacingOccurrences(of: ".md", with: "_diarized.json")
-                if transcriptHasUnconfirmedSpeakers(at: diarized) {
+                if calendarEventIdDiarisedAgainst(diarizedJSONPath: diarized) == event.id {
+                    // The suggestion was applied while transcribing, so the
+                    // speakers already reflect this meeting's invite list. A
+                    // second pass would only redo the same work — and clash with
+                    // the names the reviewer is confirming in the sidecar.
+                    log("Calendar linked without re-diarising \(audioURL.lastPathComponent): already diarised against '\(event.title)'")
+                    viewModel.syncStatus = "Calendar linked — speakers already matched to this meeting"
+                    viewModel.syncStatusLevel = .success
+                    syncViewModelState()
+                } else if transcriptHasUnconfirmedSpeakers(at: diarized) {
                     // Deliberately no explicit count. The saved `_calendar.json`
                     // already carries the attendee list, and the pipeline treats a
                     // calendar count as a **downward-only** soft cap
@@ -4590,6 +4666,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// route uses the user's *already connected* Claude MCP configuration for
     /// calendars that are not synced into the local Calendar app (for example
     /// an M365 account the user has connected only in Claude).
+    /// The event a lookup should suggest, or nil when it's genuinely unclear.
+    /// See `chooseCalendarEvent` for the rule; this adds the recording window
+    /// and logs why several candidates did or didn't produce a suggestion.
+    private func calendarEventToSuggest(
+        _ events: [CalendarMeetingCandidate],
+        audioPath: String,
+        duration: Double
+    ) -> CalendarMeetingCandidate? {
+        guard events.count > 1 else { return events.first }
+        guard let start = calendarRecordingStart(for: audioPath) else { return nil }
+        let decision = chooseCalendarEvent(events, recordingStart: start,
+                                           recordingEnd: start.addingTimeInterval(max(1, duration)))
+        log("Calendar match for \((audioPath as NSString).lastPathComponent): \(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
+        return decision.event
+    }
+
     private func findClaudeCalendarEvents(
         audioPath: String,
         duration: Double,
@@ -4606,6 +4698,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
             + ["\(NSHomeDirectory())/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
         guard let claudePath = cliCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            reportCalendarConnectorProblem(
+                summary: "Calendar lookup can't run: the Claude CLI wasn't found",
+                fix: "Install Claude Code (it should be at ~/.local/bin/claude), then press Check again.",
+                detail: "Looked in PATH, ~/.local/bin, /opt/homebrew/bin and /usr/local/bin.",
+                audioPath: audioPath
+            )
             DispatchQueue.main.async { completion([]) }
             return
         }
@@ -4640,7 +4738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("Calendar search started [\(searchKind)] for \((audioPath as NSString).lastPathComponent), local recording \(localStart)–\(localEnd)\(requestedMeeting.map { ", query=\($0)" } ?? "")")
         let prompt = """
-        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses):
+        Use the connected Microsoft 365 calendar MCP only. \(searchInstruction) For each event, fetch the event DETAILS before answering. Return these separate lines for every candidate (display names only, no email addresses; write each name as "First Last", never "Last, First"):
         Title: <event title>
         Time: <HH:mm> – <HH:mm>
         Organiser: <display name>
@@ -4687,10 +4785,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 else {
                     let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                     self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no usable result (status \(process.terminationStatus))\(stderrText.isEmpty ? "" : ": \(stderrText)")")
+                    self?.reportCalendarConnectorProblem(
+                        summary: "Calendar lookup failed: the Claude CLI exited with status \(process.terminationStatus)",
+                        fix: "Press Fix in Terminal to check Claude is signed in, then press Check again.",
+                        detail: stderrText.isEmpty ? "No error output." : String(stderrText.prefix(400)),
+                        audioPath: audioPath
+                    )
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
                 let answer = root["result"] as? String ?? ""
+                // A lapsed connector is not "no meeting". Claude says so in
+                // prose ("the Microsoft 365 connector isn't authorised"), which
+                // the negative signals below would otherwise swallow as
+                // no-match — exactly how a week of meetings went unlinked with
+                // nothing visible in the app.
+                if root["is_error"] as? Bool == true || calendarReplyIsConnectorFailure(answer) {
+                    let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s: CONNECTOR UNAVAILABLE for \((audioPath as NSString).lastPathComponent): \(answer.prefix(400))")
+                    self?.reportCalendarConnectorUnavailable(answer: answer, audioPath: audioPath)
+                    DispatchQueue.main.async { completion([]) }
+                    return
+                }
                 // A negative answer must not be parsed as an event. The regex
                 // below looks for a bold span followed by a time range, which a
                 // refusal satisfies whenever the model helpfully volunteers the
@@ -4711,7 +4827,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 ]
                 if negativeSignals.contains(where: { lowered.contains($0) }) {
                     let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
-                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no match for \((audioPath as NSString).lastPathComponent)")
+                    self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with no match for \((audioPath as NSString).lastPathComponent): \(answer.prefix(240))")
+                    self?.calendarConnectorReached()
                     DispatchQueue.main.async { completion([]) }
                     return
                 }
@@ -4805,11 +4922,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                 self?.log("Calendar search finished [\(searchKind)] in \(seconds)s with \(events.count) event(s): \(answer.prefix(240))")
+                self?.calendarConnectorReached()
                 DispatchQueue.main.async { completion(events.sorted { $0.start < $1.start }) }
             } catch {
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 let seconds = Int(Date().timeIntervalSince(searchStartedAt).rounded())
                 self?.log("Calendar search failed [\(searchKind)] after \(seconds)s: \(error.localizedDescription)")
+                self?.reportCalendarConnectorProblem(
+                    summary: "Calendar lookup failed: couldn't run the Claude CLI",
+                    fix: "Press Fix in Terminal to check Claude works, then press Check again.",
+                    detail: error.localizedDescription,
+                    audioPath: audioPath
+                )
                 DispatchQueue.main.async { completion([]) }
             }
         }
@@ -4883,7 +5007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.log("Calendar suggestion suppressed for \((audioPath as NSString).lastPathComponent): marked ad-hoc while lookup was running")
                 return
             }
-            if events.count == 1, let event = events.first {
+            if let event = self.calendarEventToSuggest(events, audioPath: audioPath, duration: duration) {
                 // A manual check clears a previous decline: the user is asking
                 // again, so the old "not this meeting" answer no longer applies.
                 self.clearCalendarRejection(for: audioPath)
@@ -4990,8 +5114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func rejectCalendarSuggestion(for audioPath: String) {
+        let declined = suggestedCalendarEvent(for: audioPath)
         saveCalendarRejection(for: audioPath)
         try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
+        try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
         // The table renders cached calendar fields rather than reading sidecars
         // for every row.  Refresh them now: clearing only the suggestion used to
         // leave `calendarRejected` false until an unrelated sync refresh, so the
@@ -5003,42 +5129,259 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // initial transcription has already detected voices, so declining a
         // meeting must leave that useful result intact rather than starting a
         // redundant second pass without any new evidence.
+        // The one exception: speakers diarised against the declined meeting
+        // were narrowed to the wrong invite list, so detect them again
+        // without it. Confirmed speakers are left alone as usual.
+        let diarized = diarizedTranscriptPath(forAudioPath: audioPath)
+        if let declined, calendarEventIdDiarisedAgainst(diarizedJSONPath: diarized) == declined.id,
+           transcriptHasUnconfirmedSpeakers(at: diarized) {
+            log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); re-detecting speakers without '\(declined.title)'")
+            rediarizeTranscript(jsonPath: diarized, nSpeakers: nil) { _ in }
+            return
+        }
         log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
     }
 
-    /// Search only after the transcript is safely written. The result is a
-    /// suggestion sidecar, never a prerequisite for speaker detection: the
-    /// user must explicitly confirm it before its attendee data refines an
-    /// already-diarised transcript.
+    /// Where an unconfirmed meeting's context is written for the pipeline.
+    ///
+    /// Deliberately not `_calendar.json`: the pipeline finds that one on its
+    /// own and the table treats it as a confirmed link. This one is only used
+    /// when passed explicitly with `--calendar-context`.
+    private func provisionalCalendarContextURL(for audioPath: String) -> URL {
+        let audio = URL(fileURLWithPath: audioPath)
+        return audio.deletingLastPathComponent()
+            .appendingPathComponent("\(audio.deletingPathExtension().lastPathComponent)_calendar_provisional.json")
+    }
+
+    private func diarizedTranscriptPath(forAudioPath audioPath: String) -> String {
+        if let merged = viewModel.mergedFileTranscriptPaths[(audioPath as NSString).lastPathComponent] {
+            return merged.replacingOccurrences(of: ".md", with: "_diarized.json")
+        }
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let stem = ((audioPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        return "\(dir)/\(stem)_diarized.json"
+    }
+
+    private func writeProvisionalCalendarContext(_ event: CalendarMeetingCandidate, audioPath: String, duration: Double) {
+        guard let payload = calendarContextPayload(event: event, audioPath: audioPath, duration: duration),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        try? data.write(to: provisionalCalendarContextURL(for: audioPath), options: .atomic)
+    }
+
+    /// Look the meeting up while the recording transcribes, not after.
+    ///
+    /// The lookup takes seconds; speech-to-text takes minutes, and the pipeline
+    /// reads its calendar context only when it reaches diarisation. So a
+    /// meeting found here is written out as the provisional context and the
+    /// first diarisation already uses its invite list. Confirming it later then
+    /// has nothing to redo — previously every confirmation started a second
+    /// diarisation while the reviewer was naming speakers in the sidecar.
+    ///
+    /// Returns the path to pass as `--calendar-context`, or nil when no lookup
+    /// applies (already linked, or declined as an ad-hoc call).
+    private func startCalendarPrelookup(for audioPath: String, duration: Double) -> String? {
+        let provisional = provisionalCalendarContextURL(for: audioPath)
+        try? FileManager.default.removeItem(at: provisional)
+        guard calendarLinkedEvent(for: audioPath) == nil, !hasCalendarRejection(for: audioPath) else {
+            return nil
+        }
+        let duration = duration > 0 ? duration : ImportedRecordingsStore.probeDuration(at: audioPath)
+        calendarPrelookups[audioPath] = .pending
+        findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
+            guard let self else { return }
+            if let event = self.calendarEventToSuggest(events, audioPath: audioPath, duration: duration) {
+                self.writeProvisionalCalendarContext(event, audioPath: audioPath, duration: duration)
+                self.log("Calendar found while transcribing \((audioPath as NSString).lastPathComponent) → \(event.title); diarising against it")
+            }
+            self.calendarPrelookups[audioPath] = .done(events)
+            if self.calendarAwaitingTranscript.remove(audioPath) != nil {
+                self.resolveCalendarSuggestion(for: audioPath, events: events, duration: duration)
+            }
+        }
+        return provisional.path
+    }
+
+    /// Settle the suggestion once the transcript is written.
+    ///
+    /// The result is still only a suggestion: the user confirms it. But the
+    /// speakers are already diarised against it, so confirming is instant.
     private func suggestCalendarMeeting(afterTranscriptionOf audioPath: String) {
+        // Every completed transcription passes through here, so it doubles as
+        // the "new transcript" trigger for GitHub publishing.
+        TranscriptPublish.shared.noteActivity(mdPath: transcriptMarkdownPath(forAudioPath: audioPath),
+                                              reason: "Transcribed")
         // A confirmed meeting is the answer this search would be looking for.
         // Re-running it costs an MCP/EventKit round-trip and, on the no-match
         // branch below, would re-diarise a transcript the user has already
         // resolved. Once linked, the calendar question is closed.
         if let linked = calendarLinkedEvent(for: audioPath) {
+            calendarPrelookups[audioPath] = nil
             log("Calendar already confirmed for \((audioPath as NSString).lastPathComponent) → \(linked.title); skipping lookup")
             return
         }
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
-        findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
-            guard let self else { return }
-            if events.count == 1, let event = events.first {
-                self.saveCalendarSuggestion(event, for: audioPath)
-                self.log("Calendar suggestion pending confirmation for \((audioPath as NSString).lastPathComponent) → \(event.title)")
-            } else {
-                self.log("No unambiguous calendar match for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
+        switch calendarPrelookups[audioPath] {
+        case .pending:
+            // Rare: transcription beat the lookup. Finish when it lands.
+            calendarAwaitingTranscript.insert(audioPath)
+        case .done(let events):
+            resolveCalendarSuggestion(for: audioPath, events: events, duration: duration)
+        case nil:
+            // Transcribed by a path that didn't look up early.
+            findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
+                self?.resolveCalendarSuggestion(for: audioPath, events: events, duration: duration)
             }
         }
     }
 
+    /// The meeting to suggest for a transcribed recording: by time first,
+    /// then by what was said when time alone can't decide.
+    private func pickCalendarEvent(
+        _ events: [CalendarMeetingCandidate],
+        audioPath: String,
+        duration: Double
+    ) -> CalendarMeetingCandidate? {
+        if let event = calendarEventToSuggest(events, audioPath: audioPath, duration: duration) { return event }
+        guard events.count > 1, let start = calendarRecordingStart(for: audioPath),
+              let transcript = loadDiarizedTranscript(at: diarizedTranscriptPath(forAudioPath: audioPath))
+        else { return nil }
+        let decision = chooseCalendarEventFromTranscript(
+            events, transcript: transcript.segments.map(\.text).joined(separator: " "),
+            recordingStart: start, recordingEnd: start.addingTimeInterval(max(1, duration)))
+        log("Calendar match for \((audioPath as NSString).lastPathComponent) from the transcript: "
+            + "\(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
+        return decision.event
+    }
+
+    private func resolveCalendarSuggestion(
+        for audioPath: String,
+        events: [CalendarMeetingCandidate],
+        duration: Double
+    ) {
+        calendarPrelookups[audioPath] = nil
+        let name = (audioPath as NSString).lastPathComponent
+        let diarized = diarizedTranscriptPath(forAudioPath: audioPath)
+        guard let event = pickCalendarEvent(events, audioPath: audioPath, duration: duration) else {
+            try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
+            log("No unambiguous calendar match for \(name); keeping initial speaker detection")
+            return
+        }
+        saveCalendarSuggestion(event, for: audioPath)
+        log("Calendar suggestion pending confirmation for \(name) → \(event.title)")
+        if calendarEventIdDiarisedAgainst(diarizedJSONPath: diarized) == event.id {
+            return
+        }
+        // Chosen too late for the first diarisation (the transcript decided
+        // it, or transcription beat the lookup). Apply it now, in the
+        // background, so it is done before the reviewer gets to it.
+        writeProvisionalCalendarContext(event, audioPath: audioPath, duration: duration)
+        guard diarizeEnabled, FileManager.default.fileExists(atPath: diarized),
+              transcriptHasUnconfirmedSpeakers(at: diarized) else { return }
+        log("Diarising \(name) against suggested meeting '\(event.title)'")
+        rediarizeTranscript(jsonPath: diarized, nSpeakers: nil,
+                            calendarContextPath: provisionalCalendarContextURL(for: audioPath).path) { _ in }
+    }
+
+    // MARK: - Calendar connector health
+
+    /// The connector name as Claude's `/mcp` menu lists it, for instructions.
+    private var calendarConnectorName: String {
+        viewModel.calendarProvider == "google" ? "Google Calendar" : "claude.ai Microsoft 365"
+    }
+
+    /// The calendar lookup reached the calendar and Claude could not use it.
+    private func reportCalendarConnectorUnavailable(answer: String, audioPath: String) {
+        reportCalendarConnectorProblem(
+            summary: "Calendar isn't connected: meeting lookups are failing",
+            fix: "Press Fix in Terminal, type /mcp in Claude, choose “\(calendarConnectorName)” and sign in, then press Check again.",
+            detail: answer.trimmingCharacters(in: .whitespacesAndNewlines),
+            audioPath: audioPath
+        )
+    }
+
+    /// Record a lookup that never reached the calendar. Safe from any thread.
+    /// Notifies once per outage rather than once per recording.
+    private func reportCalendarConnectorProblem(summary: String, fix: String, detail: String, audioPath: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if var existing = self.viewModel.calendarConnectorProblem {
+                existing.summary = summary
+                existing.fix = fix
+                existing.detail = detail
+                if !existing.affectedPaths.contains(audioPath) { existing.affectedPaths.append(audioPath) }
+                self.viewModel.calendarConnectorProblem = existing
+                return
+            }
+            self.viewModel.calendarConnectorProblem = .init(
+                summary: summary, fix: fix, detail: detail, since: Date(), affectedPaths: [audioPath]
+            )
+            self.log("Calendar connector problem raised: \(summary)")
+            self.postNotification(title: "HiDock: calendar lookups failing", body: "\(summary). \(fix)")
+        }
+    }
+
+    /// A lookup got a real answer from the calendar, so any outage is over.
+    private func calendarConnectorReached() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.viewModel.calendarConnectorProblem != nil else { return }
+            self.viewModel.calendarConnectorProblem = nil
+            self.log("Calendar connector reachable again; cleared the warning")
+        }
+    }
+
+    /// Open the embedded terminal with Claude running and the reconnect steps
+    /// above it. Reconnecting a claude.ai connector is only possible from an
+    /// interactive Claude session (`/mcp`), so the terminal is the fix.
     private func openCalendarMCPOnboarding() {
-        let command = """
-        printf '\\nHiDock calendar MCP setup\\nThe native Mac Calendar search is available above. To connect or refresh Claude Microsoft 365 MCP, run the following if it is not already listed as Connected:\\n\\n'
-        claude mcp list
-        printf '\\nTo add Microsoft 365 MCP if needed:\\nclaude mcp add --transport http --scope user microsoft365-calendar https://microsoft365.mcp.claude.com/mcp\\nThen follow the browser sign-in and run claude mcp list again.\\n\\n'
-        printf 'To add Google Calendar MCP if needed:\\nclaude mcp add --scope user google-calendar -- npx -y @cocal/google-calendar-mcp\\nThen complete its browser sign-in and run claude mcp list again.\\n\\n'
+        showSyncWindow()
+        viewModel.cliPaneMode = .terminal
+        viewModel.cliPaneVisible = true
+        let claude = claudeExecutablePath().map { "\"\($0)\"" } ?? "claude"
+        let steps = """
+        printf '\\n\\033[1mHiDock: reconnect the calendar\\033[0m\\n\
+          1. In Claude below, type /mcp and press Return\\n\
+          2. Select “\(calendarConnectorName)” and choose Authenticate (or Reconnect)\\n\
+          3. Finish signing in in the browser\\n\
+          4. Type /exit, then press Check again on the HiDock calendar banner\\n\\n'
         """
-        openTerminal(initialCommand: command)
+        viewModel.terminalController.runCommand("\(steps); \(claude)")
+    }
+
+    /// Re-run the lookups that failed during the outage, one at a time, and
+    /// stop at the first one that still can't reach the calendar.
+    private func retryCalendarConnector() {
+        guard let problem = viewModel.calendarConnectorProblem, !viewModel.calendarConnectorRetrying else { return }
+        viewModel.calendarConnectorRetrying = true
+        log("Retrying \(problem.affectedPaths.count) calendar lookup(s) after connector problem")
+        retryCalendarLookups(problem.affectedPaths)
+    }
+
+    private func retryCalendarLookups(_ paths: [String]) {
+        guard let path = paths.first else {
+            viewModel.calendarConnectorRetrying = false
+            return
+        }
+        let rest = Array(paths.dropFirst())
+        guard FileManager.default.fileExists(atPath: path), calendarLinkedEvent(for: path) == nil else {
+            retryCalendarLookups(rest)
+            return
+        }
+        let duration = ImportedRecordingsStore.probeDuration(at: path)
+        findClaudeCalendarEvents(audioPath: path, duration: duration) { [weak self] events in
+            guard let self else { return }
+            if let event = self.calendarEventToSuggest(events, audioPath: path, duration: duration) {
+                self.saveCalendarSuggestion(event, for: path)
+                self.log("Calendar suggestion pending confirmation for \((path as NSString).lastPathComponent) → \(event.title)")
+            }
+            // Reports land on main before this completion, so a still-raised
+            // problem means this attempt failed too: no point trying the rest.
+            if self.viewModel.calendarConnectorProblem != nil {
+                self.viewModel.calendarConnectorRetrying = false
+                return
+            }
+            self.retryCalendarLookups(rest)
+        }
     }
 
     /// The in-flight assistant CLI process, if any — kept only so the Stop
@@ -5105,7 +5448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         You are HiDock's calendar assistant. The recording runs from \(iso.string(from: start)) to \(iso.string(from: end)). \(connectorInstruction) Help find the correct event, name likely matches with their times and attendees, and do not claim an event has been linked or change any files.
 
         When you are confident about one or more specific events, end your reply with one line per event, after all prose, in exactly this form:
-        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <comma-separated attendee display names>
+        CANDIDATE: <title> | <ISO-8601 start> | <ISO-8601 end> | <attendee display names, separated by semicolons, each as "First Last">
         Emit no CANDIDATE line if you are unsure — a wrong one would attach the recording to the wrong meeting. Never mention the CANDIDATE lines in your prose.
 
         User: \(userMessage)
@@ -5594,9 +5937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                   end > start
             else { continue }
             let attendees = fields.count >= 4
-                ? fields[3].split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
+                ? splitAttendeeNames(fields[3])
                 : []
             let id = "\(title)|\(start.timeIntervalSince1970)"
             guard seen.insert(id).inserted else { continue }
@@ -5726,13 +6067,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onLoadCalendarRejection: { [weak self] audioPath in self?.hasCalendarRejection(for: audioPath) ?? false },
             onClearCalendarRejection: { [weak self] audioPath in self?.clearCalendarRejection(for: audioPath) },
             onLoadCalendarEvent: { [weak self] audioPath in self?.calendarLinkedEvent(for: audioPath) },
-            onLinkCalendarEvent: { [weak self] audioPath, duration, event, rediarizeAfterLink in
-                self?.linkCalendarEvent(
+            onLinkCalendarEvent: { [weak self] audioPath, duration, event, rediarizeAfterLink, onSaved in
+                guard let self else { onSaved(); return }
+                self.linkCalendarEvent(
                     audioPath: audioPath,
                     duration: duration,
                     event: event,
-                    rediarizeAfterLink: rediarizeAfterLink
+                    rediarizeAfterLink: rediarizeAfterLink,
+                    onSaved: onSaved
                 )
+            },
+            onChooseCalendarEvent: { [weak self] audioPath, duration, events in
+                self?.pickCalendarEvent(events, audioPath: audioPath, duration: duration)
             },
             onRemoveCalendarEvent: { [weak self] audioPath in
                 self?.removeCalendarEvent(audioPath: audioPath)
@@ -6100,6 +6446,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Capture the *current* files before a caller changes them.  The commit is
     /// skipped when nothing has changed since the last snapshot.
     private func snapshotTranscriptArtifacts(_ diarizedPath: String, reason: String) {
+        // Publishing is a separate, debounced, post-write concern — see
+        // TranscriptPublish. The flush re-reads the files when it fires, so
+        // triggering from the pre-write snapshot point is safe; the verified
+        // rewrite-md completion re-schedules to catch slow operations.
+        TranscriptPublish.shared.schedule(diarizedPath: diarizedPath,
+                                          reason: Self.publishReason(fromSnapshot: reason))
         guard let root = ensureTranscriptHistoryRepository(for: diarizedPath) else { return }
         let artifacts = transcriptHistoryArtifacts(for: diarizedPath)
             .filter { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
@@ -6112,6 +6464,284 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if result.status != 0 {
             log("Could not snapshot transcript before change: \(result.output)")
         }
+    }
+
+    /// Snapshot messages read "Before renaming X → Y" (rollback flavour); the
+    /// publish repo's history should read as an edit log, so drop the prefix.
+    static func publishReason(fromSnapshot reason: String) -> String {
+        guard reason.hasPrefix("Before ") else { return reason }
+        var stripped = String(reason.dropFirst("Before ".count))
+        if let first = stripped.first {
+            stripped = String(first).uppercased() + stripped.dropFirst()
+        }
+        return stripped
+    }
+
+    // MARK: - Transcripts on GitHub menu
+
+    private func transcriptMarkdownPath(forAudioPath audioPath: String) -> String {
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let stem = ((audioPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        return "\(dir)/\(stem).md"
+    }
+
+    /// Audio paths the app knows for a recording stem (device downloads,
+    /// imports and merges all land in `syncEntries` / merged outputs).
+    private func audioPaths(forStem stem: String) -> [String] {
+        syncEntries.map(\.recording.outputPath)
+            .filter { (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == stem }
+    }
+
+    private func configureTranscriptPublishing() {
+        let publisher = TranscriptPublish.shared
+        publisher.transcriptsDir = { [weak self] in
+            self?.syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        }
+        publisher.isAwaitingReview = { [weak self] stem in
+            guard let self else { return false }
+            return self.audioPaths(forStem: stem).contains { self.suggestedCalendarEvent(for: $0) != nil }
+        }
+        publisher.isBusyElsewhere = { [weak self] stem in
+            guard let self else { return false }
+            let matches: (String) -> Bool = {
+                (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == stem
+            }
+            if self.viewModel.calendarLookupInProgress.contains(where: matches) { return true }
+            return self.pendingTranscriptionQueue.contains {
+                matches($0.path) && ($0.status == .queued || $0.status == .transcribing)
+            }
+        }
+        publisher.log = { [weak self] message in self?.log("TranscriptPublish: \(message)") }
+        publisher.onStatusChanged = { [weak self] states, settling, _, _ in
+            guard let self else { return }
+            if self.viewModel.publishFileStatus != states { self.viewModel.publishFileStatus = states }
+            if self.viewModel.publishSettlingStems != settling { self.viewModel.publishSettlingStems = settling }
+        }
+        // Publishing predates the Repository setting: an install that already
+        // publishes keeps its original target rather than silently stopping.
+        if publisher.isEnabled, TranscriptPublish.configuredRepo == nil {
+            UserDefaults.standard.set("jw-gsl/Transcripts", forKey: TranscriptPublish.repoKey)
+        }
+        viewModel.transcriptsRepo = TranscriptPublish.configuredRepo ?? ""
+        viewModel.transcriptPublishEnabled = publisher.isEnabled
+        publisher.onProblem = { [weak self] problem in
+            guard let self else { return }
+            let wasHealthy = self.viewModel.transcriptPublishProblem == nil
+            self.viewModel.transcriptPublishProblem = problem
+            if let problem, wasHealthy {
+                self.postNotification(title: "HiDock: transcripts not reaching GitHub",
+                                      body: "\(problem) — retrying every 15 minutes.")
+            }
+        }
+        publisher.start()
+    }
+
+    @objc private func toggleAutoPublishMenu(_ sender: NSMenuItem) {
+        setTranscriptPublishing(!TranscriptPublish.shared.isEnabled)
+    }
+
+    /// Single path for switching publishing on/off, used by the status-bar
+    /// menu and the Settings section.
+    private func setTranscriptPublishing(_ enable: Bool) {
+        guard enable else {
+            UserDefaults.standard.set(false, forKey: TranscriptPublish.enabledKey)
+            viewModel.transcriptPublishEnabled = false
+            autoPublishMenuItem?.state = .off
+            return
+        }
+        guard !viewModel.transcriptPublishBusy else { return }
+        guard let repo = TranscriptPublish.configuredRepo else {
+            viewModel.transcriptPublishLastResult = nil
+            viewModel.transcriptsRepoMessage = "Enter a private GitHub repository first."
+            return
+        }
+        let slug = TranscriptPublish.repoSlug(from: repo)
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptPublishLastResult = "Checking \(slug ?? repo) is private…"
+        // Transcripts are company meeting content: enabling publish must
+        // never point at a public repo. Verify with `gh` when it's available.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let check = slug.map(Self.checkTranscriptsRepo) ?? .unverifiable("not a GitHub repo")
+            DispatchQueue.main.async {
+                self.viewModel.transcriptPublishBusy = false
+                self.viewModel.transcriptPublishLastResult = nil
+                if case .publicRepo = check {
+                    let alert = NSAlert()
+                    alert.messageText = "Transcripts repo is public"
+                    alert.informativeText = "\(slug ?? repo) is visible to everyone. Make it private before HiDock publishes meeting transcripts to it."
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                    return
+                }
+                if case .notFound(let detail) = check {
+                    self.viewModel.transcriptsRepoMessage = "\(slug ?? repo) wasn't found on GitHub: \(detail)"
+                    return
+                }
+                let confirm = NSAlert()
+                confirm.messageText = "Publish transcripts to GitHub?"
+                var suffix = ""
+                if case .unverifiable(let why) = check {
+                    suffix = "\n\nCould not verify the repo is private (\(why)) — check it before continuing."
+                }
+                confirm.informativeText = "Transcripts are pushed to the private \(slug ?? repo) repo. Each one is committed once it has settled: 10 minutes after its last change, with transcription, speaker matching and any pending meeting confirmation finished. Merge pieces are left out.\n\nPublish everything now, or only transcripts that are new or change from now on?\(suffix)"
+                confirm.addButton(withTitle: "Only new and changed")
+                confirm.addButton(withTitle: "Publish everything now")
+                confirm.addButton(withTitle: "Cancel")
+                let choice = confirm.runModal()
+                guard choice != .alertThirdButtonReturn else { return }
+                UserDefaults.standard.set(true, forKey: TranscriptPublish.enabledKey)
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
+                self.autoPublishMenuItem?.state = .on
+                self.viewModel.transcriptPublishEnabled = true
+                if choice == .alertSecondButtonReturn {
+                    self.runManualTranscriptSync(reason: "Initial import")
+                } else {
+                    TranscriptPublish.shared.scan()
+                }
+            }
+        }
+    }
+
+    /// Save a new target repository after checking it exists and is private.
+    /// Switching while publishing is on asks how to seed the new repo; the old
+    /// repo's local copy is set aside by the publisher, never pushed across.
+    private func setTranscriptsRepo(_ input: String) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let slug = TranscriptPublish.repoSlug(from: trimmed) else {
+            viewModel.transcriptsRepoMessage = "Enter a GitHub repository as owner/repo or its github.com URL."
+            return
+        }
+        guard slug != TranscriptPublish.repoSlug(from: TranscriptPublish.configuredRepo) else {
+            viewModel.transcriptsRepoMessage = nil
+            return
+        }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptsRepoMessage = "Checking \(slug)…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let check = Self.checkTranscriptsRepo(slug)
+            DispatchQueue.main.async {
+                self.viewModel.transcriptPublishBusy = false
+                switch check {
+                case .publicRepo:
+                    self.viewModel.transcriptsRepoMessage = "\(slug) is public — make it private first. Not saved."
+                    return
+                case .notFound(let detail):
+                    self.viewModel.transcriptsRepoMessage = "\(slug) wasn't found (create it on GitHub as a private repo first). \(detail)"
+                    return
+                case .unverifiable(let why):
+                    self.viewModel.transcriptsRepoMessage = "Saved, but couldn't confirm it's private: \(why)"
+                case .privateRepo:
+                    self.viewModel.transcriptsRepoMessage = "Saved — \(slug) is private."
+                }
+                let wasPublishing = TranscriptPublish.shared.isEnabled && TranscriptPublish.configuredRepo != nil
+                UserDefaults.standard.set(slug, forKey: TranscriptPublish.repoKey)
+                self.viewModel.transcriptsRepo = slug
+                self.log("TranscriptPublish: repository set to \(slug)")
+                guard wasPublishing else { return }
+                let confirm = NSAlert()
+                confirm.messageText = "Publish to \(slug) from now on?"
+                confirm.informativeText = "Future transcripts go to \(slug). The local copy of the previous repo is set aside, not pushed to the new one.\n\nCopy all transcripts into \(slug) now, or only ones that are new or change from now on?"
+                confirm.addButton(withTitle: "Only new and changed")
+                confirm.addButton(withTitle: "Publish everything now")
+                if confirm.runModal() == .alertSecondButtonReturn {
+                    self.runManualTranscriptSync(reason: "Initial import")
+                } else {
+                    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: TranscriptPublish.enabledSinceKey)
+                    TranscriptPublish.shared.scan()
+                }
+            }
+        }
+    }
+
+    @objc private func syncTranscriptsToGitHubMenu() {
+        runManualTranscriptSync(reason: "Manual sync")
+    }
+
+    /// Publish everything now. Progress and the outcome show in the Settings
+    /// section (and the banner on failure) rather than a blocking alert.
+    private func runManualTranscriptSync(reason: String) {
+        guard !viewModel.transcriptPublishBusy else { return }
+        viewModel.transcriptPublishBusy = true
+        viewModel.transcriptPublishLastResult = "Publishing…"
+        TranscriptPublish.shared.syncNow(reason: reason) { [weak self] ok, detail in
+            guard let self else { return }
+            self.viewModel.transcriptPublishBusy = false
+            let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
+            self.viewModel.transcriptPublishLastResult = ok
+                ? "Synced at \(time)\(detail.isEmpty ? "" : " — \(detail)")"
+                : "Sync failed at \(time): \(detail)"
+            self.log("TranscriptPublish: manual sync (\(reason)) \(ok ? "ok" : "failed"): \(detail)")
+        }
+    }
+
+    @objc private func showPublishStatusMenu() {
+        TranscriptPublish.shared.status { state, error in
+            let box = NSAlert()
+            guard let state else {
+                box.messageText = "Could not read publish status"
+                box.informativeText = error
+                box.runModal()
+                return
+            }
+            box.messageText = "Transcript publishing status"
+            var lines: [String] = []
+            lines.append("Auto-publish: \(TranscriptPublish.shared.isEnabled ? "on" : "off")")
+            lines.append("Settling (not yet committed): \(TranscriptPublish.shared.pending.count)")
+            lines.append("Pending commits: \(state["pending"] ?? 0)")
+            if let ok = state["clone_ok"] as? Bool, !ok {
+                lines.append("Publish clone: not created yet")
+            }
+            if let last = state["last_success"] as? String {
+                lines.append("Last success: \(last)")
+            }
+            if let error = state["last_error"] as? String {
+                lines.append("Last error: \(error)")
+            }
+            box.informativeText = lines.joined(separator: "\n")
+            box.runModal()
+        }
+    }
+
+    enum RepoCheck: Equatable {
+        case privateRepo, publicRepo
+        case notFound(String)
+        /// gh missing or not signed in — existence and visibility unknown.
+        case unverifiable(String)
+    }
+
+    /// Ask `gh` whether `owner/repo` exists and is private. Blocking: call
+    /// off the main thread.
+    private static func checkTranscriptsRepo(_ slug: String) -> RepoCheck {
+        guard let gh = whichTool("gh") else { return .unverifiable("the GitHub CLI (gh) isn't installed") }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: gh)
+        process.arguments = ["repo", "view", slug, "--json", "visibility"]
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+        do { try process.run() } catch { return .unverifiable(error.localizedDescription) }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let errText = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        process.waitUntilExit()
+        if process.terminationStatus == 0,
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let visibility = object["visibility"] as? String {
+            return visibility == "PUBLIC" ? .publicRepo : .privateRepo
+        }
+        if errText.localizedCaseInsensitiveContains("could not resolve") || errText.contains("404") {
+            return .notFound(errText)
+        }
+        return .unverifiable(errText.isEmpty ? "gh couldn't check it" : errText)
+    }
+
+    private static func whichTool(_ name: String) -> String? {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            let path = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
     }
 
     private func transcriptVersions(for diarizedPath: String) -> [TranscriptVersion] {
@@ -6315,6 +6945,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTHONPATH"] = self.repoRoot
             // Gated models (pyannote) authenticate with this; absent otherwise.
             HuggingFaceToken.inject(into: &env)
+            NemotronAccess.inject(into: &env)
             if env["PATH"] == nil || !env["PATH"]!.contains("/opt/homebrew") {
                 env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             } else if let existing = env["PATH"], !existing.contains("/.local/bin") {
@@ -7976,6 +8607,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for path in transcriptArtifacts {
             try? FileManager.default.removeItem(atPath: path)
         }
+        // The published copy is deleted once this settles (its source is gone).
+        TranscriptPublish.shared.noteActivity(mdPath: "\(transcriptDir)/\(stem).md", reason: "Removed transcript")
 
         // Summaries are matched by the "<stem> - <Type> - …" prefix — same
         // lookup findSummaryPath uses. A `contains(stem)` sweep was
@@ -8288,7 +8921,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                 capability: info["capability"] as? String,
                                 distributable: info["distributable"] as? Bool,
                                 licence: info["licence"] as? String,
-                                gated: info["gated"] as? Bool ?? false
+                                gated: info["gated"] as? Bool ?? false,
+                                gateNote: info["gate_note"] as? String ?? "",
+                                hardwareGated: info["hardware_gated"] as? Bool ?? false,
+                                hardwareGateKey: info["hardware_gate_key"] as? String ?? "",
+                                hardwareGateAffirmed: info["hardware_gate_affirmed"] as? Bool ?? false,
+                                remoteService: info["remote_service"] as? Bool ?? false
                             )
                         }
                         self.viewModel.modelStatuses = statuses
@@ -8382,17 +9020,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptPath, "set-active", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            do {
+                try process.run()
+                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                errPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                // Hardware-gated or unreachable remote backends are refused
+                // by models.py with a JSON error; surface the reason instead
+                // of silently doing nothing.
+                if process.terminationStatus != 0,
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let message = parsed["error"] as? String {
+                    DispatchQueue.main.async { self?.log("Cannot set active model \(key): \(message)") }
+                } else {
+                    DispatchQueue.main.async {
+                        self?.log("Set active model: \(key)")
+                    }
+                }
+                DispatchQueue.main.async {
+                    self?.refreshModelStatuses()
+                }
+            } catch {
+                self?.log("Failed to set active model \(key): \(error)")
+            }
+        }
+    }
+
+    /// Run `shared/models.py remote-check <key>` for a remote-service backend
+    /// (e.g. the Nemotron sidecar on an NVIDIA host). The result string lands
+    /// in viewModel.remoteServiceChecks[key] and renders inline on the row.
+    private func checkRemoteService(_ key: String) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.remoteServiceChecking.insert(key)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "remote-check", key]
+            var sparkEnv = ProcessInfo.processInfo.environment
+            NemotronAccess.inject(into: &sparkEnv)
+            process.environment = sparkEnv
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let reachable = parsed?["reachable"] as? Bool ?? false
+                let detail = parsed?["detail"] as? String ?? "no response from check"
+                let result = reachable ? "\u{2713} \(detail)" : "\u{2717} \(detail)"
+                DispatchQueue.main.async {
+                    self?.viewModel.remoteServiceChecking.remove(key)
+                    self?.viewModel.remoteServiceChecks[key] = result
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.viewModel.remoteServiceChecking.remove(key)
+                    self?.viewModel.remoteServiceChecks[key] = "check failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Persist the "Do you have an NVIDIA GPU host?" affirmation
+    /// (`models.py set-hardware-gate <gateKey> <true|false>`), then refresh
+    /// statuses so the row ungreys (or re-greys) immediately.
+    private func setHardwareGate(_ gateKey: String, affirmed: Bool) {
+        let scriptPath = modelsScriptPath()
+        let pythonPath = modelsPythonPath()
+        guard FileManager.default.fileExists(atPath: scriptPath) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            process.arguments = [scriptPath, "set-hardware-gate", gateKey, affirmed ? "true" : "false"]
             process.standardOutput = Pipe()
             process.standardError = Pipe()
             do {
                 try process.run()
                 process.waitUntilExit()
                 DispatchQueue.main.async {
-                    self?.log("Set active model: \(key)")
+                    self?.log("Hardware gate \(gateKey) = \(affirmed)")
                     self?.refreshModelStatuses()
                 }
             } catch {
-                self?.log("Failed to set active model \(key): \(error)")
+                self?.log("Failed to set hardware gate \(gateKey): \(error)")
             }
         }
     }
@@ -10494,6 +11217,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             arguments.append(contentsOf: ["--summarize-engine", summarizeEngine])
         }
         log("runTranscription: \(arguments.joined(separator: " "))")
+        // Anything the pipeline is doing to a recording holds back its GitHub
+        // publish until it finishes (see TranscriptPublish's settle rule).
+        let publishWork = TranscriptPublish.shared.beginWork(arguments: arguments)
+        let originalCompletion = completion
+        let completion: (Result<Data, Error>) -> Void = { result in
+            TranscriptPublish.shared.endWork(publishWork)
+            originalCompletion(result)
+        }
         transcriptionDispatchQueue.async {
             let process = Process()
             process.currentDirectoryURL = URL(fileURLWithPath: self.transcriptionRoot)
@@ -10515,6 +11246,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // was created by an earlier build (so its ACL no longer matches) every
             // one of those reads raised an access prompt. Only pyannote is gated,
             // so a Parakeet + Sortformer pipeline now never touches the Keychain.
+            // The Spark's endpoint and token, for the Nemotron diarizer. A
+            // missing token is cached as such, so this costs no Keychain prompt.
+            NemotronAccess.inject(into: &env)
             if self.anyGatedModelInPlay {
                 HuggingFaceToken.inject(into: &env)
             }
@@ -10527,6 +11261,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             // Force unbuffered Python output so PROGRESS lines arrive immediately
             env["PYTHONUNBUFFERED"] = "1"
+            // The app publishes through TranscriptPublish once a transcript has
+            // settled. transcribe.py's own publish-after-write is for terminal
+            // runs only; here it would push synchronously on this serial queue
+            // and race the app's publisher for the same git clone.
+            env["HIDOCK_PUBLISH_TO_GITHUB"] = "0"
             process.environment = env
 
             let outPipe = Pipe()
@@ -10885,40 +11624,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         enqueueTranscriptions(entries.map(\.recording.outputPath))
     }
 
-    /// Calendar is a gate before automatic/manual transcription, not an
-    /// afterthought. A strong single match becomes a persisted pending review
-    /// row; no audio processing starts until the user accepts or rejects it.
-    private func calendarGateTranscription(entries: [HiDockSyncRecordingEntry], readyPaths: [String]) {
-        guard let entry = entries.first else {
-            if !readyPaths.isEmpty { enqueueTranscriptions(readyPaths) }
-            return
-        }
-        let remaining = Array(entries.dropFirst())
-        let path = entry.recording.outputPath
-        if calendarMeetingTitle(for: path) != nil {
-            calendarGateTranscription(entries: remaining, readyPaths: readyPaths + [path])
-            return
-        }
-        if suggestedCalendarEvent(for: path) != nil {
-            // It is already visibly awaiting a decision in the table.
-            calendarGateTranscription(entries: remaining, readyPaths: readyPaths)
-            return
-        }
-        findClaudeCalendarEvents(audioPath: path, duration: entry.recording.duration) { [weak self] events in
-            guard let self else { return }
-            if events.count == 1, let event = events.first {
-                self.saveCalendarSuggestion(event, for: path)
-                self.log("Calendar gate: pending confirmation for \(entry.recording.outputName) → \(event.title)")
-                self.viewModel.syncStatus = "Meeting pending: \(entry.recording.outputName)"
-                self.viewModel.syncStatusLevel = .warning
-                self.syncViewModelState()
-                self.calendarGateTranscription(entries: remaining, readyPaths: readyPaths)
-            } else {
-                self.calendarGateTranscription(entries: remaining, readyPaths: readyPaths + [path])
-            }
-        }
-    }
-
     private func enqueueTranscriptions(_ paths: [String]) {
         // Items that have previously failed, been cancelled, or completed
         // still live in `pendingTranscriptionQueue` so the Queue window can
@@ -11051,10 +11756,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "TRANSCRIBING \(filename)"))
-        // Diarisation belongs to this initial transcription. The calendar
-        // lookup below is optional enrichment: a confirmed meeting may trigger
-        // a second, attendee-informed pass, but a pending meeting must already
-        // show its detected speaker count.
+        // Diarisation belongs to this initial transcription, and a meeting
+        // found by the calendar lookup started below is applied to it, so a
+        // pending meeting already shows speakers matched to its invite list.
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
         args.append("--summarize")  // see transcribeFileDirect for rationale
@@ -11064,6 +11768,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .flatMap { queueItem -> Double? in
                 syncEntries.first(where: { $0.recording.outputName == queueItem.filename })?.recording.duration
             } ?? 0
+        if diarizeEnabled, let context = startCalendarPrelookup(for: item.path, duration: itemDuration) {
+            // Read at the diarisation stage, minutes from now; if the lookup
+            // hasn't written it by then the pipeline simply goes without.
+            args += ["--calendar-context", context]
+        }
         let scaledTimeout = Self.computeTranscriptionTimeout(for: item.path, knownDuration: itemDuration)
         runTranscription(arguments: args, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }
@@ -11902,7 +12611,7 @@ func parseEnrichedAttendees(_ reply: String) -> [String]? {
     var seen = Set<String>()
     let names: [String] = raw.compactMap { value in
         guard let text = value as? String else { return nil }
-        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = normalizeAttendeeName(text)
         guard !name.isEmpty, name.caseInsensitiveCompare("unavailable") != .orderedSame,
               seen.insert(name.lowercased()).inserted
         else { return nil }
@@ -11945,14 +12654,11 @@ func calendarAttendeeNames(in answer: String, region: NSRange) -> [String] {
     var names: [String] = []
     if let organiser = calendarOrganiserExpression.firstMatch(in: answer, range: region),
        let nameRange = Range(organiser.range(at: 1), in: answer) {
-        names.append(String(answer[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines))
+        names.append(normalizeAttendeeName(String(answer[nameRange])))
     }
     if let block = calendarAttendeesExpression.firstMatch(in: answer, range: region),
        let namesRange = Range(block.range(at: 1), in: answer) {
-        names += String(answer[namesRange])
-            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•"))) }
-            .filter { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
+        names += splitAttendeeNames(String(answer[namesRange]))
     }
     return Array(Set(names)).sorted()
 }

@@ -227,3 +227,221 @@ func timestampBearingStem(_ stem: String) -> String {
     guard let range = body.range(of: "-to-") else { return body }
     return String(body[body.startIndex..<range.lowerBound])
 }
+
+/// "Robins, Justin" → "Justin Robins". Outlook/Exchange directories list people
+/// surname-first; everywhere else in the app (voice library, transcript
+/// speakers) names are "First Last", so a surname-first attendee would never
+/// match the voice it belongs to. Only a single comma between two plain name
+/// parts is flipped — anything else is returned unchanged.
+func normalizeAttendeeName(_ raw: String) -> String {
+    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let parts = name.components(separatedBy: ",")
+    guard parts.count == 2 else { return name }
+    let surname = parts[0].trimmingCharacters(in: .whitespaces)
+    let given = parts[1].trimmingCharacters(in: .whitespaces)
+    let plain: (String) -> Bool = { part in
+        !part.isEmpty && part.split(separator: " ").count <= 3
+            && part.unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) || " '-.".unicodeScalars.contains($0) }
+    }
+    guard plain(surname), plain(given) else { return name }
+    return "\(given) \(surname)"
+}
+
+/// Split an attendee list from a calendar reply into names.
+///
+/// Semicolons/newlines are the separators we ask for, and when present commas
+/// are left alone: they're part of "Surname, First" names. A comma-only list
+/// is split on commas, but there a surname-first name has already been cut in
+/// two ("…, Robins, Justin" became the attendees "Justin" and "Robins" on
+/// Rec50, 2026-10-06), so two adjacent single-word pieces are rejoined when
+/// the rest of the list is full names — in such a list a lone word is far
+/// more likely half a name than someone known only by one word.
+func splitAttendeeNames(_ text: String) -> [String] {
+    let clean: (String) -> String = {
+        $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*•")))
+    }
+    let useful: (String) -> Bool = { !$0.isEmpty && $0.caseInsensitiveCompare("unavailable") != .orderedSame }
+    if text.contains(";") || text.contains("\n") {
+        return text.components(separatedBy: CharacterSet(charactersIn: ";\n"))
+            .map(clean).filter(useful).map(normalizeAttendeeName)
+    }
+    let pieces = text.components(separatedBy: ",").map(clean).filter(useful)
+    let singleWord: (String) -> Bool = { !$0.contains(" ") }
+    let fullNames = pieces.filter { !singleWord($0) }.count
+    guard fullNames > 0 else { return pieces }
+    var names: [String] = []
+    var index = 0
+    while index < pieces.count {
+        let piece = pieces[index]
+        if singleWord(piece), index + 1 < pieces.count, singleWord(pieces[index + 1]) {
+            names.append("\(pieces[index + 1]) \(piece)")  // "Robins, Justin"
+            index += 2
+        } else {
+            names.append(piece)
+            index += 1
+        }
+    }
+    return names
+}
+
+/// Whether a `claude --print` calendar reply means the calendar connector
+/// could not be reached at all, as opposed to "it looked and found nothing".
+///
+/// The two used to be indistinguishable: a lapsed Microsoft 365 authorisation
+/// produced "I couldn't check your calendar. The Microsoft 365 connector isn't
+/// authorised in this session", the negative-signal check logged it as "no
+/// match", and every recording from 2026-10-01 onwards silently lost its
+/// meeting with nothing in the UI to say why.
+///
+/// An explicit NO_MATCH, or a reply that lists events in the requested
+/// `Time:` shape, is a real answer even if it mentions access in passing
+/// (for example "attendee data unavailable").
+func calendarReplyIsConnectorFailure(_ answer: String) -> Bool {
+    let lowered = answer.lowercased()
+    if lowered.trimmingCharacters(in: .whitespacesAndNewlines) == "no_match" { return false }
+    if answer.range(of: #"(?im)^\s*Time:\s*\d{1,2}:\d{2}"#, options: .regularExpression) != nil {
+        return false
+    }
+    let signals = [
+        "authoris", "authoriz", "authenticat", "/mcp", "sign in", "log in",
+        "connector isn't", "connector is not", "connector not",
+        "not connected", "isn't connected", "no access to", "don't have access",
+        "do not have access", "can't access", "cannot access", "unable to access",
+        "couldn't check", "could not check", "unable to check",
+        "no calendar tool", "no calendar mcp", "tools aren't available",
+        "tools are not available", "not available in this session",
+    ]
+    return signals.contains { lowered.contains($0) }
+}
+
+/// Which of several overlapping calendar events a recording belongs to, if any.
+///
+/// Recordings start a minute early and run a minute over, so on a day of
+/// back-to-back meetings every lookup returns the meeting itself plus a sliver
+/// of its neighbour. Requiring exactly one event left all of those unlinked
+/// (Rec61–63, 2026-10-09: 30 min of "Jordan & James" against 1½ min of the
+/// next call). An event wins when it covers a real share of the recording and
+/// clearly outweighs everything else; a recording split evenly across two
+/// meetings stays ambiguous and goes to the user, as before.
+///
+/// Events with one or no invitee ("Swimming", focus time) count half: an empty
+/// list can also mean the connector didn't return invitees, so they're
+/// discounted rather than dropped. The result is still only a suggestion that
+/// the user confirms.
+struct CalendarMatchDecision {
+    let event: CalendarMeetingCandidate?
+    /// Why, in a form fit for the log.
+    let reason: String
+}
+
+func chooseCalendarEvent(
+    _ events: [CalendarMeetingCandidate],
+    recordingStart: Date,
+    recordingEnd: Date
+) -> CalendarMatchDecision {
+    if events.isEmpty { return CalendarMatchDecision(event: nil, reason: "no events") }
+    if events.count == 1 { return CalendarMatchDecision(event: events[0], reason: "only event") }
+
+    let recordingLength = max(1, recordingEnd.timeIntervalSince(recordingStart))
+    func overlap(_ e: CalendarMeetingCandidate) -> TimeInterval {
+        max(0, min(e.end, recordingEnd).timeIntervalSince(max(e.start, recordingStart)))
+    }
+    func score(_ e: CalendarMeetingCandidate) -> TimeInterval {
+        overlap(e) * (e.attendeeCount >= 2 ? 1 : 0.5)
+    }
+    let ranked = events.sorted { score($0) > score($1) }
+    let best = ranked[0], runnerUp = ranked[1]
+    let bestOverlap = overlap(best)
+    let eventLength = max(1, best.end.timeIntervalSince(best.start))
+    let minutes = { (t: TimeInterval) in String(format: "%.1f min", t / 60) }
+    let summary = ranked.map { "\($0.title) \(minutes(overlap($0)))" }.joined(separator: ", ")
+
+    // A real share of either the recording or the meeting: a short recording
+    // inside a long meeting, or a whole meeting inside a long recording.
+    guard bestOverlap >= 0.5 * recordingLength || bestOverlap >= 0.5 * eventLength else {
+        return CalendarMatchDecision(event: nil, reason: "no event covers most of the recording (\(summary))")
+    }
+    guard score(runnerUp) * 3 <= score(best) else {
+        return CalendarMatchDecision(event: nil, reason: "no clear winner (\(summary))")
+    }
+    return CalendarMatchDecision(event: best, reason: "dominant overlap (\(summary))")
+}
+
+/// The calendar event a diarised transcript's speakers were matched against,
+/// from the `calendar_context` block the pipeline writes into `_diarized.json`.
+///
+/// Lets a confirmation skip re-diarising when the transcript was already
+/// diarised against the suggested meeting during transcription.
+func calendarEventIdDiarisedAgainst(diarizedJSONPath path: String) -> String? {
+    guard let data = FileManager.default.contents(atPath: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let context = json["calendar_context"] as? [String: Any],
+          let id = context["calendar_event_id"] as? String, !id.isEmpty
+    else { return nil }
+    return id
+}
+
+/// Break a timing tie between calendar events using what was said.
+///
+/// Used only after `chooseCalendarEvent` finds no clear winner by time, e.g. a
+/// recording that runs evenly across two meetings, or two meetings booked over
+/// the same slot. Each event scores one point for every invitee *only it has*
+/// who is named in the transcript (first name or full name), and half a point
+/// for every distinctive word of its title that comes up. Invitees shared by
+/// every candidate (usually the person recording) tell them apart in no way
+/// and are ignored. An event wins with at least 1.5 points and a 1.5-point
+/// lead, and only if it overlaps at least a fifth of the recording, so a talk
+/// that mentions next week's meeting can't pull a recording into it.
+func chooseCalendarEventFromTranscript(
+    _ events: [CalendarMeetingCandidate],
+    transcript: String,
+    recordingStart: Date,
+    recordingEnd: Date
+) -> CalendarMatchDecision {
+    guard events.count > 1 else { return CalendarMatchDecision(event: nil, reason: "nothing to compare") }
+    let text = " " + transcript.lowercased()
+        .map { $0.isLetter || $0.isNumber ? $0 : " " }
+        .reduce(into: "") { $0.append($1) } + " "
+    func said(_ phrase: String) -> Bool {
+        let words = phrase.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        guard !words.isEmpty else { return false }
+        return text.contains(" " + words.joined(separator: " ") + " ")
+    }
+    let normalised = { (name: String) in name.lowercased().trimmingCharacters(in: .whitespaces) }
+    let shared = events.dropFirst().reduce(Set(events[0].attendeeNames.map(normalised))) {
+        $0.intersection($1.attendeeNames.map(normalised))
+    }
+    let titleStopWords: Set<String> = [
+        "meeting", "call", "sync", "catch", "chat", "with", "and", "the", "for", "team",
+        "weekly", "daily", "review", "session", "discussion", "update", "check", "teams",
+    ]
+    let recordingLength = max(1, recordingEnd.timeIntervalSince(recordingStart))
+
+    struct Evidence { let event: CalendarMeetingCandidate; let score: Double; let detail: String }
+    let evidence = events.map { event -> Evidence in
+        let names = event.attendeeNames.filter { !shared.contains(normalised($0)) }.filter { name in
+            let first = name.split(separator: " ").first.map(String.init) ?? name
+            return said(name) || (first.count >= 3 && said(first))
+        }
+        let titleWords = Set(event.title.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+            .filter { $0.count >= 4 && !titleStopWords.contains($0) })
+            .filter(said)
+        let score = Double(names.count) + 0.5 * Double(titleWords.count)
+        let parts = (names.isEmpty ? [] : ["named " + names.joined(separator: ", ")])
+            + (titleWords.isEmpty ? [] : ["said " + titleWords.sorted().joined(separator: ", ")])
+        return Evidence(event: event, score: score,
+                        detail: "\(event.title) \(score)" + (parts.isEmpty ? "" : " (\(parts.joined(separator: "; ")))"))
+    }.sorted { $0.score > $1.score }
+
+    let summary = evidence.map(\.detail).joined(separator: ", ")
+    let best = evidence[0], runnerUp = evidence[1]
+    let overlap = max(0, min(best.event.end, recordingEnd).timeIntervalSince(max(best.event.start, recordingStart)))
+    guard best.score >= 1.5, best.score - runnerUp.score >= 1.5 else {
+        return CalendarMatchDecision(event: nil, reason: "transcript doesn't settle it: \(summary)")
+    }
+    guard overlap >= 0.2 * recordingLength else {
+        return CalendarMatchDecision(event: nil, reason: "transcript points at \(best.event.title), but it barely overlaps: \(summary)")
+    }
+    return CalendarMatchDecision(event: best.event, reason: "transcript: \(summary)")
+}
