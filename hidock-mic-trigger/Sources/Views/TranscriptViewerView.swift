@@ -706,12 +706,6 @@ enum TranscriptRediarizeStatus {
     case failed(String)
 }
 
-private enum ReassignScope: String, CaseIterable, Identifiable {
-    case allMeeting = "All meeting"
-    case reviewedThrough = "Reviewed until…"
-    var id: String { rawValue }
-}
-
 /// A calendar event offered as speaker-count context for this recording.
 struct CalendarMeetingCandidate: Identifiable, Hashable {
     let id: String
@@ -861,11 +855,9 @@ struct TranscriptViewerView: View {
     /// Timestamp of the text just edited. Splitting a segment changes its view
     /// identity, so SwiftUI otherwise reconstructs the scroll view at the top.
     @State private var pendingTranscriptRestoreTime: Double?
-    @State private var showReassignOptions = false
     @State private var showSpeakerToolsHelp = false
-    @State private var reassignScope: ReassignScope = .allMeeting
-    @State private var reviewedUntilMinutes = 0
-    @State private var reviewedUntilSeconds = 0
+    @State private var voiceCheckRunning = false
+    @State private var voiceCheckResult: VoiceCheckResult?
     @State private var calendarCandidates: [CalendarMeetingCandidate] = []
     @State private var calendarLoading = false
     @State private var linkedCalendarEvent: CalendarMeetingCandidate?
@@ -938,6 +930,11 @@ struct TranscriptViewerView: View {
     /// Re-match still-generic speakers in THIS transcript against the voice
     /// library (`rematch` verb). Optional so older call-sites keep compiling.
     var onRematch: ((String) -> Void)?
+    /// Check every line against the saved voices of this meeting's people
+    /// (`voice-check`). Optional so older call-sites keep compiling.
+    var onVoiceCheck: ((String, @escaping (VoiceCheckResult) -> Void) -> Void)? = nil
+    /// Apply the accepted voice-check moves; returns the updated transcript.
+    var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?) -> Void) -> Void)? = nil
     /// Enrol a speaker from the diarized sidecar's stored centroid (name,
     /// jsonPath, speakerId) — a far better voiceprint than one short segment.
     /// Falls back to onEnrollSpeaker (audio) when nil.
@@ -1036,6 +1033,40 @@ struct TranscriptViewerView: View {
     /// let the pipeline report how far it actually got.
     private var rediarizeSpeakerRange: ClosedRange<Int> {
         2...max(20, uniqueSpeakerIds.count)
+    }
+
+    private func startVoiceCheck() {
+        guard let check = onVoiceCheck else { return }
+        voiceCheckRunning = true
+        check(filePath) { result in
+            DispatchQueue.main.async {
+                voiceCheckRunning = false
+                if let error = result.error {
+                    rediarizeStatus = .failed("Voice check: \(error)")
+                } else if let note = result.note {
+                    rediarizeStatus = .skipped("Voice check: \(note)")
+                } else if (result.lines ?? []).isEmpty && (result.speakers ?? []).isEmpty {
+                    rediarizeStatus = .skipped("Voice check: every line sounds like the person it's assigned to (\(result.checked ?? 0) checked).")
+                } else {
+                    voiceCheckResult = result
+                }
+            }
+        }
+    }
+
+    private func applyVoiceCheck(_ moves: [VoiceCheckMove]) {
+        guard let apply = onApplyVoiceCheck, !moves.isEmpty else { return }
+        // Applying takes about a second; the re-diarising banner would mislead.
+        apply(filePath, moves) { updated in
+            DispatchQueue.main.async {
+                guard let updated else {
+                    rediarizeStatus = .failed("Couldn't apply the voice-check changes.")
+                    return
+                }
+                applyRediarizedTranscript(updated)
+                rediarizeStatus = .skipped("Voice check: moved \(moves.count) line\(moves.count == 1 ? "" : "s"). Undo is in the transcript history.")
+            }
+        }
     }
 
     private var isRediarizing: Bool {
@@ -1869,15 +1900,39 @@ struct TranscriptViewerView: View {
         // apply library or meeting-specific identity work.
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                if onRediarize != nil {
+                if onVoiceCheck != nil {
+                    // Refine used to rerun the diarizer with no count — the
+                    // same call as Redetect on Auto. It now checks each line
+                    // against the meeting's saved voices instead, which is what
+                    // catches the errors left after names are confirmed.
                     Button {
-                        startRediarize(speakers: nil)
+                        startVoiceCheck()
                     } label: {
-                        Label("Refine", systemImage: "wand.and.stars")
+                        Label(voiceCheckRunning ? "Checking voices…" : "Refine", systemImage: "wand.and.stars")
                     }
                     .fixedSize()
-                    .disabled(isRediarizing)
-                    .help("Refine this transcript with the configured automatic diarizer. Existing confirmed and legacy-named people stay anchored; generic or provisional parts may be re-split, and oversized blocks are capped for readability.")
+                    .disabled(isRediarizing || voiceCheckRunning)
+                    .help("Check every line against the saved voices of the people in this meeting, and suggest lines (or whole speakers) that sound like someone else. Nothing changes until you apply the suggestions. Best after confirming names.")
+                    .popover(isPresented: Binding(get: { voiceCheckResult != nil },
+                                                  set: { if !$0 { voiceCheckResult = nil } }),
+                             arrowEdge: .bottom) {
+                        if let result = voiceCheckResult {
+                            VoiceCheckPanel(
+                                result: result,
+                                onPlay: { start, end in
+                                    audioPlayer.play(audioPath: audioPath, start: start, end: end,
+                                                     segmentId: "voice-check-\(start)")
+                                },
+                                onApply: { moves in
+                                    voiceCheckResult = nil
+                                    applyVoiceCheck(moves)
+                                },
+                                onCancel: { voiceCheckResult = nil }
+                            )
+                        }
+                    }
+                }
+                if onRediarize != nil {
 
                     Button {
                         startRediarize(speakers: rediarizeCountChosen ? rediarizeNSpeakers : nil)
@@ -1886,33 +1941,7 @@ struct TranscriptViewerView: View {
                     }
                     .fixedSize()
                     .disabled(isRediarizing)
-                    .help("Redetect speakers from the audio from scratch — automatically, or with the number you set beside Speakers. Confirmed and legacy-named people are preserved where the timestamps support them; other assignments may change.")
-
-                }
-
-                if onRematch != nil {
-                    Button {
-                        onRematch?(filePath)
-                    } label: {
-                        Label("Rematch", systemImage: "sparkle.magnifyingglass")
-                    }
-                    .fixedSize()
-                    .help("Rematch only generic, unconfirmed speakers against the saved Voice Library. It uses stored embeddings when available, re-embeds older sidecars when needed, and leaves confirmed or named people unchanged.")
-                }
-
-                if onReclusterWithLabels != nil, hasAnchorNamedSpeakers {
-                    Button {
-                        showReassignOptions = true
-                    } label: {
-                        Label("Reassign", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .fixedSize()
-                    .help("Use confirmed people in this meeting to correct unconfirmed turns. Choose the whole meeting or only the reviewed portion as evidence.")
-                    .popover(isPresented: $showReassignOptions, arrowEdge: .bottom) {
-                        reassignOptions
-                            .frame(width: 315)
-                            .padding(12)
-                    }
+                    .help("Start speaker detection again from the audio — automatically, or with the number you set beside Speakers. Use it when who-spoke-when is badly wrong, such as two people merged into one. Confirmed names carry over where the timing supports them; everything else may change.")
                 }
             }
             .buttonStyle(.bordered)
@@ -2229,29 +2258,16 @@ struct TranscriptViewerView: View {
         Int(ceil(transcript.segments.map(\.end).max() ?? 0))
     }
 
-    private var reviewedUntilValue: Double {
-        Double(reviewedUntilMinutes * 60 + reviewedUntilSeconds)
-    }
-
-    private var reviewedUntilIsValid: Bool {
-        reviewedUntilValue > 0 && reviewedUntilValue <= Double(transcriptDurationSeconds)
-    }
 
     private var speakerToolsHelp: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Speaker tools")
                 .font(.headline)
             Text("Refine").font(.subheadline.weight(.semibold))
-            Text("Reruns automatic speaker detection while preserving confirmed labels where possible.")
+            Text("Checks every line against the saved voices of this meeting's people and suggests corrections: lines that belong to someone else, a speaker whose name is wrong, and names for speakers still called \"Speaker N\". Nothing changes until you apply them. Best after confirming names.")
                 .font(.caption)
             Text("Redetect").font(.subheadline.weight(.semibold))
-            Text("Reruns detection using the selected expected speaker count. Use only when the speaker breaks themselves need redoing.")
-                .font(.caption)
-            Text("Rematch").font(.subheadline.weight(.semibold))
-            Text("Matches generic speakers against the saved Voice Library; confirmed labels stay unchanged.")
-                .font(.caption)
-            Text("Reassign").font(.subheadline.weight(.semibold))
-            Text("Uses confirmed people in this meeting to correct other turns. In Reviewed until mode, every later label is cleared and reassessed.")
+            Text("Starts speaker detection again from the audio — automatically, or with the count set beside Speakers. Use it when who-spoke-when is badly wrong (two people merged into one). Confirmed names carry over where the timing supports them.")
                 .font(.caption)
         }
     }
@@ -2588,65 +2604,6 @@ struct TranscriptViewerView: View {
                 && (onLoadCalendarRejection?(audioPath) ?? false)
             if linkedCalendarEvent == nil && suggestedCalendarEvent == nil && !calendarCheckRejected && calendarCandidates.isEmpty {
                 loadCalendarCandidates()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var reassignOptions: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Reassign unconfirmed turns")
-                .font(.headline)
-            Text("Choose which reviewed labels should guide the rest of this meeting.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Picker("Evidence", selection: $reassignScope) {
-                ForEach(ReassignScope.allCases) { scope in
-                    Text(scope.rawValue).tag(scope)
-                }
-            }
-            .pickerStyle(.radioGroup)
-
-            if reassignScope == .reviewedThrough {
-                HStack(spacing: 6) {
-                    Text("Reviewed until")
-                    TextField("0", value: $reviewedUntilMinutes, formatter: Self.timeComponentFormatter)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 38)
-                    Text("min")
-                        .font(.caption)
-                    Stepper("", value: $reviewedUntilMinutes, in: 0...max(0, transcriptDurationSeconds / 60))
-                        .labelsHidden()
-                        .controlSize(.small)
-                    TextField("0", value: $reviewedUntilSeconds, formatter: Self.timeComponentFormatter)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 38)
-                    Text("sec")
-                        .font(.caption)
-                    Stepper("", value: $reviewedUntilSeconds, in: 0...59)
-                        .labelsHidden()
-                        .controlSize(.small)
-                }
-                Text("Labels up to this time stay fixed. All later labels are treated as unreviewed, then reassessed against them.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                if !reviewedUntilIsValid {
-                    Text("Choose a time within this recording.")
-                        .font(.caption2)
-                        .foregroundColor(.red)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("Cancel") { showReassignOptions = false }
-                Button("Reassign") {
-                    let cutoff = reassignScope == .reviewedThrough ? reviewedUntilValue : nil
-                    onReclusterWithLabels?(filePath, cutoff)
-                    showReassignOptions = false
-                }
-                .disabled(reassignScope == .reviewedThrough && !reviewedUntilIsValid)
-                .keyboardShortcut(.defaultAction)
             }
         }
     }
