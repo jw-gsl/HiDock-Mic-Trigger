@@ -655,10 +655,14 @@ def _assess_sample_quality(source: str, provenance: dict) -> dict:
 def _refresh_active_samples(entry: dict, max_samples: int = _MAX_SAMPLES) -> None:
     """Choose a bounded, diverse active set without deleting archived evidence."""
     samples = entry.setdefault("samples", [])
+    # A sample the library audit set aside (it sounds like someone else) stays
+    # out. Without this check every new enrolment re-activated them: 16 of the
+    # 37 set aside on 2026-10-12 were back in use a day later.
     eligible = [
         sample for sample in samples
         if sample.get("quality_state", "active_candidate") != "archive"
         and float(sample.get("quality_score", 0.75) or 0.0) >= _MIN_ACTIVE_QUALITY
+        and "quarantined" not in sample
     ]
     selected: list[dict] = []
     remaining = list(eligible)

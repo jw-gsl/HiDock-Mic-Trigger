@@ -23,6 +23,7 @@ import numpy as np
 
 MARGIN = 0.15
 QUARANTINE_KEY = "quarantined"
+KEEP_KEY = "keep_after_audit"
 
 
 def _stem(sample: dict) -> str:
@@ -39,6 +40,9 @@ def audit(library: dict, *, margin: float = MARGIN) -> list[dict]:
         for index, sample in enumerate(entry.get("samples") or []):
             vector = sample.get("embedding")
             if sample.get("active") is False or not isinstance(vector, list) or not vector:
+                continue
+            if sample.get(KEEP_KEY):
+                # Restored by the reviewer: their call stands over the audit's.
                 continue
             v = np.asarray(vector, dtype=np.float32)
             norm = float(np.linalg.norm(v))
@@ -97,12 +101,49 @@ def restore(library: dict) -> int:
         for sample in entry.get("samples") or []:
             if sample.pop(QUARANTINE_KEY, None) is not None:
                 sample["active"] = True
+                sample[KEEP_KEY] = True
                 count += 1
     return count
+
+
+KEEP_BACKUPS = 5
+# More flagged than this in one run is more likely a model or library change
+# than bad samples, so the automatic clean-up leaves it for a person.
+AUTO_LIMIT = 25
 
 
 def backup(path: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     copy = path.with_name(f"{path.name}.before-audit-{stamp}")
     shutil.copy2(path, copy)
+    # Keep the newest few; the automatic run would otherwise add one every
+    # six hours whenever it finds something.
+    olds = sorted(path.parent.glob(f"{path.name}.before-audit-*"))
+    for old in olds[:-KEEP_BACKUPS]:
+        old.unlink(missing_ok=True)
     return copy
+
+
+def set_aside_count(library: dict) -> int:
+    """Samples currently set aside by the audit."""
+    return sum(1 for entry in (library.get("speakers") or {}).values()
+               for sample in entry.get("samples") or [] if QUARANTINE_KEY in sample)
+
+
+def auto_clean(path: Path) -> dict:
+    """The scheduled clean-up: set aside mislabelled samples unless there are
+    suspiciously many. Returns what it did, for the Matching quality panel."""
+    import json
+    library = json.loads(path.read_text(encoding="utf-8"))
+    flagged = audit(library)
+    result = {"flagged": len(flagged), "set_aside": 0,
+              "people": sorted({f["name"] for f in flagged})}
+    if flagged and len(flagged) <= AUTO_LIMIT:
+        from shared.voice_candidate_review import _atomic_write
+        backup(path)
+        result["set_aside"] = set_aside(library, flagged)
+        _atomic_write(path, library)
+    elif flagged:
+        result["held_back"] = True
+    result["total_set_aside"] = set_aside_count(library)
+    return result

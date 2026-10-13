@@ -192,10 +192,28 @@ def correction_report(transcripts_dir: Path, *, since: str | None = None, limit:
     }
 
 
+def library_cleanup(apply: bool) -> dict | None:
+    """Run (or just measure) the voice-library clean-up on the naming library."""
+    try:
+        from shared import voice_library_audit as audit
+        from shared.voice_candidate_review import load_candidate_config
+        config = load_candidate_config()
+        if not (config.get("available") and config.get("library_path")):
+            return None
+        path = Path(config["library_path"])
+        if apply:
+            return audit.auto_clean(path)
+        library = json.loads(path.read_text(encoding="utf-8"))
+        return {"flagged": 0, "set_aside": 0, "total_set_aside": audit.set_aside_count(library)}
+    except Exception as exc:  # never let the clean-up break the report
+        return {"error": str(exc)}
+
+
 def report(transcripts_dir: Path, *, since: str | None = None, retune: bool = False) -> dict:
     full = {"refine": refine_report(), "calendar": calendar_report(),
             "corrections": correction_report(transcripts_dir, since=since),
-            "tuning": tune() if retune else load_tuning()}
+            "tuning": tune() if retune else load_tuning(),
+            "library": library_cleanup(apply=retune)}
     full["summary"] = summary_lines(full)
     return full
 
@@ -285,6 +303,17 @@ def summary_lines(full: dict) -> list[str]:
         lines.append("Meetings: no meeting suggestions confirmed or declined yet.")
     if (full.get("tuning") or {}).get("recurring_meetings") is False:
         lines.append("  Preferring previously confirmed meetings is off — those picks were mostly wrong.")
+    library = full.get("library") or {}
+    if library.get("held_back"):
+        lines.append(f"Voice library: {library['flagged']} samples look mislabelled — unusually many, so they "
+                     "were not set aside automatically. Ask for the library to be reviewed.")
+    elif library.get("set_aside"):
+        lines.append(f"Voice library: set aside {library['set_aside']} sample(s) that sounded like someone else "
+                     f"({', '.join(library.get('people', [])[:4])}).")
+    if library.get("total_set_aside"):
+        lines.append(f"  {library['total_set_aside']} sample(s) set aside in total; Undo clean-ups restores them.")
+    elif "total_set_aside" in library and not library.get("set_aside"):
+        lines.append("Voice library: no mislabelled samples found.")
     for backend, stats in sorted(((full.get("corrections") or {}).get("by_backend") or {}).items()):
         if backend == "unknown":
             continue
