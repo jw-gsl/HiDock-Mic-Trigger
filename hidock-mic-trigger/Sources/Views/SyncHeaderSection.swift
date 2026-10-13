@@ -36,6 +36,9 @@ struct SyncHeaderSection: View {
             if let problem = viewModel.transcriptPublishProblem {
                 TranscriptPublishBanner(viewModel: viewModel, problem: problem)
             }
+            if let problem = viewModel.calendarConnectorProblem {
+                CalendarConnectorBanner(viewModel: viewModel, problem: problem)
+            }
 
             // GitHub-style meeting-activity heatmap — one square per day over
             // the last year, intensity = meetings recorded that day, hover for
