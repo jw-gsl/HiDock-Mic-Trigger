@@ -132,9 +132,10 @@ targets:
               "$REQUEST_ID" "$BUSY_JSON" "$DIALOG_TEXT" > "$REQ"
 
             DECISION=""
-            # 60s: long enough to notice and read the alert, short enough that a
-            # forgotten build does not sit forever.
-            for _ in $(seq 1 120); do
+            # 10 minutes. 60s was too short in practice: on 2026-10-13 the alert
+            # was answered after 5½ minutes, long after the build had given up,
+            # and the stale alert then hid the next request.
+            for _ in $(seq 1 1200); do
               if [ -f "$RES" ] && /usr/bin/grep -q "$REQUEST_ID" "$RES"; then
                 DECISION=$(/usr/bin/sed -n 's/.*"decision"[^"]*"\([^"]*\)".*/\1/p' "$RES")
                 break
