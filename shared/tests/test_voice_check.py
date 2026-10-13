@@ -86,10 +86,20 @@ def test_apply_moves_to_existing_and_new_people():
     assert data["speaker_meta"][str(chris)]["verified"] is True
 
 
-def test_apply_skips_lines_that_moved_since_the_check():
+def test_apply_skips_a_line_that_no_longer_exists():
     data = _data()
     summary = voice_check.apply_moves(data, [{"index": 3, "to_name": "Jeff Chow", "start": 99.0}])
-    assert summary["moved"] == 0 and data["segments"][3]["speaker_id"] == 1
+    assert summary == {"moved": 0, "requested": 1, "not_found": 1}
+    assert data["segments"][3]["speaker_id"] == 1
+
+
+def test_apply_finds_the_line_after_an_earlier_split():
+    # A split before the line shifts its index by one; its start time still finds it.
+    data = _data()
+    data["segments"].insert(1, {"start": 2.5, "end": 5.0, "speaker_id": 0, "text": "split off"})
+    summary = voice_check.apply_moves(data, [{"index": 3, "to_name": "Jeff Chow", "start": 15.0}])
+    assert summary["moved"] == 1
+    assert data["segments"][4]["start"] == 15.0 and data["segments"][4]["speaker_id"] == 2
 
 
 def test_meeting_people_combines_names_and_invitees():

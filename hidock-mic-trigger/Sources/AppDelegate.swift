@@ -3669,14 +3669,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Completion gets the updated transcript and how many moves couldn't be
+    /// applied (their line no longer exists).
     private func applyVoiceCheck(jsonPath: String, moves: [VoiceCheckMove],
-                                 completion: @escaping (DiarizedTranscript?) -> Void) {
+                                 completion: @escaping (DiarizedTranscript?, Int) -> Void) {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         let movesURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("hidock-voice-check-\(UUID().uuidString).json")
         guard let data = try? encoder.encode(moves), (try? data.write(to: movesURL)) != nil else {
-            completion(nil)
+            completion(nil, moves.count)
             return
         }
         snapshotTranscriptArtifacts(jsonPath, reason: "Before accepting voice-check suggestions")
@@ -3685,13 +3687,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
-                case .success:
-                    self.log("Voice check: applied \(moves.count) move(s) to \(jsonPath)")
+                case .success(let output):
+                    // Log what was actually saved, not what was asked for:
+                    // "applied 1 move(s)" used to be logged for moves that the
+                    // file never received.
+                    let line = String(decoding: output, as: UTF8.self)
+                        .split(separator: "\n").last(where: { $0.hasPrefix("{") }).map(String.init) ?? "{}"
+                    let summary = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] ?? [:]
+                    let moved = summary["moved"] as? Int ?? 0
+                    let notFound = summary["not_found"] as? Int ?? 0
+                    self.log("Voice check: moved \(moved) of \(moves.count) line(s) in \(jsonPath)"
+                             + (notFound > 0 ? " (\(notFound) no longer found)" : ""))
                     self.refreshSpeakerReview(forDiarizedPath: jsonPath)
-                    completion(self.loadDiarizedTranscript(at: jsonPath))
+                    completion(self.loadDiarizedTranscript(at: jsonPath), notFound)
                 case .failure(let error):
                     self.log("Voice check apply failed: \(error.localizedDescription)")
-                    completion(nil)
+                    completion(nil, moves.count)
                 }
             }
         }
@@ -6026,7 +6037,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.runVoiceCheck(jsonPath: jsonPath, onProgress: onProgress, completion: completion)
             },
             onApplyVoiceCheck: { [weak self] jsonPath, moves, completion in
-                guard let self else { completion(nil); return }
+                guard let self else { completion(nil, moves.count); return }
                 self.applyVoiceCheck(jsonPath: jsonPath, moves: moves, completion: completion)
             },
             onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
