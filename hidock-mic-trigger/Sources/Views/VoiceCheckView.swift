@@ -50,51 +50,50 @@ struct VoiceCheckMove: Encodable {
     let start: Double
 }
 
-/// The proposals from a voice check, for the reviewer to accept or untick.
+/// Refine's suggestions, for the reviewer to check and apply.
 ///
-/// Everything starts ticked: on Rec63 four in five proposals matched what the
-/// reviewer then did by hand, so unticking the odd wrong one is quicker than
-/// ticking the rest. Accepting a whole speaker moves its lines except those
-/// that clearly are the current name, and a line's own proposal still wins.
+/// Each suggestion shows the line, who it would move from and to, how strongly
+/// the voice matches each, a play button, and Apply / Skip. "Apply all" takes
+/// whatever is left. Applied and skipped rows leave the list; the panel closes
+/// itself when nothing is left. A speaker-level suggestion moves that speaker's
+/// lines except those that clearly are the current name.
+///
+/// The list used to sit in a ScrollView with only a maximum height, which
+/// collapsed to nothing inside the sidecar: the reviewer saw "14 changes" and
+/// no way to see what they were.
 struct VoiceCheckPanel: View {
     let result: VoiceCheckResult
     let onPlay: ((Double, Double) -> Void)?
+    /// Scroll the transcript to this time.
+    let onShow: ((Double) -> Void)?
     let onApply: ([VoiceCheckMove]) -> Void
-    let onCancel: () -> Void
+    let onClose: () -> Void
 
-    @State private var acceptedSpeakers: Set<String>
-    @State private var acceptedLines: Set<Int>
+    @State private var lines: [VoiceCheckResult.Line]
+    @State private var speakers: [VoiceCheckResult.Speaker]
+    @State private var applied = 0
 
     init(result: VoiceCheckResult,
          onPlay: ((Double, Double) -> Void)? = nil,
+         onShow: ((Double) -> Void)? = nil,
          onApply: @escaping ([VoiceCheckMove]) -> Void,
-         onCancel: @escaping () -> Void) {
+         onClose: @escaping () -> Void) {
         self.result = result
         self.onPlay = onPlay
+        self.onShow = onShow
         self.onApply = onApply
-        self.onCancel = onCancel
-        _acceptedSpeakers = State(initialValue: Set((result.speakers ?? []).map(\.id)))
-        _acceptedLines = State(initialValue: Set((result.lines ?? []).map(\.id)))
+        self.onClose = onClose
+        _lines = State(initialValue: result.lines ?? [])
+        _speakers = State(initialValue: result.speakers ?? [])
     }
 
-    private var moves: [VoiceCheckMove] {
-        var byIndex: [Int: VoiceCheckMove] = [:]
-        for speaker in result.speakers ?? [] where acceptedSpeakers.contains(speaker.id) {
-            for line in speaker.moves {
-                byIndex[line.index] = VoiceCheckMove(index: line.index, toName: speaker.suggested, start: line.start)
-            }
-        }
-        for line in result.lines ?? [] where acceptedLines.contains(line.id) {
-            byIndex[line.index] = VoiceCheckMove(index: line.index, toName: line.toName, start: line.start)
-        }
-        return byIndex.values.sorted { $0.index < $1.index }
-    }
+    private var remaining: Int { lines.count + speakers.count }
 
     private var headline: String {
-        let lines = result.lines?.count ?? 0, speakers = result.speakers?.count ?? 0
+        if remaining == 0 { return "Refine: all suggestions dealt with" }
         var parts: [String] = []
-        if speakers > 0 { parts.append("\(speakers) speaker\(speakers == 1 ? "" : "s")") }
-        if lines > 0 { parts.append("\(lines) line\(lines == 1 ? "" : "s")") }
+        if !speakers.isEmpty { parts.append("\(speakers.count) speaker\(speakers.count == 1 ? "" : "s")") }
+        if !lines.isEmpty { parts.append("\(lines.count) line\(lines.count == 1 ? "" : "s")") }
         return "Refine suggests changing " + parts.joined(separator: " and ")
     }
 
@@ -102,7 +101,9 @@ struct VoiceCheckPanel: View {
         let people = result.voicesKnown?.count ?? 0
         var text = "Checked \(result.checked ?? 0) lines against the saved voices of \(people) people in this meeting"
         if let short = result.skippedShort, short > 0 { text += " (\(short) too short to judge)" }
-        return text + "."
+        text += ". Play a line to check it, then apply or skip it."
+        if applied > 0 { text += " \(applied) applied so far." }
+        return text
     }
 
     private static func time(_ seconds: Double) -> String {
@@ -111,82 +112,145 @@ struct VoiceCheckPanel: View {
                          : String(format: "%d:%02d", s / 60, s % 60)
     }
 
+    private func move(_ line: VoiceCheckResult.Line) -> VoiceCheckMove {
+        VoiceCheckMove(index: line.index, toName: line.toName, start: line.start)
+    }
+
+    private func moves(_ speaker: VoiceCheckResult.Speaker) -> [VoiceCheckMove] {
+        // A line with its own suggestion goes where that suggestion says.
+        let own = Set(lines.map(\.index))
+        return speaker.moves.filter { !own.contains($0.index) }
+            .map { VoiceCheckMove(index: $0.index, toName: speaker.suggested, start: $0.start) }
+    }
+
+    private func finishIfEmpty() {
+        if remaining == 0 { onClose() }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(headline).font(.headline)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(headline).font(.headline)
+                Spacer()
+                Button("Close", action: onClose)
+                    .buttonStyle(.borderless)
+                    .help("Close without applying the rest")
+            }
             Text(summary).font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // A fixed minimum height: with only a maximum, the ScrollView
+            // collapsed to zero inside the sidecar.
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let speakers = result.speakers, !speakers.isEmpty {
-                        Text("Speakers").font(.subheadline.weight(.semibold))
-                        ForEach(speakers) { speaker in
-                            Toggle(isOn: binding(for: speaker.id, in: $acceptedSpeakers)) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("“\(speaker.name)” sounds like \(speaker.suggested)")
-                                    Text(String(format: "%.2f vs %.2f · moves %d of %d lines", speaker.score,
-                                                speaker.currentScore, speaker.moves.count, speaker.lines)
-                                         + (speaker.kept.isEmpty ? ""
-                                            : " · keeps \(speaker.kept.count) that sound like \(speaker.name)"))
-                                        .font(.caption).foregroundColor(.secondary)
-                                }
-                            }
-                        }
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(speakers) { speaker in
+                        speakerRow(speaker)
+                        Divider()
                     }
-                    if let lines = result.lines, !lines.isEmpty {
-                        HStack {
-                            Text("Lines (\(lines.count))").font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Button(acceptedLines.count == lines.count ? "None" : "All") {
-                                acceptedLines = acceptedLines.count == lines.count ? [] : Set(lines.map(\.id))
-                            }
-                            .buttonStyle(.borderless).font(.caption)
-                        }
-                        ForEach(lines) { line in
-                            HStack(alignment: .top, spacing: 6) {
-                                Toggle("", isOn: binding(for: line.id, in: $acceptedLines)).labelsHidden()
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 4) {
-                                        Text(Self.time(line.start)).monospacedDigit()
-                                        Text("\(line.fromName) → \(line.toName)").fontWeight(.medium)
-                                        Text(String(format: "%.2f vs %.2f", line.score, line.currentScore))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .font(.caption)
-                                    Text(line.text).font(.caption).lineLimit(2)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer(minLength: 4)
-                                if let onPlay {
-                                    Button { onPlay(line.start, line.end) } label: {
-                                        Image(systemName: "play.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .help("Play this line")
-                                }
-                            }
-                        }
+                    ForEach(lines) { line in
+                        lineRow(line)
+                        Divider()
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 420)
+            .frame(minHeight: min(CGFloat(remaining) * 84, 340), maxHeight: 340)
 
-            HStack {
-                Spacer()
-                Button("Cancel", action: onCancel)
-                Button("Apply \(moves.count) change\(moves.count == 1 ? "" : "s")") { onApply(moves) }
+            if remaining > 0 {
+                HStack {
+                    Spacer()
+                    Button("Skip all") {
+                        lines = []; speakers = []
+                        onClose()
+                    }
+                    Button("Apply all \(remaining)") {
+                        var all = speakers.flatMap(moves)
+                        all += lines.map(move)
+                        applied += remaining
+                        lines = []; speakers = []
+                        onApply(all)
+                        onClose()
+                    }
                     .buttonStyle(.borderedProminent)
-                    .disabled(moves.isEmpty)
+                }
+                .controlSize(.small)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func binding<T: Hashable>(for id: T, in set: Binding<Set<T>>) -> Binding<Bool> {
-        Binding(get: { set.wrappedValue.contains(id) },
-                set: { if $0 { set.wrappedValue.insert(id) } else { set.wrappedValue.remove(id) } })
+    private func speakerRow(_ speaker: VoiceCheckResult.Speaker) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "person.crop.circle.badge.questionmark")
+                .foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Everyone labelled “\(speaker.name)” sounds like \(speaker.suggested)")
+                    .font(.callout.weight(.medium))
+                Text(String(format: "Voice match: %@ %.2f, %@ %.2f · moves %d of %d lines",
+                            speaker.suggested, speaker.score, speaker.name, speaker.currentScore,
+                            speaker.moves.count, speaker.lines)
+                     + (speaker.kept.isEmpty ? "" : " (keeps \(speaker.kept.count) that sound like \(speaker.name))"))
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 4)
+            rowButtons(apply: {
+                applied += 1
+                onApply(moves(speaker))
+                speakers.removeAll { $0.id == speaker.id }
+                finishIfEmpty()
+            }, skip: {
+                speakers.removeAll { $0.id == speaker.id }
+                finishIfEmpty()
+            })
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func lineRow(_ line: VoiceCheckResult.Line) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            if let onPlay {
+                Button { onPlay(line.start, line.end) } label: {
+                    Image(systemName: "play.circle").font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .help("Play this line")
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Button(Self.time(line.start)) { onShow?(line.start) }
+                        .buttonStyle(.borderless)
+                        .font(.caption.monospacedDigit())
+                        .help("Show this line in the transcript")
+                    Text(line.fromName).strikethrough().foregroundColor(.secondary)
+                    Image(systemName: "arrow.right").font(.caption2).foregroundColor(.secondary)
+                    Text(line.toName).fontWeight(.semibold)
+                }
+                .font(.caption)
+                Text(line.text).font(.callout).lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(String(format: "Voice match: %@ %.2f, %@ %.2f",
+                            line.toName, line.score, line.fromName, line.currentScore))
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 4)
+            rowButtons(apply: {
+                applied += 1
+                onApply([move(line)])
+                lines.removeAll { $0.id == line.id }
+                finishIfEmpty()
+            }, skip: {
+                lines.removeAll { $0.id == line.id }
+                finishIfEmpty()
+            })
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func rowButtons(apply: @escaping () -> Void, skip: @escaping () -> Void) -> some View {
+        VStack(spacing: 4) {
+            Button("Apply", action: apply).buttonStyle(.bordered)
+            Button("Skip", action: skip).buttonStyle(.borderless).foregroundColor(.secondary)
+        }
+        .controlSize(.small)
     }
 }

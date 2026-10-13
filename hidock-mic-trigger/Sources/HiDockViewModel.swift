@@ -99,6 +99,21 @@ final class HiDockViewModel: ObservableObject {
         activeDetailTabId = tab.id
     }
 
+    /// Show `tab` in place of any open tab whose id starts with `prefix`, so
+    /// only one of that kind is ever open. Used for transcripts: a tab per
+    /// meeting piled up full viewers, slowed the app and made the tab bar
+    /// clunky. The replacement takes the old tab's place in the bar.
+    func showDetailTab(_ tab: DetailTab, replacingPrefix prefix: String) {
+        let same = detailTabs.indices.filter { detailTabs[$0].id.hasPrefix(prefix) }
+        if let first = same.first {
+            detailTabs[first] = tab
+            for index in same.dropFirst().reversed() { detailTabs.remove(at: index) }
+        } else {
+            detailTabs.append(tab)
+        }
+        activeDetailTabId = tab.id
+    }
+
     func closeDetailTab(_ id: String) {
         detailTabs.removeAll { $0.id == id }
         if activeDetailTabId == id {

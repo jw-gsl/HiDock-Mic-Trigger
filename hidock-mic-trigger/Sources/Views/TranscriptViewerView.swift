@@ -871,6 +871,10 @@ struct TranscriptViewerView: View {
     @State private var showSpeakerToolsHelp = false
     @State private var voiceCheckRunning = false
     @State private var voiceCheckProgress = 0
+    @State private var voiceCheckQueue: [VoiceCheckMove] = []
+    @State private var voiceCheckApplying = false
+    /// Lines moved since this Refine run started, for the closing note.
+    @State private var voiceCheckMoved = 0
     @State private var voiceCheckResult: VoiceCheckResult?
     @State private var calendarCandidates: [CalendarMeetingCandidate] = []
     @State private var calendarLoading = false
@@ -903,6 +907,10 @@ struct TranscriptViewerView: View {
     /// the turn is still alive during that silence.
     @State private var calendarAssistantStartedAt: Date?
     @State private var transcriptAssistantDraft = ""
+    /// The "tell it what's wrong" box, shown from the Ask button beside
+    /// Redetect. Hidden by default: always on, it took a third of the
+    /// sidecar's header.
+    @State private var showTranscriptAssistant = false
     @State private var transcriptAssistantMessages: [TranscriptAssistantMessage] = []
     @State private var transcriptAssistantSessionId: String?
     @State private var transcriptAssistantRunning = false
@@ -1053,6 +1061,7 @@ struct TranscriptViewerView: View {
         guard let check = onVoiceCheck else { return }
         voiceCheckRunning = true
         voiceCheckProgress = 0
+        voiceCheckMoved = 0
         rediarizeStatus = nil
         check(filePath, { pct in voiceCheckProgress = pct }) { result in
             DispatchQueue.main.async {
@@ -1070,17 +1079,37 @@ struct TranscriptViewerView: View {
         }
     }
 
+    /// Applies one batch at a time: each apply rewrites the transcript file,
+    /// so two at once (quick clicks on several rows) could lose one.
     private func applyVoiceCheck(_ moves: [VoiceCheckMove]) {
-        guard let apply = onApplyVoiceCheck, !moves.isEmpty else { return }
+        guard !moves.isEmpty else { return }
+        voiceCheckQueue.append(contentsOf: moves)
+        guard !voiceCheckApplying else { return }
+        let batch = voiceCheckQueue
+        voiceCheckQueue = []
+        voiceCheckApplying = true
+        applyVoiceCheckNow(batch)
+    }
+
+    private func applyVoiceCheckNow(_ moves: [VoiceCheckMove]) {
+        guard let apply = onApplyVoiceCheck else { voiceCheckApplying = false; return }
         // Applying takes about a second; the re-diarising banner would mislead.
         apply(filePath, moves) { updated in
             DispatchQueue.main.async {
+                voiceCheckApplying = false
+                voiceCheckMoved += updated == nil ? 0 : moves.count
+                if !voiceCheckQueue.isEmpty {
+                    let next = voiceCheckQueue
+                    voiceCheckQueue = []
+                    voiceCheckApplying = true
+                    applyVoiceCheckNow(next)
+                }
                 guard let updated else {
                     rediarizeStatus = .failed("Refine couldn't apply the changes. The transcript is unchanged.")
                     return
                 }
                 applyRediarizedTranscript(updated)
-                rediarizeStatus = .skipped("Refine: moved \(moves.count) line\(moves.count == 1 ? "" : "s"). You can undo this from the transcript history.")
+                rediarizeStatus = .skipped("Refine: moved \(voiceCheckMoved) line\(voiceCheckMoved == 1 ? "" : "s"). You can undo this from the transcript history.")
             }
         }
     }
@@ -1294,7 +1323,7 @@ struct TranscriptViewerView: View {
             // 5 speakers, go through it more carefully". Between the tool
             // buttons and the stats row so it reads as one of the speaker
             // tools, not a separate feature.
-            if hasSpeakers, onTranscriptAssistantTurn != nil {
+            if hasSpeakers, onTranscriptAssistantTurn != nil, showTranscriptAssistant {
                 transcriptAssistantPanel
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
@@ -1395,6 +1424,9 @@ struct TranscriptViewerView: View {
                 }
             }
         }
+        // Opening another transcript replaces this one; don't leave its
+        // audio playing.
+        .onDisappear { audioPlayer.stop() }
         .onAppear {
             syncRediarizeSpeakerCount()
             refreshLibraryNames()
@@ -1924,14 +1956,9 @@ struct TranscriptViewerView: View {
                     audioPlayer.play(audioPath: audioPath, start: start, end: end,
                                      segmentId: "voice-check-\(start)")
                 },
-                onApply: { moves in
-                    voiceCheckResult = nil
-                    applyVoiceCheck(moves)
-                },
-                onCancel: {
-                    voiceCheckResult = nil
-                    rediarizeStatus = .info("Refine: suggestions closed without changes. Run Refine again to see them.")
-                }
+                onShow: { start in pendingTranscriptRestoreTime = start },
+                onApply: { moves in applyVoiceCheck(moves) },
+                onClose: { voiceCheckResult = nil }
             )
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
             .padding(.horizontal, 16)
@@ -1970,6 +1997,15 @@ struct TranscriptViewerView: View {
                     .fixedSize()
                     .disabled(isRediarizing)
                     .help("Start speaker detection again from the audio — automatically, or with the number you set beside Speakers. Use it when who-spoke-when is badly wrong, such as two people merged into one. Confirmed names carry over where the timing supports them; everything else may change.")
+                }
+                if hasSpeakers, onTranscriptAssistantTurn != nil {
+                    Button {
+                        showTranscriptAssistant.toggle()
+                    } label: {
+                        Label(showTranscriptAssistant ? "Hide Ask" : "Ask", systemImage: "sparkles")
+                    }
+                    .fixedSize()
+                    .help("Tell the assistant what's wrong with this transcript in your own words, e.g. \"there were definitely 5 speakers, go through it more carefully\".")
                 }
             }
             .buttonStyle(.bordered)
@@ -2170,11 +2206,9 @@ struct TranscriptViewerView: View {
         }
     }
 
-    /// Always present (not gated behind a toggle like the calendar assistant)
-    /// — this is meant to read as one of the speaker tools above it, always
-    /// available for "actually this transcript needs work" feedback. Starts
-    /// as just the input line; the message history only takes space once
-    /// there's something to show.
+    /// Opened from the Ask button beside Redetect, so it reads as one of the
+    /// speaker tools. Starts as just the input line; the message history only
+    /// takes space once there's something to show.
     private var transcriptAssistantPanel: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
