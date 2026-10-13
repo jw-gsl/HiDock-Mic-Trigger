@@ -120,4 +120,34 @@ One-off run: copy all `.md`, commit as "Initial import", push. After that, per-c
 4. **Identity**: generic `HiDock <transcripts@hidock.local>` commit author.
 5. **Contents**: markdown only — never json/srt/audio.
 
-Still open: Windows app / other machines publishing, or macOS-only for now?
+Still open: Windows app / other machines publishing, or macOS-only for now? (macOS-only for now; Windows parity is no longer a goal per CLAUDE.md)
+
+## Hardening — 2026-10-07 (commit 7d45081)
+- [x] Commit control: settle rule (10 min quiet + no in-flight work; up to 12h hold while a meeting suggestion awaits confirmation); one batched commit per tick with a per-transcript edit body; settling set persisted at ~/HiDock/.transcripts-git.pending.json
+- [x] App sets HIDOCK_PUBLISH_TO_GITHUB=0 for pipeline subprocesses (was: sync push on serial transcription queue + race with Swift publisher)
+- [x] flock (~/HiDock/.transcripts-git.lock); state moved to ~/HiDock/.transcripts-git.state.json
+- [x] Deletions mirrored (named missing source, or --all prune with 20% guard)
+- [x] Private-repo check before every push (24h cache); empty remote → main
+- [x] Failure banner + one notification; 15-min retry backoff; quit no longer blocks
+- [x] Dry-run push to jw-gsl/Transcripts authenticates over HTTPS (2026-10-07)
+- [x] First real enable (2026-10-07): the user chose "Publish everything"; the initial import went to jw-gsl/Transcripts
+- [x] Merged recordings: handled by the reconciliation pass below (merge pieces are excluded and removed from the repo)
+
+## Self-assessment
+- Busy detection depends on pipeline arguments naming the recording's files. A long-running operation that names no file wouldn't hold a transcript back; the 10-minute quiet window is the backstop.
+- Commit reasons come from the snapshot reason strings, so they read "Renaming X → Y" rather than past tense.
+
+## Reconciliation + file-list icon — 2026-10-07 (commit after 7d45081)
+- [x] `--scan` reconciliation (30 min + after each publish): external edits (Obsidian), missed triggers, deletions → settle queue using file mtime
+- [x] Settle guard: .md/_diarized.json mtime newer than last activity restarts the clock (closes "op names no file" gap)
+- [x] Merge pieces excluded and removed from repo (closes merged-children gap); 39 pieces in the real library as of today
+- [x] "Enable only" honoured via publishTranscriptsToGitHubSince
+- [x] File list icon + commit count; click opens on GitHub, right-click opens history
+- Real-data scan: 1,802 transcripts in 0.08s
+- Remaining risk: a crash *during* a commit leaves the clone's index dirty, but the next sync's `add -A` + commit picks it up. A diverged remote (someone editing on github.com) stops pushes until it's resolved by hand; the banner says so.
+
+## Later fixes — 2026-10-07 to 2026-10-13
+- [x] Repository is configurable in Settings (UserDefaults `transcriptsGitHubRepo`, accepts owner/repo or a URL); switching repo sets the old clone aside as `.transcripts-git.previous-<time>`
+- [x] Per-recording publish icons survive restarts and redeploys: status cache at `~/HiDock/.transcripts-git.status.json`, plus a scan at launch
+- [x] Sync result shown in plain words, not raw JSON
+- [x] Shipped in PR #91, merged to main 2026-10-13
