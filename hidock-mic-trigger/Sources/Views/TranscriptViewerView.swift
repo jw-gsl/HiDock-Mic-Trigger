@@ -987,7 +987,12 @@ struct TranscriptViewerView: View {
     /// Persist a selected event as the recording's calendar-context sidecar.
     /// The final Boolean lets this view own the visible rediarisation update
     /// while table confirmation runs the same pass in the background.
-    var onLinkCalendarEvent: ((String, Double, CalendarMeetingCandidate, Bool) -> Void)?
+    /// The last argument runs once the meeting's context is saved — after
+    /// attendee enrichment, which can take several seconds.
+    var onLinkCalendarEvent: ((String, Double, CalendarMeetingCandidate, Bool, @escaping () -> Void) -> Void)?
+    /// Which of several looked-up meetings to suggest, if any: by time, then by
+    /// what was said. Nil when nothing clearly fits.
+    var onChooseCalendarEvent: ((String, Double, [CalendarMeetingCandidate]) -> CalendarMeetingCandidate?)? = nil
     /// Remove a previously confirmed calendar-context sidecar.
     var onRemoveCalendarEvent: ((String) -> Void)? = nil
     /// Explicitly settle the recording as an ad-hoc call, dismissing a pending
@@ -2292,13 +2297,17 @@ struct TranscriptViewerView: View {
                         attendeeNames: enriched.attendeeNames
                     )
                 }
-                // A single time-overlapping result is useful as a suggestion,
-                // never as an automatic link. Multiple possibilities keep the
-                // neutral Match meeting label until the reviewer chooses one.
-                if requestedAlternative?.isEmpty != false,
-                   events.count == 1,
-                   linkedCalendarEvent == nil {
-                    suggestedCalendarEvent = events[0]
+                // The best fit is a suggestion, never an automatic link: one
+                // event, the one that clearly dominates the recording's time,
+                // or the one the transcript points to. Otherwise the neutral
+                // Match meeting label stays until the reviewer chooses.
+                if requestedAlternative?.isEmpty != false, linkedCalendarEvent == nil {
+                    let pick = onChooseCalendarEvent?(audioPath, Double(transcriptDurationSeconds), events)
+                        ?? (events.count == 1 ? events[0] : nil)
+                    if let pick {
+                        suggestedCalendarEvent = pick
+                        selectedCalendarCandidate = pick
+                    }
                 }
                 calendarLoading = false
             }
@@ -2312,31 +2321,39 @@ struct TranscriptViewerView: View {
         // Save the calendar context before the speaker pass.  The sidecar
         // owns this particular run so its `@State` transcript updates in
         // place rather than leaving the reviewer with stale speaker blocks.
-        onLinkCalendarEvent?(audioPath, Double(transcriptDurationSeconds), event, false)
-        if calendarEventIdDiarisedAgainst(diarizedJSONPath: filePath) == event.id {
-            // Suggested meetings are applied while transcribing, so these
-            // speakers were already matched against this invite list.
-            rediarizeStatus = .skipped("Calendar linked — speakers were already matched against this meeting, so there was nothing to redo.")
-        } else if allSpeakersConfirmed {
-            rediarizeStatus = .skipped("Calendar linked — all speakers are confirmed, so their assignments were left untouched.")
-        } else if hasAnchorNamedSpeakers, onReclusterWithLabels != nil,
-                  event.attendeeCount < 2 || uniqueSpeakerIds.count >= event.attendeeCount {
-            // At least one speaker is already confirmed, and we're not being
-            // asked to discover a speaker we haven't detected at all — reassign
-            // only the unconfirmed/generic turns using the confirmed ones as
-            // anchors. A full rediarize re-clusters from scratch, and its label
-            // preservation (`preserve_existing_speaker_labels`) is best-effort,
-            // matched by timestamp overlap — it can silently un-verify an
-            // already-confirmed speaker whenever the fresh cluster boundaries
-            // don't line up cleanly with the old ones, forcing a needless
-            // reconfirmation of someone who was already correct.
-            onReclusterWithLabels?(filePath, nil)
+        // The pass waits for the save: linking can enrich attendees first,
+        // which takes seconds, and Rec63's re-run started 12 s before its
+        // invite list existed — so it named speakers from the whole library.
+        let speakerPass = {
+            if calendarEventIdDiarisedAgainst(diarizedJSONPath: filePath) == event.id {
+                // Suggested meetings are applied while transcribing, so these
+                // speakers were already matched against this invite list.
+                rediarizeStatus = .skipped("Calendar linked — speakers were already matched against this meeting, so there was nothing to redo.")
+            } else if allSpeakersConfirmed {
+                rediarizeStatus = .skipped("Calendar linked — all speakers are confirmed, so their assignments were left untouched.")
+            } else if hasAnchorNamedSpeakers,
+                      event.attendeeCount < 2 || uniqueSpeakerIds.count >= event.attendeeCount {
+                // Some speakers are already confirmed, so don't re-cluster from
+                // scratch: that can un-verify someone who was already right.
+                // This used to run Reassign (TitaNet anchors), which on this
+                // audio can't tell voices apart well enough to move lines.
+                // Refine checks against this meeting's people instead, and
+                // only with the reviewer's say-so.
+                rediarizeStatus = .skipped("Calendar linked — confirmed names kept. Use Refine to check the other lines against this meeting's people.")
+            } else {
+                // No forced count. The linked meeting is saved first, and the
+                // pipeline uses its invite list as a ceiling (merge down, never
+                // split up) — the invitee count as an explicit target would invent
+                // speakers for invitees who never spoke. Same as the table's confirm.
+                startRediarize(speakers: nil)
+            }
+        }
+        if let link = onLinkCalendarEvent {
+            link(audioPath, Double(transcriptDurationSeconds), event, false) {
+                DispatchQueue.main.async { speakerPass() }
+            }
         } else {
-            // No forced count. The linked meeting is saved first, and the
-            // pipeline uses its invite list as a ceiling (merge down, never
-            // split up) — the invitee count as an explicit target would invent
-            // speakers for invitees who never spoke. Same as the table's confirm.
-            startRediarize(speakers: nil)
+            speakerPass()
         }
         showCalendarPicker = false
     }
