@@ -1057,6 +1057,13 @@ struct TranscriptViewerView: View {
         2...max(20, uniqueSpeakerIds.count)
     }
 
+    /// The transcript row a Refine suggestion is about, if it's still there.
+    private func voiceCheckSegment(_ line: VoiceCheckResult.Line) -> DiarizedSegment? {
+        guard transcript.segments.indices.contains(line.index) else { return nil }
+        let segment = transcript.segments[line.index]
+        return abs(segment.start - line.start) < 0.05 ? segment : nil
+    }
+
     private func startVoiceCheck() {
         guard let check = onVoiceCheck else { return }
         voiceCheckRunning = true
@@ -1952,9 +1959,17 @@ struct TranscriptViewerView: View {
             // finished Refine (14 suggestions on Rec63) looked like it did nothing.
             VoiceCheckPanel(
                 result: result,
-                onPlay: { start, end in
-                    audioPlayer.play(audioPath: audioPath, start: start, end: end,
-                                     segmentId: "voice-check-\(start)")
+                player: audioPlayer,
+                playbackId: { line in voiceCheckSegment(line)?.id ?? "voice-check-\(line.start)" },
+                onPlay: { line in
+                    // Bring the line into view below while it plays; playing it
+                    // under the row's own id highlights the row too.
+                    pendingTranscriptRestoreTime = line.start
+                    let segment = voiceCheckSegment(line)
+                    audioPlayer.play(audioPath: audioPath, start: line.start, end: line.end,
+                                     segmentId: segment?.id ?? "voice-check-\(line.start)",
+                                     wordCount: segment.map { $0.text.split(separator: " ").count } ?? 0,
+                                     wordTimings: segment?.words)
                 },
                 onShow: { start in pendingTranscriptRestoreTime = start },
                 onApply: { moves in applyVoiceCheck(moves) },

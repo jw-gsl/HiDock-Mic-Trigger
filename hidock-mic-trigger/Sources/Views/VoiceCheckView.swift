@@ -63,7 +63,13 @@ struct VoiceCheckMove: Encodable {
 /// no way to see what they were.
 struct VoiceCheckPanel: View {
     let result: VoiceCheckResult
-    let onPlay: ((Double, Double) -> Void)?
+    /// Play one suggestion's line (by its transcript index).
+    let onPlay: ((VoiceCheckResult.Line) -> Void)?
+    /// Watched so the playing line's button becomes Stop.
+    @ObservedObject var player: SegmentAudioPlayer
+    /// The playback id a line runs under — the transcript row's own id, so the
+    /// row below highlights as it plays.
+    let playbackId: (VoiceCheckResult.Line) -> String
     /// Scroll the transcript to this time.
     let onShow: ((Double) -> Void)?
     let onApply: ([VoiceCheckMove]) -> Void
@@ -74,12 +80,16 @@ struct VoiceCheckPanel: View {
     @State private var applied = 0
 
     init(result: VoiceCheckResult,
-         onPlay: ((Double, Double) -> Void)? = nil,
+         player: SegmentAudioPlayer,
+         playbackId: @escaping (VoiceCheckResult.Line) -> String,
+         onPlay: ((VoiceCheckResult.Line) -> Void)? = nil,
          onShow: ((Double) -> Void)? = nil,
          onApply: @escaping ([VoiceCheckMove]) -> Void,
          onClose: @escaping () -> Void) {
         self.result = result
         self.onPlay = onPlay
+        self.player = player
+        self.playbackId = playbackId
         self.onShow = onShow
         self.onApply = onApply
         self.onClose = onClose
@@ -209,11 +219,14 @@ struct VoiceCheckPanel: View {
     private func lineRow(_ line: VoiceCheckResult.Line) -> some View {
         HStack(alignment: .top, spacing: 8) {
             if let onPlay {
-                Button { onPlay(line.start, line.end) } label: {
-                    Image(systemName: "play.circle").font(.title3)
+                let playing = player.playingSegmentId == playbackId(line)
+                Button {
+                    if playing { player.stop() } else { onPlay(line) }
+                } label: {
+                    Image(systemName: playing ? "stop.circle.fill" : "play.circle").font(.title3)
                 }
                 .buttonStyle(.borderless)
-                .help("Play this line")
+                .help(playing ? "Stop" : "Play this line and show it in the transcript")
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
