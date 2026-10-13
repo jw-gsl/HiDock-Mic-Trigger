@@ -63,7 +63,7 @@ class SegmentAudioPlayer: ObservableObject {
                 wordCount: wordCount,
                 wordTimings: wordTimings
             )
-            armStopTimer(after: end - start)
+            armStopTimer(atPlayerTime: max(0, start) + (end - start) + Self.tailSeconds)
             return
         }
 
@@ -133,7 +133,7 @@ class SegmentAudioPlayer: ObservableObject {
             NSSound.beep()
             return
         }
-        let duration = max(0.1, end - start)
+        let duration = max(0.1, end - start) + Self.tailSeconds
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("hidock-seg-\(UUID().uuidString).wav")
         tempURL = out
@@ -180,7 +180,7 @@ class SegmentAudioPlayer: ObservableObject {
                     wordCount: wordCount,
                     wordTimings: wordTimings
                 )
-                self.armStopTimer(after: duration)
+                self.armStopTimer(atPlayerTime: duration)
             }
         }
         do {
@@ -193,10 +193,22 @@ class SegmentAudioPlayer: ObservableObject {
         }
     }
 
-    private func armStopTimer(after duration: Double) {
-        stopTimer = Timer.scheduledTimer(withTimeInterval: max(0.1, duration), repeats: false) { [weak self] _ in
-            self?.stop()
+    /// Played past a segment's end: word end-times sit on the last word's
+    /// boundary, and cutting there clips its final sound.
+    private static let tailSeconds = 0.35
+
+    /// Stop once playback *reaches* `end` on the player's own clock.
+    ///
+    /// A wall-clock timer started at play() also counted the time the audio
+    /// took to start, so it cut the end off every clip — most of a 1–2 s
+    /// Refine line.
+    private func armStopTimer(atPlayerTime end: Double) {
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, let p = self.player else { return }
+            if p.currentTime >= end || !p.isPlaying { self.stop() }
         }
+        RunLoop.main.add(t, forMode: .common)
+        stopTimer = t
     }
 
     func stop() {
