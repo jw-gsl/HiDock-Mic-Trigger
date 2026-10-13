@@ -48,6 +48,11 @@ struct VoiceCheckMove: Encodable {
     let index: Int
     let toName: String
     let start: Double
+    /// Recorded with the decision, so Refine's accuracy can be measured.
+    var fromName: String? = nil
+    var score: Double? = nil
+    var currentScore: Double? = nil
+    var kind: String = "line"
 }
 
 /// Refine's suggestions, for the reviewer to check and apply.
@@ -73,6 +78,8 @@ struct VoiceCheckPanel: View {
     /// Scroll the transcript to this time.
     let onShow: ((Double) -> Void)?
     let onApply: ([VoiceCheckMove]) -> Void
+    /// Skipped suggestions, remembered so they aren't offered again.
+    let onSkip: ([VoiceCheckMove]) -> Void
     let onClose: () -> Void
 
     @State private var lines: [VoiceCheckResult.Line]
@@ -85,6 +92,7 @@ struct VoiceCheckPanel: View {
          onPlay: ((VoiceCheckResult.Line) -> Void)? = nil,
          onShow: ((Double) -> Void)? = nil,
          onApply: @escaping ([VoiceCheckMove]) -> Void,
+         onSkip: @escaping ([VoiceCheckMove]) -> Void = { _ in },
          onClose: @escaping () -> Void) {
         self.result = result
         self.onPlay = onPlay
@@ -92,6 +100,7 @@ struct VoiceCheckPanel: View {
         self.playbackId = playbackId
         self.onShow = onShow
         self.onApply = onApply
+        self.onSkip = onSkip
         self.onClose = onClose
         _lines = State(initialValue: result.lines ?? [])
         _speakers = State(initialValue: result.speakers ?? [])
@@ -123,14 +132,17 @@ struct VoiceCheckPanel: View {
     }
 
     private func move(_ line: VoiceCheckResult.Line) -> VoiceCheckMove {
-        VoiceCheckMove(index: line.index, toName: line.toName, start: line.start)
+        VoiceCheckMove(index: line.index, toName: line.toName, start: line.start,
+                       fromName: line.fromName, score: line.score, currentScore: line.currentScore)
     }
 
     private func moves(_ speaker: VoiceCheckResult.Speaker) -> [VoiceCheckMove] {
         // A line with its own suggestion goes where that suggestion says.
         let own = Set(lines.map(\.index))
         return speaker.moves.filter { !own.contains($0.index) }
-            .map { VoiceCheckMove(index: $0.index, toName: speaker.suggested, start: $0.start) }
+            .map { VoiceCheckMove(index: $0.index, toName: speaker.suggested, start: $0.start,
+                                  fromName: speaker.name, score: speaker.score,
+                                  currentScore: speaker.currentScore, kind: "speaker") }
     }
 
     private func finishIfEmpty() {
@@ -169,6 +181,7 @@ struct VoiceCheckPanel: View {
                 HStack {
                     Spacer()
                     Button("Skip all") {
+                        onSkip(speakers.flatMap(moves) + lines.map(move))
                         lines = []; speakers = []
                         onClose()
                     }
@@ -209,6 +222,7 @@ struct VoiceCheckPanel: View {
                 speakers.removeAll { $0.id == speaker.id }
                 finishIfEmpty()
             }, skip: {
+                onSkip(moves(speaker))
                 speakers.removeAll { $0.id == speaker.id }
                 finishIfEmpty()
             })
@@ -252,6 +266,7 @@ struct VoiceCheckPanel: View {
                 lines.removeAll { $0.id == line.id }
                 finishIfEmpty()
             }, skip: {
+                onSkip([move(line)])
                 lines.removeAll { $0.id == line.id }
                 finishIfEmpty()
             })

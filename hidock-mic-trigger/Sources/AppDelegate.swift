@@ -86,6 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var calendarPrelookups: [String: CalendarPrelookup] = [:]
     /// Transcribed before their lookup finished; resolved when it does.
     private var calendarAwaitingTranscript: Set<String> = []
+    /// Why the current suggestion for a recording was chosen (time, transcript,
+    /// recurring, only event), saved with it for the decision log.
+    private var calendarPickReason: [String: String] = [:]
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceId: String? = nil
@@ -3671,6 +3674,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Completion gets the updated transcript and how many moves couldn't be
     /// applied (their line no longer exists).
+    /// Remember skipped suggestions (review-feedback log) so Refine stops
+    /// offering them and their accuracy can be measured.
+    private func recordVoiceCheckSkips(jsonPath: String, moves: [VoiceCheckMove]) {
+        guard !moves.isEmpty else { return }
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hidock-voice-skip-\(UUID().uuidString).json")
+        guard let data = try? encoder.encode(moves), (try? data.write(to: url)) != nil else { return }
+        runTranscription(arguments: ["voice-check", jsonPath, "--skip", url.path]) { [weak self] result in
+            try? FileManager.default.removeItem(at: url)
+            if case .failure(let error) = result {
+                self?.log("Could not record skipped Refine suggestions: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Learn a person's voice from lines moved to them by hand. Checked first:
+    /// nothing is saved unless the lines make a long-enough stretch that
+    /// doesn't sound like someone else.
+    private func learnFromLines(jsonPath: String, name: String, ranges: [[Double]]) {
+        guard !viewModel.hidockRecordingActive else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hidock-learn-\(UUID().uuidString).json")
+        guard let data = try? JSONSerialization.data(withJSONObject: ranges), (try? data.write(to: url)) != nil else { return }
+        runTranscription(arguments: ["learn-lines", jsonPath, "--name", name, "--ranges", url.path], timeout: 300) { [weak self] result in
+            try? FileManager.default.removeItem(at: url)
+            switch result {
+            case .success(let output):
+                let line = String(decoding: output, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
+                self?.log("Voice learning from moved lines for \(name): \(line.prefix(200))")
+            case .failure(let error):
+                self?.log("Voice learning from moved lines failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func applyVoiceCheck(jsonPath: String, moves: [VoiceCheckMove],
                                  completion: @escaping (DiarizedTranscript?, Int) -> Void) {
         let encoder = JSONEncoder()
@@ -4500,6 +4538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         rediarizeAfterLink: Bool = true,
         onSaved: (() -> Void)? = nil
     ) {
+        logCalendarDecision(audioPath: audioPath, duration: duration, final: event)
         // Whatever happens below, the caller's follow-up (the sidecar's own
         // speaker pass) runs once the context is on disk, never before it.
         defer { onSaved?() }
@@ -4706,11 +4745,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         audioPath: String,
         duration: Double
     ) -> CalendarMeetingCandidate? {
-        guard events.count > 1 else { return events.first }
+        guard events.count > 1 else {
+            calendarPickReason[audioPath] = "only event"
+            return events.first
+        }
         guard let start = calendarRecordingStart(for: audioPath) else { return nil }
         let decision = chooseCalendarEvent(events, recordingStart: start,
                                            recordingEnd: start.addingTimeInterval(max(1, duration)))
         log("Calendar match for \((audioPath as NSString).lastPathComponent): \(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
+        if decision.event != nil { calendarPickReason[audioPath] = "time" }
         return decision.event
     }
 
@@ -5087,9 +5130,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func saveCalendarSuggestion(_ event: CalendarMeetingCandidate, for audioPath: String) {
         let iso = ISO8601DateFormatter()
-        let payload: [String: Any] = ["id": event.id, "title": event.title,
+        var payload: [String: Any] = ["id": event.id, "title": event.title,
                                       "start": iso.string(from: event.start), "end": iso.string(from: event.end),
                                       "attendees": event.attendeeNames]
+        // How it was chosen, logged with the reviewer's eventual decision.
+        if let reason = calendarPickReason[audioPath] { payload["chosen_by"] = reason }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? data.write(to: calendarSuggestionURL(for: audioPath), options: .atomic)
         clearCalendarRejection(for: audioPath)
@@ -5147,6 +5192,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func rejectCalendarSuggestion(for audioPath: String) {
         let declined = suggestedCalendarEvent(for: audioPath)
+        logCalendarDecision(audioPath: audioPath, duration: ImportedRecordingsStore.probeDuration(at: audioPath),
+                            final: nil)
         saveCalendarRejection(for: audioPath)
         try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
         try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
@@ -5172,6 +5219,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
+    }
+
+    /// Append the reviewer's meeting decision to the review-feedback log:
+    /// accepted the suggestion, chose another meeting, declined (ad-hoc), or
+    /// linked one with no suggestion. Read back by `review-report` and by the
+    /// recurring-meeting preference in `pickCalendarEvent`.
+    private func logCalendarDecision(audioPath: String, duration: Double, final: CalendarMeetingCandidate?) {
+        let suggestionURL = calendarSuggestionURL(for: audioPath)
+        let suggestion = (try? Data(contentsOf: suggestionURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let suggestedId = suggestion?["id"] as? String
+        let decision: String
+        if final == nil { decision = "declined" }
+        else if suggestedId == nil { decision = "linked" }
+        else if suggestedId == final?.id { decision = "accepted" }
+        else { decision = "chose_other" }
+        var row: [String: Any] = [
+            "recording": ((audioPath as NSString).lastPathComponent as NSString).deletingPathExtension,
+            "decision": decision,
+        ]
+        row["suggested_title"] = suggestion?["title"]
+        row["chosen_by"] = suggestion?["chosen_by"]
+        if let final {
+            row["final_title"] = final.title
+            row["attendees"] = final.attendeeCount
+            if let start = calendarRecordingStart(for: audioPath) {
+                let end = start.addingTimeInterval(max(1, duration))
+                let overlap = max(0, min(final.end, end).timeIntervalSince(max(final.start, start)))
+                row["overlap_share"] = (overlap / max(1, duration) * 1000).rounded() / 1000
+                let weekday = Calendar.current.component(.weekday, from: final.start)
+                row["weekday"] = weekday
+            }
+        }
+        ReviewFeedbackLog.append(row, to: ReviewFeedbackLog.calendarLog)
     }
 
     /// Where an unconfirmed meeting's context is written for the pipeline.
@@ -5283,7 +5364,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             recordingStart: start, recordingEnd: start.addingTimeInterval(max(1, duration)))
         log("Calendar match for \((audioPath as NSString).lastPathComponent) from the transcript: "
             + "\(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
-        return decision.event
+        if let event = decision.event {
+            calendarPickReason[audioPath] = "transcript"
+            return event
+        }
+        // Last resort: a meeting the reviewer has confirmed at least twice
+        // before (a recurring meeting), when it's the only such candidate and
+        // covers a fifth of the recording.
+        let recordingEnd = start.addingTimeInterval(max(1, duration))
+        let confirmed = ReviewFeedbackLog.confirmedMeetingTitles()
+        let recurring = events.filter { event in
+            let overlap = max(0, min(event.end, recordingEnd).timeIntervalSince(max(event.start, start)))
+            return (confirmed[event.title] ?? 0) >= 2 && overlap >= 0.2 * max(1, duration)
+        }
+        if recurring.count == 1 {
+            log("Calendar match for \((audioPath as NSString).lastPathComponent): → \(recurring[0].title), "
+                + "a meeting you've confirmed \(confirmed[recurring[0].title] ?? 0) times before")
+            calendarPickReason[audioPath] = "recurring"
+            return recurring[0]
+        }
+        return nil
     }
 
     private func resolveCalendarSuggestion(
@@ -6039,6 +6139,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onApplyVoiceCheck: { [weak self] jsonPath, moves, completion in
                 guard let self else { completion(nil, moves.count); return }
                 self.applyVoiceCheck(jsonPath: jsonPath, moves: moves, completion: completion)
+            },
+            onSkipVoiceCheck: { [weak self] jsonPath, moves in
+                self?.recordVoiceCheckSkips(jsonPath: jsonPath, moves: moves)
+            },
+            onLearnFromLines: { [weak self] jsonPath, name, ranges in
+                self?.learnFromLines(jsonPath: jsonPath, name: name, ranges: ranges)
             },
             onEnrollSpeakerFromDiarized: { [weak self] name, jsonPath, speakerId in
                 self?.enrollSpeakerFromDiarized(name: name, diarizedPath: jsonPath, speakerId: speakerId)

@@ -958,6 +958,11 @@ struct TranscriptViewerView: View {
     var onVoiceCheck: ((String, @escaping (Int) -> Void, @escaping (VoiceCheckResult) -> Void) -> Void)? = nil
     /// Apply the accepted voice-check moves; returns the updated transcript.
     var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?, Int) -> Void) -> Void)? = nil
+    /// Remember skipped Refine suggestions so they aren't offered again.
+    var onSkipVoiceCheck: ((String, [VoiceCheckMove]) -> Void)? = nil
+    /// Learn a person's voice from lines the reviewer moved to them by hand
+    /// (verified against the naming library before anything is saved).
+    var onLearnFromLines: ((String, String, [[Double]]) -> Void)? = nil
     /// Enrol a speaker from the diarized sidecar's stored centroid (name,
     /// jsonPath, speakerId) — a far better voiceprint than one short segment.
     /// Falls back to onEnrollSpeaker (audio) when nil.
@@ -1746,6 +1751,9 @@ struct TranscriptViewerView: View {
         }
 
         saveTranscript("Before reassigning selected text")
+        if let start = sampleStart, let end = sampleEnd, !isGenericName(speakerName(for: newSpeakerId)) {
+            onLearnFromLines?(filePath, speakerName(for: newSpeakerId), [[start, end]])
+        }
     }
 
     /// Reassign one whole transcript row to another speaker without requiring a
@@ -1766,6 +1774,7 @@ struct TranscriptViewerView: View {
         // real name gets this row's audio as a training sample.
         if !isGenericName(speakerName(for: newSpeakerId)) {
             onEnrollSpeaker(speakerName(for: newSpeakerId), audioPath, segment.start, segment.end)
+            onLearnFromLines?(filePath, speakerName(for: newSpeakerId), [[segment.start, segment.end]])
         }
     }
 
@@ -1980,6 +1989,7 @@ struct TranscriptViewerView: View {
                 },
                 onShow: { start in pendingTranscriptRestoreTime = start },
                 onApply: { moves in applyVoiceCheck(moves) },
+                onSkip: { moves in onSkipVoiceCheck?(filePath, moves) },
                 onClose: { voiceCheckResult = nil }
             )
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
