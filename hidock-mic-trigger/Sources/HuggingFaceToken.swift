@@ -69,6 +69,8 @@ enum HuggingFaceToken {
     /// item's access list no longer matches this build and the only fix is to
     /// re-create it — which is what the Settings page offers.
     static func isReadableWithoutPrompting() -> Bool {
+        // Untrusted builds never touch the item: the probe itself can prompt.
+        guard KeychainAccessPolicy.mayPrompt else { return true }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -159,12 +161,13 @@ enum HuggingFaceToken {
         }
         // Ask before reading, so we can tell a promptless read from one that
         // raised a dialog. Cheap, and the only way to know a repair is due.
-        let neededPrompt = !isReadableWithoutPrompting()
-        // A test host or ad-hoc build would prompt, then take the item over.
-        if neededPrompt && !KeychainAccessPolicy.mayPrompt {
+        // A test host or ad-hoc build would prompt (even the silent-read
+        // probe does), then take the item over. Don't touch it.
+        guard KeychainAccessPolicy.mayPrompt else {
             cache = .notFound
             return nil
         }
+        let neededPrompt = !isReadableWithoutPrompting()
         let token = readStoredToken()
         if let token, neededPrompt, rewriteWithSelfOwnedAccess(token) {
             NSLog("HuggingFaceToken: repaired Keychain access — this build now owns "

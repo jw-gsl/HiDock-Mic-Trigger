@@ -11,6 +11,8 @@ import Security
 /// copy, so the real app asked next. Unsigned and test builds now read
 /// silently or go without.
 enum KeychainAccessPolicy {
+    /// Whether this process may touch the Keychain items at all. Anything
+    /// else — test hosts, ad-hoc builds — behaves as though no token is saved.
     static let mayPrompt: Bool = {
         let env = ProcessInfo.processInfo.environment
         if env["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil {
@@ -63,6 +65,8 @@ final class KeychainSecret {
     }
 
     func isReadableWithoutPrompting() -> Bool {
+        // Untrusted builds never touch the item: the probe itself can prompt.
+        guard KeychainAccessPolicy.mayPrompt else { return true }
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -97,11 +101,14 @@ final class KeychainSecret {
         case .value(let value): return value
         case .unread: break
         }
-        let neededPrompt = !isReadableWithoutPrompting()
-        if neededPrompt && !KeychainAccessPolicy.mayPrompt {
+        // Don't even ask: the "can I read this silently?" probe itself raises
+        // the dialog in the login keychain for a process the item doesn't
+        // trust, so test hosts and ad-hoc builds still prompted after #103.
+        guard KeychainAccessPolicy.mayPrompt else {
             cache = .notFound
             return nil
         }
+        let neededPrompt = !isReadableWithoutPrompting()
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
