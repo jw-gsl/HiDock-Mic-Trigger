@@ -2313,7 +2313,11 @@ struct TranscriptViewerView: View {
         // owns this particular run so its `@State` transcript updates in
         // place rather than leaving the reviewer with stale speaker blocks.
         onLinkCalendarEvent?(audioPath, Double(transcriptDurationSeconds), event, false)
-        if allSpeakersConfirmed {
+        if calendarEventIdDiarisedAgainst(diarizedJSONPath: filePath) == event.id {
+            // Suggested meetings are applied while transcribing, so these
+            // speakers were already matched against this invite list.
+            rediarizeStatus = .skipped("Calendar linked — speakers were already matched against this meeting, so there was nothing to redo.")
+        } else if allSpeakersConfirmed {
             rediarizeStatus = .skipped("Calendar linked — all speakers are confirmed, so their assignments were left untouched.")
         } else if hasAnchorNamedSpeakers, onReclusterWithLabels != nil,
                   event.attendeeCount < 2 || uniqueSpeakerIds.count >= event.attendeeCount {

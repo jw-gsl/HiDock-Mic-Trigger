@@ -81,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var deployApprovalTimer: Timer?
     private let mergeGroupsPath = "\(NSHomeDirectory())/HiDock/merge_groups.json"
     private var diarizeEnabled = false
+    private enum CalendarPrelookup { case pending, done([CalendarMeetingCandidate]) }
+    /// Calendar lookups started alongside transcription, by audio path.
+    private var calendarPrelookups: [String: CalendarPrelookup] = [:]
+    /// Transcribed before their lookup finished; resolved when it does.
+    private var calendarAwaitingTranscript: Set<String> = []
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceId: String? = nil
@@ -3659,6 +3664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func rediarizeTranscript(
         jsonPath: String,
         nSpeakers: Int?,
+        calendarContextPath: String? = nil,
         onUpdate: @escaping (TranscriptRediarizeStatus) -> Void
     ) {
         guard ensureTranscriptionReady() else {
@@ -3688,6 +3694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         var args = ["rediarize", jsonPath]
         if let n = nSpeakers { args += ["--n-speakers", "\(n)"] }
+        if let calendarContextPath { args += ["--calendar-context", calendarContextPath] }
 
         runTranscription(arguments: args) { [weak self] result in
             guard let self = self else { return }
@@ -4352,17 +4359,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func finishLinkingCalendarEvent(
-        audioPath: String,
-        duration: Double,
+    /// The `_calendar.json` document the pipeline reads for one event: the
+    /// attendee list it narrows speaker names to and caps the count by.
+    private func calendarContextPayload(
         event: CalendarMeetingCandidate,
-        rediarizeAfterLink: Bool = true
-    ) {
+        audioPath: String,
+        duration: Double
+    ) -> [String: Any]? {
         captureRecordingTimeZone(for: audioPath)
-        guard let recordingStart = calendarRecordingStart(for: audioPath) else { return }
+        guard let recordingStart = calendarRecordingStart(for: audioPath) else { return nil }
         let recordingTimeZone = recordingTimeZone(for: audioPath)
         let iso = ISO8601DateFormatter()
-        let payload: [String: Any] = [
+        return [
             "source": "macos-eventkit",
             "recording_start": iso.string(from: recordingStart),
             "recording_end": iso.string(from: recordingStart.addingTimeInterval(max(1, duration))),
@@ -4381,6 +4389,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 },
             ]],
         ]
+    }
+
+    private func finishLinkingCalendarEvent(
+        audioPath: String,
+        duration: Double,
+        event: CalendarMeetingCandidate,
+        rediarizeAfterLink: Bool = true
+    ) {
+        guard let payload = calendarContextPayload(event: event, audioPath: audioPath, duration: duration) else { return }
         let audioURL = URL(fileURLWithPath: audioPath)
         let destination = audioURL.deletingLastPathComponent()
             .appendingPathComponent("\(audioURL.deletingPathExtension().lastPathComponent)_calendar.json")
@@ -4391,6 +4408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // been explicitly linked (from either the table or sidecar), it
             // must not reappear as a second, stale decision on reopening.
             try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
+            try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
             clearCalendarRejection(for: audioPath)
             updateCalendarMeeting(event, for: audioPath)
             updateCalendarSuggestion(title: nil, for: audioPath)
@@ -4418,7 +4436,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 .flatMap { $0.transcribed ? $0.transcriptPath : nil }
             if rediarizeAfterLink, let transcriptPath = entryTranscript ?? mergedTranscript {
                 let diarized = transcriptPath.replacingOccurrences(of: ".md", with: "_diarized.json")
-                if transcriptHasUnconfirmedSpeakers(at: diarized) {
+                if calendarEventIdDiarisedAgainst(diarizedJSONPath: diarized) == event.id {
+                    // The suggestion was applied while transcribing, so the
+                    // speakers already reflect this meeting's invite list. A
+                    // second pass would only redo the same work — and clash with
+                    // the names the reviewer is confirming in the sidecar.
+                    log("Calendar linked without re-diarising \(audioURL.lastPathComponent): already diarised against '\(event.title)'")
+                    viewModel.syncStatus = "Calendar linked — speakers already matched to this meeting"
+                    viewModel.syncStatusLevel = .success
+                    syncViewModelState()
+                } else if transcriptHasUnconfirmedSpeakers(at: diarized) {
                     // Deliberately no explicit count. The saved `_calendar.json`
                     // already carries the attendee list, and the pipeline treats a
                     // calendar count as a **downward-only** soft cap
@@ -5013,8 +5040,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func rejectCalendarSuggestion(for audioPath: String) {
+        let declined = suggestedCalendarEvent(for: audioPath)
         saveCalendarRejection(for: audioPath)
         try? FileManager.default.removeItem(at: calendarSuggestionURL(for: audioPath))
+        try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
         // The table renders cached calendar fields rather than reading sidecars
         // for every row.  Refresh them now: clearing only the suggestion used to
         // leave `calendarRejected` false until an unrelated sync refresh, so the
@@ -5026,13 +5055,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // initial transcription has already detected voices, so declining a
         // meeting must leave that useful result intact rather than starting a
         // redundant second pass without any new evidence.
+        // The one exception: speakers diarised against the declined meeting
+        // were narrowed to the wrong invite list, so detect them again
+        // without it. Confirmed speakers are left alone as usual.
+        let diarized = diarizedTranscriptPath(forAudioPath: audioPath)
+        if let declined, calendarEventIdDiarisedAgainst(diarizedJSONPath: diarized) == declined.id,
+           transcriptHasUnconfirmedSpeakers(at: diarized) {
+            log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); re-detecting speakers without '\(declined.title)'")
+            rediarizeTranscript(jsonPath: diarized, nSpeakers: nil) { _ in }
+            return
+        }
         log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
     }
 
-    /// Search only after the transcript is safely written. The result is a
-    /// suggestion sidecar, never a prerequisite for speaker detection: the
-    /// user must explicitly confirm it before its attendee data refines an
-    /// already-diarised transcript.
+    /// Where an unconfirmed meeting's context is written for the pipeline.
+    ///
+    /// Deliberately not `_calendar.json`: the pipeline finds that one on its
+    /// own and the table treats it as a confirmed link. This one is only used
+    /// when passed explicitly with `--calendar-context`.
+    private func provisionalCalendarContextURL(for audioPath: String) -> URL {
+        let audio = URL(fileURLWithPath: audioPath)
+        return audio.deletingLastPathComponent()
+            .appendingPathComponent("\(audio.deletingPathExtension().lastPathComponent)_calendar_provisional.json")
+    }
+
+    private func diarizedTranscriptPath(forAudioPath audioPath: String) -> String {
+        if let merged = viewModel.mergedFileTranscriptPaths[(audioPath as NSString).lastPathComponent] {
+            return merged.replacingOccurrences(of: ".md", with: "_diarized.json")
+        }
+        let dir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let stem = ((audioPath as NSString).lastPathComponent as NSString).deletingPathExtension
+        return "\(dir)/\(stem)_diarized.json"
+    }
+
+    private func writeProvisionalCalendarContext(_ event: CalendarMeetingCandidate, audioPath: String, duration: Double) {
+        guard let payload = calendarContextPayload(event: event, audioPath: audioPath, duration: duration),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        try? data.write(to: provisionalCalendarContextURL(for: audioPath), options: .atomic)
+    }
+
+    /// Look the meeting up while the recording transcribes, not after.
+    ///
+    /// The lookup takes seconds; speech-to-text takes minutes, and the pipeline
+    /// reads its calendar context only when it reaches diarisation. So a
+    /// meeting found here is written out as the provisional context and the
+    /// first diarisation already uses its invite list. Confirming it later then
+    /// has nothing to redo — previously every confirmation started a second
+    /// diarisation while the reviewer was naming speakers in the sidecar.
+    ///
+    /// Returns the path to pass as `--calendar-context`, or nil when no lookup
+    /// applies (already linked, or declined as an ad-hoc call).
+    private func startCalendarPrelookup(for audioPath: String, duration: Double) -> String? {
+        let provisional = provisionalCalendarContextURL(for: audioPath)
+        try? FileManager.default.removeItem(at: provisional)
+        guard calendarLinkedEvent(for: audioPath) == nil, !hasCalendarRejection(for: audioPath) else {
+            return nil
+        }
+        let duration = duration > 0 ? duration : ImportedRecordingsStore.probeDuration(at: audioPath)
+        calendarPrelookups[audioPath] = .pending
+        findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
+            guard let self else { return }
+            if let event = self.calendarEventToSuggest(events, audioPath: audioPath, duration: duration) {
+                self.writeProvisionalCalendarContext(event, audioPath: audioPath, duration: duration)
+                self.log("Calendar found while transcribing \((audioPath as NSString).lastPathComponent) → \(event.title); diarising against it")
+            }
+            self.calendarPrelookups[audioPath] = .done(events)
+            if self.calendarAwaitingTranscript.remove(audioPath) != nil {
+                self.resolveCalendarSuggestion(for: audioPath, events: events, duration: duration)
+            }
+        }
+        return provisional.path
+    }
+
+    /// Settle the suggestion once the transcript is written.
+    ///
+    /// The result is still only a suggestion: the user confirms it. But the
+    /// speakers are already diarised against it, so confirming is instant.
     private func suggestCalendarMeeting(afterTranscriptionOf audioPath: String) {
         // Every completed transcription passes through here, so it doubles as
         // the "new transcript" trigger for GitHub publishing.
@@ -5043,19 +5142,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // branch below, would re-diarise a transcript the user has already
         // resolved. Once linked, the calendar question is closed.
         if let linked = calendarLinkedEvent(for: audioPath) {
+            calendarPrelookups[audioPath] = nil
             log("Calendar already confirmed for \((audioPath as NSString).lastPathComponent) → \(linked.title); skipping lookup")
             return
         }
         let duration = ImportedRecordingsStore.probeDuration(at: audioPath)
-        findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
-            guard let self else { return }
-            if let event = self.calendarEventToSuggest(events, audioPath: audioPath, duration: duration) {
-                self.saveCalendarSuggestion(event, for: audioPath)
-                self.log("Calendar suggestion pending confirmation for \((audioPath as NSString).lastPathComponent) → \(event.title)")
-            } else {
-                self.log("No unambiguous calendar match for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
+        switch calendarPrelookups[audioPath] {
+        case .pending:
+            // Rare: transcription beat the lookup. Finish when it lands.
+            calendarAwaitingTranscript.insert(audioPath)
+        case .done(let events):
+            resolveCalendarSuggestion(for: audioPath, events: events, duration: duration)
+        case nil:
+            // Transcribed by a path that didn't look up early.
+            findClaudeCalendarEvents(audioPath: audioPath, duration: duration) { [weak self] events in
+                self?.resolveCalendarSuggestion(for: audioPath, events: events, duration: duration)
             }
         }
+    }
+
+    private func resolveCalendarSuggestion(
+        for audioPath: String,
+        events: [CalendarMeetingCandidate],
+        duration: Double
+    ) {
+        calendarPrelookups[audioPath] = nil
+        let name = (audioPath as NSString).lastPathComponent
+        let diarized = diarizedTranscriptPath(forAudioPath: audioPath)
+        var chosen = calendarEventToSuggest(events, audioPath: audioPath, duration: duration)
+        if chosen == nil, events.count > 1, let start = calendarRecordingStart(for: audioPath),
+           let transcript = loadDiarizedTranscript(at: diarized) {
+            let decision = chooseCalendarEventFromTranscript(
+                events, transcript: transcript.segments.map(\.text).joined(separator: " "),
+                recordingStart: start, recordingEnd: start.addingTimeInterval(max(1, duration)))
+            log("Calendar match for \(name) from the transcript: \(decision.event.map { "→ \($0.title)" } ?? "none"), \(decision.reason)")
+            chosen = decision.event
+        }
+        guard let event = chosen else {
+            try? FileManager.default.removeItem(at: provisionalCalendarContextURL(for: audioPath))
+            log("No unambiguous calendar match for \(name); keeping initial speaker detection")
+            return
+        }
+        saveCalendarSuggestion(event, for: audioPath)
+        log("Calendar suggestion pending confirmation for \(name) → \(event.title)")
+        if calendarEventIdDiarisedAgainst(diarizedJSONPath: diarized) == event.id {
+            return
+        }
+        // Chosen too late for the first diarisation (the transcript decided
+        // it, or transcription beat the lookup). Apply it now, in the
+        // background, so it is done before the reviewer gets to it.
+        writeProvisionalCalendarContext(event, audioPath: audioPath, duration: duration)
+        guard diarizeEnabled, FileManager.default.fileExists(atPath: diarized),
+              transcriptHasUnconfirmedSpeakers(at: diarized) else { return }
+        log("Diarising \(name) against suggested meeting '\(event.title)'")
+        rediarizeTranscript(jsonPath: diarized, nSpeakers: nil,
+                            calendarContextPath: provisionalCalendarContextURL(for: audioPath).path) { _ in }
     }
 
     // MARK: - Calendar connector health
@@ -11552,10 +11693,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         viewModel.ledMatrix.notify(LEDEvent(kind: .transcription, text: "TRANSCRIBING \(filename)"))
-        // Diarisation belongs to this initial transcription. The calendar
-        // lookup below is optional enrichment: a confirmed meeting may trigger
-        // a second, attendee-informed pass, but a pending meeting must already
-        // show its detected speaker count.
+        // Diarisation belongs to this initial transcription, and a meeting
+        // found by the calendar lookup started below is applied to it, so a
+        // pending meeting already shows speakers matched to its invite list.
         var args = ["transcribe", item.path]
         if diarizeEnabled { args.append("--diarize") }
         args.append("--summarize")  // see transcribeFileDirect for rationale
@@ -11565,6 +11705,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .flatMap { queueItem -> Double? in
                 syncEntries.first(where: { $0.recording.outputName == queueItem.filename })?.recording.duration
             } ?? 0
+        if diarizeEnabled, let context = startCalendarPrelookup(for: item.path, duration: itemDuration) {
+            // Read at the diarisation stage, minutes from now; if the lookup
+            // hasn't written it by then the pipeline simply goes without.
+            args += ["--calendar-context", context]
+        }
         let scaledTimeout = Self.computeTranscriptionTimeout(for: item.path, knownDuration: itemDuration)
         runTranscription(arguments: args, timeout: scaledTimeout, onProgress: { [weak self] pct in
             guard let self = self else { return }

@@ -616,3 +616,72 @@ final class CalendarEventChoiceTests: XCTestCase {
         XCTAssertEqual(chooseCalendarEvent([only], recordingStart: at(0), recordingEnd: at(30)).event, only)
     }
 }
+
+/// When timing can't decide, what was said can.
+final class CalendarTranscriptChoiceTests: XCTestCase {
+    private let day = Date(timeIntervalSince1970: 1_791_500_000)
+    private func at(_ minutes: Double) -> Date { day.addingTimeInterval(minutes * 60) }
+    private func event(_ title: String, _ from: Double, _ to: Double, _ people: [String]) -> CalendarMeetingCandidate {
+        CalendarMeetingCandidate(id: title, title: title, start: at(from), end: at(to), attendeeNames: people)
+    }
+
+    private lazy var evenSplit = [
+        event("Diligence working session", 0, 30, ["James Whiting", "Jeff Chow", "Ellen Barss"]),
+        event("AI Accelerator 101", 30, 60, ["James Whiting", "Jordan Di Scola"]),
+    ]
+
+    func testNamedInviteesSettleAnEvenSplit() {
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Thanks Jeff. Ellen, can you take the diligence numbers?",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertEqual(decision.event?.title, "Diligence working session")
+    }
+
+    func testSharedInviteeTellsThemApartInNoWay() {
+        // Only the recorder is named, and they're on both invites.
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "James here, let's get going.",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testCloseEvidenceStaysAmbiguous() {
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Jeff said Jordan would join later.",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testNamesMustBeWholeWords() {
+        // "Jeffrey" and "jordanian" are not Jeff or Jordan.
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Jeffrey from the jordanian office, diligence aside",
+            recordingStart: at(10), recordingEnd: at(50))
+        XCTAssertNil(decision.event)
+    }
+
+    func testBarelyOverlappingMeetingCannotWin() {
+        // Talking about the next meeting doesn't move the recording into it.
+        let decision = chooseCalendarEventFromTranscript(
+            evenSplit, transcript: "Before Jordan's AI Accelerator session later…",
+            recordingStart: at(0), recordingEnd: at(32))
+        XCTAssertNil(decision.event)
+    }
+}
+
+final class CalendarDiarisedAgainstTests: XCTestCase {
+    func testReadsTheEventIdThePipelineRecorded() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())_diarized.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"segments":[],"calendar_context":{"calendar_event_id":"Catch-up|1791500000.0"}}"#.utf8).write(to: url)
+        XCTAssertEqual(calendarEventIdDiarisedAgainst(diarizedJSONPath: url.path), "Catch-up|1791500000.0")
+    }
+
+    func testNoContextMeansNotDiarisedAgainstAnything() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())_diarized.json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"segments":[]}"#.utf8).write(to: url)
+        XCTAssertNil(calendarEventIdDiarisedAgainst(diarizedJSONPath: url.path))
+        XCTAssertNil(calendarEventIdDiarisedAgainst(diarizedJSONPath: "/nonexistent/x_diarized.json"))
+    }
+}
