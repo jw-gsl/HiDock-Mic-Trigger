@@ -6127,15 +6127,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onTranscriptAssistantStop: { [weak self] in self?.stopTranscriptAssistant() }
         )
 
-        // Host as a tab in the right pane (one per transcript — re-opening the
-        // same meeting focuses its existing tab).
+        // Host in the right pane, replacing whichever transcript was open:
+        // one transcript at a time. Edits are saved as they're made and any
+        // speaker work carries on in the background, so nothing is lost.
         // The tab bar is a compact way to switch recordings, so use the stable
         // recording stem (including its Rec number) rather than a full path or
         // a redundant audio extension such as ".mp3".
         let title = URL(fileURLWithPath: transcript.audioFile)
             .deletingPathExtension()
             .lastPathComponent
-        showDetailTab(id: "transcript:\(diarizedPath)", title: title, icon: "waveform", view: viewer)
+        viewModel.showDetailTab(
+            HiDockViewModel.DetailTab(id: "transcript:\(diarizedPath)", title: title, icon: "waveform",
+                                      content: AnyView(viewer)),
+            replacingPrefix: "transcript:")
+        syncWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Re-read `speaker_meta` for one meeting and push `speakersTagged` /
