@@ -7,6 +7,7 @@ import SwiftUI
 struct MatchingQualityView: View {
     @ObservedObject var viewModel: HiDockViewModel
     @State private var expanded = false
+    @State private var confirmUndo = false
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
@@ -32,6 +33,11 @@ struct MatchingQualityView: View {
                             .font(.caption2).foregroundColor(.secondary)
                     }
                     Spacer()
+                    if viewModel.reviewQualityLines.contains(where: { $0.contains("Undo clean-ups") }) {
+                        Button("Undo clean-ups") { confirmUndo = true }
+                            .controlSize(.small)
+                            .help("Put back every voice sample the clean-up set aside, and keep them from now on")
+                    }
                     if viewModel.reviewQualityBusy {
                         ProgressView().controlSize(.small)
                     } else {
@@ -53,5 +59,10 @@ struct MatchingQualityView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .onAppear { viewModel.onRefreshReviewQuality() }
+        .confirmationDialog("Put back the voice samples the clean-up set aside?", isPresented: $confirmUndo) {
+            Button("Put them back") { viewModel.onUndoLibraryCleanups() }
+        } message: {
+            Text("They'll be used for matching again, and the clean-up won't set them aside again.")
+        }
     }
 }

@@ -1222,6 +1222,8 @@ final class HiDockViewModel: ObservableObject {
     @Published var reviewQualityUpdated: Date?
     @Published var reviewQualityBusy = false
     var onRefreshReviewQuality: () -> Void = {}
+    /// Put back every voice sample the automatic clean-up set aside.
+    var onUndoLibraryCleanups: () -> Void = {}
     var onSetTranscriptPublishing: (Bool) -> Void = { _ in }
     /// The saved target repo (`owner/repo`); empty until the user sets one.
     @Published var transcriptsRepo = ""

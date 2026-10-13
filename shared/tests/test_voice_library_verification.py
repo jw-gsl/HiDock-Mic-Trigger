@@ -67,3 +67,43 @@ def test_audit_flags_set_aside_and_restore():
     assert sample["active"] is False and sample["quarantined"]["sounds_like"] == "Jeff Chow"
     assert audit.audit(lib) == []
     assert audit.restore(lib) == 1 and sample["active"] is True and "quarantined" not in sample
+    # A restored sample is the reviewer's call: later audits leave it alone.
+    assert audit.audit(lib) == []
+
+
+def test_auto_clean_sets_aside_and_keeps_few_backups(tmp_path):
+    import json
+    path = tmp_path / "voice-library.json"
+    lib = _library(**{
+        "Ian Reay": [(IAN, "Rec1"), (IAN, "Rec2"), (JEFF, "Rec5")],
+        "Jeff Chow": [(JEFF, "Rec1"), (JEFF, "Rec3")],
+    })
+    path.write_text(json.dumps(lib))
+    for _ in range(7):
+        (tmp_path / f"voice-library.json.before-audit-2026010{_}-000000").write_text("{}")
+    result = audit.auto_clean(path)
+    assert result["set_aside"] == 1 and result["total_set_aside"] == 1 and result["people"] == ["Ian Reay"]
+    assert len(list(tmp_path.glob("voice-library.json.before-audit-*"))) == audit.KEEP_BACKUPS
+
+
+def test_auto_clean_holds_back_when_suspiciously_many(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(audit, "AUTO_LIMIT", 0)
+    path = tmp_path / "voice-library.json"
+    path.write_text(json.dumps(_library(**{
+        "Ian Reay": [(IAN, "Rec1"), (IAN, "Rec2"), (JEFF, "Rec5")],
+        "Jeff Chow": [(JEFF, "Rec1"), (JEFF, "Rec3")],
+    })))
+    result = audit.auto_clean(path)
+    assert result["held_back"] is True and result["set_aside"] == 0
+
+
+def test_a_new_enrolment_does_not_reactivate_set_aside_samples():
+    from shared.voice_library_lite import _refresh_active_samples
+    lib = _library(**{
+        "Ian Reay": [(IAN, "Rec1"), (IAN, "Rec2"), (JEFF, "Rec5")],
+        "Jeff Chow": [(JEFF, "Rec1"), (JEFF, "Rec3")],
+    })
+    audit.set_aside(lib, audit.audit(lib))
+    _refresh_active_samples(lib["speakers"]["Ian Reay"])
+    assert lib["speakers"]["Ian Reay"]["samples"][2]["active"] is False

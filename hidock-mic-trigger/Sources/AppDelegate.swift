@@ -3681,6 +3681,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// of start-up work), then every six hours, and whenever Settings opens.
     private func scheduleReviewQuality() {
         viewModel.onRefreshReviewQuality = { [weak self] in self?.refreshReviewQuality() }
+        viewModel.onUndoLibraryCleanups = { [weak self] in
+            guard let self else { return }
+            self.viewModel.reviewQualityBusy = true
+            self.runTranscription(arguments: ["voice-library-audit", "--restore"], timeout: 120) { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.viewModel.reviewQualityBusy = false
+                    if case .failure(let error) = result {
+                        self.log("Undo voice-library clean-ups failed: \(error.localizedDescription)")
+                    } else {
+                        self.log("Voice-library clean-ups undone")
+                    }
+                    self.refreshReviewQuality()
+                }
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in self?.refreshReviewQuality() }
         reviewQualityTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
             self?.refreshReviewQuality()
