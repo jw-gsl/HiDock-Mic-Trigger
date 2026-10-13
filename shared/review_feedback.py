@@ -192,6 +192,103 @@ def correction_report(transcripts_dir: Path, *, since: str | None = None, limit:
     }
 
 
-def report(transcripts_dir: Path, *, since: str | None = None) -> dict:
-    return {"refine": refine_report(), "calendar": calendar_report(),
-            "corrections": correction_report(transcripts_dir, since=since)}
+def report(transcripts_dir: Path, *, since: str | None = None, retune: bool = False) -> dict:
+    full = {"refine": refine_report(), "calendar": calendar_report(),
+            "corrections": correction_report(transcripts_dir, since=since),
+            "tuning": tune() if retune else load_tuning()}
+    full["summary"] = summary_lines(full)
+    return full
+
+
+# ── Automatic tuning ────────────────────────────────────────────────────────
+TUNING_FILE = "tuning.json"
+# Decisions needed for a pair before its margin moves, and how far it may move.
+MIN_PAIR_DECISIONS = 8
+MAX_MARGIN_RAISE = 0.15
+
+
+def load_tuning(directory: Path | None = None) -> dict:
+    path = (directory or FEEDBACK_DIR) / TUNING_FILE
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def tune(directory: Path | None = None) -> dict:
+    """Adjust matching from the reviewer's own decisions, within bounds.
+
+    Refine: for a pair of voices it keeps getting wrong (from → to), raise the
+    margin a suggestion needs; for one the reviewer nearly always accepts,
+    lower it a little. Calendar: stop preferring previously confirmed
+    ("recurring") meetings if those picks are mostly declined or swapped.
+    Written to `tuning.json`, read by voice_check and the app.
+    """
+    refine = _read(REFINE_LOG, directory)
+    pairs: dict[str, Counter] = defaultdict(Counter)
+    for r in refine:
+        pairs[f"{r.get('from_name')} → {r.get('to_name')}"][r.get("action")] += 1
+    adjust: dict[str, float] = {}
+    for pair, c in pairs.items():
+        n = c["applied"] + c["skipped"]
+        if n < MIN_PAIR_DECISIONS:
+            continue
+        rate = c["applied"] / n
+        if rate < 0.5:
+            adjust[pair] = 0.10
+        elif rate < 0.7:
+            adjust[pair] = 0.05
+        elif rate >= 0.9 and n >= 15:
+            adjust[pair] = -0.05
+    adjust = {p: max(-0.05, min(MAX_MARGIN_RAISE, v)) for p, v in adjust.items()}
+
+    recurring = [r for r in _read(CALENDAR_LOG, directory) if r.get("chosen_by") == "recurring"]
+    recurring_ok = sum(1 for r in recurring if r.get("decision") == "accepted")
+    recurring_enabled = not (len(recurring) >= 4 and recurring_ok / len(recurring) < 0.5)
+
+    tuning = {
+        "updated": datetime.now(timezone.utc).isoformat(),
+        "refine_margin_adjust": adjust,
+        "recurring_meetings": recurring_enabled,
+    }
+    folder = directory or FEEDBACK_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / TUNING_FILE).write_text(json.dumps(tuning, indent=2, ensure_ascii=False), encoding="utf-8")
+    return tuning
+
+
+def summary_lines(full: dict) -> list[str]:
+    """The report in plain sentences, for the app's Settings."""
+    lines: list[str] = []
+    refine = full.get("refine") or {}
+    decided = refine.get("applied", 0) + refine.get("skipped", 0)
+    if decided:
+        lines.append(f"Refine: you accepted {refine['applied']} of {decided} suggestions "
+                     f"({round(100 * refine['applied'] / decided)}%).")
+    else:
+        lines.append("Refine: no suggestions applied or skipped yet.")
+    adjust = (full.get("tuning") or {}).get("refine_margin_adjust") or {}
+    for pair, delta in sorted(adjust.items()):
+        p = next((x for x in refine.get("by_pair", []) if x["pair"] == pair), None)
+        basis = f" (accepted {p['applied']} of {p['applied'] + p['skipped']})" if p else ""
+        lines.append(f"  {pair}{basis}: Refine now needs "
+                     f"{'stronger' if delta > 0 else 'slightly less'} evidence for this pair.")
+    calendar = full.get("calendar") or {}
+    counts = Counter()
+    for by_how in (calendar.get("by_how_suggested") or {}).values():
+        counts.update(by_how)
+    suggested = counts["accepted"] + counts["chose_other"] + counts["declined"]
+    if suggested:
+        lines.append(f"Meetings: you accepted {counts['accepted']} of {suggested} suggested meetings "
+                     f"({round(100 * counts['accepted'] / suggested)}%).")
+    else:
+        lines.append("Meetings: no meeting suggestions confirmed or declined yet.")
+    if (full.get("tuning") or {}).get("recurring_meetings") is False:
+        lines.append("  Preferring previously confirmed meetings is off — those picks were mostly wrong.")
+    for backend, stats in sorted(((full.get("corrections") or {}).get("by_backend") or {}).items()):
+        if backend == "unknown":
+            continue
+        lines.append(f"Speaker detection ({backend}): you re-labelled "
+                     f"{round(100 * stats['mean_relabelled_share'])}% of speech on average "
+                     f"across {stats['transcripts']} transcripts.")
+    return lines

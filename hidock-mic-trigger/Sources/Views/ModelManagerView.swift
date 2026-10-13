@@ -295,8 +295,52 @@ struct ModelManagerView: View {
                 Divider()
 
                 githubPublishSection
+
+                Divider()
+
+                matchingQualitySection
             }
         }
+    }
+
+    /// What the reviewer's decisions say about matching, and what the app has
+    /// tuned because of them. Kept up to date automatically.
+    private var matchingQualitySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "chart.line.uptrend.xyaxis").foregroundColor(.teal)
+                Text("Matching quality").fontWeight(.medium)
+                Spacer()
+                if viewModel.reviewQualityBusy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Refresh") { viewModel.onRefreshReviewQuality() }
+                        .controlSize(.small)
+                }
+            }
+            Text("Learned from what you apply, skip and confirm. Refine and meeting matching adjust themselves from this, within safe limits.")
+                .font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if viewModel.reviewQualityLines.isEmpty {
+                Text(viewModel.reviewQualityBusy ? "Working it out…" : "Not measured yet.")
+                    .font(.caption).foregroundColor(.secondary)
+            } else {
+                ForEach(Array(viewModel.reviewQualityLines.enumerated()), id: \.offset) { _, line in
+                    Text(line.trimmingCharacters(in: .whitespaces))
+                        .font(.caption)
+                        .padding(.leading, line.hasPrefix("  ") ? 14 : 0)
+                        .foregroundColor(line.hasPrefix("  ") ? .secondary : .primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let updated = viewModel.reviewQualityUpdated {
+                Text("Updated \(updated.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .onAppear { viewModel.onRefreshReviewQuality() }
     }
 
     /// Transcripts on GitHub — the same switch as the status-bar menu item,

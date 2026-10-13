@@ -1315,7 +1315,8 @@ def cmd_review_report(args):
     import json as _json
     from shared import review_feedback
     folder = Path(args.transcripts).expanduser()
-    print(_json.dumps(review_feedback.report(folder, since=args.since), indent=2, ensure_ascii=False))
+    print(_json.dumps(review_feedback.report(folder, since=args.since, retune=args.tune),
+                      indent=2, ensure_ascii=False))
 
 
 def cmd_rematch(args):
@@ -2326,6 +2327,7 @@ def main():
     p_report = sub.add_parser("review-report", help="Accuracy of Refine and calendar suggestions, and correction rates")
     p_report.add_argument("--transcripts", default=str(Path.home() / "HiDock" / "Raw Transcripts"))
     p_report.add_argument("--since", help="Only transcripts first saved after this date (git --since)")
+    p_report.add_argument("--tune", action="store_true", help="Recompute tuning.json from the decisions first")
     p_report.set_defaults(func=cmd_review_report)
 
     p_rematch = sub.add_parser(

@@ -38,3 +38,35 @@ def test_confirmed_titles_count_recurring_meetings(tmp_path):
     for decision in ("accepted", "accepted", "declined", "chose_other"):
         fb.record_calendar({"decision": decision, "final_title": "Weekly sync" if decision != "chose_other" else "1:1"}, tmp_path)
     assert fb.confirmed_meeting_titles(tmp_path) == Counter({"Weekly sync": 2, "1:1": 1})
+
+
+def test_tuning_raises_margin_for_a_pair_that_keeps_being_skipped(tmp_path):
+    fb.record_refine("Rec1", "applied", [{"start": 1, "from_name": "Ian", "to_name": "Jeff"}] * 3, tmp_path)
+    fb.record_refine("Rec1", "skipped", [{"start": 2, "from_name": "Ian", "to_name": "Jeff"}] * 6, tmp_path)
+    fb.record_refine("Rec1", "applied", [{"start": 3, "from_name": "Chris", "to_name": "Jordan"}] * 20, tmp_path)
+    tuning = fb.tune(tmp_path)
+    assert tuning["refine_margin_adjust"] == {"Ian → Jeff": 0.10, "Chris → Jordan": -0.05}
+    assert fb.load_tuning(tmp_path)["refine_margin_adjust"]["Ian → Jeff"] == 0.10
+
+
+def test_too_few_decisions_change_nothing(tmp_path):
+    fb.record_refine("Rec1", "skipped", [{"start": 2, "from_name": "Ian", "to_name": "Jeff"}] * 7, tmp_path)
+    assert fb.tune(tmp_path)["refine_margin_adjust"] == {}
+
+
+def test_recurring_preference_turns_off_when_mostly_wrong(tmp_path):
+    for decision in ("declined", "chose_other", "declined", "accepted"):
+        fb.record_calendar({"decision": decision, "chosen_by": "recurring"}, tmp_path)
+    assert fb.tune(tmp_path)["recurring_meetings"] is False
+
+
+def test_summary_reads_as_sentences():
+    full = {"refine": {"applied": 3, "skipped": 1, "by_pair": [{"pair": "Ian → Jeff", "applied": 1, "skipped": 7}]},
+            "calendar": {"by_how_suggested": {"time": {"accepted": 4, "declined": 1}}},
+            "corrections": {"by_backend": {"nemotron": {"transcripts": 15, "mean_relabelled_share": 0.173}}},
+            "tuning": {"refine_margin_adjust": {"Ian → Jeff": 0.1}, "recurring_meetings": True}}
+    lines = fb.summary_lines(full)
+    assert lines[0] == "Refine: you accepted 3 of 4 suggestions (75%)."
+    assert "stronger evidence" in lines[1]
+    assert lines[2].startswith("Meetings: you accepted 4 of 5")
+    assert "17% of speech" in lines[3]

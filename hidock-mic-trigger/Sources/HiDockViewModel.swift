@@ -1215,6 +1215,13 @@ final class HiDockViewModel: ObservableObject {
     @Published var transcriptPublishBusy = false
     /// Outcome of the last manual action, shown under the Settings toggle.
     @Published var transcriptPublishLastResult: String?
+    /// "Matching quality" in Settings: plain sentences from `review-report`,
+    /// which also re-tunes Refine and calendar matching from the reviewer's
+    /// decisions. Refreshed automatically; no command to run.
+    @Published var reviewQualityLines: [String] = []
+    @Published var reviewQualityUpdated: Date?
+    @Published var reviewQualityBusy = false
+    var onRefreshReviewQuality: () -> Void = {}
     var onSetTranscriptPublishing: (Bool) -> Void = { _ in }
     /// The saved target repo (`owner/repo`); empty until the user sets one.
     @Published var transcriptsRepo = ""

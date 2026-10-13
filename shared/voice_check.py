@@ -91,6 +91,7 @@ def propose(
     recording: str | None = None,
     people: list[str] | None = None,
     on_progress: Callable[[float], None] | None = None,
+    margin_adjust: dict[str, float] | None = None,
 ) -> dict:
     """Proposed corrections for one diarised transcript.
 
@@ -124,6 +125,10 @@ def propose(
 
     def ranked(vector: np.ndarray, within: dict | None = None) -> list[tuple[str, float]]:
         return [(r["name"], float(r["score"])) for r in _rank_library(within or sub, vector, scorer)]
+
+    def margin_for(source: str, target: str) -> float:
+        # Tuned per pair from the reviewer's apply/skip decisions.
+        return min_margin + float((margin_adjust or {}).get(f"{source} → {target}", 0.0))
 
     def score_of(ranks: list[tuple[str, float]], name: str) -> float:
         return next((s for n, s in ranks if n.casefold() == name.casefold()), 0.0)
@@ -159,7 +164,7 @@ def propose(
         top, top_score = ranks[0]
         current_score = score_of(ranks, current)
         if top.casefold() != current.casefold() and top_score >= threshold \
-                and top_score - current_score >= min_margin:
+                and top_score - current_score >= margin_for(current, top):
             result["lines"].append({
                 "index": index, "start": start, "end": end,
                 "text": str(seg.get("text") or "").strip(),
@@ -189,7 +194,7 @@ def propose(
         else:
             continue
         if top.casefold() != current.casefold() and top_score >= threshold \
-                and top_score - current_score >= min_margin:
+                and top_score - current_score >= margin_for(current, top):
             # Renaming the whole speaker must not sweep up the lines that
             # really are the current name. Rec63's "Jordan" was mostly Chris,
             # but four of its lines were Jordan answering when asked; moving
@@ -286,8 +291,10 @@ def run(json_path: Path, *, on_progress: Callable[[float], None] | None = None) 
         except Exception:
             return None
 
+    from shared.review_feedback import load_tuning
     result = propose(
         data, embed, library,
+        margin_adjust=load_tuning().get("refine_margin_adjust"),
         scorer=str(config.get("scorer") or "top3_median"),
         threshold=float(config.get("threshold", 0.5)),
         min_margin=float(config.get("min_margin", 0.23)),
