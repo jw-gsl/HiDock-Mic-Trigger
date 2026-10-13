@@ -1082,6 +1082,18 @@ struct TranscriptViewerView: View {
         return abs(segment.start - line.start) < 0.05 ? segment : nil
     }
 
+    /// Show the suggestions the pipeline saved after transcribing, so the
+    /// reviewer doesn't have to click Refine and wait for them. Never replaces
+    /// a check already on screen or running.
+    private func showSavedVoiceCheck() {
+        guard onVoiceCheck != nil, voiceCheckResult == nil, !voiceCheckRunning,
+              let saved = VoiceCheckResult.saved(forTranscript: filePath), saved.hasSuggestions
+        else { return }
+        voiceCheckMoved = 0
+        voiceCheckNotApplied = 0
+        voiceCheckResult = saved
+    }
+
     private func startVoiceCheck() {
         guard let check = onVoiceCheck else { return }
         voiceCheckRunning = true
@@ -1458,9 +1470,13 @@ struct TranscriptViewerView: View {
         // Opening another transcript replaces this one; don't leave its
         // audio playing.
         .onDisappear { audioPlayer.stop() }
+        .onReceive(NotificationCenter.default.publisher(for: .refineSuggestionsUpdated)) { note in
+            if note.object as? String == filePath { showSavedVoiceCheck() }
+        }
         .onAppear {
             syncRediarizeSpeakerCount()
             refreshLibraryNames()
+            showSavedVoiceCheck()
             // Recover transcripts made by the short-lived raw-ASR-first flow.
             // Meeting matching is deliberately not involved: the initial pass
             // establishes the real speaker count first, then a confirmed

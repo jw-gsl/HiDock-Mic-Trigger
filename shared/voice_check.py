@@ -309,3 +309,99 @@ def run(json_path: Path, *, on_progress: Callable[[float], None] | None = None) 
         result["lines"], skipped_suggestions(audio_path.stem))
     result["model"] = config.get("model_key")
     return result
+
+
+# --- Suggestions saved by the pipeline -------------------------------------
+#
+# Refine takes a couple of minutes on an hour-long meeting, so the pipeline
+# runs it once a transcript is written and saves the result beside it. The
+# app shows it when the transcript opens, but only while the transcript is
+# byte-for-byte the one it was computed from: any other edit makes it stale.
+# Skips and applies keep it current themselves (`forget_suggestions`).
+
+def cache_path(json_path: Path) -> Path:
+    return json_path.with_name(json_path.name.replace("_diarized.json", "_refine.json"))
+
+
+def _digest(json_path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(json_path.read_bytes()).hexdigest()
+
+
+def save_cache(json_path: Path, result: dict, *, digest: str | None = None) -> None:
+    """Save a result for `json_path` — computed from the transcript whose
+    digest is `digest` (read before the check, so an edit made while it ran
+    leaves the saved result stale rather than wrongly current)."""
+    if result.get("error"):
+        cache_path(json_path).unlink(missing_ok=True)
+        return
+    from datetime import datetime, timezone
+    payload = {
+        "transcript_sha256": digest or _digest(json_path),
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "result": result,
+    }
+    tmp = cache_path(json_path).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cache_path(json_path))
+
+
+def load_cache(json_path: Path) -> dict | None:
+    """The saved result, or None when there is none or the transcript changed."""
+    try:
+        payload = json.loads(cache_path(json_path).read_text(encoding="utf-8"))
+        if payload.get("transcript_sha256") != _digest(json_path):
+            return None
+        return payload.get("result")
+    except (OSError, ValueError):
+        return None
+
+
+def forget_suggestions(json_path: Path, moves: list[dict], *, digest_before: str) -> None:
+    """Drop suggestions the reviewer acted on and re-stamp the saved result.
+
+    Called after a skip (transcript unchanged) or an apply (transcript just
+    rewritten). The remaining line suggestions stay valid: each was scored on
+    its own audio. Their indices are re-found by start time, and speaker-wide
+    suggestions are dropped once any speaker move was applied, since the
+    speaker they describe has changed.
+    """
+    try:
+        payload = json.loads(cache_path(json_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if payload.get("transcript_sha256") != digest_before:
+        return
+    result = payload.get("result") or {}
+    done = [float(m.get("start", -1)) for m in moves]
+    segments = json.loads(json_path.read_text(encoding="utf-8")).get("segments") or []
+    kept = []
+    for line in result.get("lines") or []:
+        if any(abs(float(line.get("start", 0)) - s) <= 0.05 for s in done):
+            continue
+        index = next((i for i, seg in enumerate(segments)
+                      if abs(float(seg.get("start", 0)) - float(line.get("start", 0))) <= 0.05), None)
+        if index is None:
+            continue
+        kept.append({**line, "index": index})
+    result["lines"] = kept
+    if any(m.get("kind") == "speaker" for m in moves):
+        result["speakers"] = []
+    if not kept and not result.get("speakers"):
+        cache_path(json_path).unlink(missing_ok=True)
+        return
+    save_cache(json_path, result)
+
+
+def precompute(json_path: Path) -> dict:
+    """Run the check for the pipeline and save it. Never raises."""
+    try:
+        digest = _digest(json_path)
+        result = run(json_path)
+        save_cache(json_path, result, digest=digest)
+        return {"lines": len(result.get("lines") or []),
+                "speakers": len(result.get("speakers") or []),
+                "checked": result.get("checked", 0),
+                "error": result.get("error")}
+    except Exception as exc:  # a missing suggestion list must never fail a transcription
+        return {"error": str(exc)}

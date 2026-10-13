@@ -86,6 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var calendarPrelookups: [String: CalendarPrelookup] = [:]
     /// Transcribed before their lookup finished; resolved when it does.
     private var calendarAwaitingTranscript: Set<String> = []
+    /// Background Refine checks by transcript path; true = run again when done.
+    private var refinePrecomputes: [String: Bool] = [:]
     /// Recordings whose meeting link is being saved; a second tick is ignored.
     private var calendarLinksInFlight: Set<String> = []
     /// Why the current suggestion for a recording was chosen (time, transcript,
@@ -3676,6 +3678,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Run Refine on a freshly written transcript and save its suggestions
+    /// beside it (`_refine.json`), so they are waiting when it is opened.
+    ///
+    /// Its own low-priority process, not `runTranscription`: that queue is
+    /// serial, and a 2-minute check on an hour-long meeting would hold up the
+    /// next recording's transcription. A request while one runs for the same
+    /// transcript reruns it once afterwards (a calendar re-diarisation usually
+    /// follows the first pass within the minute).
+    private func precomputeRefine(jsonPath: String) {
+        guard FileManager.default.fileExists(atPath: jsonPath),
+              FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else { return }
+        if refinePrecomputes[jsonPath] != nil {
+            refinePrecomputes[jsonPath] = true
+            return
+        }
+        refinePrecomputes[jsonPath] = false
+        let name = (jsonPath as NSString).lastPathComponent
+        log("Refine check queued in the background for \(name)")
+        let process = Process()
+        process.currentDirectoryURL = URL(fileURLWithPath: transcriptionRoot)
+        process.executableURL = URL(fileURLWithPath: transcriptionPythonPath)
+        process.arguments = [transcriptionScriptPath, "voice-check", jsonPath, "--precompute"]
+        process.qualityOfService = .background
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = NSHomeDirectory()
+        env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        env["PYTHONUNBUFFERED"] = "1"
+        process.environment = env
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] _ in
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            let summary = String(decoding: data, as: UTF8.self)
+                .split(separator: "\n").last(where: { $0.hasPrefix("{") }).map(String.init) ?? "no result"
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.log("Refine check for \(name): \(summary)")
+                let rerun = self.refinePrecomputes.removeValue(forKey: jsonPath) == true
+                NotificationCenter.default.post(name: .refineSuggestionsUpdated, object: jsonPath)
+                if rerun { self.precomputeRefine(jsonPath: jsonPath) }
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            refinePrecomputes[jsonPath] = nil
+            log("Refine check for \(name) could not start: \(error.localizedDescription)")
+        }
+    }
+
     /// Completion gets the updated transcript and how many moves couldn't be
     /// applied (their line no longer exists).
     /// Re-tune matching from the reviewer's decisions and refresh the
@@ -3885,6 +3938,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     break
                 }
                 TranscriptPublish.shared.schedule(diarizedPath: jsonPath)
+                self.precomputeRefine(jsonPath: jsonPath)
                 let summary = self.rediarizeSummary(before: before, after: after)
                 self.log("Re-diarization complete (\(summary.changedSegmentAssignments) lines changed speaker)")
                 if !viewerShowsProgress {
@@ -5434,6 +5488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // the "new transcript" trigger for GitHub publishing.
         TranscriptPublish.shared.noteActivity(mdPath: transcriptMarkdownPath(forAudioPath: audioPath),
                                               reason: "Transcribed")
+        precomputeRefine(jsonPath: diarizedTranscriptPath(forAudioPath: audioPath))
         // A confirmed meeting is the answer this search would be looking for.
         // Re-running it costs an MCP/EventKit round-trip and, on the no-match
         // branch below, would re-diarise a transcript the user has already

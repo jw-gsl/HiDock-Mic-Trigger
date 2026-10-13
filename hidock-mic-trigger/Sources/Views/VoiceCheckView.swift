@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 
 /// What `transcribe.py voice-check` proposes for one transcript.
@@ -41,6 +42,34 @@ struct VoiceCheckResult: Decodable {
     static func failure(_ message: String) -> VoiceCheckResult {
         VoiceCheckResult(error: message)
     }
+
+    /// Whether there is anything for the reviewer to look at.
+    var hasSuggestions: Bool { !(lines ?? []).isEmpty || !(speakers ?? []).isEmpty }
+
+    /// The suggestions the pipeline saved beside this transcript
+    /// (`voice-check --precompute`), or nil when there are none or the
+    /// transcript has changed since they were computed.
+    static func saved(forTranscript jsonPath: String) -> VoiceCheckResult? {
+        let cachePath = jsonPath.replacingOccurrences(of: "_diarized.json", with: "_refine.json")
+        guard cachePath != jsonPath,
+              let cache = FileManager.default.contents(atPath: cachePath),
+              let transcript = FileManager.default.contents(atPath: jsonPath),
+              let payload = try? JSONSerialization.jsonObject(with: cache) as? [String: Any],
+              let digest = payload["transcript_sha256"] as? String,
+              let result = payload["result"],
+              digest == SHA256.hash(data: transcript).map({ String(format: "%02x", $0) }).joined(),
+              let resultData = try? JSONSerialization.data(withJSONObject: result)
+        else { return nil }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(VoiceCheckResult.self, from: resultData)
+    }
+}
+
+extension Notification.Name {
+    /// Posted with the transcript's `_diarized.json` path once the pipeline
+    /// has saved (or failed to save) Refine suggestions for it.
+    static let refineSuggestionsUpdated = Notification.Name("HiDockRefineSuggestionsUpdated")
 }
 
 /// One accepted correction, as `voice-check --apply` reads it.

@@ -1,4 +1,6 @@
 """Voice check: propose line/speaker corrections from saved voices, apply accepted ones."""
+import json
+
 import numpy as np
 
 from shared import voice_check
@@ -143,3 +145,58 @@ def test_unnamed_speaker_is_named_from_anyone_saved():
                                  threshold=0.5, min_margin=0.2, people=["Jeff Chow"])
     assert [(s["name"], s["suggested"]) for s in result["speakers"]] == [("Speaker 4", "Ian Reay")]
     assert result["lines"] == []
+
+
+def _write_transcript(tmp_path, starts):
+    path = tmp_path / "Rec1_diarized.json"
+    segs = [{"start": s, "end": s + 2, "speaker_id": 0, "text": "x"} for s in starts]
+    path.write_text(json.dumps({"segments": segs, "speaker_names": {"0": "Ann"}}))
+    return path
+
+
+def _line(index, start):
+    return {"index": index, "start": start, "end": start + 2, "text": "x",
+            "from_name": "Ann", "to_name": "Bob", "score": 0.7, "current_score": 0.2}
+
+
+def test_saved_suggestions_go_stale_when_the_transcript_changes(tmp_path):
+    path = _write_transcript(tmp_path, [0, 5])
+    voice_check.save_cache(path, {"lines": [_line(1, 5)], "speakers": []})
+    assert voice_check.load_cache(path)["lines"][0]["start"] == 5
+    path.write_text(path.read_text() + " ")
+    assert voice_check.load_cache(path) is None
+
+
+def test_a_result_computed_before_an_edit_is_saved_as_stale(tmp_path):
+    path = _write_transcript(tmp_path, [0, 5])
+    digest = voice_check._digest(path)
+    path.write_text(path.read_text() + " ")  # edited while the check ran
+    voice_check.save_cache(path, {"lines": [_line(1, 5)]}, digest=digest)
+    assert voice_check.load_cache(path) is None
+
+
+def test_applied_and_skipped_suggestions_are_forgotten_and_the_rest_kept(tmp_path):
+    path = _write_transcript(tmp_path, [0, 5, 9])
+    voice_check.save_cache(path, {"lines": [_line(1, 5), _line(2, 9)], "speakers": [{"speaker_id": "0"}]})
+    before = voice_check._digest(path)
+    data = json.loads(path.read_text())
+    data["segments"].insert(0, {"start": -3, "end": -1, "speaker_id": 0, "text": "y"})  # shifts indices
+    data["segments"][2]["speaker_id"] = 1
+    path.write_text(json.dumps(data))
+    voice_check.forget_suggestions(path, [{"index": 1, "start": 5, "to_name": "Bob"}], digest_before=before)
+    cached = voice_check.load_cache(path)
+    assert [(l["start"], l["index"]) for l in cached["lines"]] == [(9, 3)]
+    assert cached["speakers"] == [{"speaker_id": "0"}]
+
+
+def test_forgetting_the_last_suggestion_removes_the_saved_file(tmp_path):
+    path = _write_transcript(tmp_path, [0, 5])
+    voice_check.save_cache(path, {"lines": [_line(1, 5)]})
+    voice_check.forget_suggestions(path, [{"start": 5}], digest_before=voice_check._digest(path))
+    assert not voice_check.cache_path(path).exists()
+
+
+def test_an_error_result_is_not_saved(tmp_path):
+    path = _write_transcript(tmp_path, [0])
+    voice_check.save_cache(path, {"error": "no library"})
+    assert not voice_check.cache_path(path).exists()
