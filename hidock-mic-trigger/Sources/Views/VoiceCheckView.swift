@@ -90,6 +90,14 @@ struct VoiceCheckPanel: View {
         return byIndex.values.sorted { $0.index < $1.index }
     }
 
+    private var headline: String {
+        let lines = result.lines?.count ?? 0, speakers = result.speakers?.count ?? 0
+        var parts: [String] = []
+        if speakers > 0 { parts.append("\(speakers) speaker\(speakers == 1 ? "" : "s")") }
+        if lines > 0 { parts.append("\(lines) line\(lines == 1 ? "" : "s")") }
+        return "Refine suggests changing " + parts.joined(separator: " and ")
+    }
+
     private var summary: String {
         let people = result.voicesKnown?.count ?? 0
         var text = "Checked \(result.checked ?? 0) lines against the saved voices of \(people) people in this meeting"
@@ -105,7 +113,7 @@ struct VoiceCheckPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Refine: suggested corrections").font(.headline)
+            Text(headline).font(.headline)
             Text(summary).font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -173,8 +181,8 @@ struct VoiceCheckPanel: View {
                     .disabled(moves.isEmpty)
             }
         }
-        .padding(14)
-        .frame(width: 480)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func binding<T: Hashable>(for id: T, in set: Binding<Set<T>>) -> Binding<Bool> {

@@ -1914,6 +1914,27 @@ struct TranscriptViewerView: View {
             .font(.caption)
             .foregroundColor(.secondary)
             .padding(.horizontal, 16)
+        } else if let result = voiceCheckResult {
+            // Inline, not a popover: anchored to a button inside the
+            // horizontally scrolling toolbar, the popover never appeared, so a
+            // finished Refine (14 suggestions on Rec63) looked like it did nothing.
+            VoiceCheckPanel(
+                result: result,
+                onPlay: { start, end in
+                    audioPlayer.play(audioPath: audioPath, start: start, end: end,
+                                     segmentId: "voice-check-\(start)")
+                },
+                onApply: { moves in
+                    voiceCheckResult = nil
+                    applyVoiceCheck(moves)
+                },
+                onCancel: {
+                    voiceCheckResult = nil
+                    rediarizeStatus = .info("Refine: suggestions closed without changes. Run Refine again to see them.")
+                }
+            )
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+            .padding(.horizontal, 16)
         } else if let rediarizeStatus {
             rediarizeStatusView(rediarizeStatus)
                 .padding(.horizontal, 16)
@@ -1938,24 +1959,6 @@ struct TranscriptViewerView: View {
                     .fixedSize()
                     .disabled(isRediarizing || voiceCheckRunning)
                     .help("Check every line against the saved voices of the people in this meeting, and suggest lines (or whole speakers) that sound like someone else. Nothing changes until you apply the suggestions. Best after confirming names.")
-                    .popover(isPresented: Binding(get: { voiceCheckResult != nil },
-                                                  set: { if !$0 { voiceCheckResult = nil } }),
-                             arrowEdge: .bottom) {
-                        if let result = voiceCheckResult {
-                            VoiceCheckPanel(
-                                result: result,
-                                onPlay: { start, end in
-                                    audioPlayer.play(audioPath: audioPath, start: start, end: end,
-                                                     segmentId: "voice-check-\(start)")
-                                },
-                                onApply: { moves in
-                                    voiceCheckResult = nil
-                                    applyVoiceCheck(moves)
-                                },
-                                onCancel: { voiceCheckResult = nil }
-                            )
-                        }
-                    }
                 }
                 if onRediarize != nil {
 
