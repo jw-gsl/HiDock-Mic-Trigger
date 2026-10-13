@@ -492,3 +492,70 @@ final class TimestampBearingStemTests: XCTestCase {
         XCTAssertEqual(timestampBearingStem("intro-to-swift"), "intro-to-swift")
     }
 }
+
+final class AttendeeNameTests: XCTestCase {
+
+    func testSurnameFirstIsFlipped() {
+        XCTAssertEqual(normalizeAttendeeName("Robins, Justin"), "Justin Robins")
+        XCTAssertEqual(normalizeAttendeeName("  O'Neill, Mary-Kate "), "Mary-Kate O'Neill")
+    }
+
+    func testOrdinaryAndOddNamesAreLeftAlone() {
+        XCTAssertEqual(normalizeAttendeeName("Jeff Chow"), "Jeff Chow")
+        XCTAssertEqual(normalizeAttendeeName("Room 4, Floor 2"), "Room 4, Floor 2")
+        XCTAssertEqual(normalizeAttendeeName("a, b, c"), "a, b, c")
+    }
+
+    /// The Rec50 invite, as Claude returned it with semicolons.
+    func testSemicolonListKeepsSurnameFirstNamesWhole() {
+        XCTAssertEqual(splitAttendeeNames("Ellen Barss; Ian Reay; Robins, Justin; Jeff Chow"),
+                       ["Ellen Barss", "Ian Reay", "Justin Robins", "Jeff Chow"])
+    }
+
+    /// The Rec50 failure: a comma-only list that had cut "Robins, Justin" in two.
+    func testCommaListRejoinsASplitSurnameFirstName() {
+        XCTAssertEqual(splitAttendeeNames("Ellen Barss, Ian Reay, James Whiting, Jeff Chow, Robins, Justin"),
+                       ["Ellen Barss", "Ian Reay", "James Whiting", "Jeff Chow", "Justin Robins"])
+    }
+
+    func testCommaListOfFirstNamesOnlyIsNotPaired() {
+        XCTAssertEqual(splitAttendeeNames("Ian, Bob, Caro"), ["Ian", "Bob", "Caro"])
+    }
+
+    func testUnavailableAndBulletsAreDropped() {
+        XCTAssertEqual(splitAttendeeNames("- Jeff Chow\n• unavailable\n* Ian Reay"), ["Jeff Chow", "Ian Reay"])
+    }
+}
+
+final class CalendarReplyClassificationTests: XCTestCase {
+
+    /// The reply that silently cost a week of meeting links (2026-10-07).
+    func testLapsedM365AuthorisationIsConnectorFailure() {
+        let reply = "I couldn't check your calendar. The Microsoft 365 connector isn't authorised in this session, so I have no access to it. To fix it, connect Microsoft 365 in your claude.ai connector settings."
+        XCTAssertTrue(calendarReplyIsConnectorFailure(reply))
+    }
+
+    func testNeedsAuthenticationIsConnectorFailure() {
+        XCTAssertTrue(calendarReplyIsConnectorFailure("The calendar MCP requires authentication. Run /mcp to sign in."))
+        XCTAssertTrue(calendarReplyIsConnectorFailure("I don't have access to any calendar tools in this session."))
+    }
+
+    func testExplicitNoMatchIsNotConnectorFailure() {
+        XCTAssertFalse(calendarReplyIsConnectorFailure("NO_MATCH"))
+        XCTAssertFalse(calendarReplyIsConnectorFailure("  NO_MATCH\n"))
+    }
+
+    func testPlainNoEventReplyIsNotConnectorFailure() {
+        XCTAssertFalse(calendarReplyIsConnectorFailure("No events overlap that window."))
+    }
+
+    func testEventListMentioningAccessIsNotConnectorFailure() {
+        let reply = """
+        Title: James & Hannah Weekly
+        Time: 10:00 – 10:30
+        Organiser: Hannah
+        Invitees: unavailable (I don't have access to the attendee list)
+        """
+        XCTAssertFalse(calendarReplyIsConnectorFailure(reply))
+    }
+}

@@ -335,6 +335,7 @@ struct MainWindowView: View {
                 .controlSize(.small)
 
                 Button {
+                    viewModel.modelManagerTab = .models
                     viewModel.onShowModelManager()
                 } label: {
                     Label("Models", systemImage: "square.and.arrow.down")
@@ -342,6 +343,19 @@ struct MainWindowView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+
+                Button {
+                    viewModel.modelManagerTab = .settings
+                    viewModel.onShowModelManager()
+                } label: {
+                    Label("GitHub", systemImage: viewModel.transcriptPublishProblem != nil
+                          ? "exclamationmark.icloud"
+                          : (viewModel.transcriptPublishEnabled ? "checkmark.icloud" : "icloud"))
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Transcripts on GitHub — publishing settings")
 
                 Button {
                     viewModel.onShowTemplatesManager()
