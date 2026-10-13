@@ -9,6 +9,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import os
 import fcntl
 import json
 import signal
@@ -1259,11 +1260,23 @@ def cmd_voice_check(args):
     if args.skip:
         skipped = _json.loads(Path(args.skip).read_text(encoding="utf-8"))
         review_feedback.record_refine(recording, "skipped", skipped)
+        voice_check.forget_suggestions(json_path, skipped, digest_before=voice_check._digest(json_path))
         print(_json.dumps({"recorded_skips": len(skipped)}))
+        return
+    if args.precompute:
+        # Runs beside transcription work, after a transcript is written: keep
+        # out of its way.
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+        print(_json.dumps(voice_check.precompute(json_path)))
         return
     if not args.apply:
         progress(5)
+        digest = voice_check._digest(json_path)
         result = voice_check.run(json_path, on_progress=lambda f: progress(5 + int(f * 90)))
+        voice_check.save_cache(json_path, result, digest=digest)
         progress(100)
         # Errors travel in the JSON too, so the app can show the reason.
         print(_json.dumps(result))
@@ -1271,9 +1284,11 @@ def cmd_voice_check(args):
 
     moves = _json.loads(Path(args.apply).read_text(encoding="utf-8"))
     snapshot_transcript(json_path, "Before accepting voice-check suggestions")
+    digest_before = voice_check._digest(json_path)
     data = _json.loads(json_path.read_text(encoding="utf-8"))
     summary = voice_check.apply_moves(data, moves)
     json_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    voice_check.forget_suggestions(json_path, moves, digest_before=digest_before)
     review_feedback.record_refine(recording, "applied", moves)
     # Learn each person's voice from the lines just given to them (verified).
     learned = {}
@@ -2316,6 +2331,8 @@ def main():
     p_voice_check.add_argument("json_path", help="Path to _diarized.json file")
     p_voice_check.add_argument("--apply", help="JSON list of accepted moves ({index, to_name, start, ...}) to apply")
     p_voice_check.add_argument("--skip", help="JSON list of suggestions the reviewer skipped, to remember")
+    p_voice_check.add_argument("--precompute", action="store_true",
+                               help="Run at low priority and save the suggestions beside the transcript (_refine.json)")
     p_voice_check.set_defaults(func=cmd_voice_check)
 
     p_learn = sub.add_parser("learn-lines", help="Learn a voice from lines assigned to a person (verified)")
