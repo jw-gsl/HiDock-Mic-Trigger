@@ -7366,7 +7366,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             meName: viewModel.voiceLibraryMeName,
             onToggleMe: { [weak self] name in
                 self?.toggleVoiceLibraryMe(name)
-            }
+            },
+            qualityPanel: AnyView(MatchingQualityView(viewModel: viewModel))
         )
 
         showDetailTab(id: "voiceLibrary", title: "Voice Library", icon: "person.2.wave.2", view: libraryView)

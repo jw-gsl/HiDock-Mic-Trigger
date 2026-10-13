@@ -184,6 +184,8 @@ struct VoiceLibraryView: View {
     /// pickers. Tapping a row's star toggles it; nil means no Me set.
     @State var meName: String? = nil
     var onToggleMe: ((String) -> Void)? = nil
+    /// The Matching quality panel, supplied by the app (it needs the view model).
+    var qualityPanel: AnyView? = nil
 
     private var visibleSpeakers: [VoiceLibrarySpeaker] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -251,6 +253,11 @@ struct VoiceLibraryView: View {
             .background(.ultraThinMaterial)
 
             Divider()
+
+            if let qualityPanel {
+                qualityPanel
+                Divider()
+            }
 
             if !allPeople.isEmpty {
                 Picker("", selection: $tab) {
