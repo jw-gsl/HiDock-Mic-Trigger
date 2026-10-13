@@ -86,6 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var calendarPrelookups: [String: CalendarPrelookup] = [:]
     /// Transcribed before their lookup finished; resolved when it does.
     private var calendarAwaitingTranscript: Set<String> = []
+    /// Recordings whose meeting link is being saved; a second tick is ignored.
+    private var calendarLinksInFlight: Set<String> = []
     /// Why the current suggestion for a recording was chosen (time, transcript,
     /// recurring, only event), saved with it for the decision log.
     private var calendarPickReason: [String: String] = [:]
@@ -4526,29 +4528,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         rediarizeAfterLink: Bool = true,
         onSaved: (() -> Void)? = nil
     ) {
-        // Enrich *before* writing the sidecar and re-diarising, not after: the
-        // attendee list becomes `allowed_names`, so a re-diarisation kicked off with
-        // the truncated list would be bounded by it and the later correction would
-        // arrive too late to matter.
         guard event.attendeeCount >= eventKitAttendeeCap else {
             finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
                                        event: event, rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
             return
         }
+        // EventKit may have truncated the invite list, and the Claude lookup that
+        // completes it takes 10–20 s. Wait for it only when something consumes
+        // the list straight away: a re-diarisation (it becomes `allowed_names`,
+        // and a pass started on the truncated list would be bounded by it) or
+        // the sidecar's follow-up speaker pass. Otherwise — typically a
+        // recording already diarised against this meeting while transcribing —
+        // link now so the row updates on the tick, and fill in the names after.
+        let diarized = linkedDiarizedTranscriptPath(forAudioPath: audioPath)
+        let needsFullListNow = onSaved != nil || (rediarizeAfterLink && diarized.map {
+            calendarEventIdDiarisedAgainst(diarizedJSONPath: $0) != event.id
+                && transcriptHasUnconfirmedSpeakers(at: $0)
+        } == true)
+        if !needsFullListNow {
+            finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
+                                       event: event, rediarizeAfterLink: rediarizeAfterLink)
+            enrichAttendees(for: event) { [weak self] enriched in
+                guard let self, let resolved = Self.enriched(event, with: enriched),
+                      self.calendarLinkedEvent(for: audioPath)?.id == event.id else { return }
+                self.writeLinkedCalendarContext(resolved, audioPath: audioPath, duration: duration)
+            }
+            return
+        }
+        calendarLinksInFlight.insert(audioPath)
         enrichAttendees(for: event) { [weak self] enriched in
             guard let self else { return }
-            var resolved = event
-            if let enriched, enriched.count > event.attendeeCount {
-                // Keep EventKit's response statuses for the names it knew; the MCP
-                // reply carries names only, and an absent status must read as
-                // unknown rather than as acceptance.
-                resolved = CalendarMeetingCandidate(
-                    id: event.id, title: event.title, start: event.start, end: event.end,
-                    attendeeNames: enriched, attendeeResponses: event.attendeeResponses
-                )
-            }
+            self.calendarLinksInFlight.remove(audioPath)
             self.finishLinkingCalendarEvent(audioPath: audioPath, duration: duration,
-                                            event: resolved, rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
+                                            event: Self.enriched(event, with: enriched) ?? event,
+                                            rediarizeAfterLink: rediarizeAfterLink, onSaved: onSaved)
+        }
+    }
+
+    /// The event with the enrichment's longer attendee list, or nil when it
+    /// adds nobody. Keeps EventKit's response statuses for the names it knew;
+    /// the MCP reply carries names only, and an absent status must read as
+    /// unknown rather than as acceptance.
+    private static func enriched(_ event: CalendarMeetingCandidate, with names: [String]?) -> CalendarMeetingCandidate? {
+        guard let names, names.count > event.attendeeCount else { return nil }
+        return CalendarMeetingCandidate(
+            id: event.id, title: event.title, start: event.start, end: event.end,
+            attendeeNames: names, attendeeResponses: event.attendeeResponses
+        )
+    }
+
+    /// The diarised transcript a link would re-diarise, if the recording has one.
+    private func linkedDiarizedTranscriptPath(forAudioPath audioPath: String) -> String? {
+        let merged = viewModel.mergedFileTranscriptPaths[(audioPath as NSString).lastPathComponent]
+        let entry = syncEntries
+            .first(where: { $0.recording.outputPath == audioPath })
+            .flatMap { $0.transcribed ? $0.transcriptPath : nil }
+        return (entry ?? merged).map { $0.replacingOccurrences(of: ".md", with: "_diarized.json") }
+    }
+
+    /// Rewrite an already-linked meeting's `_calendar.json` with a fuller
+    /// attendee list. No decision is logged and nothing is re-diarised: the
+    /// link itself was recorded when it was made.
+    private func writeLinkedCalendarContext(_ event: CalendarMeetingCandidate, audioPath: String, duration: Double) {
+        guard let payload = calendarContextPayload(event: event, audioPath: audioPath, duration: duration),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        let audioURL = URL(fileURLWithPath: audioPath)
+        let destination = audioURL.deletingLastPathComponent()
+            .appendingPathComponent("\(audioURL.deletingPathExtension().lastPathComponent)_calendar.json")
+        do {
+            try data.write(to: destination, options: .atomic)
+            updateCalendarMeeting(event, for: audioPath)
+            log("Calendar attendees for \(audioURL.lastPathComponent) completed in the background: \(event.attendeeCount)")
+        } catch {
+            log("Failed to update calendar attendees: \(error.localizedDescription)")
         }
     }
 
@@ -5238,6 +5291,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 + "no calendar suggestion on disk (the row's tick is stale)")
             refreshCalendarFields()
             viewModel.syncEntries = syncEntries
+            return
+        }
+        guard !calendarLinksInFlight.contains(audioPath) else {
+            log("Confirm ignored for \((audioPath as NSString).lastPathComponent): already linking")
             return
         }
         linkCalendarEvent(audioPath: audioPath, duration: ImportedRecordingsStore.probeDuration(at: audioPath), event: event)
