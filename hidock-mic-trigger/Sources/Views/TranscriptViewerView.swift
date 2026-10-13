@@ -2380,7 +2380,7 @@ struct TranscriptViewerView: View {
                 // audio can't tell voices apart well enough to move lines.
                 // Refine checks against this meeting's people instead, and
                 // only with the reviewer's say-so.
-                rediarizeStatus = .skipped("Calendar linked — confirmed names kept. Use Refine to check the other lines against this meeting's people.")
+                rediarizeStatus = .info("Calendar linked — confirmed names kept. Use Refine to check the other lines against this meeting's people.")
             } else {
                 // No forced count. The linked meeting is saved first, and the
                 // pipeline uses its invite list as a ceiling (merge down, never
