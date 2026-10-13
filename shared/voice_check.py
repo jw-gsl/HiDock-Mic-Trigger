@@ -224,13 +224,22 @@ def apply_moves(data: dict, moves: list[dict]) -> dict:
     segments = data.get("segments") or []
     by_name = {str(n).casefold(): sid for sid, n in names.items()}
     moved = 0
+    missing: list[dict] = []
     for move in moves:
         index, name = int(move["index"]), str(move["to_name"]).strip()
-        if not name or not 0 <= index < len(segments):
+        if not name:
             continue
-        # Indices come from the check; an edit in between (a merge, a split)
-        # shifts them. The start time pins each move to the line it was about.
-        if "start" in move and abs(float(segments[index].get("start", 0)) - float(move["start"])) > 0.05:
+        # Indices come from the check; an edit in between (a split, a merge)
+        # shifts them — on Rec63 one split silently voided ten accepted moves.
+        # The start time identifies the line, so find it by that.
+        if "start" in move:
+            start = float(move["start"])
+            if not (0 <= index < len(segments)
+                    and abs(float(segments[index].get("start", 0)) - start) <= 0.05):
+                index = next((i for i, seg in enumerate(segments)
+                              if abs(float(seg.get("start", 0)) - start) <= 0.05), -1)
+        if not 0 <= index < len(segments):
+            missing.append(move)
             continue
         sid = by_name.get(name.casefold())
         if sid is None:
@@ -246,7 +255,7 @@ def apply_moves(data: dict, moves: list[dict]) -> dict:
             segments[index]["speaker_id"] = int(sid)
             segments[index].pop("speaker", None)
             moved += 1
-    return {"moved": moved, "requested": len(moves)}
+    return {"moved": moved, "requested": len(moves), "not_found": len(missing)}
 
 
 def run(json_path: Path, *, on_progress: Callable[[float], None] | None = None) -> dict:

@@ -875,6 +875,7 @@ struct TranscriptViewerView: View {
     @State private var voiceCheckApplying = false
     /// Lines moved since this Refine run started, for the closing note.
     @State private var voiceCheckMoved = 0
+    @State private var voiceCheckNotApplied = 0
     @State private var voiceCheckResult: VoiceCheckResult?
     @State private var calendarCandidates: [CalendarMeetingCandidate] = []
     @State private var calendarLoading = false
@@ -956,7 +957,7 @@ struct TranscriptViewerView: View {
     /// (`voice-check`). Optional so older call-sites keep compiling.
     var onVoiceCheck: ((String, @escaping (Int) -> Void, @escaping (VoiceCheckResult) -> Void) -> Void)? = nil
     /// Apply the accepted voice-check moves; returns the updated transcript.
-    var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?) -> Void) -> Void)? = nil
+    var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?, Int) -> Void) -> Void)? = nil
     /// Enrol a speaker from the diarized sidecar's stored centroid (name,
     /// jsonPath, speakerId) — a far better voiceprint than one short segment.
     /// Falls back to onEnrollSpeaker (audio) when nil.
@@ -1069,6 +1070,7 @@ struct TranscriptViewerView: View {
         voiceCheckRunning = true
         voiceCheckProgress = 0
         voiceCheckMoved = 0
+        voiceCheckNotApplied = 0
         rediarizeStatus = nil
         check(filePath, { pct in voiceCheckProgress = pct }) { result in
             DispatchQueue.main.async {
@@ -1101,10 +1103,11 @@ struct TranscriptViewerView: View {
     private func applyVoiceCheckNow(_ moves: [VoiceCheckMove]) {
         guard let apply = onApplyVoiceCheck else { voiceCheckApplying = false; return }
         // Applying takes about a second; the re-diarising banner would mislead.
-        apply(filePath, moves) { updated in
+        apply(filePath, moves) { updated, notApplied in
             DispatchQueue.main.async {
                 voiceCheckApplying = false
-                voiceCheckMoved += updated == nil ? 0 : moves.count
+                voiceCheckMoved += updated == nil ? 0 : moves.count - notApplied
+                voiceCheckNotApplied += updated == nil ? 0 : notApplied
                 if !voiceCheckQueue.isEmpty {
                     let next = voiceCheckQueue
                     voiceCheckQueue = []
@@ -1116,7 +1119,11 @@ struct TranscriptViewerView: View {
                     return
                 }
                 applyRediarizedTranscript(updated)
-                rediarizeStatus = .skipped("Refine: moved \(voiceCheckMoved) line\(voiceCheckMoved == 1 ? "" : "s"). You can undo this from the transcript history.")
+                if voiceCheckNotApplied > 0 {
+                    rediarizeStatus = .info("Refine: moved \(voiceCheckMoved) line\(voiceCheckMoved == 1 ? "" : "s"); \(voiceCheckNotApplied) couldn't be applied because the line was edited since the check. Run Refine again to review them.")
+                } else {
+                    rediarizeStatus = .skipped("Refine: moved \(voiceCheckMoved) line\(voiceCheckMoved == 1 ? "" : "s"). You can undo this from the transcript history.")
+                }
             }
         }
     }
@@ -3312,11 +3319,15 @@ struct TranscriptViewerView: View {
             }
             .padding(.vertical, 2)
         }
-        // Detail tabs are removed from the hierarchy when their sidebar tab is
-        // closed. Stop both direct AVAudioPlayer playback and any in-flight
-        // ffmpeg preview at that lifecycle boundary.
+        // Stop when the *playing* row scrolls away. Stopping on any row's
+        // disappearance meant every scroll killed playback — including the
+        // scroll a Refine suggestion's play button makes to its line, so the
+        // first click only scrolled. Closing the transcript is handled by the
+        // viewer's own onDisappear.
         .onDisappear {
-            audioPlayer.stop()
+            if audioPlayer.playingSegmentId == segment.id {
+                audioPlayer.stop()
+            }
         }
     }
 
