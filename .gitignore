@@ -62,3 +62,7 @@ usb-extractor/state.json.*-bak
 docs/PLAN-*.md
 docs/UAT-*.md
 docs/SECURITY-REVIEW-*.md
+
+# Local, per-user folders: Obsidian vault settings and browser-automation screenshots
+.obsidian/
+screenshots/
