@@ -39,6 +39,8 @@ Nothing here deletes anything on the old Mac. Keep the old Mac intact until sect
 - **Exporting the identity from the old Mac can fail.** `security export -t identities -f pkcs12` returned `SecKeychainItemExport: The contents of this item cannot be retrieved` on the reference Mac, which usually means the private key is not exportable or the export needs an interactive approval. Nothing was created.
 - **Preferred route: issue a new Developer ID Application certificate on the new Mac** (Xcode > Settings > Accounts > Manage Certificates > + > Developer ID Application). It needs the Apple ID and Account Holder/Admin rights on the team, and no private key has to leave the old Mac.
 - Then rebuild with `HIDOCK_DEPLOY=1`; the deploy step confirms before replacing a running app.
+- **Sign from a local Terminal the first time, not over SSH.** A deploy run over SSH built and staged fine but failed in `codesign` with `errSecInternalComponent`: the login keychain is not unlocked in an SSH session and the key-access prompt has nowhere to appear. Run the `HIDOCK_DEPLOY=1 xcodebuild ...` command once in Terminal on the new Mac, enter the login password and choose **Always Allow** at the prompt. (Whether later builds then work over SSH was not tested.)
+- On the reference run the result was verified with `codesign -dvv` (Authority = Developer ID Application, Team ID set), `codesign --verify --deep --strict`, and a running process. `spctl` reports `Unnotarized Developer ID` for locally built apps; that is expected and the same as on the old Mac.
 - Back the new private key up (1Password) as soon as it exists. If it is only on one Mac and that Mac is lost, the certificate must be reissued.
 - Without a Developer ID identity, the ad-hoc build can be copied to `/Applications` by hand, but macOS ties permissions (microphone, accessibility) to the signature, so they may need re-granting after every rebuild.
 
@@ -93,3 +95,4 @@ IT-managed software (Intune, Company Portal, Automox, CrowdStrike, WARP) arrives
 - [ ] Voice Check works against the migrated Voice Library.
 - [ ] Process one new recording end to end.
 - [ ] Run the new Mac for a full working day before returning or wiping the old one.
+- [ ] Open question from the reference run: `~/Library/LaunchAgents` had no HiDock entry on the new Mac after install, so the app may not start at login. `CLAUDE.md` says a LaunchAgent starts it on the old Mac; how that agent is created was not checked.
