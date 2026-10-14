@@ -25,11 +25,22 @@ Nothing here deletes anything on the old Mac. Keep the old Mac intact until sect
 | Transcript git mirror | `HiDock/.transcripts-git` (-> private `jw-gsl/Transcripts`) | No. Re-clone if wanted |
 
 ## 2. Install the app on the new Mac
-1. Install prerequisites: Xcode, Homebrew, git, Tailscale, 1Password.
-2. Clone the repo: `git clone https://github.com/jw-gsl/HiDock-Mic-Trigger.git ~/_git/hidock-tools`.
-3. Build `hidock-mic-trigger` (see `hidock-mic-trigger/README.md`) and place the app in `/Applications`.
-4. Set up the Python environment the app uses for its scripts.
-5. Launch, grant permissions, enter the Hugging Face token, then download models from the Models UI.
+1. Install prerequisites: Xcode, Homebrew, git, Tailscale, 1Password. The App Store/Apple ID step for Xcode has to be done in a GUI session on the new Mac.
+2. Make Xcode the active toolchain: `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`, then `sudo xcodebuild -license accept` and `sudo xcodebuild -runFirstLaunch`. Without admin rights, prefix commands with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` instead.
+3. If only the Command Line Tools were present, native Python builds (`editdistance`, `texterrors`) fail at link time with `ld: ... tapi error: malformed file`. Build with the Xcode toolchain (step 2) or reinstall the Command Line Tools.
+4. Clone the repo: `git clone https://github.com/jw-gsl/HiDock-Mic-Trigger.git ~/_git/hidock-tools`.
+5. Python: `brew install python@3.13 ffmpeg`, then `transcription-pipeline/setup-venv.sh` (about 1.9G, installs torch/NeMo/mlx) and a venv in `usb-extractor/` (`python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt`). Then `transcription-pipeline/.venv/bin/pip install pytest`: it is not in `requirements.txt`, but the build's "Run Python Tests" phase needs it and fails the build without it.
+6. Build: `brew install xcodegen`, then in `hidock-mic-trigger/` run `xcodegen generate` and `xcodebuild -project hidock-mic-trigger.xcodeproj -scheme hidock-mic-trigger -configuration Debug -derivedDataPath ~/hidock-build build`. Xcode 27 does not bundle the Metal toolchain that SwiftTerm needs; if you see `cannot execute tool 'metal' due to missing Metal Toolchain`, run `xcodebuild -downloadComponent MetalToolchain` (about 840MB).
+7. Signing and deploy: see section 2a. A build without `HIDOCK_DEPLOY=1` compiles and is ad-hoc signed but is never installed.
+8. Launch, grant permissions, enter the Hugging Face token, then download models from the Models UI.
+
+### 2a. Code signing on the new Mac
+`HIDOCK_DEPLOY=1` refuses to install unless a **Developer ID Application** identity is in the keychain (or `HIDOCK_SIGNING_IDENTITY` names one). A fresh Mac has none (`security find-identity -v -p codesigning` reports 0).
+- **Exporting the identity from the old Mac can fail.** `security export -t identities -f pkcs12` returned `SecKeychainItemExport: The contents of this item cannot be retrieved` on the reference Mac, which usually means the private key is not exportable or the export needs an interactive approval. Nothing was created.
+- **Preferred route: issue a new Developer ID Application certificate on the new Mac** (Xcode > Settings > Accounts > Manage Certificates > + > Developer ID Application). It needs the Apple ID and Account Holder/Admin rights on the team, and no private key has to leave the old Mac.
+- Then rebuild with `HIDOCK_DEPLOY=1`; the deploy step confirms before replacing a running app.
+- Back the new private key up (1Password) as soon as it exists. If it is only on one Mac and that Mac is lost, the certificate must be reissued.
+- Without a Developer ID identity, the ad-hoc build can be copied to `/Applications` by hand, but macOS ties permissions (microphone, accessibility) to the signature, so they may need re-granting after every rebuild.
 
 ## 3. Connect the Macs
 Preferred: SSH + rsync from the new Mac or old Mac.
