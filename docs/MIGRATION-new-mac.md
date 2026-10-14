@@ -15,7 +15,7 @@ Nothing here deletes anything on the old Mac. Keep the old Mac intact until sect
 | Data | Location | Migrate? |
 |---|---|---|
 | Audio | `~/HiDock/Recordings` (mp3 + `_recording_time.json`) | Yes |
-| Older audio and transcripts | `~/Downloads/HiDock Files` | Only the files not byte-identical to Recordings (see 4) |
+| Older audio and transcripts | `~/Downloads/HiDock Files` | Only the unique mp3s (see 4). The old `.txt` transcripts and other files are optional: the app never reads them |
 | Transcripts and pipeline outputs | `~/HiDock/Raw Transcripts` (`.md`, `.srt`, `_diarized.json`, `_asr.json`) | Yes. The app reads `_diarized.json` / `_asr.json` directly |
 | Voice identity | `~/HiDock/Voice Library`, `Voice Library Candidates` | Yes, only copy |
 | App state | `imported_recordings.json`, `skipped_transcriptions.json`, `feedback_history.json`, `Summaries`, `Summary Templates`, `.review-feedback` | Yes. Losing import state can trigger a full re-import |
@@ -40,6 +40,14 @@ Preferred: SSH + rsync from the new Mac or old Mac.
 - Fallbacks: external SSD (needs no admin rights), or a direct Thunderbolt/USB-C cable for a faster link (still needs Remote Login for rsync).
 - Always dry-run first: add `-n --stats`.
 
+Lessons from the reference run:
+- **Address the receiving Mac by its Tailscale IP, not its LAN IP.** The LAN address changed after an OS update and every retry timed out until the IP was corrected.
+- **`caffeinate -s` does nothing on battery.** Use `caffeinate -dimu -t <seconds>` on the receiving Mac, and plug it in. Drops show up as `unexpected end of file` / `poll: hangup on nonblocking write`, and rsync resumes cleanly with `--partial`.
+- **Add `-o ServerAliveInterval=15` to the ssh used by rsync, and wrap each stage in a retry loop.**
+- **Remote paths with spaces need escaping on the destination**, e.g. `host:"Downloads/HiDock\ Files/"`. Otherwise openrsync fails with `server receiver mode requires two argument`.
+- **When hashing in a shell loop over ssh, use `ssh -n`.** Without it ssh swallows the loop's stdin and the loop silently stops after one file. macOS has no `shuf`; use `sort -R | head`.
+- **Keep the OS update out of the copy window.** The new Mac rebooted for an update mid-copy.
+
 ## 4. Order of operations
 Run from the old Mac, from `~`.
 
@@ -52,10 +60,10 @@ caffeinate -s rsync -a --partial --stats --exclude='.DS_Store' \
 
 **Step 2: audio**
 - `~/HiDock/Recordings` in full.
-- From `~/Downloads/HiDock Files`: only mp3s whose content is not already in Recordings, plus the older `.txt` transcripts. On the reference Mac 1,387 of 1,407 mp3 (22.6G) were byte-identical to Recordings; 20 were unique.
+- From `~/Downloads/HiDock Files`: only mp3s whose content is not already in Recordings. On the reference Mac 1,387 of 1,407 mp3 (22.6G) were byte-identical to Recordings; 20 were unique (17 plus 3 name clashes, below).
 - The app only reads `recordings_folder` from `config.toml` (`~/HiDock/Recordings`). It never reads `~/Downloads/HiDock Files`, so the unique mp3s must be copied **into Recordings** to be visible (17 on the reference Mac).
 - Three Downloads mp3 shared a filename with a Recordings file but differed in content. Copying them into Recordings would overwrite or collide, so they go to `~/HiDock/Review-Name-Clashes/` for review by ear. Keep both versions.
-- The remaining non-mp3 files (1,507 on the reference Mac, mostly older `.txt` transcripts) go to the same `~/Downloads/HiDock Files/` path on the new Mac.
+- The remaining non-mp3 files (1,507 on the reference Mac, mostly older `.txt` transcripts, about 50MB) are **not migrated by default**. They have no counterpart in Raw Transcripts, so they are unique, but the app does not read them. Copy them only if you want that history kept (they were copied once on the reference run and then removed again, since they weren't wanted).
 - Plaud duplicates: 67 mp3 in `PlaudRecordings` were identical to Recordings files.
 
 **Step 3: config**
