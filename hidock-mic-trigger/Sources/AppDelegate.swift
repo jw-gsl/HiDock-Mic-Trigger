@@ -791,6 +791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
         viewModel.onSendChat = { [weak self] text in self?.runChatTurn(text) }
         viewModel.onOpenRawTerminal = { [weak self] in self?.openRawTerminalPane() }
+        viewModel.watchLEDSettings()
         // LED idle ticker — supply live stats on demand.
         viewModel.ledMatrix.idleProvider = { [weak self] content in
             guard let self = self else { return nil }
