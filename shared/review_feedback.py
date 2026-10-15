@@ -202,7 +202,16 @@ def library_cleanup(apply: bool) -> dict | None:
             return None
         path = Path(config["library_path"])
         if apply:
-            return audit.auto_clean(path)
+            result = audit.auto_clean(path)
+            # The live library is what new naming samples are copied from.
+            from shared.voice_library_reconcile import reconcile_file
+            live = Path.home() / "HiDock" / "Voice Library" / "embeddings.json"
+            if live.exists():
+                live_result = reconcile_file(live, apply=True, limit=audit.AUTO_LIMIT)
+                result["live_relabelled"] = live_result.get("moved", 0)
+                if live_result.get("held_back"):
+                    result["live_relabel_held_back"] = live_result["found"]
+            return result
         library = json.loads(path.read_text(encoding="utf-8"))
         return {"flagged": 0, "set_aside": 0, "total_set_aside": audit.set_aside_count(library)}
     except Exception as exc:  # never let the clean-up break the report
@@ -304,6 +313,14 @@ def summary_lines(full: dict) -> list[str]:
     if (full.get("tuning") or {}).get("recurring_meetings") is False:
         lines.append("  Preferring previously confirmed meetings is off — those picks were mostly wrong.")
     library = full.get("library") or {}
+    moved = library.get("relabelled", 0) + library.get("live_relabelled", 0)
+    if moved:
+        lines.append(f"Voice library: moved {moved} sample(s) to the person the transcript says was speaking.")
+    held = library.get("relabel_held_back", 0) + library.get("live_relabel_held_back", 0)
+    if held:
+        lines.append(f"Voice library: {held} samples are filed under someone other than the person the "
+                     "transcript says was speaking — unusually many, so they were not moved. "
+                     "Ask for the library to be reviewed.")
     if library.get("held_back"):
         lines.append(f"Voice library: {library['flagged']} samples look mislabelled — unusually many, so they "
                      "were not set aside automatically. Ask for the library to be reviewed.")
@@ -312,7 +329,7 @@ def summary_lines(full: dict) -> list[str]:
                      f"({', '.join(library.get('people', [])[:4])}).")
     if library.get("total_set_aside"):
         lines.append(f"  {library['total_set_aside']} sample(s) set aside in total; Undo clean-ups restores them.")
-    elif "total_set_aside" in library and not library.get("set_aside"):
+    elif "total_set_aside" in library and not (library.get("set_aside") or moved or held):
         lines.append("Voice library: no mislabelled samples found.")
     for backend, stats in sorted(((full.get("corrections") or {}).get("by_backend") or {}).items()):
         if backend == "unknown":
