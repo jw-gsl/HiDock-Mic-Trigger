@@ -202,7 +202,14 @@ def library_cleanup(apply: bool) -> dict | None:
             return None
         path = Path(config["library_path"])
         if apply:
-            return audit.auto_clean(path)
+            result = audit.auto_clean(path)
+            # The live library is what new naming samples are copied from.
+            from shared.voice_library_reconcile import reconcile_file
+            live = Path.home() / "HiDock" / "Voice Library" / "embeddings.json"
+            if live.exists():
+                live_result = reconcile_file(live, apply=True, limit=audit.AUTO_LIMIT)
+                result["live_relabelled"] = live_result.get("moved", 0)
+            return result
         library = json.loads(path.read_text(encoding="utf-8"))
         return {"flagged": 0, "set_aside": 0, "total_set_aside": audit.set_aside_count(library)}
     except Exception as exc:  # never let the clean-up break the report
