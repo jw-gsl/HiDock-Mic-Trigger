@@ -31,6 +31,11 @@ struct SetupDoctorBanner: View {
                 }
             }
             Spacer(minLength: 8)
+            Button("Fix…") {
+                viewModel.onOpenSettings(viewModel.setupProblems.first.map { SettingsPane.forSetupCheck($0.id) })
+            }
+            .controlSize(.small)
+            .help("Open the Settings pane where the first problem is fixed")
             Button("Check again") { viewModel.onRecheckSetup() }
                 .controlSize(.small)
             Button {

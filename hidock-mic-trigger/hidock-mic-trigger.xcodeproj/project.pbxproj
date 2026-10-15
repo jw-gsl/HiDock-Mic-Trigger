@@ -41,6 +41,7 @@
 		8D856E9B37A4BD2FB48631C9 /* MeetingHeatmapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A5F120B9B92FC378A0FD2F0 /* MeetingHeatmapView.swift */; };
 		8F4F17F9FC81801F1A855275 /* HiDockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */; };
 		9B16C8FCC211E0A87724E4CB /* SyncToolbarSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BD650B128F2DAC9FC989951 /* SyncToolbarSection.swift */; };
+		9B30DF0B8F1A7BCFA51808DC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4D21F14F0DE8F83FC6D995A /* SettingsView.swift */; };
 		9C9AC2D1761397E2D6138BEC /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B035CBE2580FAE9A62ACD9 /* ModelsTests.swift */; };
 		9F88469E24E4E75401A1B681 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 651E9570959AB1B72306DFE9 /* MainWindowView.swift */; };
 		A2CBB53693C6E15A60AE604D /* HuggingFaceToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8BA1C16C1E7AF997CB2B48 /* HuggingFaceToken.swift */; };
@@ -127,6 +128,7 @@
 		9C0ABB8A75B2D6565D986782 /* HiDockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiDockViewModel.swift; sourceTree = "<group>"; };
 		A168553CF6A253F63ABEB56C /* PlaudAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaudAuth.swift; sourceTree = "<group>"; };
 		A4585EF83686B05AAA68BCF2 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
+		A4D21F14F0DE8F83FC6D995A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A6B676854CEF1F4D7F0F95EB /* DeviceCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCardView.swift; sourceTree = "<group>"; };
 		A70B0A78DE0F059AB6761E38 /* ImportedRecordings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedRecordings.swift; sourceTree = "<group>"; };
 		A8E04E9A0217D867C7C327E9 /* VoiceTrainingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTrainingView.swift; sourceTree = "<group>"; };
@@ -225,6 +227,7 @@
 				2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */,
 				AD4349987570F91E3F9E960B /* PublishStatusIcon.swift */,
 				22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */,
+				A4D21F14F0DE8F83FC6D995A /* SettingsView.swift */,
 				49402E7E154578219CC74C6D /* SetupDoctorBanner.swift */,
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
 				4C462B0D4FB3CCE023603E77 /* SummaryViewerView.swift */,
@@ -420,6 +423,7 @@
 				B3C9A2C39C6AB708F9992443 /* PublishStatusIcon.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,
 				BC838A301E2D504E887A2E37 /* ReviewFeedbackLog.swift in Sources */,
+				9B30DF0B8F1A7BCFA51808DC /* SettingsView.swift in Sources */,
 				651BDFE192102DEBA7F1A3BC /* SetupDoctorBanner.swift in Sources */,
 				1F28538F2F1601D254A85E9C /* SkippedTranscriptions.swift in Sources */,
 				159FDEE1D4C7748ABBAB8D03 /* SplitSources.swift in Sources */,

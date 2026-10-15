@@ -370,13 +370,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let preferredMicKey = "preferredMicName"
     private var preferredMicName: String? {
         get { UserDefaults.standard.string(forKey: preferredMicKey) }
-        set { UserDefaults.standard.set(newValue, forKey: preferredMicKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: preferredMicKey)
+            viewModel.preferredMicName = newValue
+        }
     }
 
     private let fallbackMicKey = "fallbackMicName"
     private var fallbackMicName: String? {
         get { UserDefaults.standard.string(forKey: fallbackMicKey) }
-        set { UserDefaults.standard.set(newValue, forKey: fallbackMicKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: fallbackMicKey)
+            viewModel.fallbackMicName = newValue
+        }
     }
 
     private var previousDeviceNames: Set<String> = []
@@ -428,6 +434,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         configureTranscriptPublishing()
         scheduleReviewQuality()
         scheduleSetupDoctor()
+        viewModel.onOpenSettings = { [weak self] pane in self?.openSettings(pane: pane) }
+        viewModel.preferredMicName = preferredMicName
+        viewModel.fallbackMicName = fallbackMicName
+        viewModel.onSetPreferredMic = { [weak self] name in
+            guard let self else { return }
+            self.log("Set preferred mic to '\(name ?? "none")' from Settings")
+            self.preferredMicName = name
+            self.updateMenuState()
+        }
+        viewModel.onSetFallbackMic = { [weak self] name in
+            self?.log("Set fallback mic to '\(name ?? "none")' from Settings")
+            self?.fallbackMicName = name
+        }
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         // Skipped: loadCachedRecordings() used to fire a short-timeout
@@ -1486,7 +1505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(NSMenuItem.separator())
         menu.addItem(micMenuItem)
         menu.addItem(autoStartItem)
-        menu.addItem(summarizeMenuItem)
+        // The summariser choice moved to Settings → Summaries.
         menu.addItem(NSMenuItem.separator())
         menu.addItem(syncWindowItem)
         menu.addItem(NSMenuItem.separator())
@@ -1505,9 +1524,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let rematchAllItem = NSMenuItem(title: "Re-match Untagged Meetings", action: #selector(rematchUntaggedMenu), keyEquivalent: "")
         rematchAllItem.target = self
         menu.addItem(rematchAllItem)
-        let modelManagerItem = NSMenuItem(title: "Models...", action: #selector(openModelManagerMenu), keyEquivalent: "")
-        modelManagerItem.target = self
-        menu.addItem(modelManagerItem)
+        let settingsMenuItem = NSMenuItem(title: "Settings…", action: #selector(openSettingsMenu), keyEquivalent: ",")
+        settingsMenuItem.target = self
+        menu.addItem(settingsMenuItem)
         let terminalItem = NSMenuItem(title: "Terminal...", action: #selector(openTerminalMenu), keyEquivalent: "t")
         terminalItem.keyEquivalentModifierMask = [.command, .shift]
         terminalItem.target = self
@@ -1538,7 +1557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         syncNowItem.target = self
         let publishStatusItem = NSMenuItem(title: "Show Sync Status...", action: #selector(showPublishStatusMenu), keyEquivalent: "")
         publishStatusItem.target = self
-        publishSubmenu.addItem(autoPublishItem)
+        // The on/off switch lives in Settings → GitHub; these are the actions.
         publishSubmenu.addItem(syncNowItem)
         publishSubmenu.addItem(publishStatusItem)
         let publishItem = NSMenuItem(title: "Transcripts on GitHub", action: nil, keyEquivalent: "")
@@ -1685,28 +1704,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(checkUpdatesItem)
         appMenu.addItem(NSMenuItem.separator())
 
-        // Appearance submenu
-        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
-        let appearanceSubmenu = NSMenu(title: "Appearance")
-        let currentMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "auto"
-
-        let darkItem = NSMenuItem(title: "Dark", action: #selector(setAppearanceDark), keyEquivalent: "")
-        darkItem.target = self
-        darkItem.state = currentMode == "dark" ? .on : .off
-        appearanceSubmenu.addItem(darkItem)
-
-        let lightItem = NSMenuItem(title: "Light", action: #selector(setAppearanceLight), keyEquivalent: "")
-        lightItem.target = self
-        lightItem.state = currentMode == "light" ? .on : .off
-        appearanceSubmenu.addItem(lightItem)
-
-        let autoItem = NSMenuItem(title: "Auto (System)", action: #selector(setAppearanceAuto), keyEquivalent: "")
-        autoItem.target = self
-        autoItem.state = (currentMode != "dark" && currentMode != "light") ? .on : .off
-        appearanceSubmenu.addItem(autoItem)
-
-        appearanceItem.submenu = appearanceSubmenu
-        appMenu.addItem(appearanceItem)
+        // Every preference lives in the Settings window now (appearance used
+        // to have a submenu here as well as a footer menu).
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettingsMenu), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
 
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Quit HiDock Mic Trigger", action: #selector(quitApp), keyEquivalent: "q"))
@@ -1740,23 +1742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         deviceMgrItem.target = self
         fileMenu.addItem(deviceMgrItem)
 
-        fileMenu.addItem(NSMenuItem.separator())
-
-        let chooseRecItem = NSMenuItem(title: "Choose Recordings Folder...", action: #selector(fileMenuChooseRecordingsFolder), keyEquivalent: "")
-        chooseRecItem.target = self
-        fileMenu.addItem(chooseRecItem)
-
-        let chooseTxItem = NSMenuItem(title: "Choose Transcripts Folder...", action: #selector(fileMenuChooseTranscriptsFolder), keyEquivalent: "")
-        chooseTxItem.target = self
-        fileMenu.addItem(chooseTxItem)
-
-        fileMenu.addItem(NSMenuItem.separator())
-
-        let speakerLabelsItem = NSMenuItem(title: "Speaker Labels (Diarize)", action: #selector(fileMenuToggleDiarize), keyEquivalent: "")
-        speakerLabelsItem.target = self
-        speakerLabelsItem.state = diarizeEnabled ? .on : .off
-        fileMenu.addItem(speakerLabelsItem)
-        speakerLabelsMenuItem = speakerLabelsItem
+        // Folders and speaker labels moved to Settings → Devices / Transcription.
 
         fileMenuItem.submenu = fileMenu
 
@@ -9059,7 +9045,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Device Manager
 
     private func openDeviceManager() {
-        showDetailTab(id: "deviceManager", title: "Device Manager", icon: "externaldrive.connected.to.line.below", view: DeviceManagerView(viewModel: viewModel))
+        openSettings(pane: .devices)
     }
 
     private func forgetDevice(_ device: HiDockPairedDevice) {
@@ -9186,9 +9172,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openModelManager() {
-        // Single-instance: focus the existing window instead of spawning a duplicate.
         refreshModelStatuses()
-        showDetailTab(id: "models", title: "Models", icon: "shippingbox", view: ModelManagerView(viewModel: viewModel))
+        openSettings(pane: .models)
+    }
+
+    // MARK: - Settings window
+
+    private var settingsWindow: NSWindow?
+
+    @objc private func openSettingsMenu() {
+        openSettings(pane: nil)
+    }
+
+    /// The one Settings window (docs/PLAN-settings-window.md). Single
+    /// instance: a second open brings it forward and switches pane.
+    private func openSettings(pane: SettingsPane?) {
+        if let pane { viewModel.settingsPane = pane }
+        if viewModel.settingsPane == .models { refreshModelStatuses() }
+        if let window = settingsWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false
+        )
+        window.title = "Settings"
+        window.isReleasedWhenClosed = false
+        window.contentViewController = NSHostingController(rootView: SettingsView(viewModel: viewModel))
+        window.setFrameAutosaveName("HiDockSettingsWindow")
+        if !window.setFrameUsingName("HiDockSettingsWindow") { window.center() }
+        settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Summary Templates Manager
@@ -9234,7 +9252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func openTemplatesManager() {
-        showDetailTab(id: "templates", title: "Summary Templates", icon: "doc.badge.gearshape", view: TemplatesManagerView(viewModel: viewModel))
+        openSettings(pane: .summaries)
     }
 
     /// Open Claude Code in the embedded CLI pane, cd'd into the templates

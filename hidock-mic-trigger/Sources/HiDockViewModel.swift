@@ -1241,6 +1241,21 @@ final class HiDockViewModel: ObservableObject {
     /// public repo, diverged remote), or nil while publishing works.
     /// Failing checks from `transcribe.py doctor` (missing tokens, models,
     /// packages, GitHub sign-in, another Mac still publishing). Empty = fine.
+    // MARK: Settings window
+    /// The pane the Settings window shows; remembered between openings.
+    @Published var settingsPane: SettingsPane = SettingsPane(
+        rawValue: UserDefaults.standard.string(forKey: "settingsLastPane") ?? "") ?? .general {
+        didSet { UserDefaults.standard.set(settingsPane.rawValue, forKey: "settingsLastPane") }
+    }
+    /// Open the Settings window, optionally at a pane (nil = last used).
+    var onOpenSettings: (SettingsPane?) -> Void = { _ in }
+    /// The mic the trigger returns to when it is available, and the one it
+    /// uses when the default is missing.
+    @Published var preferredMicName: String?
+    @Published var fallbackMicName: String?
+    var onSetPreferredMic: (String?) -> Void = { _ in }
+    var onSetFallbackMic: (String?) -> Void = { _ in }
+
     @Published var setupProblems: [SetupProblem] = []
     var onRecheckSetup: () -> Void = {}
     var onDismissSetupProblems: () -> Void = {}
