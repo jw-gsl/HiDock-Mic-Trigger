@@ -303,7 +303,11 @@ MODEL_REGISTRY = {
     "speaker_embed": {
         "name": "TitaNet",
         "filename": "speaker_embedding.onnx",
-        "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx",
+        # The Hugging Face mirror (csukuangfj/sherpa-onnx-nemo-speaker-
+        # verification-titanet_small) started returning 401 in Oct 2026; this
+        # is the same export from sherpa-onnx's own release, as
+        # SPEAKER_EMBED_MODELS["titanet"] already uses.
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
         "size_mb": 10,
         "required": False,
         "stage": "embedding",
