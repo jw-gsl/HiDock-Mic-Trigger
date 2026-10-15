@@ -89,30 +89,52 @@ struct SettingsView: View {
         case .devices: DevicesSettingsPane(viewModel: viewModel)
         case .transcription: TranscriptionSettingsPane(viewModel: viewModel)
         case .speakers: SpeakersSettingsPane(viewModel: viewModel)
-        case .models:
-            VStack(spacing: 0) {
-                ModelManagerView(viewModel: viewModel, section: .models)
-                Divider()
-                ModelManagerView(viewModel: viewModel, section: .huggingFace)
+        case .models: ModelManagerView(viewModel: viewModel, section: .models)
+        case .summaries: SummariesSettingsPane(viewModel: viewModel)
+        case .calendar: ModelManagerView(viewModel: viewModel, section: .calendar)
+        case .github: ModelManagerView(viewModel: viewModel, section: .github)
+        case .led:
+            LEDSettingsView(settings: viewModel.ledSettings) {
+                viewModel.ledMatrix.notify(LEDEvent(kind: .syncComplete, text: "\(LEDFont.check) LED TEST"))
             }
-        case .summaries:
-            VStack(spacing: 0) {
-                ModelManagerView(viewModel: viewModel, section: .summaries)
-                Divider()
-                TemplatesManagerView(viewModel: viewModel)
-            }
-        case .calendar: scrolling(ModelManagerView(viewModel: viewModel, section: .calendar))
-        case .github: scrolling(ModelManagerView(viewModel: viewModel, section: .github))
-        case .led: LEDSettingsView(settings: viewModel.ledSettings)
         }
     }
 
-    private func scrolling(_ content: some View) -> some View {
-        ScrollView { content.frame(maxWidth: .infinity, alignment: .leading) }
-    }
 }
 
 // MARK: - Panes
+
+/// The summariser and the template list in one form, so there's one scroll.
+private struct SummariesSettingsPane: View {
+    @ObservedObject var viewModel: HiDockViewModel
+
+    var body: some View {
+        Form {
+            Section("AI summariser") {
+                SummariserRows(viewModel: viewModel)
+            }
+            TemplatesManagerView(viewModel: viewModel, asFormSection: true)
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct SummariserRows: View {
+    @ObservedObject var viewModel: HiDockViewModel
+
+    var body: some View {
+        Picker("Engine", selection: Binding(
+            get: { viewModel.summarizeEngine },
+            set: { viewModel.onSetSummarizeEngine($0) }
+        )) {
+            ForEach(viewModel.summarizeEngineChoices, id: \.id) { Text($0.label).tag($0.id) }
+        }
+        Toggle("Show the CLI pane while summarising", isOn: Binding(
+            get: { viewModel.showCLIWhileSummarising },
+            set: { viewModel.onSetShowCLIWhileSummarising($0) }
+        ))
+    }
+}
 
 private struct GeneralSettingsPane: View {
     @ObservedObject var viewModel: HiDockViewModel
@@ -238,17 +260,7 @@ private struct DevicesSettingsPane: View {
     @ObservedObject var viewModel: HiDockViewModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section("Recordings folder") {
-                    FolderRow(path: viewModel.syncOutputFolder ?? "~/HiDock/Recordings",
-                              choose: viewModel.onChooseRecordingsFolder)
-                }
-            }
-            .formStyle(.grouped)
-            .frame(maxHeight: 110)
-            DeviceManagerView(viewModel: viewModel)
-        }
+        DeviceManagerView(viewModel: viewModel)
     }
 }
 
@@ -281,9 +293,15 @@ private struct TranscriptionSettingsPane: View {
             } footer: {
                 Text("Which models do the work is chosen under Models.")
             }
-            Section("Transcripts folder") {
-                FolderRow(path: viewModel.syncTranscriptFolder ?? "~/HiDock/Raw Transcripts",
-                          choose: viewModel.onChooseTranscriptFolder)
+            Section("Folders") {
+                LabeledContent("Recordings") {
+                    FolderRow(path: viewModel.syncOutputFolder ?? "~/HiDock/Recordings",
+                              choose: viewModel.onChooseRecordingsFolder)
+                }
+                LabeledContent("Transcripts") {
+                    FolderRow(path: viewModel.syncTranscriptFolder ?? "~/HiDock/Raw Transcripts",
+                              choose: viewModel.onChooseTranscriptFolder)
+                }
             }
             Section {
                 ForEach(HiDockViewModel.hideableStatuses, id: \.self) { status in

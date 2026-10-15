@@ -4,28 +4,34 @@ import SwiftUI
 /// Persists live through the `LEDSettings` `ObservableObject`.
 struct LEDSettingsView: View {
     @ObservedObject var settings: LEDSettings
+    /// Sends a test announcement, to see the ticker work without waiting for
+    /// an event.
+    var onTest: (() -> Void)? = nil
 
     var body: some View {
         Form {
-            Toggle("Enable LED ticker", isOn: $settings.enabled)
+            Section {
+                Toggle("Enable LED ticker", isOn: $settings.enabled)
+                if settings.enabled, let onTest {
+                    Button("Send a test message", action: onTest)
+                }
+            } footer: {
+                Text("Shows over the meeting heatmap on the main window.")
+            }
 
             if settings.enabled {
                 Section("Display") {
                     Picker("At rest", selection: $settings.defaultView) {
                         ForEach(LEDDefaultView.allCases) { Text($0.label).tag($0) }
                     }
-                    Toggle("Take over the heatmap on events", isOn: $settings.eventTakeover)
+                    if settings.defaultView == .heatmap {
+                        Toggle("Show events over the heatmap", isOn: $settings.eventTakeover)
+                    }
                     Picker("Colour", selection: $settings.colorScheme) {
                         ForEach(LEDColorScheme.allCases) { Text($0.label).tag($0) }
                     }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Brightness").font(.caption).foregroundColor(.secondary)
-                        Slider(value: $settings.brightness, in: 0.3...1.0)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Scroll speed").font(.caption).foregroundColor(.secondary)
-                        Slider(value: $settings.scrollSpeed, in: 8...40)
-                    }
+                    Slider(value: $settings.brightness, in: 0.3...1.0) { Text("Brightness") }
+                    Slider(value: $settings.scrollSpeed, in: 8...40) { Text("Scroll speed") }
                 }
 
                 Section("Idle ticker") {
@@ -45,7 +51,6 @@ struct LEDSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 320, height: 520)
     }
 
     private func eventBinding(_ k: LEDEventKind) -> Binding<Bool> {
