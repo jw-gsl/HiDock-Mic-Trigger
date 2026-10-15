@@ -97,3 +97,9 @@ def test_reconcile_file_holds_back_bulk_changes(tmp_path):
     path.write_text(json.dumps({"speakers": {"X Y": {"samples": [_sample("Z", 0, 30)]}}}))
     # No transcript on disk → nothing to do.
     assert rec.reconcile_file(path, apply=True, limit=0)["found"] == 0
+
+
+def test_sample_put_back_by_the_reviewer_is_not_set_aside_again():
+    lib = {"speakers": {"Ian Reay": {"samples": [_sample("A", 0, 30, keep_after_audit=True)]}}}
+    transcripts = {"/t/A_diarized.json": _transcript(("Jeff Chow", 0, 30), source="auto")}
+    assert rec.find_moves(lib, _loader(transcripts)) == []

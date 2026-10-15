@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from shared.speaker_meta import backfill_label_source, is_generic_name
-from shared.voice_library_audit import QUARANTINE_KEY
+from shared.voice_library_audit import KEEP_KEY, QUARANTINE_KEY
 
 # Share of the transcribed speech in a sample's window that must belong to one
 # person before the transcript is trusted over the library's label.
@@ -126,8 +126,8 @@ def find_moves(library: dict, load_transcript: Callable[[str], dict | None] | No
                     or same_person(who["name"], name)):
                 continue
             target = resolve_name(library, who["name"]) if who["trusted"] else None
-            if target is None and QUARANTINE_KEY in sample:
-                continue  # already set aside
+            if target is None and (QUARANTINE_KEY in sample or sample.get(KEEP_KEY)):
+                continue  # already set aside, or put back by the reviewer
             moves.append({
                 "name": name, "index": index, "id": sample.get("id"),
                 "recording": Path(str(sample.get("audio_file") or source)).stem.replace("_diarized", ""),

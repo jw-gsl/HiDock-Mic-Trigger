@@ -70,3 +70,16 @@ def test_summary_reads_as_sentences():
     assert "stronger evidence" in lines[1]
     assert lines[2].startswith("Meetings: you accepted 4 of 5")
     assert "17% of speech" in lines[3]
+
+
+def test_summary_reports_samples_moved_to_the_transcript_speaker():
+    from shared.review_feedback import summary_lines
+    lines = summary_lines({"library": {"relabelled": 2, "live_relabelled": 3, "set_aside": 0, "total_set_aside": 0}})
+    assert any("moved 5 sample(s)" in line for line in lines)
+    assert not any("no mislabelled samples" in line for line in lines)
+
+
+def test_summary_flags_a_held_back_relabel():
+    from shared.review_feedback import summary_lines
+    lines = summary_lines({"library": {"live_relabel_held_back": 40, "total_set_aside": 0}})
+    assert any("40 samples" in line and "not moved" in line for line in lines)
