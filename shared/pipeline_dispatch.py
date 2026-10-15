@@ -99,13 +99,35 @@ def diarize(
         # Remote 8-speaker diarizer on an NVIDIA host (sidecar over the
         # local network). Absorbs the Sortformer refinements like pyannote.
         from shared.diarize_nemotron import diarize as nemotron_diarize
-        return nemotron_diarize(
-            audio_path,
-            whisper_segments,
-            n_speakers=n_speakers,
-            calendar_context=calendar_context,
-            **backend_options,
-        )
+        try:
+            return nemotron_diarize(
+                audio_path,
+                whisper_segments,
+                n_speakers=n_speakers,
+                calendar_context=calendar_context,
+                **backend_options,
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back rather than lose speakers
+            # The Spark refused us (no token after a migration: HTTP 401) or
+            # isn't reachable. Failing here used to leave the whole meeting
+            # under one speaker; on-Mac detection is worse than Nemotron but
+            # far better than that. The result says so, for the app to show.
+            import sys
+            last_error: Exception = exc
+            for fallback in _local_fallback_backends():
+                print(f"Nemotron unavailable ({exc}); detecting speakers on this Mac with {fallback}",
+                      file=sys.stderr)
+                try:
+                    result = _diarize_with(fallback, audio_path, whisper_segments, n_speakers,
+                                           calendar_context, backend_options)
+                except Exception as fallback_error:  # noqa: BLE001 - try the next one
+                    print(f"{fallback} failed too: {fallback_error}", file=sys.stderr)
+                    last_error = fallback_error
+                    continue
+                result["diarization_fallback"] = {"wanted": "nemotron", "used": fallback,
+                                                  "reason": str(exc)[:300]}
+                return result
+            raise last_error
     if backend == "pyannote":
         # Clusters embeddings globally instead of predicting a fixed speaker set
         # per window, so speaker count is an outcome rather than a capped
@@ -158,3 +180,19 @@ def active_pipeline() -> dict[str, str]:
             "vad": "silero",
             "embedding": "titanet",
         }
+
+
+def _local_fallback_backends() -> list[str]:
+    """On-Mac diarizers to try in order: Sortformer if installed, then Lite."""
+    import importlib.util
+    return (["sortformer"] if importlib.util.find_spec("nemo") is not None else []) + ["lite"]
+
+
+def _diarize_with(backend, audio_path, whisper_segments, n_speakers, calendar_context, backend_options):
+    if backend == "sortformer":
+        from shared.diarize_sortformer import diarize as sortformer_diarize
+        return sortformer_diarize(audio_path, whisper_segments, n_speakers=n_speakers,
+                                  calendar_context=calendar_context, **backend_options)
+    from shared.diarize_lite import diarize as lite_diarize
+    return lite_diarize(audio_path, whisper_segments, n_speakers=n_speakers,
+                        calendar_context=calendar_context)

@@ -550,6 +550,13 @@ def _sync_locked(result, md_paths, reason, *, all_md, transcripts_dir, clone,
     message = ["-m", title]
     if body.strip():
         message += ["-m", body.strip()[:8000]]
+    # Which Mac published this, so a second Mac still running HiDock (after a
+    # migration) can be spotted: see setup_doctor.check_other_mac_publishing.
+    try:
+        from shared.setup_doctor import MACHINE_TRAILER, machine_id
+        message += ["--trailer", f"{MACHINE_TRAILER}: {machine_id()}"]
+    except Exception:  # noqa: BLE001 - attribution must never block a publish
+        pass
     status, output = _run_git(clone_dir, ["commit", "--quiet", *message])
     if status != 0:
         result["detail"] = f"commit failed: {output.strip()[:300]}"

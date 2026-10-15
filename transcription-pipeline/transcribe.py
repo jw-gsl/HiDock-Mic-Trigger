@@ -1246,6 +1246,13 @@ def cmd_recluster_with_anchors(args):
     print(_json.dumps(summary))
 
 
+def cmd_doctor(_args):
+    """Check this Mac has what the pipeline needs; JSON with a fix per problem."""
+    import json as _json
+    from shared import setup_doctor
+    print(_json.dumps(setup_doctor.run()))
+
+
 def cmd_voice_check(args):
     """Propose line and speaker corrections from the meeting's saved voices,
     or apply the ones the reviewer accepted (--apply moves.json)."""
@@ -2323,6 +2330,9 @@ def main():
         ),
     )
     p_recluster.set_defaults(func=cmd_recluster_with_anchors)
+
+    p_doctor = sub.add_parser("doctor", help="Check tokens, models, packages and GitHub sign-in; say what to fix")
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_voice_check = sub.add_parser(
         "voice-check",

@@ -29,6 +29,7 @@
 		4E4A12A3596A60E15C76B4BA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 640A7BCEAB107C1993E023E0 /* AppDelegate.swift */; };
 		58797A92FB4785A04BE9B70B /* KeychainSecret.swift in Sources */ = {isa = PBXBuildFile; fileRef = 449C1A54AD85B4F451D76401 /* KeychainSecret.swift */; };
 		59E784A93E779D477255B352 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 2784F8780F6B93CA6AB8AD20 /* SwiftTerm */; };
+		651BDFE192102DEBA7F1A3BC /* SetupDoctorBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49402E7E154578219CC74C6D /* SetupDoctorBanner.swift */; };
 		66A307E9B017F3D942935331 /* LEDMatrixView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CEB328428F33B788960056F /* LEDMatrixView.swift */; };
 		6A0D1AA0C76828E2B4F6B807 /* NvidiaSparkSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 753FC313FAC43BC68336943D /* NvidiaSparkSettingsView.swift */; };
 		6AFC1F19EBD2DE7583548074 /* PlaudAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A168553CF6A253F63ABEB56C /* PlaudAuth.swift */; };
@@ -98,6 +99,7 @@
 		3CEB328428F33B788960056F /* LEDMatrixView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LEDMatrixView.swift; sourceTree = "<group>"; };
 		449C1A54AD85B4F451D76401 /* KeychainSecret.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecret.swift; sourceTree = "<group>"; };
 		45ECA314D0E3BF8DDD56BEC3 /* SkippedTranscriptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkippedTranscriptions.swift; sourceTree = "<group>"; };
+		49402E7E154578219CC74C6D /* SetupDoctorBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupDoctorBanner.swift; sourceTree = "<group>"; };
 		49F3C693C50E57C2B0A55EEE /* LEDFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LEDFont.swift; sourceTree = "<group>"; };
 		4C462B0D4FB3CCE023603E77 /* SummaryViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryViewerView.swift; sourceTree = "<group>"; };
 		5917D14BDB00424EA7457723 /* SplitSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitSources.swift; sourceTree = "<group>"; };
@@ -223,6 +225,7 @@
 				2AA2CA3514F7AEAF9CC6ECBA /* OnboardingView.swift */,
 				AD4349987570F91E3F9E960B /* PublishStatusIcon.swift */,
 				22435A4A9768A2BA2B30DABA /* RecordingsTableView.swift */,
+				49402E7E154578219CC74C6D /* SetupDoctorBanner.swift */,
 				6BB08406C7E6A83DE88D6C20 /* StatusBadge.swift */,
 				4C462B0D4FB3CCE023603E77 /* SummaryViewerView.swift */,
 				FE6739855445FE5C10ACAF9C /* SyncHeaderSection.swift */,
@@ -302,9 +305,10 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
 			};
 			buildConfigurationList = F82CB7DAE873C64AB23F3107 /* Build configuration list for PBXProject "hidock-mic-trigger" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -318,6 +322,7 @@
 				06F7022EE6FDFC866B7CC01A /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			preferredProjectObjectVersion = 77;
+			productRefGroup = F17E692D4D29F11982F4DCBD /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -415,6 +420,7 @@
 				B3C9A2C39C6AB708F9992443 /* PublishStatusIcon.swift in Sources */,
 				A60F233C10072A2EE53F99FC /* RecordingsTableView.swift in Sources */,
 				BC838A301E2D504E887A2E37 /* ReviewFeedbackLog.swift in Sources */,
+				651BDFE192102DEBA7F1A3BC /* SetupDoctorBanner.swift in Sources */,
 				1F28538F2F1601D254A85E9C /* SkippedTranscriptions.swift in Sources */,
 				159FDEE1D4C7748ABBAB8D03 /* SplitSources.swift in Sources */,
 				332BC0482460367C5C80C578 /* StatusBadge.swift in Sources */,
