@@ -22,6 +22,7 @@ cd ~/_git/hidock-tools/transcription-pipeline
 | **GitHub sign-in** | `gh`'s token is in the Keychain and becomes invalid. | "Transcripts aren't reaching GitHub". | Terminal: `gh auth login -h github.com`, then `gh auth setup-git`. |
 | **Model files** in `~/HiDock/Speech-to-Text` | Not copied, or only partly. | TitaNet and ReDimNet show as not installed; naming and Refine stop. | Models → download each one. ReDimNet2-B6 now fetches its code too. |
 | **ReDimNet2 code** (`Speech-to-Text/redimnet2-repo`) | It's a git clone beside the weights and is easy to miss. | "Could not load the redimnet2_b6 voice model". | Download ReDimNet2-B6 again from Models. |
+| **Code-signing access** (developers only) | The Developer ID key arrives, but `codesign` isn't allowed to use it without a prompt. | Deploy fails: `errSecInternalComponent`, "User interaction is not allowed". | `security unlock-keychain ~/Library/Keychains/login.keychain-db`, then `security set-key-partition-list -S apple-tool:,apple:,codesign: -s ~/Library/Keychains/login.keychain-db` (asks for your login password once). |
 | **Python packages** | The pipeline's `.venv` is rebuilt for the new Mac's Python. `onnxruntime` wasn't in `requirements.txt` until 2026-10-15. | TitaNet quietly falls back to crude MFCC voice matching. | `transcription-pipeline/setup-venv.sh`. It now ends with the setup check. |
 
 ## What does come across
@@ -54,7 +55,7 @@ then re-transcribe the recording on the new Mac once the checks pass.
 
 1. Copy `~/HiDock` and the `hidock-tools` repo across, or let Migration Assistant do it.
 2. Run `transcription-pipeline/setup-venv.sh`.
-3. Build and install the app (see CLAUDE.md → Deploy).
+3. Build and install the app (see CLAUDE.md → Deploy). If signing fails, see code-signing access above.
 4. In the app, go to **Models**: download any model shown as missing, and paste the Nemotron and Hugging Face tokens.
 5. In Terminal: `gh auth login -h github.com` and `gh auth setup-git`.
 6. Quit HiDock on the old Mac.
