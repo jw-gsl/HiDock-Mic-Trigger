@@ -1,8 +1,10 @@
 # Changelog
 
-All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.0 were reconstructed on 2026-10-15 from the merged pull requests; each one is tagged at the commit it shipped from.
+All notable changes to HiDock Mic Trigger (the macOS app). Releases before v4.1.0 were reconstructed on 2026-10-15 from the merged pull requests; each one is tagged at the commit it shipped from.
 
-## v1.9.0 — Settings window and setup check (2026-10-15)
+The first number marks a big shift in what the app does (2: AI summaries, 3: speaker identity and the voice library, 4: Refine, learning from review, Nemotron and GitHub publishing). The second marks a batch of features, and the third a batch of fixes only.
+
+## v4.1.0 — Settings window and setup check (2026-10-15)
 
 - A proper Settings window (⌘,) with ten panes. The footer drops from 11 controls to 5.
 - A setup check flags missing tokens, models, packages or a GitHub sign-in, with a fix for each. Nemotron falls back to on-Mac speaker detection.
@@ -23,7 +25,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.8.0 — Smarter matching, Refine, and GitHub publishing (2026-10-13)
+## v4.0.0 — Smarter matching, Refine, and GitHub publishing (2026-10-13)
 
 - Publish transcripts to a private GitHub repository.
 - Nemotron 3 speaker detection on an NVIDIA DGX Spark.
@@ -65,7 +67,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.7.0 — Transcript assistant (2026-09-24)
+## v3.3.0 — Transcript assistant (2026-09-24)
 
 - Ask a transcript questions in plain English from the sidecar.
 - Multilingual audio no longer comes out forced into English.
@@ -85,7 +87,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.6.1 — Fixes (2026-08-21)
+## v3.2.1 — Fixes (2026-08-21)
 
 - The transcript viewer no longer hangs the app in a layout loop.
 - Implausible transcription timeouts are ignored, and error alerts no longer dump raw progress logs.
@@ -99,7 +101,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.6.0 — Calendar assistant (2026-08-06)
+## v3.2.0 — Calendar assistant (2026-08-06)
 
 - The calendar assistant streams its answer and can link the meeting it finds.
 - Merged recordings find and inherit their meeting.
@@ -120,7 +122,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.5.0 — Better speaker detection (2026-07-31)
+## v3.1.0 — Better speaker detection (2026-07-31)
 
 - Split one recording into two meetings that transcribe separately.
 - Local transcript history, and confirmed speakers are protected when a calendar match re-runs speaker detection.
@@ -141,7 +143,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.4.0 — Speaker verification and the voice library (2026-07-17)
+## v3.0.0 — Speaker verification and the voice library (2026-07-17)
 
 - Speaker verification loop and more accurate voice-library matching.
 - People filter, speaker-name autocomplete, and voice-library merge and de-duplication.
@@ -163,7 +165,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.3.0 — Meeting heatmap (2026-06-25)
+## v2.1.0 — Meeting heatmap (2026-06-25)
 
 - A GitHub-style heatmap of meeting activity over the past year.
 - Agents and the terminal can read typed summaries (MCP tools and a `notes` CLI).
@@ -181,7 +183,7 @@ All notable changes to HiDock Mic Trigger (the macOS app). Releases before v1.9.
 
 </details>
 
-## v1.2.0 — AI summaries (2026-06-18)
+## v2.0.0 — AI summaries (2026-06-18)
 
 - Type-aware summaries written by Claude Code from editable templates, with a Summary Templates manager.
 - Summarise one recording or a selection, or automatically, with a Summary column and a filter by meeting type.
