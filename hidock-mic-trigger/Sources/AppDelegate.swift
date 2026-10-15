@@ -94,6 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// recurring, only event), saved with it for the decision log.
     private var calendarPickReason: [String: String] = [:]
     private var reviewQualityTimer: Timer?
+    private var setupDoctorTimer: Timer?
+    /// The problems the user hid; the banner returns when the set changes.
+    private var dismissedSetupProblems: [SetupProblem] = []
     private var syncSortKey: String = "created"
     private var syncSortAscending: Bool = false
     private var syncFilterDeviceId: String? = nil
@@ -424,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         wireViewModel()
         configureTranscriptPublishing()
         scheduleReviewQuality()
+        scheduleSetupDoctor()
         registerDeviceChangeListener()
         previousDeviceNames = Set(getInputDeviceNames())
         // Skipped: loadCachedRecordings() used to fire a short-timeout
@@ -3734,6 +3738,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Re-tune matching from the reviewer's decisions and refresh the
     /// "Matching quality" summary: two minutes after launch (out of the way
     /// of start-up work), then every six hours, and whenever Settings opens.
+    /// Check this Mac has the tokens, models, packages and sign-ins the
+    /// pipeline needs (`transcribe.py doctor`): a minute after launch, every
+    /// six hours, and on demand. A fresh install or a migrated Mac otherwise
+    /// finds out from a worse transcript.
+    private func scheduleSetupDoctor() {
+        viewModel.onRecheckSetup = { [weak self] in
+            self?.dismissedSetupProblems = []
+            self?.runSetupDoctor()
+        }
+        viewModel.onDismissSetupProblems = { [weak self] in
+            guard let self else { return }
+            self.dismissedSetupProblems = self.viewModel.setupProblems
+            self.viewModel.setupProblems = []
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.runSetupDoctor() }
+        setupDoctorTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.runSetupDoctor()
+        }
+    }
+
+    private func runSetupDoctor() {
+        guard FileManager.default.isExecutableFile(atPath: transcriptionPythonPath) else {
+            viewModel.setupProblems = [SetupProblem(
+                id: "python", title: "Transcription pipeline",
+                detail: "its Python environment isn't set up",
+                fix: "Run transcription-pipeline/setup-venv.sh in Terminal.")]
+            return
+        }
+        runTranscription(arguments: ["doctor"], timeout: 180) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard case .success(let data) = result,
+                      let start = data.firstIndex(of: UInt8(ascii: "{")),
+                      let json = try? JSONSerialization.jsonObject(with: data[start...]) as? [String: Any],
+                      let checks = json["checks"] as? [[String: Any]] else {
+                    self.log("Setup check returned no readable result")
+                    return
+                }
+                let problems = checks.compactMap { check -> SetupProblem? in
+                    guard (check["ok"] as? Bool) == false else { return nil }
+                    return SetupProblem(id: check["id"] as? String ?? "?",
+                                        title: check["title"] as? String ?? "Setup",
+                                        detail: check["detail"] as? String ?? "",
+                                        fix: check["fix"] as? String ?? "")
+                }
+                self.log("Setup check: " + (problems.isEmpty ? "all OK"
+                    : problems.map { "\($0.title) — \($0.detail)" }.joined(separator: "; ")))
+                self.viewModel.setupProblems = problems == self.dismissedSetupProblems ? [] : problems
+            }
+        }
+    }
+
     private func scheduleReviewQuality() {
         viewModel.onRefreshReviewQuality = { [weak self] in self?.refreshReviewQuality() }
         viewModel.onUndoLibraryCleanups = { [weak self] in
@@ -11577,6 +11633,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // runs only; here it would push synchronously on this serial queue
             // and race the app's publisher for the same git clone.
             env["HIDOCK_PUBLISH_TO_GITHUB"] = "0"
+            // Lets `doctor` tell "no token saved" from "run from Terminal,
+            // which can't see the app's Keychain items".
+            env["HIDOCK_FROM_APP"] = "1"
             process.environment = env
 
             let outPipe = Pipe()

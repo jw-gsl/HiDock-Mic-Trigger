@@ -27,4 +27,15 @@ else:
 "
 
 echo ""
+echo "Checking setup (tokens, models, GitHub)..."
+(cd "$SCRIPT_DIR" && "$VENV/bin/python" transcribe.py doctor | "$VENV/bin/python" -c "
+import json, sys
+d = json.load(sys.stdin)
+for c in d['checks']:
+    print(('  ok    ' if c['ok'] else '  FIX   ') + c['title'] + ': ' + c['detail'])
+    if c['fix']:
+        print('        -> ' + c['fix'])
+") || true
+
+echo ""
 echo "Done. Activate with:  source $VENV/bin/activate"

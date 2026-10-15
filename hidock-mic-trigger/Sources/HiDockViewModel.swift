@@ -1201,6 +1201,11 @@ final class HiDockViewModel: ObservableObject {
 
     /// Why settled transcripts aren't reaching the GitHub repo (auth, network,
     /// public repo, diverged remote), or nil while publishing works.
+    /// Failing checks from `transcribe.py doctor` (missing tokens, models,
+    /// packages, GitHub sign-in, another Mac still publishing). Empty = fine.
+    @Published var setupProblems: [SetupProblem] = []
+    var onRecheckSetup: () -> Void = {}
+    var onDismissSetupProblems: () -> Void = {}
     @Published var transcriptPublishProblem: String?
     var onRetryTranscriptPublish: () -> Void = {}
     var onDismissTranscriptPublishProblem: () -> Void = {}
@@ -1306,4 +1311,12 @@ extension HiDockViewModel {
         default: return "Auto"
         }
     }
+}
+
+/// One failing setup check, with what to do about it.
+struct SetupProblem: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let detail: String
+    let fix: String
 }
