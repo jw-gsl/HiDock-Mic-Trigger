@@ -180,22 +180,12 @@ struct SyncToolbarSection: View {
 
                 // Status counts — responsive: truncate rather than push the row
                 // wider than the window. (People filter moved to the filter row.)
-                if viewModel.needsTaggingCount > 0 {
-                    let showing = viewModel.statusFilters == [.needsTagging]
-                    Button {
-                        viewModel.toggleToTagFilter()
-                    } label: {
-                        Label("\(viewModel.needsTaggingCount) to tag", systemImage: "tag.fill")
-                            .font(.caption.weight(.medium))
-                            .underline(showing)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.orange)
-                    .fixedSize()
-                    .help(showing
-                          ? "Showing only recordings to tag. Click to show everything again."
-                          : "\(viewModel.needsTaggingCount) transcribed recordings still need speaker tagging. Click to show only those.")
-                }
+                reviewCount(viewModel.needsTaggingCount, "to tag", icon: "tag.fill",
+                            color: .orange, filter: .needsTagging,
+                            what: "transcribed recordings still need speaker tagging")
+                reviewCount(viewModel.needsConfirmingCount, "to confirm", icon: "questionmark.circle.fill",
+                            color: .blue, filter: .needsConfirming,
+                            what: "recordings were auto-tagged from your voice library and need confirming")
                 if !viewModel.syncSummary.isEmpty {
                     Text(viewModel.syncSummary)
                         .font(.caption)
@@ -500,6 +490,28 @@ struct SyncToolbarSection: View {
         }
         splitTarget = nil
         viewModel.onSplitRecording(entry.recording.outputPath, seconds)
+    }
+
+    /// A toolbar count that, clicked, shows only the recordings it counts.
+    @ViewBuilder
+    private func reviewCount(_ count: Int, _ noun: String, icon: String, color: Color,
+                             filter: SyncStatusFilter, what: String) -> some View {
+        if count > 0 {
+            let showing = viewModel.statusFilters == [filter]
+            Button {
+                viewModel.toggleReviewFilter(filter)
+            } label: {
+                Label("\(count) \(noun)", systemImage: icon)
+                    .font(.caption.weight(.medium))
+                    .underline(showing)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(color)
+            .fixedSize()
+            .help(showing
+                  ? "Showing only recordings \(noun). Click to show everything again."
+                  : "\(count) \(what). Click to show only those.")
+        }
     }
 }
 

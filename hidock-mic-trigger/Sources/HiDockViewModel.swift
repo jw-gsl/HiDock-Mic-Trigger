@@ -297,16 +297,22 @@ final class HiDockViewModel: ObservableObject {
             return mergeGroups.contains {
                 $0.childNames.contains(e.recording.name) && mergedFileNeedsTagging($0.outputName)
             }
+        case .needsConfirming:
+            if needsConfirming(e) { return true }
+            return mergeGroups.contains {
+                $0.childNames.contains(e.recording.name) && mergedFileNeedsConfirming($0.outputName)
+            }
         }
     }
 
-    /// Show only what the "N to tag" count counts; again to show everything.
-    func toggleToTagFilter() {
-        if statusFilters == [.needsTagging] {
+    /// Show only what a toolbar count ("N to tag", "N to confirm") counts;
+    /// clicking the same one again shows everything.
+    func toggleReviewFilter(_ f: SyncStatusFilter) {
+        if statusFilters == [f] {
             statusFilters = []
         } else {
             clearAllRecordingFilters()
-            statusFilters = [.needsTagging]
+            statusFilters = [f]
         }
     }
 
@@ -698,12 +704,12 @@ final class HiDockViewModel: ObservableObject {
         // Filter menu (they clearly want to see it then).
         if !hiddenStatuses.isEmpty {
             let explicitlyFiltered = Set(activeStatusFilters.map { $0.label })
-            let showingToTag = activeStatusFilters.contains(.needsTagging)
+            let review = activeStatusFilters.intersection([.needsTagging, .needsConfirming])
             entries = entries.filter { e in
                 if explicitlyFiltered.contains(e.statusText) { return true }
-                // "To tag" rows are Transcribed/Summarised; hiding those must
-                // not empty the list the user just asked for.
-                if showingToTag && matchesStatusFilter(e, .needsTagging) { return true }
+                // "To tag"/"To confirm" rows are Transcribed/Summarised; hiding
+                // those must not empty the list the user just asked for.
+                if review.contains(where: { matchesStatusFilter(e, $0) }) { return true }
                 return !hiddenStatuses.contains(e.statusText)
             }
         }
@@ -884,6 +890,23 @@ final class HiDockViewModel: ObservableObject {
     var needsTaggingCount: Int {
         syncEntries.filter(needsTagging).count
             + mergedFileTranscribed.filter(mergedFileNeedsTagging).count
+    }
+
+    /// Auto-tagged from the voice library but not confirmed (the blue
+    /// question mark), and not before the tagging cutoff.
+    func needsConfirming(_ e: HiDockSyncRecordingEntry) -> Bool {
+        e.transcribed && !e.speakersTagged && e.speakersAutoMatched
+            && !isBeforeTaggingCutoff(e.recording)
+    }
+
+    func mergedFileNeedsConfirming(_ name: String) -> Bool {
+        mergedFileTranscribed.contains(name) && !mergedFileTagged.contains(name)
+            && mergedFileAutoMatched.contains(name) && !isMergeBeforeTaggingCutoff(name)
+    }
+
+    var needsConfirmingCount: Int {
+        syncEntries.filter(needsConfirming).count
+            + mergedFileTranscribed.filter(mergedFileNeedsConfirming).count
     }
 
     var syncSummary: String {
