@@ -181,11 +181,20 @@ struct SyncToolbarSection: View {
                 // Status counts — responsive: truncate rather than push the row
                 // wider than the window. (People filter moved to the filter row.)
                 if viewModel.needsTaggingCount > 0 {
-                    Label("\(viewModel.needsTaggingCount) to tag", systemImage: "tag.fill")
-                        .font(.caption.weight(.medium))
-                        .foregroundColor(.orange)
-                        .fixedSize()
-                        .help("\(viewModel.needsTaggingCount) transcribed recordings still need speaker tagging")
+                    let showing = viewModel.statusFilters == [.needsTagging]
+                    Button {
+                        viewModel.toggleToTagFilter()
+                    } label: {
+                        Label("\(viewModel.needsTaggingCount) to tag", systemImage: "tag.fill")
+                            .font(.caption.weight(.medium))
+                            .underline(showing)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.orange)
+                    .fixedSize()
+                    .help(showing
+                          ? "Showing only recordings to tag. Click to show everything again."
+                          : "\(viewModel.needsTaggingCount) transcribed recordings still need speaker tagging. Click to show only those.")
                 }
                 if !viewModel.syncSummary.isEmpty {
                     Text(viewModel.syncSummary)

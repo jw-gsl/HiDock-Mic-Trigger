@@ -290,6 +290,23 @@ final class HiDockViewModel: ObservableObject {
         case .imported: return e.deviceId == "imported:local"
         case .merged:
             return mergeGroups.contains { $0.childNames.contains(e.recording.name) }
+        case .needsTagging:
+            if needsTagging(e) { return true }
+            // A merged recording is tagged as one file; show its pieces so the
+            // merge row appears.
+            return mergeGroups.contains {
+                $0.childNames.contains(e.recording.name) && mergedFileNeedsTagging($0.outputName)
+            }
+        }
+    }
+
+    /// Show only what the "N to tag" count counts; again to show everything.
+    func toggleToTagFilter() {
+        if statusFilters == [.needsTagging] {
+            statusFilters = []
+        } else {
+            clearAllRecordingFilters()
+            statusFilters = [.needsTagging]
         }
     }
 
@@ -513,11 +530,11 @@ final class HiDockViewModel: ObservableObject {
     /// Populated by refreshTranscriptionState after each Python `status`
     /// query — same source of truth as the per-row state.
     @Published var mergedFileTranscribed: Set<String> = [] { didSet { markDerivedDirty() } }
-    @Published var mergedFileTagged: Set<String> = []
+    @Published var mergedFileTagged: Set<String> = [] { didSet { markDerivedDirty() } }
     /// Merged files where the voice library auto-matched ≥1 speaker but none is
     /// confirmed yet — the "confirm me" state (blue question mark). Mirrors the
     /// per-row `speakersAutoMatched`. Excluded from the "needs tagging" nag.
-    @Published var mergedFileAutoMatched: Set<String> = []
+    @Published var mergedFileAutoMatched: Set<String> = [] { didSet { markDerivedDirty() } }
     @Published var mergedFileTranscriptPaths: [String: String] = [:]
     /// Merge-output filename -> linked calendar meeting title.
     ///
@@ -681,8 +698,12 @@ final class HiDockViewModel: ObservableObject {
         // Filter menu (they clearly want to see it then).
         if !hiddenStatuses.isEmpty {
             let explicitlyFiltered = Set(activeStatusFilters.map { $0.label })
+            let showingToTag = activeStatusFilters.contains(.needsTagging)
             entries = entries.filter { e in
                 if explicitlyFiltered.contains(e.statusText) { return true }
+                // "To tag" rows are Transcribed/Summarised; hiding those must
+                // not empty the list the user just asked for.
+                if showingToTag && matchesStatusFilter(e, .needsTagging) { return true }
                 return !hiddenStatuses.contains(e.statusText)
             }
         }
@@ -818,6 +839,7 @@ final class HiDockViewModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(taggingIgnoreBefore?.timeIntervalSince1970 ?? 0,
                                       forKey: "taggingIgnoreBefore")
+            markDerivedDirty()
         }
     }
 
@@ -844,21 +866,24 @@ final class HiDockViewModel: ObservableObject {
         return f
     }()
 
+    /// Only true "needs tagging" rows nag: transcribed, multi-speaker, and
+    /// neither confirmed (tagged) nor auto-matched, and not before the tagging
+    /// cutoff. Auto-matched meetings ("confirm me") are surfaced by the blue
+    /// question-mark icon, not the pill.
+    func needsTagging(_ e: HiDockSyncRecordingEntry) -> Bool {
+        e.transcribed && !e.speakersTagged && !e.speakersAutoMatched
+            && !isBeforeTaggingCutoff(e.recording)
+    }
+
+    /// Same rule for a merged file (they don't live in syncEntries).
+    func mergedFileNeedsTagging(_ name: String) -> Bool {
+        mergedFileTranscribed.contains(name) && !mergedFileTagged.contains(name)
+            && !mergedFileAutoMatched.contains(name) && !isMergeBeforeTaggingCutoff(name)
+    }
+
     var needsTaggingCount: Int {
-        // Only true "needs tagging" rows nag: transcribed, multi-speaker, and
-        // neither confirmed (tagged) nor auto-matched. Auto-matched meetings
-        // ("confirm me") are surfaced by the blue question-mark icon, not the pill.
-        let perRow = syncEntries.filter {
-            $0.transcribed && !$0.speakersTagged && !$0.speakersAutoMatched
-                && !isBeforeTaggingCutoff($0.recording)
-        }.count
-        // Same for merged-file rows (they don't live in syncEntries).
-        let perMerge = mergedFileTranscribed
-            .subtracting(mergedFileTagged)
-            .subtracting(mergedFileAutoMatched)
-            .filter { !isMergeBeforeTaggingCutoff($0) }
-            .count
-        return perRow + perMerge
+        syncEntries.filter(needsTagging).count
+            + mergedFileTranscribed.filter(mergedFileNeedsTagging).count
     }
 
     var syncSummary: String {
