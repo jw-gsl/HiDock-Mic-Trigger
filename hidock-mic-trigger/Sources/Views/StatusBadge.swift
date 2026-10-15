@@ -86,6 +86,8 @@ struct TranscriptionIndicator: View {
     /// What speaker work (Redetect, Refine) is running on this recording, if
     /// any. Without it the row showed nothing while a confirmation re-ran.
     var speakerWorkStage: String? = nil
+    /// Older than the "only ask to tag from" date: still tag-able, not nagged.
+    var beforeTaggingCutoff: Bool = false
 
     @State private var showingError = false
 
@@ -131,10 +133,12 @@ struct TranscriptionIndicator: View {
                 }
             } label: {
                 Image(systemName: "tag.fill")
-                    .foregroundColor(.orange)
+                    .foregroundColor(beforeTaggingCutoff ? .secondary : .orange)
             }
             .buttonStyle(.plain)
-            .help("Speakers need tagging — click to open")
+            .help(beforeTaggingCutoff
+                  ? "Speakers not tagged — older than your tagging start date, so not counted. Click to open"
+                  : "Speakers need tagging — click to open")
         } else if transcriptionBusy && transcriptionCurrentFile == entry.recording.outputName {
             HStack(spacing: 4) {
                 ProgressView()

@@ -877,7 +877,8 @@ struct RecordingsTableView: View {
                 onRevealTranscript: viewModel.onRevealTranscript,
                 onOpenTranscriptViewer: viewModel.onOpenTranscriptViewer,
                 speakerWorkStage: viewModel.speakerWorkFile == entry.recording.outputName
-                    ? viewModel.speakerWorkStage : nil
+                    ? viewModel.speakerWorkStage : nil,
+                beforeTaggingCutoff: viewModel.isBeforeTaggingCutoff(entry.recording)
             )
             .frame(width: 56, alignment: .leading)
 
