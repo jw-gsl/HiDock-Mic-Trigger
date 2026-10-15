@@ -152,8 +152,16 @@ enum ModelManagerTab: String, CaseIterable, Identifiable {
     var label: String { self == .models ? "Models" : "Settings" }
 }
 
+/// The parts of this view the Settings window shows as (part of) a pane.
+enum ModelManagerSection {
+    case models, huggingFace, summaries, calendar, github, tagging
+}
+
 struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Set by the Settings window: render just this part, without the
+    /// heading and the Models/Settings switch.
+    var section: ModelManagerSection? = nil
     /// Stages are collapsed by default; this holds the expanded ones.
     @State private var expandedStages: Set<String> = []
     /// Unsaved text in the Transcripts-on-GitHub Repository field.
@@ -174,6 +182,45 @@ struct ModelManagerView: View {
     }
 
     var body: some View {
+        if let section {
+            sectionBody(section)
+        } else {
+            fullBody
+        }
+    }
+
+    @ViewBuilder
+    private func sectionBody(_ section: ModelManagerSection) -> some View {
+        switch section {
+        case .models:
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    Button("Expand all") { expandedStages = allStageKeys }
+                    Button("Collapse all") { expandedStages = [] }
+                    Button {
+                        viewModel.onRefreshModelStatuses()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh model statuses")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                modelsTab
+            }
+            .onAppear { viewModel.onRefreshModelStatuses() }
+        case .huggingFace: huggingFaceSection
+        case .summaries: summariserSection
+        case .calendar: calendarSection
+        case .github: githubPublishSection
+        case .tagging: taggingCutoffSection
+        }
+    }
+
+    private var fullBody: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(tab.label)
@@ -225,37 +272,7 @@ struct ModelManagerView: View {
     private var settingsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Image(systemName: "sparkles").foregroundColor(.indigo)
-                        Text("AI Summariser").fontWeight(.medium)
-                        Spacer()
-                        Picker("", selection: Binding(
-                            get: { viewModel.summarizeEngine },
-                            set: { viewModel.onSetSummarizeEngine($0) }
-                        )) {
-                            ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
-                                Text(choice.label).tag(choice.id)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                    }
-                    Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
-                        .font(.caption).foregroundColor(.secondary)
-
-                    Toggle("Show the CLI pane while summarising", isOn: Binding(
-                        get: { viewModel.showCLIWhileSummarising },
-                        set: { viewModel.onSetShowCLIWhileSummarising($0) }
-                    ))
-                    .toggleStyle(.checkbox)
-                    .padding(.top, 4)
-                    Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                summariserSection
 
                 Divider()
 
@@ -268,29 +285,7 @@ struct ModelManagerView: View {
 
                 Divider()
 
-                // Calendar provider — meeting context (attendees) used for
-                // speaker merging and suggestion narrowing.
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Image(systemName: "calendar").foregroundColor(.teal)
-                        Text("Calendar").fontWeight(.medium)
-                        Spacer()
-                        Picker("", selection: Binding(
-                            get: { viewModel.calendarProvider },
-                            set: { viewModel.onSetCalendarProvider($0) }
-                        )) {
-                            ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
-                                Text(choice.label).tag(choice.id)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                    }
-                    Text(calendarExplainer)
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                calendarSection
 
                 Divider()
 
@@ -301,6 +296,66 @@ struct ModelManagerView: View {
                 githubPublishSection
             }
         }
+    }
+
+    private var summariserSection: some View {
+        // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "sparkles").foregroundColor(.indigo)
+                Text("AI Summariser").fontWeight(.medium)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { viewModel.summarizeEngine },
+                    set: { viewModel.onSetSummarizeEngine($0) }
+                )) {
+                    ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
+                        Text(choice.label).tag(choice.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
+                .font(.caption).foregroundColor(.secondary)
+
+            Toggle("Show the CLI pane while summarising", isOn: Binding(
+                get: { viewModel.showCLIWhileSummarising },
+                set: { viewModel.onSetShowCLIWhileSummarising($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .padding(.top, 4)
+            Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
+                .font(.caption).foregroundColor(.secondary)
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 12)
+    }
+
+    private var calendarSection: some View {
+        // Calendar provider — meeting context (attendees) used for
+        // speaker merging and suggestion narrowing.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "calendar").foregroundColor(.teal)
+                Text("Calendar").fontWeight(.medium)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { viewModel.calendarProvider },
+                    set: { viewModel.onSetCalendarProvider($0) }
+                )) {
+                    ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
+                        Text(choice.label).tag(choice.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            Text(calendarExplainer)
+                .font(.caption).foregroundColor(.secondary)
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 12)
     }
 
     /// Stop old, never-tagged meetings counting towards "N to tag".

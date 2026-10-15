@@ -85,6 +85,13 @@ struct OnboardingView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 } else {
+                    // Tokens, models and GitHub are set up in Settings; the
+                    // setup check there lists anything still missing.
+                    Button("Open Settings") {
+                        viewModel.onCompleteOnboarding()
+                        viewModel.onOpenSettings(.general)
+                    }
+                    .controlSize(.large)
                     Button("Start Using HiDock") {
                         viewModel.onCompleteOnboarding()
                     }

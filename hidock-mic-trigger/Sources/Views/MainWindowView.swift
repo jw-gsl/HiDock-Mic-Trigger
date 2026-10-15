@@ -5,6 +5,11 @@ struct MainWindowView: View {
     /// Confirmation for the tab-strip "Close All" control.
     @State private var confirmCloseAllTabs = false
 
+    /// A failing setup check or a stuck GitHub publish: tints the Settings button.
+    private var settingsNeedsAttention: Bool {
+        !viewModel.setupProblems.isEmpty || viewModel.transcriptPublishProblem != nil
+    }
+
     var body: some View {
         let windowMin = MainWindowMetrics.minSize(detailPaneVisible: viewModel.detailPaneVisible)
         return Group {
@@ -246,63 +251,6 @@ struct MainWindowView: View {
 
                 Spacer()
 
-                Menu {
-                    Button {
-                        viewModel.onToggleNotifyTranscription()
-                    } label: {
-                        Label(
-                            "Transcription Complete",
-                            systemImage: viewModel.notifyTranscriptionComplete ? "checkmark.circle.fill" : "circle"
-                        )
-                    }
-                    Button {
-                        viewModel.onToggleNotifyDownload()
-                    } label: {
-                        Label(
-                            "Download Complete",
-                            systemImage: viewModel.notifyDownloadComplete ? "checkmark.circle.fill" : "circle"
-                        )
-                    }
-                    Button {
-                        viewModel.onToggleNotifyMicChanges()
-                    } label: {
-                        Label(
-                            "Mic Changes",
-                            systemImage: viewModel.notifyMicChanges ? "checkmark.circle.fill" : "circle"
-                        )
-                    }
-                } label: {
-                    Label("Notifications", systemImage: "bell")
-                        .font(.caption)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Notification preferences")
-
-                Menu {
-                    Button {
-                        viewModel.onSetAppearance("auto")
-                    } label: {
-                        Label("Auto (System)", systemImage: "circle.lefthalf.filled")
-                    }
-                    Button {
-                        viewModel.onSetAppearance("dark")
-                    } label: {
-                        Label("Dark", systemImage: "moon.fill")
-                    }
-                    Button {
-                        viewModel.onSetAppearance("light")
-                    } label: {
-                        Label("Light", systemImage: "sun.max.fill")
-                    }
-                } label: {
-                    Label(viewModel.appearanceLabel, systemImage: viewModel.appearanceIcon)
-                        .font(.caption)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Change appearance")
-
                 // Bottom-bar CLI toggle — opens/closes the embedded
                 // terminal pane (Claude Code + summarise activity).
                 Button {
@@ -317,57 +265,6 @@ struct MainWindowView: View {
                 .help("Show/hide the embedded CLI pane — runs Ask AI and shows live summarise activity")
 
                 Button {
-                    viewModel.onCheckForUpdates()
-                } label: {
-                    Label("Check for Updates", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
-                    viewModel.onShowDeviceManager()
-                } label: {
-                    Label("Devices", systemImage: "externaldrive.connected.to.line.below")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
-                    viewModel.modelManagerTab = .models
-                    viewModel.onShowModelManager()
-                } label: {
-                    Label("Models", systemImage: "square.and.arrow.down")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
-                    viewModel.modelManagerTab = .settings
-                    viewModel.onShowModelManager()
-                } label: {
-                    Label("GitHub", systemImage: viewModel.transcriptPublishProblem != nil
-                          ? "exclamationmark.icloud"
-                          : (viewModel.transcriptPublishEnabled ? "checkmark.icloud" : "icloud"))
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Transcripts on GitHub — publishing settings")
-
-                Button {
-                    viewModel.onShowTemplatesManager()
-                } label: {
-                    Label("Templates", systemImage: "doc.text")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Manage summary templates — import, edit/iterate with AI, delete")
-
-                Button {
                     viewModel.onShowVoiceLibrary()
                 } label: {
                     Label("Voice Library", systemImage: "person.2")
@@ -375,6 +272,21 @@ struct MainWindowView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+
+                // Every preference — appearance, notifications, devices,
+                // models, GitHub, templates, updates — is in Settings now
+                // (docs/PLAN-settings-window.md); the footer keeps only the
+                // workspaces you use while working.
+                Button {
+                    viewModel.onOpenSettings(nil)
+                } label: {
+                    Label("Settings", systemImage: settingsNeedsAttention ? "gearshape.fill" : "gearshape")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(settingsNeedsAttention ? .orange : nil)
+                .help(settingsNeedsAttention ? "Settings — something needs attention" : "Settings (⌘,)")
 
                 // Feedback — one button, dropdown for Send / My Feedback.
                 Menu {
