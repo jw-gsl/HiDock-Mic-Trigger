@@ -23,7 +23,6 @@ import importlib.util
 import json
 import os
 import subprocess
-from pathlib import Path
 from typing import Any, Callable
 
 MACHINE_TRAILER = "HiDock-Machine"
