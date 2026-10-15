@@ -250,7 +250,8 @@ final class TranscriptPublish {
         workLock.unlock()
     }
 
-    private func hasActiveWork(_ stem: String) -> Bool {
+    /// True while any pipeline command naming this recording is queued or running.
+    func hasActiveWork(_ stem: String) -> Bool {
         workLock.lock()
         defer { workLock.unlock() }
         return activeWork[stem] != nil
@@ -264,7 +265,7 @@ final class TranscriptPublish {
             let url = URL(fileURLWithPath: argument)
             guard extensions.contains(url.pathExtension.lowercased()) else { continue }
             var stem = url.deletingPathExtension().lastPathComponent
-            for suffix in ["_diarized", "_calendar", "_calendar_suggestion"] where stem.hasSuffix(suffix) {
+            for suffix in ["_diarized", "_asr", "_whisper", "_calendar", "_calendar_suggestion"] where stem.hasSuffix(suffix) {
                 stem = String(stem.dropLast(suffix.count))
             }
             if !stems.contains(stem) { stems.append(stem) }

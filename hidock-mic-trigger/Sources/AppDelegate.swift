@@ -3425,6 +3425,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func trimRecording(path: String, start: Double, end: Double, saveAsCopy: Bool) {
         let url = URL(fileURLWithPath: path)
+        // Overwriting audio a pipeline job is still reading (or is queued to
+        // read) leaves that job working from the old timeline: a re-diarize
+        // that finished just after a trim rewrote the full-length transcript
+        // over the trimmed recording. A copy leaves the original alone.
+        if !saveAsCopy && TranscriptPublish.shared.hasActiveWork(url.deletingPathExtension().lastPathComponent) {
+            showError("\(url.lastPathComponent) is still being transcribed or processed. Trim it once that finishes, or save the trim as a copy.")
+            return
+        }
         let outputPath: String
         if saveAsCopy {
             let stem = url.deletingPathExtension().lastPathComponent
@@ -3540,6 +3548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     // touch the listed entry, so nothing to update there.
                     if !saveAsCopy {
                         self.updateEntryAfterOverwriteTrim(path: path, newDuration: end - start)
+                        self.trimTranscriptArtifacts(audioPath: path, start: start, end: end)
                     }
                 } else {
                     self.viewModel.syncStatus = "Trim failed"
@@ -3555,6 +3564,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         ? "ffmpeg exited with status \(process.terminationStatus) (no stderr output)"
                         : "ffmpeg exited with status \(process.terminationStatus):\n\n\(lastLines)"
                     self.showError(detail)
+                }
+                self.syncViewModelState()
+            }
+        }
+    }
+
+    /// After an overwrite-trim, crop the recording's transcript to the same
+    /// range so it no longer holds text for audio that is gone, and rebase
+    /// its timestamps to the new start. Snapshotted first, so it can be
+    /// rolled back from transcript history like any other rewrite.
+    private func trimTranscriptArtifacts(audioPath: String, start: Double, end: Double) {
+        let stem = URL(fileURLWithPath: audioPath).deletingPathExtension().lastPathComponent
+        let transcriptDir = syncTranscriptFolder ?? "\(NSHomeDirectory())/HiDock/Raw Transcripts"
+        let diarizedPath = "\(transcriptDir)/\(stem)_diarized.json"
+        let hasTranscript = ["_diarized.json", ".md", "_asr.json", "_whisper.json"]
+            .contains { FileManager.default.fileExists(atPath: "\(transcriptDir)/\(stem)\($0)") }
+        guard hasTranscript, ensureTranscriptionReady() else { return }
+
+        snapshotTranscriptArtifacts(diarizedPath, reason: "Before trimming the audio to \(formatRecordingDuration(start))–\(formatRecordingDuration(end))")
+        viewModel.trimBusy = true
+        viewModel.syncStatus = "Trimming the transcript to match…"
+        viewModel.syncStatusLevel = .secondary
+        syncViewModelState()
+        runTranscription(arguments: ["trim-artifacts", audioPath, "--transcript-dir", transcriptDir,
+                                     "--start", String(start), "--end", String(end)]) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.viewModel.trimBusy = false
+                switch result {
+                case .success:
+                    self.log("Trimmed transcript for \(stem) to \(start)s–\(end)s")
+                    self.viewModel.syncStatus = "Trimmed \(stem) and its transcript"
+                    self.viewModel.syncStatusLevel = .success
+                    TranscriptPublish.shared.schedule(diarizedPath: diarizedPath, reason: "Trimmed with the audio")
+                    self.refreshTranscriptionState()
+                case .failure(let error):
+                    // The audio is trimmed and fine; only the transcript lags behind.
+                    self.log("trim-artifacts failed for \(stem): \(error.localizedDescription)")
+                    self.viewModel.syncStatus = "Trimmed audio; transcript not trimmed"
+                    self.viewModel.syncStatusLevel = .warning
+                    self.showError("The audio was trimmed, but its transcript could not be trimmed to match — re-transcribe it to bring them back in line:\n\(error.localizedDescription)")
                 }
                 self.syncViewModelState()
             }

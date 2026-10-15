@@ -36,6 +36,15 @@ final class TranscriptPublishTests: XCTestCase {
         XCTAssertEqual(stems, ["2026Oct06-132930-Rec48", "2026Oct06-143340-Rec49"])
     }
 
+    func testRecordingStemsStripRawASRSidecarSuffixes() {
+        let stems = TranscriptPublish.recordingStems(in: [
+            "/Users/x/HiDock/Raw Transcripts/2026Oct14-145921-Rec70_asr.json",
+            "/Users/x/HiDock/Raw Transcripts/2026Oct14-145921-Rec70_whisper.json",
+            "/Users/x/HiDock/Recordings/2026Oct14-145921-Rec70.mp3",
+        ])
+        XCTAssertEqual(stems, ["2026Oct14-145921-Rec70"])
+    }
+
     func testRecordingStemsIgnoresNonFileArguments() {
         XCTAssertEqual(TranscriptPublish.recordingStems(in: ["status", "--final-name", "Jeff Chow"]), [])
     }
