@@ -2279,6 +2279,19 @@ def cmd_split_artifacts(args):
     }))
 
 
+def cmd_trim_artifacts(args):
+    """Crop existing JSON/Markdown/SRT transcript artifacts to match trimmed audio."""
+    from shared.split_recording import write_trimmed_artifacts
+
+    audio = Path(args.audio).resolve()
+    if not audio.exists():
+        raise FileNotFoundError(f"trimmed audio not found: {audio}")
+    if args.end <= args.start:
+        raise ValueError(f"trim end ({args.end}) must be after start ({args.start})")
+    md = write_trimmed_artifacts(audio, Path(args.transcript_dir).resolve(), args.start, args.end)
+    print(json.dumps({"transcript": str(md) if md else None}))
+
+
 def main():
     parser = argparse.ArgumentParser(description="HiDock Transcription Pipeline")
     sub = parser.add_subparsers(dest="command")
@@ -2574,6 +2587,16 @@ def main():
     p_split.add_argument("--transcript-dir", required=True)
     p_split.add_argument("--split-at", required=True, type=float)
     p_split.set_defaults(func=cmd_split_artifacts)
+
+    p_trim = sub.add_parser(
+        "trim-artifacts",
+        help="Crop existing JSON/Markdown/SRT transcript artifacts to a trimmed time range",
+    )
+    p_trim.add_argument("audio")
+    p_trim.add_argument("--transcript-dir", required=True)
+    p_trim.add_argument("--start", required=True, type=float)
+    p_trim.add_argument("--end", required=True, type=float)
+    p_trim.set_defaults(func=cmd_trim_artifacts)
 
     p_sweep = sub.add_parser(
         "anchor-sweep",
