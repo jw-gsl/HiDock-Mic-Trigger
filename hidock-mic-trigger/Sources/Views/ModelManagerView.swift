@@ -173,6 +173,9 @@ struct ModelManagerView: View {
     /// default: twelve rows of 2–4 line descriptions buried the six words that
     /// actually matter, which is which one is on.
     @State private var expandedRows: Set<String> = []
+    /// Models rows the user opened or closed in the Settings form. Without an
+    /// entry a row follows its use: the model in use is open, the rest closed.
+    @State private var modelExpansion: [String: Bool] = [:]
 
     /// Every stage currently having at least one registered model.
     private var allStageKeys: Set<String> {
@@ -205,7 +208,32 @@ struct ModelManagerView: View {
     /// Models as a grouped form: a section per stage, a compact row per model
     /// (choose / status / download or ⋯), details on demand, and Hugging Face
     /// access as the last section — one scroll, in keeping with the other panes.
+    private func isModelExpanded(_ status: ModelStatus) -> Bool {
+        modelExpansion[status.id] ?? status.active
+    }
+
     private var modelsForm: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Spacer()
+                Button("Expand all") {
+                    modelExpansion = Dictionary(uniqueKeysWithValues: viewModel.modelStatuses.keys.map { ($0, true) })
+                }
+                Button("Collapse all") {
+                    modelExpansion = Dictionary(uniqueKeysWithValues: viewModel.modelStatuses.keys.map { ($0, false) })
+                }
+                Button("Show models in use") { modelExpansion = [:] }
+                    .help("Open the models in use and close the rest")
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            modelsFormBody
+        }
+    }
+
+    private var modelsFormBody: some View {
         Form {
             if viewModel.modelStatuses.isEmpty {
                 HStack(spacing: 8) {
@@ -222,10 +250,22 @@ struct ModelManagerView: View {
                             ModelSettingsRow(
                                 status: status,
                                 selectable: entries.count > 1,
+                                expanded: Binding(
+                                    get: { isModelExpanded(status) },
+                                    set: { modelExpansion[status.id] = $0 }
+                                ),
                                 remoteStatus: viewModel.remoteServiceChecks[status.id],
                                 remoteChecking: viewModel.remoteServiceChecking.contains(status.id),
                                 capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
-                                onSetActive: { viewModel.onSetActiveModelByKey(status.id) },
+                                onSetActive: {
+                                    // The newly chosen model opens and the one it
+                                    // replaces closes, unless set by hand.
+                                    for other in entries where modelExpansion[other.id] == false || other.active {
+                                        modelExpansion[other.id] = nil
+                                    }
+                                    modelExpansion[status.id] = nil
+                                    viewModel.onSetActiveModelByKey(status.id)
+                                },
                                 onDownload: { viewModel.onDownloadModelByKey(status.id) },
                                 onDelete: { viewModel.onDeleteModelByKey(status.id) },
                                 onCheckCapability: { viewModel.onCheckModelCapability(status.id) },
@@ -1278,6 +1318,7 @@ private func capabilityColor(_ status: String) -> Color {
 struct ModelSettingsRow: View {
     let status: ModelStatus
     let selectable: Bool
+    @Binding var expanded: Bool
     let remoteStatus: String?
     let remoteChecking: Bool
     let capabilityChecking: Bool
@@ -1287,7 +1328,6 @@ struct ModelSettingsRow: View {
     let onCheckCapability: () -> Void
     let onCheckRemote: () -> Void
     let onSetHardwareGate: (Bool) -> Void
-    @State private var showDetails = false
 
     private var gateBlocked: Bool { status.hardwareGated && !status.hardwareGateAffirmed }
     private var usable: Bool { (status.installed || status.builtIn || status.remoteService) && !gateBlocked }
@@ -1302,6 +1342,17 @@ struct ModelSettingsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "Hide details" : "Show details")
                 if selectable {
                     Button(action: onSetActive) {
                         Image(systemName: status.active ? "largecircle.fill.circle" : "circle")
@@ -1325,22 +1376,19 @@ struct ModelSettingsRow: View {
                 } else if !status.installed && !status.builtIn && !status.remoteService {
                     Button("Download", action: onDownload).controlSize(.small)
                 }
-                Menu {
-                    Button(showDetails ? "Hide details" : "Details") { showDetails.toggle() }
-                    if status.capability != nil {
-                        Button("Check compatibility", action: onCheckCapability)
-                    }
-                    if status.installed && !status.active && !status.builtIn {
-                        Divider()
-                        Button("Delete", role: .destructive, action: onDelete)
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
 
+            if expanded {
+                expandedContent
+                    .padding(.leading, 20)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
             if status.hardwareGated {
                 Toggle("I have an NVIDIA DGX Spark", isOn: Binding(
                     get: { status.hardwareGateAffirmed },
@@ -1372,21 +1420,31 @@ struct ModelSettingsRow: View {
                     Text("Checking compatibility…").font(.caption).foregroundColor(.secondary)
                 }
             }
-            if showDetails {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(status.description)
-                    if !status.usedBy.isEmpty { Text("Used by: \(status.usedBy)") }
-                    if !status.dependsOn.isEmpty { Text("Needs: \(status.dependsOn)") }
-                    if let licence = status.licence { Text("Licence: \(licence)") }
-                    if !status.gateNote.isEmpty { Text(status.gateNote).italic() }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(status.description)
+                if !status.usedBy.isEmpty { Text("Used by: \(status.usedBy)") }
+                if !status.dependsOn.isEmpty { Text("Needs: \(status.dependsOn)") }
+                if let licence = status.licence { Text("Licence: \(licence)") }
+                if !status.gateNote.isEmpty { Text(status.gateNote).italic() }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            let canCheck = status.capability != nil && !capabilityChecking
+            let canDelete = status.installed && !status.active && !status.builtIn
+            if canCheck || canDelete {
+                HStack(spacing: 8) {
+                    if canCheck {
+                        Button("Check compatibility", action: onCheckCapability)
+                    }
+                    if canDelete {
+                        Button("Delete", role: .destructive, action: onDelete)
+                    }
                 }
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+                .controlSize(.small)
             }
         }
-        .padding(.vertical, 2)
     }
 
     private func pill(_ text: String, _ color: Color) -> some View {
