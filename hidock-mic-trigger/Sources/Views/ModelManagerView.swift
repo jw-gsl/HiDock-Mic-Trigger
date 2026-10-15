@@ -294,9 +294,47 @@ struct ModelManagerView: View {
 
                 Divider()
 
+                taggingCutoffSection
+
+                Divider()
+
                 githubPublishSection
             }
         }
+    }
+
+    /// Stop old, never-tagged meetings counting towards "N to tag".
+    private var taggingCutoffSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "tag").foregroundColor(.orange)
+                Text("Speaker tagging").fontWeight(.medium)
+                Spacer()
+                Toggle("Only count from", isOn: Binding(
+                    get: { viewModel.taggingIgnoreBefore != nil },
+                    set: { on in
+                        viewModel.taggingIgnoreBefore = on
+                            ? Calendar.current.date(byAdding: .month, value: -1, to: Date())
+                            : nil
+                    }
+                ))
+                .toggleStyle(.checkbox)
+                if let cutoff = viewModel.taggingIgnoreBefore {
+                    DatePicker("", selection: Binding(
+                        get: { cutoff },
+                        set: { viewModel.taggingIgnoreBefore = $0 }
+                    ), displayedComponents: .date)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+            Text(viewModel.taggingIgnoreBefore == nil
+                 ? "Every transcribed recording without confirmed speakers counts towards \"to tag\"."
+                 : "Older recordings stay in the list with a grey tag and can still be tagged; they just don't count towards \"to tag\".")
+                .font(.caption).foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 
 

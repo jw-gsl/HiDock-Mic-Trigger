@@ -12071,7 +12071,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
                 // Post-meeting nudge (from minutes v0.11.2)
                 // Subtle status bar suggestion — not a modal or popup
-                let untagged = syncEntries.filter { $0.transcribed && !$0.speakersTagged }.count
+                let untagged = viewModel.needsTaggingCount
                 if untagged > 3 {
                     viewModel.syncStatus = "✅ \(completed) transcribed — \(untagged) need speaker tagging"
                     viewModel.syncStatusLevel = .info
