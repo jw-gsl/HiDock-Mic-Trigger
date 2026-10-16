@@ -23,6 +23,9 @@ enum RepoUpdater {
         var incoming: [String] = []
         var error: String?
 
+        /// Commits the checkout itself is behind (0 = only a rebuild is needed).
+        var checkoutBehind = 0
+
         var canUpdate: Bool { error == nil && branch == "main" && behind > 0 && ahead == 0 && dirtyFiles.isEmpty }
     }
 
@@ -35,6 +38,11 @@ enum RepoUpdater {
     static var repoRoot: String {
         if let saved = UserDefaults.standard.string(forKey: "hidockRepoRoot"), !saved.isEmpty { return saved }
         return "\(NSHomeDirectory())/_git/hidock-tools"
+    }
+
+    /// The commit this app was built from (written by the deploy phase).
+    static var installedCommit: String? {
+        Bundle.main.infoDictionary?["HiDockGitCommit"] as? String
     }
 
     static var logPath: String { "\(NSHomeDirectory())/Library/Logs/hidock-self-update.log" }
@@ -99,7 +107,12 @@ enum RepoUpdater {
         s.branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).1.trimmingCharacters(in: .whitespacesAndNewlines)
         let counts = git(["rev-list", "--left-right", "--count", "HEAD...origin/main"]).1
             .split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
-        if counts.count == 2 { s.ahead = counts[0]; s.behind = counts[1] }
+        if counts.count == 2 { s.ahead = counts[0]; s.checkoutBehind = counts[1] }
+        // Behind = what the *installed app* lacks. The checkout can be current
+        // (pulled by hand) while the app was built from an older commit.
+        let base = installedCommit.flatMap { c in git(["cat-file", "-e", "\(c)^{commit}"]).0 == 0 ? c : nil } ?? "HEAD"
+        s.behind = Int(git(["rev-list", "--count", "\(base)..origin/main"]).1
+            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? s.checkoutBehind
         s.remoteHead = git(["rev-parse", "--short", "origin/main"]).1.trimmingCharacters(in: .whitespacesAndNewlines)
         s.dirtyFiles = git(["status", "--porcelain", "--untracked-files=no"]).1
             .split(separator: "\n").map { String($0.dropFirst(3)) }
@@ -109,7 +122,7 @@ enum RepoUpdater {
             .first { $0.contains("MARKETING_VERSION:") }
             .map { $0.split(separator: ":").last.map { $0.trimmingCharacters(in: .whitespaces) } ?? "" }
         if s.behind > 0 {
-            s.incoming = git(["log", "--format=%s", "--first-parent", "-n", "8", "HEAD..origin/main"]).1
+            s.incoming = git(["log", "--format=%s", "--first-parent", "-n", "8", "\(base)..origin/main"]).1
                 .split(separator: "\n").map(String.init)
         }
         return s
@@ -131,10 +144,13 @@ enum RepoUpdater {
             _ = run("/usr/bin/git", ["-C", repoRoot, "checkout", "--"] + generatedFiles, log: log)
             let pull = run("/usr/bin/git", ["-C", repoRoot, "pull", "--ff-only", "origin", "main"], log: log)
             guard pull.0 == 0 else { return fail("git pull failed. See \(logPath).") }
+            // Packages may have changed since the installed app was built, even
+            // when the checkout was already current.
+            let since = installedCommit ?? before
 
             // New pipeline packages arrive with the code; install them so the
             // transcription pipeline doesn't break on an import.
-            let changed = git(["diff", "--name-only", before, "HEAD"]).1
+            let changed = git(["diff", "--name-only", since, "HEAD"]).1
             if changed.contains("transcription-pipeline/requirements.txt") {
                 let pip = "\(repoRoot)/transcription-pipeline/.venv/bin/python3"
                 let r = run(pip, ["-m", "pip", "install", "-q", "-r",
@@ -184,7 +200,7 @@ enum RepoUpdater {
             lines.append(error)
         } else if s.behind == 0 {
             alert.messageText = "HiDock is up to date"
-            lines.append("Your checkout matches GitHub's main branch (\(s.remoteHead)).")
+            lines.append("This app is built from GitHub's latest main (\(s.remoteHead)).")
         } else {
             alert.messageText = "\(s.behind) new change\(s.behind == 1 ? "" : "s") on GitHub"
             if let v = s.remoteVersion, v != currentVersion { lines.append("main is at \(v).") }
@@ -197,7 +213,9 @@ enum RepoUpdater {
             } else if !s.dirtyFiles.isEmpty {
                 lines.append("Uncommitted changes in: \(s.dirtyFiles.prefix(4).joined(separator: ", ")). Commit or discard them first.")
             } else {
-                lines.append("Update now pulls them and rebuilds. You'll be asked to approve the restart, which waits for anything that's running.")
+                lines.append(s.checkoutBehind > 0
+                    ? "Update now pulls them and rebuilds. You'll be asked to approve the restart, which waits for anything that's running."
+                    : "Your checkout already has them; Update now rebuilds the app. You'll be asked to approve the restart, which waits for anything that's running.")
             }
         }
         alert.informativeText = lines.joined(separator: "\n\n")
