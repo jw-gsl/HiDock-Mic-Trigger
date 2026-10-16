@@ -60,3 +60,10 @@ then re-transcribe the recording on the new Mac once the checks pass.
 5. In Terminal: `gh auth login -h github.com` and `gh auth setup-git`.
 6. Quit HiDock on the old Mac.
 7. Click **Check again** on the setup banner, or wait for it to clear.
+
+## Keeping a Mac up to date
+
+A build installed from the code (this repo) updates itself from GitHub: **Check for Updates** shows your version, the latest release and the changes waiting on `main`, and **Update now** pulls them, installs any new Python packages and rebuilds (you approve the restart). The log is at `~/Library/Logs/hidock-self-update.log`. It won't update a checkout that isn't on `main`, has its own commits, or has uncommitted edits.
+
+The download on the Releases page is a separate, standalone app with its own Python; it updates from the Releases page.
+
