@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.9
-  CURRENT_PROJECT_VERSION: 12
+  MARKETING_VERSION: 4.1.10
+  CURRENT_PROJECT_VERSION: 13
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -238,8 +238,8 @@ targets:
         CFBundleDisplayName: HiDock Mic Trigger
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleExecutable: hidock-mic-trigger
-        CFBundleShortVersionString: "4.1.9"
-        CFBundleVersion: "12"
+        CFBundleShortVersionString: "4.1.10"
+        CFBundleVersion: "13"
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
         # EventKit matches a recording to its meeting. macOS 14+ asks for the
