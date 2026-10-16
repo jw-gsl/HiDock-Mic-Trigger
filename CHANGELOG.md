@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 11 changes (v4.1.0 to v4.1.10, 15 Oct 2026 – 16 Oct 2026)
+**Released 16 Oct 2026** · 12 changes (v4.1.0 to v4.1.11, 15 Oct 2026 – 16 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -42,6 +42,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.8 | 15 Oct 2026 | Models pane rows expand with an arrow; models in use open by default (#130) |
 | v4.1.9 | 16 Oct 2026 | Downloaded app includes its own Python; builds run from the repo no longer offer to replace themselves with the download (#135) |
 | v4.1.10 | 16 Oct 2026 | Downloaded app includes everything device sync and transcription need, checked before each release (#136) |
+| v4.1.11 | 16 Oct 2026 | Release build copies the pipeline's shared files reliably (#PR) |
 
 </details>
 
