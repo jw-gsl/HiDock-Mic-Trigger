@@ -31,8 +31,22 @@ final class UpdateChecker {
         return !FileManager.default.fileExists(atPath: "\(res)/usb-extractor/extractor.py")
     }
 
+    /// The latest release's version (without the "v"), or nil. Blocks; call
+    /// off the main thread.
+    static func latestReleaseVersion() -> String? {
+        let done = DispatchSemaphore(value: 0)
+        var version: String?
+        fetchLatestRelease { release in
+            if let tag = release?.tag_name { version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag }
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 15)
+        return version
+    }
+
     static func checkForUpdate(completion: @escaping (_ title: String, _ body: String, _ release: GitHubRelease) -> Void) {
-        guard !isDeveloperBuild else { return }
+        // A developer build updates from its checkout instead (RepoUpdater).
+        guard !isDeveloperBuild else { RepoUpdater.backgroundCheck(); return }
         guard let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else {
             return
         }
@@ -62,10 +76,8 @@ final class UpdateChecker {
     /// Manual check — always shows a result.
     static func manualCheck() {
         if isDeveloperBuild {
-            let alert = NSAlert()
-            alert.messageText = "This is a developer build"
-            alert.informativeText = "It runs the pipeline from your hidock-tools checkout, so it updates by building from the repo (git pull, then deploy), not from GitHub releases."
-            alert.runModal()
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+            RepoUpdater.manualCheck(currentVersion: version)
             return
         }
         guard let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else {
