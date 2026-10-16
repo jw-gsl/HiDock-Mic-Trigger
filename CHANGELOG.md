@@ -44,7 +44,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.9 | 16 Oct 2026 | Downloaded app includes its own Python; builds run from the repo no longer offer to replace themselves with the download (#135) |
 | v4.1.10 | 16 Oct 2026 | Downloaded app includes everything device sync and transcription need, checked before each release (#136) |
 | v4.1.11 | 16 Oct 2026 | Release build copies the pipeline's shared files reliably (#137) |
-| v4.1.12 | 16 Oct 2026 | Check for Updates in a build from the code shows what's new on GitHub and can install it (#PR) |
+| v4.1.12 | 16 Oct 2026 | Check for Updates in a build from the code shows what's new on GitHub and can install it (#138) |
 
 </details>
 
