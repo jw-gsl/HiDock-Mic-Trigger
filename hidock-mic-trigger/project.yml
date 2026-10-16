@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.13
-  CURRENT_PROJECT_VERSION: 16
+  MARKETING_VERSION: 4.1.14
+  CURRENT_PROJECT_VERSION: 17
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -67,6 +67,14 @@ targets:
           if [ "${HIDOCK_DEPLOY:-}" != "1" ] && [ "${HIDOCK_DEPLOY:-}" != "force" ]; then
             echo "note: HIDOCK_DEPLOY not set — compiled only, installed app untouched"
             exit 0
+          fi
+
+          # Record the commit this app is built from, so Check for Updates can
+          # compare the installed app (not just the checkout) with GitHub.
+          COMMIT=$(git -C "$SRCROOT/.." rev-parse HEAD 2>/dev/null || echo "")
+          if [ -n "$COMMIT" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :HiDockGitCommit" "$TARGET_BUILD_DIR/$INFOPLIST_PATH" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :HiDockGitCommit string $COMMIT" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
           fi
 
           # Never install an app whose label doesn't match the project.
@@ -253,8 +261,8 @@ targets:
         CFBundleDisplayName: HiDock Mic Trigger
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleExecutable: hidock-mic-trigger
-        CFBundleShortVersionString: "4.1.13"
-        CFBundleVersion: "16"
+        CFBundleShortVersionString: "4.1.14"
+        CFBundleVersion: "17"
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
         # EventKit matches a recording to its meeting. macOS 14+ asks for the
