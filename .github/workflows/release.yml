@@ -87,8 +87,11 @@ jobs:
           mkdir -p "$RES/usb-extractor"
           cp usb-extractor/*.py "$RES/usb-extractor/"
           mkdir -p "$RES/shared"
-          (cd shared && find . -name "*.py" -not -path "./tests/*" -not -path "*/__pycache__/*" \
-            | cpio -pdm --quiet "$RES/shared")
+          # rsync, not cpio: on the runner /tmp is a symlink, and cpio refuses
+          # to "extract through symlink", which left shared/ empty (v4.1.10).
+          rsync -a --prune-empty-dirs --exclude='tests/' --exclude='__pycache__/' \
+            --include='*/' --include='*.py' --exclude='*' shared/ "$RES/shared/"
+          test -f "$RES/shared/audio_utils.py"
 
           mkdir -p "$RES/transcription-pipeline"
           cp transcription-pipeline/transcribe_cpp.py "$RES/transcription-pipeline/"
