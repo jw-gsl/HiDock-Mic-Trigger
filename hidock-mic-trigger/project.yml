@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.11
-  CURRENT_PROJECT_VERSION: 14
+  MARKETING_VERSION: 4.1.12
+  CURRENT_PROJECT_VERSION: 15
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -197,7 +197,10 @@ targets:
           codesign --verify --deep --strict --verbose=2 "$STAGED_APP"
 
           # Kill running instance only after the replacement has been signed.
-          pkill -f "hidock-mic-trigger" 2>/dev/null || true
+          # -x: the process *name*. `-f` matched any command line containing the
+          # text — including an xcodebuild started by the app's own "Update
+          # now" (its arguments name the hidock-mic-trigger project).
+          pkill -x "hidock-mic-trigger" 2>/dev/null || true
           sleep 1
 
           # Remove stale copies (including the legacy Dev.app split, the old
@@ -238,8 +241,8 @@ targets:
         CFBundleDisplayName: HiDock Mic Trigger
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleExecutable: hidock-mic-trigger
-        CFBundleShortVersionString: "4.1.11"
-        CFBundleVersion: "14"
+        CFBundleShortVersionString: "4.1.12"
+        CFBundleVersion: "15"
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
         # EventKit matches a recording to its meeting. macOS 14+ asks for the

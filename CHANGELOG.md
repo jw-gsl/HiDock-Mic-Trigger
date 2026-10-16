@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 12 changes (v4.1.0 to v4.1.11, 15 Oct 2026 – 16 Oct 2026)
+**Released 16 Oct 2026** · 13 changes (v4.1.0 to v4.1.12, 15 Oct 2026 – 16 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -17,6 +17,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **"Only count from" date for speaker tagging.** In Settings → Speakers, tick "Only count recordings from a date" and pick one; older recordings stop counting towards the "to tag" count and their tag icon turns grey (still clickable).
 
 ### Improved
+- **Check for Updates in a build from the code.** It now shows your version, the latest release, and the changes waiting on GitHub, and Update now pulls them and rebuilds (you approve the restart). You're also told at launch when there's something new.
 - **Models pane.** Each model expands with an arrow, the models you're using are open by default, and there are Expand all, Collapse all and Show models in use buttons.
 - **Speaker detection falls back.** If Nemotron on a separate NVIDIA computer isn't available, speakers are detected on the Mac instead.
 - **Voice library corrected.** Voice samples filed under the wrong person are moved to whoever the transcript says was speaking, or set aside if that's not certain.
@@ -43,6 +44,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.9 | 16 Oct 2026 | Downloaded app includes its own Python; builds run from the repo no longer offer to replace themselves with the download (#135) |
 | v4.1.10 | 16 Oct 2026 | Downloaded app includes everything device sync and transcription need, checked before each release (#136) |
 | v4.1.11 | 16 Oct 2026 | Release build copies the pipeline's shared files reliably (#137) |
+| v4.1.12 | 16 Oct 2026 | Check for Updates in a build from the code shows what's new on GitHub and can install it (#138) |
 
 </details>
 
