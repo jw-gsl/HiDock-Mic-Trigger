@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.12
-  CURRENT_PROJECT_VERSION: 15
+  MARKETING_VERSION: 4.1.13
+  CURRENT_PROJECT_VERSION: 16
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -67,6 +67,13 @@ targets:
           if [ "${HIDOCK_DEPLOY:-}" != "1" ] && [ "${HIDOCK_DEPLOY:-}" != "force" ]; then
             echo "note: HIDOCK_DEPLOY not set — compiled only, installed app untouched"
             exit 0
+          fi
+
+          # Never install an app whose label doesn't match the project.
+          BUILT_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$TARGET_BUILD_DIR/$INFOPLIST_PATH")
+          if [ "$BUILT_VERSION" != "$MARKETING_VERSION" ]; then
+            echo "error: built app says $BUILT_VERSION but the project is $MARKETING_VERSION; not deploying (rebuild)"
+            exit 1
           fi
           if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
             echo "note: GitHub Actions — never deploys"
@@ -217,6 +224,11 @@ targets:
 
           open -a "$INSTALL_DIR/$APP_NAME"
           echo "Deployed signed $APP_NAME ($CONFIGURATION) to $INSTALL_DIR"
+        # Run after the Info.plist is written. Without an input, Xcode was free
+        # to run this alongside ProcessInfoPlistFile, and once installed an app
+        # labelled with the previous build's version (4.1.11 for 4.1.12).
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
         basedOnDependencyAnalysis: false
     sources:
       - Sources
@@ -241,8 +253,8 @@ targets:
         CFBundleDisplayName: HiDock Mic Trigger
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleExecutable: hidock-mic-trigger
-        CFBundleShortVersionString: "4.1.12"
-        CFBundleVersion: "15"
+        CFBundleShortVersionString: "4.1.13"
+        CFBundleVersion: "16"
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
         # EventKit matches a recording to its meeting. macOS 14+ asks for the
