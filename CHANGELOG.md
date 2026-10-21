@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 15 changes (v4.1.0 to v4.1.14, 15 Oct 2026 – 16 Oct 2026)
+**Released 16 Oct 2026** · 16 changes (v4.1.0 to v4.1.15, 15 Oct 2026 – 16 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -25,6 +25,7 @@ This release brings every setting into one Settings window and makes setting up 
 
 ### Fixed
 - **Trimmed recordings.** Trimming a recording now trims its transcript too, instead of leaving the full-length text.
+- **Long recordings stalling on Nemotron.** Audio is now sent to the Spark as lossless FLAC instead of uncompressed WAV, a quarter of the size, so a 3-hour recording no longer takes hours to upload over a slow connection.
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
@@ -47,6 +48,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.12 | 16 Oct 2026 | Check for Updates in a build from the code shows what's new on GitHub and can install it (#138) |
 | v4.1.13 | 16 Oct 2026 | Installing a build waits for its version label, and won't install a mismatched one; guide covers updating (#139) |
 | v4.1.14 | 16 Oct 2026 | Check for Updates compares the installed app with GitHub, not just the code folder (#140) |
+| v4.1.15 | 21 Oct 2026 | Nemotron uploads are a quarter of the size (lossless FLAC), so long recordings over a slow connection finish (#141) |
 
 </details>
 

@@ -124,14 +124,15 @@ def available() -> tuple[bool, str]:
     return True, f"Connected to {host} — {why}"
 
 
-def _post_diarize(wav_bytes: bytes, profile: str) -> dict:
-    """Multipart POST of a wav blob; returns the parsed sidecar response."""
+def _post_diarize(wav_bytes: bytes, profile: str, *, filename: str = "audio.wav",
+                  content_type: str = "audio/wav") -> dict:
+    """Multipart POST of an audio blob; returns the parsed sidecar response."""
     import uuid
 
     boundary = uuid.uuid4().hex
     body = (
         f"--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; "
-        "filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
     ).encode() + wav_bytes + b"\r\n"
     body += (
         f"--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\n"
@@ -202,17 +203,22 @@ def diarize(
     audio_path = Path(audio_path)
     audio = load_audio(audio_path, sr=16000)
 
-    # Ship a WAV blob — 16 kHz mono f32 is the sidecar's native input, so
-    # load_audio here also normalises sample rate once, client-side.
+    # Ship 16 kHz mono as 16-bit FLAC. It was 32-bit float WAV: 666 MB for a
+    # 3-hour meeting, which over a slow tailnet link (60 KB/s via a relay)
+    # took hours to upload and looked like a hang. FLAC is lossless at the
+    # sidecar's 16-bit input — on a test clip the speaker turns were
+    # identical to the float WAV (100% frame agreement) — at a quarter of the
+    # size. (Sending the original file was smaller still but only 92% agreed,
+    # because the sidecar then resamples it differently.)
     import io
     import soundfile as sf
 
     buf = io.BytesIO()
-    sf.write(buf, audio, 16000, format="WAV", subtype="FLOAT")
+    sf.write(buf, audio, 16000, format="FLAC", subtype="PCM_16")
 
     profile = _nemotron_config().get("profile", "offline")
     t0 = time.time()
-    response = _post_diarize(buf.getvalue(), profile)
+    response = _post_diarize(buf.getvalue(), profile, filename="audio.flac", content_type="audio/flac")
     remote_s = response.get("inference_s", round(time.time() - t0, 1))
 
     raw_turns = _turns_from_response(response)
