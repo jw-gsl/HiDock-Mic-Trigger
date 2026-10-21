@@ -48,7 +48,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.12 | 16 Oct 2026 | Check for Updates in a build from the code shows what's new on GitHub and can install it (#138) |
 | v4.1.13 | 16 Oct 2026 | Installing a build waits for its version label, and won't install a mismatched one; guide covers updating (#139) |
 | v4.1.14 | 16 Oct 2026 | Check for Updates compares the installed app with GitHub, not just the code folder (#140) |
-| v4.1.15 | 21 Oct 2026 | Nemotron uploads are a quarter of the size (lossless FLAC), so long recordings over a slow connection finish (#PR) |
+| v4.1.15 | 21 Oct 2026 | Nemotron uploads are a quarter of the size (lossless FLAC), so long recordings over a slow connection finish (#141) |
 
 </details>
 
