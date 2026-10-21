@@ -14,6 +14,7 @@ app can persist them — this file still never writes secrets to disk itself.
 from __future__ import annotations
 
 import base64
+import glob
 import json
 import os
 import re
@@ -489,6 +490,18 @@ def _matching_existing_file(base_path: Path) -> Path | None:
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    # The day folder is the recording's date in the Mac's *current* time zone,
+    # but the file name keeps Plaud's own wall-clock time. After travelling (or
+    # a Mac set to another zone) an early-morning recording maps to a different
+    # day folder, wasn't found, and was downloaded and transcribed again —
+    # overwriting its transcript (2026-06-12 05-29-02, re-fetched on a Pacific-
+    # time Mac on 2026-10-21). Look in every Plaud day folder for the same name.
+    plaud_root = base_path.parent.parent
+    if plaud_root.name == "Plaud" and plaud_root.is_dir():
+        for ext in (base_path.suffix, ".opus", ".mp3"):
+            for candidate in plaud_root.glob(f"*/{glob.escape(base_path.stem)}{ext}"):
+                if candidate.is_file():
+                    return candidate
     return None
 
 
