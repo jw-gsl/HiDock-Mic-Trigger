@@ -420,6 +420,10 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
     case failed
     case imported
     case merged
+    /// The rows behind the toolbar's "N to tag" count.
+    case needsTagging
+    /// The rows behind "N to confirm": auto-tagged, not yet confirmed.
+    case needsConfirming
 
     var id: String { rawValue }
 
@@ -442,6 +446,8 @@ enum SyncStatusFilter: String, CaseIterable, Identifiable {
         case .failed: return "Failed"
         case .imported: return "Imported"
         case .merged: return "Merged"
+        case .needsTagging: return "To tag"
+        case .needsConfirming: return "To confirm"
         }
     }
 }
