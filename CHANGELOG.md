@@ -52,7 +52,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.14 | 16 Oct 2026 | Check for Updates compares the installed app with GitHub, not just the code folder (#140) |
 | v4.1.15 | 21 Oct 2026 | Nemotron uploads are a quarter of the size (lossless FLAC), so long recordings over a slow connection finish (#141) |
 | v4.1.16 | 21 Oct 2026 | Plaud recordings already on disk aren't downloaded again when the Mac is in another time zone (#142) |
-| v4.1.17 | 29 Oct 2026 | HiDock clock kept on Mac time, so recordings aren't stamped an hour out after the clocks change (#PR) |
+| v4.1.17 | 29 Oct 2026 | HiDock clock kept on Mac time, so recordings aren't stamped an hour out after the clocks change (#143) |
 
 </details>
 
