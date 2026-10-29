@@ -480,3 +480,34 @@ class TestUtcNowIso:
         assert "T" in result
         assert result.endswith("+00:00")
         assert "." not in result  # no microseconds
+
+
+def _fake_clock(monkeypatch, device_text):
+    import extractor
+    sent = []
+
+    def fake_send(dev, command, request_id, payload=b"", timeout_ms=0, max_reads=0):
+        sent.append((command, payload))
+        if command == extractor.CMD_QUERY_TIME:
+            return [(command, request_id, bytes.fromhex(device_text))]
+        return [(command, request_id, b"\x00")]
+
+    monkeypatch.setattr(extractor, "send_and_collect", fake_send)
+    return extractor, sent
+
+
+def test_clock_an_hour_ahead_is_set_to_mac_time(monkeypatch):
+    from datetime import datetime, timedelta
+    ahead = (datetime.now() + timedelta(hours=1)).strftime("%Y%m%d%H%M%S")
+    extractor, sent = _fake_clock(monkeypatch, ahead)
+    info = extractor.sync_device_clock(object())
+    assert info["corrected"] is True and 3590 <= info["drift_s"] <= 3610
+    assert sent[-1][0] == extractor.CMD_SET_TIME and len(sent[-1][1]) == 7
+
+
+def test_clock_within_tolerance_is_left_alone(monkeypatch):
+    from datetime import datetime
+    extractor, sent = _fake_clock(monkeypatch, datetime.now().strftime("%Y%m%d%H%M%S"))
+    info = extractor.sync_device_clock(object())
+    assert info["corrected"] is False
+    assert all(cmd != extractor.CMD_SET_TIME for cmd, _ in sent)
