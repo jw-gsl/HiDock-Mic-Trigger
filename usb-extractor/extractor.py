@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Make `shared/` importable regardless of where the extractor is invoked
@@ -1167,6 +1167,40 @@ def probe_device(timeout_ms: int = 2000) -> dict:
         release_device(dev, interface_number)
 
 
+def clock_offset_seconds(output_path: Path) -> float:
+    """Seconds the recorder's clock was ahead when it named this recording.
+
+    Read from `clock_offset_seconds` in the `<stem>_recording_time.json`
+    sidecar beside the audio (0 if absent). The HiDock keeps local time with
+    no time zone, so after the clocks change it names recordings an hour out
+    until its clock is set again.
+    """
+    sidecar = output_path.with_name(f"{output_path.stem}_recording_time.json")
+    try:
+        offset = json.loads(sidecar.read_text()).get("clock_offset_seconds", 0)
+        return float(offset or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def with_clock_offset(item: dict, output_path: Path) -> dict:
+    """Shift an item's createDate/createTime back by its recorded clock offset."""
+    offset = clock_offset_seconds(output_path)
+    if not offset:
+        return item
+    try:
+        stamped = datetime.strptime(f'{item["createDate"]} {item["createTime"]}', "%Y/%m/%d %H:%M:%S")
+    except (KeyError, ValueError):
+        return item
+    corrected = stamped - timedelta(seconds=offset)
+    return {
+        **item,
+        "createDate": corrected.strftime("%Y/%m/%d"),
+        "createTime": corrected.strftime("%H:%M:%S"),
+        "clockOffsetSeconds": offset,
+    }
+
+
 def build_recording_status_items(recordings: list[dict], state: dict, output_dir: Path, product_id: int | None = None) -> list[dict]:
     downloads = state.get("downloads", {})
     items: list[dict] = []
@@ -1270,6 +1304,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "removed": bool(stored.get("removed")),
             }
         )
+        items[-1] = with_clock_offset(items[-1], output_path)
 
     for name, stored in downloads.items():
         if name in seen_names:
@@ -1330,6 +1365,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "removed": bool(stored.get("removed")),
             }
         )
+        items[-1] = with_clock_offset(items[-1], output_path)
     items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
     return items
 
