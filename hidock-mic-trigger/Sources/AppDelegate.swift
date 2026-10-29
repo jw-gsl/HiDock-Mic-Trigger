@@ -4403,7 +4403,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = recordingTimeZone(for: timeZonePath)
         formatter.dateFormat = "yyyyMMMdd-HHmmss"
-        return formatter.date(from: String(stem.prefix(16)))
+        guard let stamped = formatter.date(from: String(stem.prefix(16))) else { return nil }
+        return stamped.addingTimeInterval(-recordingClockOffset(for: timeZonePath))
+    }
+
+    /// Seconds the recorder's clock was ahead when it named this recording
+    /// (`clock_offset_seconds` in the `_recording_time.json` sidecar; 0 if
+    /// none). The HiDock keeps local time with no time zone, so after the
+    /// clocks change it stamps recordings an hour out until it is set again.
+    private func recordingClockOffset(for audioPath: String) -> TimeInterval {
+        guard let data = try? Data(contentsOf: recordingTimeContextURL(for: audioPath)),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let offset = payload["clock_offset_seconds"] as? Double else { return 0 }
+        return offset
     }
 
     private func findMacCalendarEvents(
