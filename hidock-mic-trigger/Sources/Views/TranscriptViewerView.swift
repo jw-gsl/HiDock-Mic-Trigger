@@ -382,6 +382,49 @@ extension DiarizedTranscript {
         merged.merge(mine) { _, new in new }
         return try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
     }
+
+    /// True when "Mark all unknown" has something to do: more than one
+    /// speaker, and at least one of them not yet reviewed.
+    var canMarkAllSpeakersUnknown: Bool {
+        let ids = Set(segments.map(\.speakerId))
+        guard ids.count > 1 else { return false }
+        return ids.contains { speakerMeta?["\($0)"]?.verified != true }
+    }
+
+    /// Mark every unverified speaker as a reviewed guest: name → Speaker N,
+    /// meta → unknown + verified. Confirmed real names are untouched.
+    /// Result: ≥1 verified speaker ⇒ speakersTagged / orange nag clears.
+    /// Shared by the viewer's button and the recordings toolbar.
+    ///
+    /// Iterates **all** `speakerNames` keys (not only segment speaker ids) so
+    /// orphan name-table rows don't leave the meeting in "needs tagging".
+    /// Returns whether anything changed.
+    mutating func markAllSpeakersUnknown() -> Bool {
+        func isGeneric(_ name: String) -> Bool {
+            name.range(of: #"^Speaker \d+$"#, options: .regularExpression) != nil
+        }
+        var ids = Set(segments.map(\.speakerId))
+        for key in speakerNames.keys {
+            if let n = Int(key) { ids.insert(n) }
+        }
+        var changed = false
+        var meta = speakerMeta ?? [:]
+        for id in ids.sorted() {
+            let key = "\(id)"
+            let name = speakerNames[key] ?? "Speaker \(id + 1)"
+            if meta[key]?.verified == true, !isGeneric(name) {
+                continue   // keep locked-in people
+            }
+            let generic = "Speaker \(id + 1)"
+            if name != generic || meta[key]?.source != "unknown" || meta[key]?.verified != true {
+                speakerNames[key] = generic
+                meta[key] = SpeakerMeta(source: "unknown", confidence: nil, verified: true)
+                changed = true
+            }
+        }
+        if changed { speakerMeta = meta }
+        return changed
+    }
 }
 
 /// Pass-through for the `speaker_lineage` sidecar map produced when labels
@@ -3713,42 +3756,10 @@ struct TranscriptViewerView: View {
 
     /// True when this multi-speaker meeting still has anyone not fully
     /// reviewed — so "Mark all unknown" can close the tagging loop.
-    private var canMarkAllUnknown: Bool {
-        guard uniqueSpeakerIds.count > 1 else { return false }
-        return uniqueSpeakerIds.contains { id in
-            !(speakerMeta(for: id)?.verified ?? false)
-        }
-    }
+    private var canMarkAllUnknown: Bool { transcript.canMarkAllSpeakersUnknown }
 
-    /// Mark every unverified speaker as a reviewed guest: name → Speaker N,
-    /// meta → unknown + verified. Confirmed real names are untouched.
-    /// Result: ≥1 verified speaker ⇒ speakersTagged / orange nag clears.
-    ///
-    /// Iterates **all** `speakerNames` keys (not only segment speaker ids) so
-    /// orphan name-table rows don't leave the meeting in "needs tagging".
     private func markAllSpeakersUnknown() {
-        var changed = false
-        let ids: [Int] = {
-            var set = Set(uniqueSpeakerIds)
-            for key in transcript.speakerNames.keys {
-                if let n = Int(key) { set.insert(n) }
-            }
-            return set.sorted()
-        }()
-        for id in ids {
-            if speakerMeta(for: id)?.verified == true,
-               !isGenericName(speakerName(for: id)) {
-                continue   // keep locked-in people
-            }
-            let generic = "Speaker \(id + 1)"
-            if speakerName(for: id) != generic
-                || speakerMeta(for: id)?.source != "unknown"
-                || speakerMeta(for: id)?.verified != true {
-                transcript.speakerNames["\(id)"] = generic
-                setMeta(id, source: "unknown", verified: true, confidence: nil)
-                changed = true
-            }
-        }
+        let changed = transcript.markAllSpeakersUnknown()
         if speakerFilter != nil { speakerFilter = nil }
         if editingSpeakerId != nil {
             editingSpeakerId = nil
