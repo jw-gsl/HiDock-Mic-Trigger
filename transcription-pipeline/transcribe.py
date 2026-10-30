@@ -535,6 +535,8 @@ def transcribe_file(
                         )
                 if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
                     diarized_result["calendar_context"] = calendar_context.to_metadata()
+                    from shared.calendar_context import speaker_count_check
+                    diarized_result["speaker_count_check"] = speaker_count_check(calendar_context, diarized_result)
             except ModuleNotFoundError as e:
                 # Selected backend's pip package missing — keep going
                 # with the transcript even if diarization fails, so the
@@ -1131,6 +1133,8 @@ def cmd_rediarize(args):
         print(f"WARN: could not preserve existing speaker labels: {exc}", file=sys.stderr)
     if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
         diarized_result["calendar_context"] = calendar_context.to_metadata()
+        from shared.calendar_context import speaker_count_check
+        diarized_result["speaker_count_check"] = speaker_count_check(calendar_context, diarized_result)
     progress(90)
 
     # Apply corrections
@@ -1246,6 +1250,13 @@ def cmd_recluster_with_anchors(args):
     print(_json.dumps(summary))
 
 
+def cmd_doctor(_args):
+    """Check this Mac has what the pipeline needs; JSON with a fix per problem."""
+    import json as _json
+    from shared import setup_doctor
+    print(_json.dumps(setup_doctor.run()))
+
+
 def cmd_voice_check(args):
     """Propose line and speaker corrections from the meeting's saved voices,
     or apply the ones the reviewer accepted (--apply moves.json)."""
@@ -1262,6 +1273,9 @@ def cmd_voice_check(args):
         review_feedback.record_refine(recording, "skipped", skipped)
         voice_check.forget_suggestions(json_path, skipped, digest_before=voice_check._digest(json_path))
         print(_json.dumps({"recorded_skips": len(skipped)}))
+        return
+    if args.auto_apply is not None or args.undo_auto or args.keep_auto:
+        _voice_check_auto(args, json_path, recording)
         return
     if args.precompute:
         # Runs beside transcription work, after a transcript is written: keep
@@ -1291,7 +1305,27 @@ def cmd_voice_check(args):
     voice_check.forget_suggestions(json_path, moves, digest_before=digest_before)
     review_feedback.record_refine(recording, "applied", moves)
     # Learn each person's voice from the lines just given to them (verified).
-    learned = {}
+    learned = _learn_by_person(json_path, data, moves)
+    summary["learned"] = learned
+    summary.pop("done", None)
+    _refresh_voice_check_md(json_path, data)
+    print(_json.dumps(summary))
+
+
+def _refresh_voice_check_md(json_path: Path, data: dict) -> None:
+    try:
+        from shared.transcript_writer import write_transcript
+        md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
+        body_text = " ".join(seg.get("text", "").strip() for seg in data.get("segments", []) if seg.get("text"))
+        write_transcript(md_path, body_text, source_path=Path(data.get("audio_file", "")),
+                         model="voice-check", diarized_result=data)
+    except Exception as exc:
+        print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+
+
+def _learn_by_person(json_path: Path, data: dict, moves: list[dict]) -> dict:
+    """Learn each person's voice from lines given to them. Never raises."""
+    learned: dict = {}
     by_name: dict[str, list[tuple[float, float]]] = {}
     for move in moves:
         seg = next((s for s in data.get("segments", [])
@@ -1302,17 +1336,41 @@ def cmd_voice_check(args):
         from shared.voice_candidate_review import learn_from_lines
         for name, ranges in by_name.items():
             learned[name] = learn_from_lines(json_path, name, ranges, source="refine")
-    except Exception as exc:  # learning is a bonus; never fail the apply
+    except Exception as exc:  # learning is a bonus; never fail the decision
         learned["error"] = str(exc)
-    summary["learned"] = learned
-    try:
-        from shared.transcript_writer import write_transcript
-        md_path = json_path.with_name(json_path.stem.replace("_diarized", "") + ".md")
-        body_text = " ".join(seg.get("text", "").strip() for seg in data.get("segments", []) if seg.get("text"))
-        write_transcript(md_path, body_text, source_path=Path(data.get("audio_file", "")),
-                         model="voice-check", diarized_result=data)
-    except Exception as exc:
-        print(f"WARN: could not refresh .md: {exc}", file=sys.stderr)
+    return learned
+
+
+def _voice_check_auto(args, json_path: Path, recording: str) -> None:
+    """Refine's automatic moves: apply the confident ones, or the reviewer
+    undoing or keeping them. Only a kept move teaches the voice library."""
+    import json as _json
+    from shared import voice_check
+    from shared import review_feedback
+
+    def starts(path: str) -> list[float] | None:
+        value = _json.loads(Path(path).read_text(encoding="utf-8"))
+        return None if value == "all" else [float(v) for v in value]
+
+    if args.auto_apply is not None:
+        snapshot_transcript(json_path, "Before Refine applied its confident suggestions")
+        summary = voice_check.auto_apply(json_path, float(args.auto_apply))
+        if summary["auto_applied"]:
+            review_feedback.record_refine(recording, "auto_applied", summary["moves"])
+    elif args.undo_auto:
+        snapshot_transcript(json_path, "Before undoing Refine's automatic changes")
+        summary = voice_check.undo_auto(json_path, starts(args.undo_auto))
+        review_feedback.record_refine(recording, "skipped", [{**m, "auto": True} for m in summary["moves"]])
+    else:
+        summary = voice_check.keep_auto(json_path, starts(args.keep_auto))
+        review_feedback.record_refine(recording, "applied", [{**m, "auto": True} for m in summary["moves"]])
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+        summary["learned"] = _learn_by_person(json_path, data, summary["moves"])
+    data = _json.loads(json_path.read_text(encoding="utf-8"))
+    if summary.get("auto_applied") or summary.get("undone"):
+        _refresh_voice_check_md(json_path, data)
+    summary["pending"] = len(voice_check.pending_auto(data))
+    summary.pop("moves", None)
     print(_json.dumps(summary))
 
 
@@ -2272,6 +2330,19 @@ def cmd_split_artifacts(args):
     }))
 
 
+def cmd_trim_artifacts(args):
+    """Crop existing JSON/Markdown/SRT transcript artifacts to match trimmed audio."""
+    from shared.split_recording import write_trimmed_artifacts
+
+    audio = Path(args.audio).resolve()
+    if not audio.exists():
+        raise FileNotFoundError(f"trimmed audio not found: {audio}")
+    if args.end <= args.start:
+        raise ValueError(f"trim end ({args.end}) must be after start ({args.start})")
+    md = write_trimmed_artifacts(audio, Path(args.transcript_dir).resolve(), args.start, args.end)
+    print(json.dumps({"transcript": str(md) if md else None}))
+
+
 def main():
     parser = argparse.ArgumentParser(description="HiDock Transcription Pipeline")
     sub = parser.add_subparsers(dest="command")
@@ -2324,6 +2395,9 @@ def main():
     )
     p_recluster.set_defaults(func=cmd_recluster_with_anchors)
 
+    p_doctor = sub.add_parser("doctor", help="Check tokens, models, packages and GitHub sign-in; say what to fix")
+    p_doctor.set_defaults(func=cmd_doctor)
+
     p_voice_check = sub.add_parser(
         "voice-check",
         help="Check each line against the meeting's saved voices and propose corrections",
@@ -2331,6 +2405,10 @@ def main():
     p_voice_check.add_argument("json_path", help="Path to _diarized.json file")
     p_voice_check.add_argument("--apply", help="JSON list of accepted moves ({index, to_name, start, ...}) to apply")
     p_voice_check.add_argument("--skip", help="JSON list of suggestions the reviewer skipped, to remember")
+    p_voice_check.add_argument("--auto-apply", type=float, default=None, metavar="MIN_SCORE",
+                               help="Apply saved line suggestions scoring at least MIN_SCORE, without learning")
+    p_voice_check.add_argument("--undo-auto", help='JSON list of start times (or "all") of automatic moves to undo')
+    p_voice_check.add_argument("--keep-auto", help='JSON list of start times (or "all") of automatic moves to keep')
     p_voice_check.add_argument("--precompute", action="store_true",
                                help="Run at low priority and save the suggestions beside the transcript (_refine.json)")
     p_voice_check.set_defaults(func=cmd_voice_check)
@@ -2564,6 +2642,16 @@ def main():
     p_split.add_argument("--transcript-dir", required=True)
     p_split.add_argument("--split-at", required=True, type=float)
     p_split.set_defaults(func=cmd_split_artifacts)
+
+    p_trim = sub.add_parser(
+        "trim-artifacts",
+        help="Crop existing JSON/Markdown/SRT transcript artifacts to a trimmed time range",
+    )
+    p_trim.add_argument("audio")
+    p_trim.add_argument("--transcript-dir", required=True)
+    p_trim.add_argument("--start", required=True, type=float)
+    p_trim.add_argument("--end", required=True, type=float)
+    p_trim.set_defaults(func=cmd_trim_artifacts)
 
     p_sweep = sub.add_parser(
         "anchor-sweep",

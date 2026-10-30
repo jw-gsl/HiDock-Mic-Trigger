@@ -171,3 +171,22 @@ def test_google_calendar_shape_parses_title_and_declines():
     context = load_context(google_payload, "2026-07-21T13:58:00+01:00", "2026-07-21T14:40:00+01:00")
     assert context.selected_event_title == "Weekly sync"
     assert context.candidate_names == frozenset({"James Whiting", "Riley Roberts"})
+
+
+def test_speaker_count_check_records_invitees_and_the_backend_limit():
+    from shared.calendar_context import CalendarContext, speaker_count_check
+
+    context = CalendarContext(
+        candidate_names=frozenset(f"Person {i}" for i in range(20)),
+        selected_event_id="allhands", selected_event_title="[BT] All-hands quarterly",
+    )
+    diarized = {"backend": "nemotron", "segments": [{"speaker_id": i % 7} for i in range(30)]}
+    check = speaker_count_check(context, diarized)
+    assert check == {"invitees": 20, "invitee_basis": "invited", "voices_found": 7,
+                     "backend": "nemotron", "backend_max_speakers": 8}
+    accepted = CalendarContext(
+        candidate_names=context.candidate_names, accepted_names=frozenset({"Person 1", "Person 2"}),
+        selected_event_id="allhands",
+    )
+    assert speaker_count_check(accepted, diarized)["invitees"] == 2
+    assert speaker_count_check(CalendarContext(), diarized) is None

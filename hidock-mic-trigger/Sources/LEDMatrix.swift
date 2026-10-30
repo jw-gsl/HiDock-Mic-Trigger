@@ -28,6 +28,13 @@ final class LEDMatrix: ObservableObject {
     /// Current viewport content (exactly `viewportCols` columns). The view draws
     /// this directly.
     @Published private(set) var columns: [LEDColumn] = []
+    /// True while an event has taken over a heatmap that is otherwise at rest
+    /// (Settings → "Take over the heatmap on events"). The heatmap view shows
+    /// the ticker while this is set; it clears after a pass with nothing left
+    /// to announce, back on the resting heatmap so the hand-off doesn't jump.
+    @Published private(set) var takeoverActive = false
+    /// Lit-dot opacity, from Settings → Brightness.
+    var brightness: Double { settings.brightness }
 
     private let settings: LEDSettings
     private(set) var viewportCols: Int
@@ -63,17 +70,52 @@ final class LEDMatrix: ObservableObject {
     var colsPerSecond: Double { max(4, settings.scrollSpeed) }
     private var stepInterval: TimeInterval { 1.0 / colsPerSecond }
 
-    // Colours: green everywhere except REC / errors (red).
+    // Colours: "Green (mono)" is green apart from REC and errors (red);
+    // "Per-event colour" gives each kind of event its own.
     private var messageColor: Color { .green }
     private var recColor: Color { .red }
     private func color(for kind: LEDEventKind) -> Color {
-        (kind == .error || kind == .micRecording) ? .red : .green
+        if kind == .error || kind == .micRecording { return .red }
+        guard settings.colorScheme == .perEvent else { return .green }
+        switch kind {
+        case .download: return .blue
+        case .transcription: return .purple
+        case .summarise: return .indigo
+        case .syncComplete: return .green
+        case .deviceConnect: return .orange
+        case .error, .micRecording: return .red
+        }
     }
+
+    /// At most this many queued announcements; older ones are dropped. Events
+    /// used to pile up while the ticker was hidden and then play all at once.
+    private let maxQueued = 4
+    private var speedWatch: AnyCancellable?
 
     init(settings: LEDSettings, viewportCols: Int = 48) {
         self.settings = settings
         self.viewportCols = viewportCols
         self.columns = Array(repeating: .off, count: viewportCols)
+        // A speed change applies straight away, not on the next start.
+        speedWatch = settings.$scrollSpeed.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.restartTimerIfRunning() }
+        }
+    }
+
+    private func restartTimerIfRunning() {
+        guard timer != nil else { return }
+        timer?.invalidate()
+        let t = Timer(timeInterval: stepInterval, repeats: true) { [weak self] _ in self?.step() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    /// Something to announce arrived: if the heatmap is at rest and takeover
+    /// is on, show the ticker until it has been announced.
+    private func requestTakeover() {
+        guard settings.enabled, settings.eventTakeover, settings.defaultView == .heatmap,
+              !takeoverActive else { return }
+        takeoverActive = true
     }
 
     func configure(viewportCols: Int) {
@@ -94,15 +136,19 @@ final class LEDMatrix: ObservableObject {
         guard settings.enabled, settings.isEnabled(event.kind) else { return }
         if event.priority > 0 { queue.removeAll { $0.priority < event.priority } }
         queue.append(event)
+        if queue.count > maxQueued { queue.removeFirst(queue.count - maxQueued) }
+        requestTakeover()
     }
 
     func setRecording(_ active: Bool) {
         recActive = active && settings.isEnabled(.micRecording)
+        if recActive { requestTakeover() }
     }
 
     func setStatus(_ text: String?, color: Color = .green, kind: LEDEventKind = .download) {
         statusText = (text != nil && settings.isEnabled(kind)) ? text : nil
-        statusColor = color
+        statusColor = settings.colorScheme == .perEvent ? color : .green
+        if statusText != nil { requestTakeover() }
     }
 
     /// Start/stop the conveyor. The view calls these on appear/disappear so the
@@ -175,6 +221,17 @@ final class LEDMatrix: ObservableObject {
             for ev in queue { strip += messageColumns(ev.text, color: color(for: ev.kind)) + gap }
             queue.removeAll()
             hadContent = true
+        }
+        if takeoverActive && !hadContent && settings.defaultView == .heatmap {
+            // Everything has been announced: settle on the heatmap and hand
+            // back to the static grid. (No idle text during a takeover — it
+            // would keep the ticker up for ever.)
+            filmstrip = baseStrip
+            offset = 0
+            renderWindow()
+            timer?.invalidate(); timer = nil
+            takeoverActive = false
+            return
         }
         if !hadContent, settings.idleTickerEnabled, let t = nextIdleText() {
             strip += messageColumns(t, color: messageColor) + gap

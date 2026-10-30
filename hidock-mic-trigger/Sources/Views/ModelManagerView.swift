@@ -152,8 +152,16 @@ enum ModelManagerTab: String, CaseIterable, Identifiable {
     var label: String { self == .models ? "Models" : "Settings" }
 }
 
+/// The parts of this view the Settings window shows as (part of) a pane.
+enum ModelManagerSection {
+    case models, huggingFace, summaries, calendar, github, tagging
+}
+
 struct ModelManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Set by the Settings window: render just this part, without the
+    /// heading and the Models/Settings switch.
+    var section: ModelManagerSection? = nil
     /// Stages are collapsed by default; this holds the expanded ones.
     @State private var expandedStages: Set<String> = []
     /// Unsaved text in the Transcripts-on-GitHub Repository field.
@@ -165,6 +173,9 @@ struct ModelManagerView: View {
     /// default: twelve rows of 2–4 line descriptions buried the six words that
     /// actually matter, which is which one is on.
     @State private var expandedRows: Set<String> = []
+    /// Models rows the user opened or closed in the Settings form. Without an
+    /// entry a row follows its use: the model in use is open, the rest closed.
+    @State private var modelExpansion: [String: Bool] = [:]
 
     /// Every stage currently having at least one registered model.
     private var allStageKeys: Set<String> {
@@ -174,6 +185,110 @@ struct ModelManagerView: View {
     }
 
     var body: some View {
+        if let section {
+            sectionBody(section)
+        } else {
+            fullBody
+        }
+    }
+
+    /// The Settings window's version: grouped forms, one scroll each.
+    @ViewBuilder
+    private func sectionBody(_ section: ModelManagerSection) -> some View {
+        switch section {
+        case .models: modelsForm
+        case .huggingFace: Form { Section { huggingFaceSection } }.formStyle(.grouped)
+        case .summaries: Form { Section { summariserSection } }.formStyle(.grouped)
+        case .calendar: Form { Section { calendarSection } }.formStyle(.grouped)
+        case .github: Form { Section { githubPublishSection } }.formStyle(.grouped)
+        case .tagging: Form { Section { taggingCutoffSection } }.formStyle(.grouped)
+        }
+    }
+
+    /// Models as a grouped form: a section per stage, a compact row per model
+    /// (choose / status / download or ⋯), details on demand, and Hugging Face
+    /// access as the last section — one scroll, in keeping with the other panes.
+    private func isModelExpanded(_ status: ModelStatus) -> Bool {
+        modelExpansion[status.id] ?? status.active
+    }
+
+    private var modelsForm: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Spacer()
+                Button("Expand all") {
+                    modelExpansion = Dictionary(uniqueKeysWithValues: viewModel.modelStatuses.keys.map { ($0, true) })
+                }
+                Button("Collapse all") {
+                    modelExpansion = Dictionary(uniqueKeysWithValues: viewModel.modelStatuses.keys.map { ($0, false) })
+                }
+                Button("Show models in use") { modelExpansion = [:] }
+                    .help("Open the models in use and close the rest")
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            modelsFormBody
+        }
+    }
+
+    private var modelsFormBody: some View {
+        Form {
+            if viewModel.modelStatuses.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading model statuses…").foregroundColor(.secondary)
+                }
+            }
+            ForEach(pipelineStageOrder + supportingStageOrder, id: \.self) { stage in
+                let entries = (stageGroups[stage] ?? []).filter { !$0.planned }
+                let planned = (stageGroups[stage] ?? []).filter(\.planned)
+                if !entries.isEmpty {
+                    Section {
+                        ForEach(entries) { status in
+                            ModelSettingsRow(
+                                status: status,
+                                selectable: entries.count > 1,
+                                expanded: Binding(
+                                    get: { isModelExpanded(status) },
+                                    set: { modelExpansion[status.id] = $0 }
+                                ),
+                                remoteStatus: viewModel.remoteServiceChecks[status.id],
+                                remoteChecking: viewModel.remoteServiceChecking.contains(status.id),
+                                capabilityChecking: viewModel.modelCapabilityChecking.contains(status.id),
+                                onSetActive: {
+                                    // The newly chosen model opens and the one it
+                                    // replaces closes, unless set by hand.
+                                    for other in entries where modelExpansion[other.id] == false || other.active {
+                                        modelExpansion[other.id] = nil
+                                    }
+                                    modelExpansion[status.id] = nil
+                                    viewModel.onSetActiveModelByKey(status.id)
+                                },
+                                onDownload: { viewModel.onDownloadModelByKey(status.id) },
+                                onDelete: { viewModel.onDeleteModelByKey(status.id) },
+                                onCheckCapability: { viewModel.onCheckModelCapability(status.id) },
+                                onCheckRemote: { viewModel.onCheckRemoteService(status.id) },
+                                onSetHardwareGate: { viewModel.onSetHardwareGate(status.hardwareGateKey, $0) }
+                            )
+                        }
+                    } header: {
+                        Text(entries.first?.stageLabel ?? stage.capitalized)
+                    } footer: {
+                        if !planned.isEmpty {
+                            Text("Coming later: " + planned.map(\.name).joined(separator: ", "))
+                        }
+                    }
+                }
+            }
+            Section("Hugging Face access") { huggingFaceSection }
+        }
+        .formStyle(.grouped)
+        .onAppear { viewModel.onRefreshModelStatuses() }
+    }
+
+    private var fullBody: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(tab.label)
@@ -225,37 +340,7 @@ struct ModelManagerView: View {
     private var settingsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Image(systemName: "sparkles").foregroundColor(.indigo)
-                        Text("AI Summariser").fontWeight(.medium)
-                        Spacer()
-                        Picker("", selection: Binding(
-                            get: { viewModel.summarizeEngine },
-                            set: { viewModel.onSetSummarizeEngine($0) }
-                        )) {
-                            ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
-                                Text(choice.label).tag(choice.id)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                    }
-                    Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
-                        .font(.caption).foregroundColor(.secondary)
-
-                    Toggle("Show the CLI pane while summarising", isOn: Binding(
-                        get: { viewModel.showCLIWhileSummarising },
-                        set: { viewModel.onSetShowCLIWhileSummarising($0) }
-                    ))
-                    .toggleStyle(.checkbox)
-                    .padding(.top, 4)
-                    Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                summariserSection
 
                 Divider()
 
@@ -268,35 +353,111 @@ struct ModelManagerView: View {
 
                 Divider()
 
-                // Calendar provider — meeting context (attendees) used for
-                // speaker merging and suggestion narrowing.
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Image(systemName: "calendar").foregroundColor(.teal)
-                        Text("Calendar").fontWeight(.medium)
-                        Spacer()
-                        Picker("", selection: Binding(
-                            get: { viewModel.calendarProvider },
-                            set: { viewModel.onSetCalendarProvider($0) }
-                        )) {
-                            ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
-                                Text(choice.label).tag(choice.id)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                    }
-                    Text(calendarExplainer)
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                calendarSection
+
+                Divider()
+
+                taggingCutoffSection
 
                 Divider()
 
                 githubPublishSection
             }
         }
+    }
+
+    private var summariserSection: some View {
+        // AI summariser engine — which CLI runs Summarise with AI / Ask AI.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "sparkles").foregroundColor(.indigo)
+                Text("AI Summariser").fontWeight(.medium)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { viewModel.summarizeEngine },
+                    set: { viewModel.onSetSummarizeEngine($0) }
+                )) {
+                    ForEach(viewModel.summarizeEngineChoices, id: \.id) { choice in
+                        Text(choice.label).tag(choice.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            Text("Which CLI generates summaries and powers “Summarise with AI” / “Ask AI”. Uses your existing CLI login — no API keys.")
+                .font(.caption).foregroundColor(.secondary)
+
+            Toggle("Show the CLI pane while summarising", isOn: Binding(
+                get: { viewModel.showCLIWhileSummarising },
+                set: { viewModel.onSetShowCLIWhileSummarising($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .padding(.top, 4)
+            Text("When off, summaries run quietly in the background. The CLI button (bottom bar) still opens the pane for Ask AI or a one-time sign-in.")
+                .font(.caption).foregroundColor(.secondary)
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 12)
+    }
+
+    private var calendarSection: some View {
+        // Calendar provider — meeting context (attendees) used for
+        // speaker merging and suggestion narrowing.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "calendar").foregroundColor(.teal)
+                Text("Calendar").fontWeight(.medium)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { viewModel.calendarProvider },
+                    set: { viewModel.onSetCalendarProvider($0) }
+                )) {
+                    ForEach(viewModel.calendarProviderChoices, id: \.id) { choice in
+                        Text(choice.label).tag(choice.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            Text(calendarExplainer)
+                .font(.caption).foregroundColor(.secondary)
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 12)
+    }
+
+    /// Stop old, never-tagged meetings counting towards "N to tag".
+    private var taggingCutoffSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "tag").foregroundColor(.orange)
+                Text("Speaker tagging").fontWeight(.medium)
+                Spacer()
+                Toggle("Only count from", isOn: Binding(
+                    get: { viewModel.taggingIgnoreBefore != nil },
+                    set: { on in
+                        viewModel.taggingIgnoreBefore = on
+                            ? Calendar.current.date(byAdding: .month, value: -1, to: Date())
+                            : nil
+                    }
+                ))
+                .toggleStyle(.checkbox)
+                if let cutoff = viewModel.taggingIgnoreBefore {
+                    DatePicker("", selection: Binding(
+                        get: { cutoff },
+                        set: { viewModel.taggingIgnoreBefore = $0 }
+                    ), displayedComponents: .date)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+            Text(viewModel.taggingIgnoreBefore == nil
+                 ? "Every transcribed recording without confirmed speakers counts towards \"to tag\"."
+                 : "Older recordings stay in the list with a grey tag and can still be tagged; they just don't count towards \"to tag\".")
+                .font(.caption).foregroundColor(.secondary)
+        }
+        .padding(.horizontal, section == nil ? 20 : 0)
+        .padding(.vertical, section == nil ? 12 : 0)
     }
 
 
@@ -359,8 +520,8 @@ struct ModelManagerView: View {
                 .controlSize(.small)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, section == nil ? 20 : 0)
+        .padding(.vertical, section == nil ? 12 : 0)
     }
 
     private var publishSummary: String {
@@ -563,8 +724,8 @@ struct ModelManagerView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, section == nil ? 20 : 0)
+        .padding(.vertical, section == nil ? 12 : 0)
         .onAppear {
             // Exactly one Keychain read per time this page is opened. Guarded so
             // a re-appear (tab switch, window refocus) does not read again.
@@ -1148,5 +1309,150 @@ private func capabilityColor(_ status: String) -> Color {
     case "warn": return .orange
     case "fail": return .red
     default:     return .blue
+    }
+}
+
+/// One model in the Settings window's Models form: choose it, see whether it's
+/// installed, download or remove it. The description, licence and checks are
+/// behind "Details" so the list reads at a glance.
+struct ModelSettingsRow: View {
+    let status: ModelStatus
+    let selectable: Bool
+    @Binding var expanded: Bool
+    let remoteStatus: String?
+    let remoteChecking: Bool
+    let capabilityChecking: Bool
+    let onSetActive: () -> Void
+    let onDownload: () -> Void
+    let onDelete: () -> Void
+    let onCheckCapability: () -> Void
+    let onCheckRemote: () -> Void
+    let onSetHardwareGate: (Bool) -> Void
+
+    private var gateBlocked: Bool { status.hardwareGated && !status.hardwareGateAffirmed }
+    private var usable: Bool { (status.installed || status.builtIn || status.remoteService) && !gateBlocked }
+
+    private var statusText: String {
+        if status.remoteService { return status.hardwareGateAffirmed ? "On your network" : "Needs your NVIDIA host" }
+        if status.builtIn { return "Built in" }
+        if status.installed { return status.sizeMB > 0 ? "Installed · \(formatSize(mb: status.sizeMB))" : "Installed" }
+        return status.sizeMB > 0 ? "Not installed · \(formatSize(mb: status.sizeMB))" : "Not installed"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "Hide details" : "Show details")
+                if selectable {
+                    Button(action: onSetActive) {
+                        Image(systemName: status.active ? "largecircle.fill.circle" : "circle")
+                            .foregroundColor(status.active ? .accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!usable || status.active)
+                    .help(status.active ? "In use" : (usable ? "Use this model" : "Install it first"))
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(status.name).fontWeight(status.active ? .semibold : .regular)
+                        if status.experimental { pill("EXPERIMENTAL", .orange) }
+                        if let badge = status.licenceBadge, !badge.safe { pill(badge.text, .orange) }
+                    }
+                    Text(statusText).font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                if status.downloading {
+                    ProgressView(value: status.progress).frame(width: 80)
+                } else if !status.installed && !status.builtIn && !status.remoteService {
+                    Button("Download", action: onDownload).controlSize(.small)
+                }
+            }
+
+            if expanded {
+                expandedContent
+                    .padding(.leading, 20)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if status.hardwareGated {
+                Toggle("I have an NVIDIA DGX Spark", isOn: Binding(
+                    get: { status.hardwareGateAffirmed },
+                    set: { onSetHardwareGate($0) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.caption)
+            }
+            if status.remoteService && status.hardwareGateAffirmed {
+                NvidiaSparkSettingsView(onCheck: onCheckRemote)
+                HStack(spacing: 8) {
+                    if remoteChecking {
+                        ProgressView().controlSize(.small)
+                        Text("Checking connection…").font(.caption).foregroundColor(.secondary)
+                    } else {
+                        Button("Check connection", action: onCheckRemote).controlSize(.small)
+                    }
+                    if let remoteStatus {
+                        Text(remoteStatus)
+                            .font(.caption)
+                            .foregroundColor(remoteStatus.hasPrefix("\u{2713}") ? .green : .orange)
+                    }
+                }
+            }
+            if capabilityChecking {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Checking compatibility…").font(.caption).foregroundColor(.secondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(status.description)
+                if !status.usedBy.isEmpty { Text("Used by: \(status.usedBy)") }
+                if !status.dependsOn.isEmpty { Text("Needs: \(status.dependsOn)") }
+                if let licence = status.licence { Text("Licence: \(licence)") }
+                if !status.gateNote.isEmpty { Text(status.gateNote).italic() }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            let canCheck = status.capability != nil && !capabilityChecking
+            let canDelete = status.installed && !status.active && !status.builtIn
+            if canCheck || canDelete {
+                HStack(spacing: 8) {
+                    if canCheck {
+                        Button("Check compatibility", action: onCheckCapability)
+                    }
+                    if canDelete {
+                        Button("Delete", role: .destructive, action: onDelete)
+                    }
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func pill(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.18)))
+            .foregroundColor(color)
     }
 }

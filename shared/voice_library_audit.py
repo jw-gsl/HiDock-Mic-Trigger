@@ -134,10 +134,17 @@ def auto_clean(path: Path) -> dict:
     """The scheduled clean-up: set aside mislabelled samples unless there are
     suspiciously many. Returns what it did, for the Matching quality panel."""
     import json
+    from shared.voice_library_reconcile import reconcile_file
+    # Fix labels the transcripts contradict first, so the sound check below
+    # judges each clip against the right person.
+    relabel = reconcile_file(path, apply=True, limit=AUTO_LIMIT)
     library = json.loads(path.read_text(encoding="utf-8"))
     flagged = audit(library)
     result = {"flagged": len(flagged), "set_aside": 0,
-              "people": sorted({f["name"] for f in flagged})}
+              "people": sorted({f["name"] for f in flagged}),
+              "relabelled": relabel.get("moved", 0)}
+    if relabel.get("held_back"):
+        result["relabel_held_back"] = relabel["found"]
     if flagged and len(flagged) <= AUTO_LIMIT:
         from shared.voice_candidate_review import _atomic_write
         backup(path)

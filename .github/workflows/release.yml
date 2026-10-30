@@ -80,8 +80,18 @@ jobs:
           APP="/tmp/hidock-build/Build/Products/Release/HiDock Mic Trigger.app"
           RES="$APP/Contents/Resources"
 
+          # Everything the scripts import, not just the entry points: the
+          # extractor needs plaud_client.py beside it (since June), and the
+          # pipeline imports the shared/ package for audio loading, writing,
+          # speaker detection and summaries. The app looks for Resources/shared.
           mkdir -p "$RES/usb-extractor"
-          cp usb-extractor/extractor.py "$RES/usb-extractor/"
+          cp usb-extractor/*.py "$RES/usb-extractor/"
+          mkdir -p "$RES/shared"
+          # rsync, not cpio: on the runner /tmp is a symlink, and cpio refuses
+          # to "extract through symlink", which left shared/ empty (v4.1.10).
+          rsync -a --prune-empty-dirs --exclude='tests/' --exclude='__pycache__/' \
+            --include='*/' --include='*.py' --exclude='*' shared/ "$RES/shared/"
+          test -f "$RES/shared/audio_utils.py"
 
           mkdir -p "$RES/transcription-pipeline"
           cp transcription-pipeline/transcribe_cpp.py "$RES/transcription-pipeline/"
@@ -89,22 +99,43 @@ jobs:
           cp transcription-pipeline/config.py "$RES/transcription-pipeline/"
           cp transcription-pipeline/state.py "$RES/transcription-pipeline/"
 
-          python3.11 -m venv "$RES/usb-extractor/.venv"
-          "$RES/usb-extractor/.venv/bin/pip" install --upgrade pip
-          "$RES/usb-extractor/.venv/bin/pip" install pyusb libusb-package numpy
-
-          python3.11 -m venv "$RES/transcription-pipeline/.venv"
-          "$RES/transcription-pipeline/.venv/bin/pip" install --upgrade pip
-          "$RES/transcription-pipeline/.venv/bin/pip" install pywhispercpp certifi
-
-          PYTHON_BIN="$(python3.11 -c 'import sys; print(sys.executable)')"
-          for VENV_DIR in "$RES/usb-extractor/.venv" "$RES/transcription-pipeline/.venv"; do
-            rm -f "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python3.11" "$VENV_DIR/bin/python"
-            cp "$PYTHON_BIN" "$VENV_DIR/bin/python3"
-            ln -sf python3 "$VENV_DIR/bin/python"
-            sed -i '' "s|^home = .*|home = .|" "$VENV_DIR/pyvenv.cfg"
-            find "$VENV_DIR/bin" -type f -exec sed -i '' "1s|^#!.*python.*|#!/usr/bin/env python3|" {} \; 2>/dev/null || true
+          # A self-contained, relocatable CPython (python-build-standalone),
+          # pinned and checksummed. The previous approach copied the runner's
+          # python binary into a venv, but that binary links
+          # /Library/Frameworks/Python.framework/Versions/3.11/Python — present
+          # on GitHub's runner, absent on users' Macs — so the released app's
+          # device checks and transcription failed to start (v4.1.8).
+          PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.11.16%2B20260825-aarch64-apple-darwin-install_only.tar.gz"
+          PBS_SHA="2e50ed6ec49d8714a83c093e9ce74e1b8b21a2c64a49c3b603471d9c4caac76b"
+          curl -sSL -o "$RUNNER_TEMP/python.tar.gz" "$PBS_URL"
+          echo "$PBS_SHA  $RUNNER_TEMP/python.tar.gz" | shasum -a 256 -c -
+          for COMPONENT in usb-extractor transcription-pipeline; do
+            mkdir -p "$RUNNER_TEMP/pbs-$COMPONENT"
+            tar -xzf "$RUNNER_TEMP/python.tar.gz" -C "$RUNNER_TEMP/pbs-$COMPONENT"
+            rm -rf "$RES/$COMPONENT/.venv"
+            mv "$RUNNER_TEMP/pbs-$COMPONENT/python" "$RES/$COMPONENT/.venv"
           done
+          "$RES/usb-extractor/.venv/bin/python3" -m pip install --upgrade pip
+          "$RES/usb-extractor/.venv/bin/python3" -m pip install pyusb libusb-package numpy mutagen
+          "$RES/transcription-pipeline/.venv/bin/python3" -m pip install --upgrade pip
+          "$RES/transcription-pipeline/.venv/bin/python3" -m pip install pywhispercpp certifi numpy scipy soundfile onnxruntime mutagen
+
+          # Fail the release rather than ship a Python that needs anything
+          # outside the bundle or the OS.
+          for VENV_DIR in "$RES/usb-extractor/.venv" "$RES/transcription-pipeline/.venv"; do
+            if otool -L "$VENV_DIR/bin/python3" | tail -n +2 | grep -vE "^\s+(/usr/lib/|/System/)"; then
+              echo "::error::bundled python links outside the app/OS"; exit 1
+            fi
+          done
+          # Start the real entry points the way the app does (cwd = script dir).
+          (cd "$RES/usb-extractor" && .venv/bin/python3 extractor.py --help >/dev/null)
+          (cd "$RES/transcription-pipeline" && .venv/bin/python3 transcribe_cpp.py --help >/dev/null)
+          (cd "$RES/transcription-pipeline" && .venv/bin/python3 -c "
+          import sys; sys.path.insert(0, '..')
+          import pywhispercpp, certifi
+          import shared.audio_utils, shared.lang_windows, shared.transcript_writer
+          import shared.diarize_lite, shared.voice_library_lite, shared.calendar_context
+          print('bundled pipeline imports OK')")
       - name: Import Developer ID certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

@@ -187,7 +187,7 @@ struct MeetingHeatmapView: View {
         // mode, or when an event is "taking over" the heatmap briefly.
         // LED mode is an explicit toggle now; the conveyor runs constantly while
         // shown, so there's no isActive/takeover to observe.
-        let showLED = ledSettings.enabled && viewModel.heatmapLEDMode
+        let showLED = ledSettings.enabled && (viewModel.heatmapLEDMode || viewModel.ledTakeover)
 
         return VStack(alignment: .leading, spacing: 6) {
             header
@@ -382,6 +382,10 @@ struct MeetingHeatmapView: View {
 
     /// LED ticker controls in the header: a heatmap↔LED toggle and a settings
     /// gear (popover). The toggle persists as the default view.
+    private func sendLEDTest() {
+        ledMatrix.notify(LEDEvent(kind: .syncComplete, text: "\(LEDFont.check) LED TEST"))
+    }
+
     @ViewBuilder private var ledControls: some View {
         HStack(spacing: 6) {
             if ledSettings.enabled {
@@ -418,7 +422,8 @@ struct MeetingHeatmapView: View {
             .foregroundColor(.secondary)
             .help("LED ticker settings")
             .popover(isPresented: $showLEDSettings, arrowEdge: .bottom) {
-                LEDSettingsView(settings: ledSettings)
+                LEDSettingsView(settings: ledSettings, onTest: sendLEDTest)
+                    .frame(width: 320, height: 520)
             }
         }
     }

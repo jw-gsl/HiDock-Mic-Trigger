@@ -58,7 +58,7 @@ struct LEDMatrixView: View {
             for y in 0..<gridRows {
                 let lit = y < col.cells.count ? col.cells[y] : nil
                 let path = Path(roundedRect: CGRect(x: x, y: CGFloat(y) * pitch, width: cell, height: cell), cornerRadius: 2)
-                gc.fill(path, with: .color(lit ?? offColor))
+                gc.fill(path, with: .color(lit.map { $0.opacity(matrix.brightness) } ?? offColor))
             }
         }
     }

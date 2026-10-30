@@ -8,6 +8,7 @@ Handles downloading and caching models used for speech processing:
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import ssl
 import sys
@@ -303,7 +304,11 @@ MODEL_REGISTRY = {
     "speaker_embed": {
         "name": "TitaNet",
         "filename": "speaker_embedding.onnx",
-        "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-speaker-verification-titanet_small/resolve/main/model.onnx",
+        # The Hugging Face mirror (csukuangfj/sherpa-onnx-nemo-speaker-
+        # verification-titanet_small) started returning 401 in Oct 2026; this
+        # is the same export from sherpa-onnx's own release, as
+        # SPEAKER_EMBED_MODELS["titanet"] already uses.
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
         "size_mb": 10,
         "required": False,
         "stage": "embedding",
@@ -369,6 +374,14 @@ MODEL_REGISTRY = {
         "filename": "b6-vb2+vox2_v0-lm.pt",
         "url": "https://github.com/PalabraAI/redimnet2/releases/download/v1.0.0/b6-vb2%2Bvox2_v0-lm.pt",
         "sha256": "e0a7d340a92f798720d1208949aa6a6bd0cddcb0ba7d4cec33596a17a484e6a2",
+        # The checkpoint needs the model's code beside it (torch, no ONNX).
+        # Fetched with the weights, pinned to the commit verified against the
+        # library (cosine 1.0 on saved clips, 2026-10-15) — a migration once
+        # copied the weights' folder but not this clone, and naming stopped.
+        "code_repo": "https://github.com/PalabraAI/redimnet2",
+        "code_commit": "c5bbe0b76e37df698c403f8844e41304ceab6307",
+        "code_dir": "redimnet2-repo",
+        "code_check": "redimnet2/redimnet2.py",
         "size_mb": 49,
         "required": False,
         "stage": "identity_review",
@@ -445,6 +458,32 @@ def _ssl_context() -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+def _code_present(info: dict) -> bool:
+    """Whether a model's source code (if it needs any) is beside its weights."""
+    if not info.get("code_repo"):
+        return True
+    return (MODELS_DIR / info["code_dir"] / info["code_check"]).is_file()
+
+
+def ensure_model_code(info: dict) -> None:
+    """Clone a model's code at its pinned commit, if it needs code and lacks it."""
+    if _code_present(info):
+        return
+    import subprocess
+    dest = MODELS_DIR / info["code_dir"]
+    if dest.exists():
+        raise OSError(f"{dest} exists but lacks {info['code_check']}; move it aside and download again")
+    print(f"Fetching model code from {info['code_repo']}", file=sys.stderr)
+    for command in (
+        ["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout", info["code_repo"], str(dest)],
+        ["git", "-C", str(dest), "checkout", "--quiet", info["code_commit"]],
+    ):
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300,
+                                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if result.returncode != 0:
+            raise OSError(f"{' '.join(command[:2])} failed: {result.stderr.strip()[-300:]}")
 
 
 def download_model_if_needed(
@@ -840,7 +879,7 @@ def get_model_status() -> dict[str, dict]:
             url = None
         else:
             filepath = MODELS_DIR / info["filename"]
-            installed = filepath.exists() and filepath.stat().st_size > 1000
+            installed = filepath.exists() and filepath.stat().st_size > 1000 and _code_present(info)
             file_size = filepath.stat().st_size if installed else 0
             filename = info["filename"]
             url = info.get("url")
@@ -1004,6 +1043,7 @@ def _cli():
             path = download_model_if_needed(
                 info["url"], info["filename"], expected_sha256=info.get("sha256")
             )
+            ensure_model_code(info)
             print(json.dumps({"ok": True, "path": str(path)}))
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}))

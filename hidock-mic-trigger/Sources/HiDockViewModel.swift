@@ -155,6 +155,20 @@ final class HiDockViewModel: ObservableObject {
     /// Runtime heatmap ↔ LED toggle (seeded from the persisted default view).
     @Published var heatmapLEDMode: Bool =
         (UserDefaults.standard.string(forKey: "led.defaultView") == "led")
+    /// An event has temporarily taken over the resting heatmap (mirrors
+    /// `ledMatrix.takeoverActive`, so the heatmap needn't observe the matrix).
+    @Published var ledTakeover = false
+    private var ledWatches: [AnyCancellable] = []
+
+    /// Keep the heatmap in step with the LED settings while the app runs:
+    /// "At rest" used to be read once at launch, and takeover had no effect.
+    func watchLEDSettings() {
+        guard ledWatches.isEmpty else { return }
+        ledWatches.append(ledSettings.$defaultView.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] view in self?.heatmapLEDMode = (view == .led) })
+        ledWatches.append(ledMatrix.$takeoverActive.receive(on: DispatchQueue.main)
+            .sink { [weak self] active in self?.ledTakeover = active })
+    }
     @Published var mergeGroups: [MergeGroup] = [] { didSet { markDerivedDirty() } }
     /// Output paths of recordings that have been split into parts. They stay on
     /// disk but must not appear as rows, or a later merge re-absorbs the source
@@ -808,17 +822,55 @@ final class HiDockViewModel: ObservableObject {
         }
     }
 
+    /// Recordings made before this day don't count as needing tagging
+    /// (Settings → "Only ask to tag recordings from"). Nil = every recording.
+    /// A backlog of old meetings otherwise keeps "N to tag" in the thousands.
+    @Published var taggingIgnoreBefore: Date? = {
+        let stored = UserDefaults.standard.double(forKey: "taggingIgnoreBefore")
+        return stored > 0 ? Date(timeIntervalSince1970: stored) : nil
+    }() {
+        didSet {
+            UserDefaults.standard.set(taggingIgnoreBefore?.timeIntervalSince1970 ?? 0,
+                                      forKey: "taggingIgnoreBefore")
+        }
+    }
+
+    /// Whether a recording is older than the tagging cutoff.
+    func isBeforeTaggingCutoff(_ rec: HiDockSyncRecording) -> Bool {
+        guard let cutoff = taggingIgnoreBefore, let day = recordingDay(rec) else { return false }
+        return day < Calendar.current.startOfDay(for: cutoff)
+    }
+
+    /// A merged recording ("Merged-2026Jul20-…") is dated by its first piece.
+    private func isMergeBeforeTaggingCutoff(_ name: String) -> Bool {
+        guard let cutoff = taggingIgnoreBefore else { return false }
+        let stem = name.hasPrefix("Merged-") ? String(name.dropFirst("Merged-".count)) : name
+        guard stem.count >= 9, let day = Self.mergedDayFormatter.date(from: String(stem.prefix(9))) else {
+            return false
+        }
+        return day < Calendar.current.startOfDay(for: cutoff)
+    }
+
+    private static let mergedDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMMdd"
+        return f
+    }()
+
     var needsTaggingCount: Int {
         // Only true "needs tagging" rows nag: transcribed, multi-speaker, and
         // neither confirmed (tagged) nor auto-matched. Auto-matched meetings
         // ("confirm me") are surfaced by the blue question-mark icon, not the pill.
         let perRow = syncEntries.filter {
             $0.transcribed && !$0.speakersTagged && !$0.speakersAutoMatched
+                && !isBeforeTaggingCutoff($0.recording)
         }.count
         // Same for merged-file rows (they don't live in syncEntries).
         let perMerge = mergedFileTranscribed
             .subtracting(mergedFileTagged)
             .subtracting(mergedFileAutoMatched)
+            .filter { !isMergeBeforeTaggingCutoff($0) }
             .count
         return perRow + perMerge
     }
@@ -1108,6 +1160,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleMergeExpand: (String) -> Void = { _ in }
     var onTranscribeSelected: () -> Void = {}
     var onSummariseSelected: () -> Void = {}
+    var onMarkSelectedSpeakersUnknown: () -> Void = {}
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
@@ -1201,6 +1254,26 @@ final class HiDockViewModel: ObservableObject {
 
     /// Why settled transcripts aren't reaching the GitHub repo (auth, network,
     /// public repo, diverged remote), or nil while publishing works.
+    /// Failing checks from `transcribe.py doctor` (missing tokens, models,
+    /// packages, GitHub sign-in, another Mac still publishing). Empty = fine.
+    // MARK: Settings window
+    /// The pane the Settings window shows; remembered between openings.
+    @Published var settingsPane: SettingsPane = SettingsPane(
+        rawValue: UserDefaults.standard.string(forKey: "settingsLastPane") ?? "") ?? .general {
+        didSet { UserDefaults.standard.set(settingsPane.rawValue, forKey: "settingsLastPane") }
+    }
+    /// Open the Settings window, optionally at a pane (nil = last used).
+    var onOpenSettings: (SettingsPane?) -> Void = { _ in }
+    /// The mic the trigger returns to when it is available, and the one it
+    /// uses when the default is missing.
+    @Published var preferredMicName: String?
+    @Published var fallbackMicName: String?
+    var onSetPreferredMic: (String?) -> Void = { _ in }
+    var onSetFallbackMic: (String?) -> Void = { _ in }
+
+    @Published var setupProblems: [SetupProblem] = []
+    var onRecheckSetup: () -> Void = {}
+    var onDismissSetupProblems: () -> Void = {}
     @Published var transcriptPublishProblem: String?
     var onRetryTranscriptPublish: () -> Void = {}
     var onDismissTranscriptPublishProblem: () -> Void = {}
@@ -1306,4 +1379,12 @@ extension HiDockViewModel {
         default: return "Auto"
         }
     }
+}
+
+/// One failing setup check, with what to do about it.
+struct SetupProblem: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let detail: String
+    let fix: String
 }

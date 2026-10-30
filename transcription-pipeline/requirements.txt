@@ -10,6 +10,10 @@ parakeet-mlx>=0.5.0; sys_platform == "darwin" and platform_machine == "arm64"
 # OpenSSL 3.5 strict cert validation that rejects some HF CDN certs.
 truststore>=0.9; python_version >= "3.10"
 
+# ONNX models: TitaNet speaker embeddings (voice library, Lite diarizer),
+# Silero VAD, WeSpeaker. Without it embeddings silently fall back to MFCCs.
+onnxruntime>=1.18
+
 # Folder watching
 watchdog>=4.0
 

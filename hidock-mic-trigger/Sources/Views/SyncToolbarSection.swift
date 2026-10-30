@@ -121,6 +121,15 @@ struct SyncToolbarSection: View {
                 .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
 
                 Button {
+                    viewModel.onMarkSelectedSpeakersUnknown()
+                } label: {
+                    Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
+                }
+                .labelStyle(ToolbarActionLabelStyle())
+                .disabled(viewModel.syncDownloading || !viewModel.hasSelection)
+                .help("Mark all unknown in each selected transcript: every unconfirmed speaker becomes Speaker N and counts as reviewed. Confirmed names stay. Nothing is added to the voice library.")
+
+                Button {
                     viewModel.onSummariseSelected()
                 } label: {
                     Label("Summarise", systemImage: "sparkles")
@@ -373,25 +382,21 @@ struct SyncToolbarSection: View {
 
     /// People filter — multi-select with an Any/All mode. Filters the list to
     /// meetings containing the selected people.
-    /// Auto-download / transcribe / summarise as checkable menu items — one
-    /// compact dropdown instead of three inline checkboxes.
+    /// What runs automatically, at a glance; the switches are in
+    /// Settings → Transcription.
     private var autoMenu: some View {
-        let onCount = [viewModel.syncAutoDownload, viewModel.syncAutoTranscribe, viewModel.syncAutoSummarise]
-            .filter { $0 }.count
-        return Menu {
-            Toggle("Auto-download", isOn: Binding(
-                get: { viewModel.syncAutoDownload }, set: { _ in viewModel.onToggleAutoDownload() }))
-            Toggle("Auto-transcribe", isOn: Binding(
-                get: { viewModel.syncAutoTranscribe }, set: { _ in viewModel.onToggleAutoTranscribe() }))
-            Toggle("Auto-summarise", isOn: Binding(
-                get: { viewModel.syncAutoSummarise }, set: { _ in viewModel.onToggleAutoSummarise() }))
+        let on = [("download", viewModel.syncAutoDownload), ("transcribe", viewModel.syncAutoTranscribe),
+                  ("summarise", viewModel.syncAutoSummarise)].filter(\.1).map(\.0)
+        return Button {
+            viewModel.onOpenSettings(.transcription)
         } label: {
-            Label(onCount > 0 ? "Auto (\(onCount))" : "Auto", systemImage: "bolt.horizontal.circle")
+            Label(on.isEmpty ? "Auto: off" : "Auto: " + on.joined(separator: " · "),
+                  systemImage: "bolt.horizontal.circle")
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.borderless)
         .fixedSize()
-        .foregroundColor(onCount > 0 ? .accentColor : .secondary)
-        .help("Automatically download / transcribe / summarise new recordings as they arrive.")
+        .foregroundColor(on.isEmpty ? .secondary : .accentColor)
+        .help("New recordings are handled automatically as shown. Click to change in Settings.")
     }
 
     private var peopleFilterMenu: some View {
