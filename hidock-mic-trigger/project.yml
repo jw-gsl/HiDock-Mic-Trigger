@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.21
-  CURRENT_PROJECT_VERSION: 24
+  MARKETING_VERSION: 4.1.22
+  CURRENT_PROJECT_VERSION: 25
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm

@@ -325,9 +325,25 @@ private struct TranscriptionSettingsPane: View {
 
 private struct SpeakersSettingsPane: View {
     @ObservedObject var viewModel: HiDockViewModel
+    @AppStorage(AppDelegate.refineAutoApplyKey) private var refineAutoApply = 0.7
 
     var body: some View {
         Form {
+            Section {
+                Picker("Apply automatically", selection: $refineAutoApply) {
+                    Text("Off").tag(0.0)
+                    Text("Score 0.9 or higher").tag(0.9)
+                    Text("Score 0.8 or higher").tag(0.8)
+                    Text("Score 0.7 or higher").tag(0.7)
+                    Text("Score 0.6 or higher").tag(0.6)
+                }
+            } header: {
+                Text("Refine")
+            } footer: {
+                Text(refineAutoApply == 0
+                     ? "Refine's suggestions wait for you to apply or skip each one."
+                     : "Line moves Refine is this sure of are applied once the meeting is confirmed or marked ad-hoc. Click Refine in the transcript to undo any, or keep them to teach the voice library. Whole-speaker renames and weaker suggestions always wait for you.")
+            }
             Section {
                 Toggle("Only count recordings from a date", isOn: Binding(
                     get: { viewModel.taggingIgnoreBefore != nil },

@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 22 changes (v4.1.0 to v4.1.21, 15 Oct 2026 – 30 Oct 2026)
+**Released 16 Oct 2026** · 23 changes (v4.1.0 to v4.1.22, 15 Oct 2026 – 30 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -14,6 +14,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Settings window.** Press ⌘, to open one Settings window with a sidebar of panes, instead of settings spread across menus and the footer. The footer is down to five buttons.
 - **Setup check.** If something the app needs is missing, such as a token, a model or your GitHub sign-in, a "Setup needs attention" banner says so and links to the right Settings pane.
 - **Moving to a new Mac.** A migration guide (docs/MIGRATING.md) covers moving the app to a new Mac, including fixing code-signing access.
+- **Refine applies its confident suggestions for you.** Once a meeting is confirmed or marked ad-hoc, line moves Refine scores 0.7 or higher are applied automatically. Click Refine (it shows how many it applied) to see them under "Applied automatically": undo any that are wrong, or keep them. Voices are only learned from moves you keep. Weaker suggestions and whole-speaker renames still wait for you. The cut-off, or Off, is in Settings → Speakers.
 - **Mark unknown for several recordings at once.** Tick recordings and click Mark unknown in the toolbar (between Transcribe and Summarise). It does what Mark all unknown does in a transcript: every unconfirmed speaker becomes Speaker N and counts as reviewed, after one confirmation. Confirmed names stay, and nothing is added to the voice library.
 - **"Only count from" date for speaker tagging.** In Settings → Speakers, tick "Only count recordings from a date" and pick one; older recordings stop counting towards the "to tag" count and their tag icon turns grey (still clickable).
 
@@ -38,7 +39,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (22)</summary>
+<details><summary>Every change (23)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -63,7 +64,8 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.18 | 29 Oct 2026 | Created time shows the corrected start for recordings named while the HiDock's clock was wrong (#144) |
 | v4.1.19 | 30 Oct 2026 | Edits keep the summary and the meeting link; voices learned from all of a person's lines; Refine and under-split warnings clearer (#145) |
 | v4.1.20 | 30 Oct 2026 | The app's version label always matches the release number (#146) |
-| v4.1.21 | 30 Oct 2026 | Mark unknown in the toolbar for every ticked recording |
+| v4.1.21 | 30 Oct 2026 | Mark unknown in the toolbar for every ticked recording (#147) |
+| v4.1.22 | 30 Oct 2026 | Refine applies line moves it is sure of (0.7+) once the meeting is settled, for you to undo or keep |
 
 </details>
 
