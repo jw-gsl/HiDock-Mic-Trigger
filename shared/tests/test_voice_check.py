@@ -91,7 +91,7 @@ def test_apply_moves_to_existing_and_new_people():
 def test_apply_skips_a_line_that_no_longer_exists():
     data = _data()
     summary = voice_check.apply_moves(data, [{"index": 3, "to_name": "Jeff Chow", "start": 99.0}])
-    assert summary == {"moved": 0, "requested": 1, "not_found": 1}
+    assert summary == {"moved": 0, "requested": 1, "not_found": 1, "done": []}
     assert data["segments"][3]["speaker_id"] == 1
 
 
@@ -228,3 +228,79 @@ def test_unnamed_speakers_are_still_checked_and_show_no_score_for_their_label():
     moved = [line for line in result["lines"] if line["from_name"] == "Speaker 1"]
     assert moved and all(line["current_score"] is None for line in moved)
     assert result["no_voice"] == []
+
+
+def _auto_setup(tmp_path):
+    path = _write_transcript(tmp_path, [0, 5, 9, 14])
+    data = json.loads(path.read_text())
+    data["speaker_names"]["1"] = "Bob"
+    data["speaker_meta"] = {"0": {"source": "user", "verified": True}}
+    path.write_text(json.dumps(data))
+    lines = [{**_line(1, 5), "score": 0.85}, {**_line(2, 9), "score": 0.72},
+             {**_line(3, 14), "score": 0.6}]
+    voice_check.save_cache(path, {"lines": lines, "speakers": [{"speaker_id": "0"}]})
+    return path
+
+
+def test_auto_apply_moves_only_confident_lines_and_lists_them(tmp_path):
+    path = _auto_setup(tmp_path)
+    summary = voice_check.auto_apply(path, 0.7)
+    assert summary["auto_applied"] == 2
+    data = json.loads(path.read_text())
+    assert [s["speaker_id"] for s in data["segments"]] == [0, 1, 1, 0]
+    assert [e["start"] for e in data[voice_check.AUTO_KEY]] == [5, 9]
+    # Bob was not confirmed by anyone; Ann's review state is untouched.
+    assert data["speaker_meta"]["0"] == {"source": "user", "verified": True}
+    assert data["speaker_meta"].get("1", {}).get("verified") is not True
+    # The weaker suggestion and the speaker-wide one wait for the reviewer.
+    cached = voice_check.load_cache(path)
+    assert [l["start"] for l in cached["lines"]] == [14]
+    assert cached["speakers"] == [{"speaker_id": "0"}]
+
+
+def test_auto_apply_needs_a_current_saved_check(tmp_path):
+    path = _auto_setup(tmp_path)
+    path.write_text(path.read_text() + " ")
+    assert voice_check.auto_apply(path, 0.7)["auto_applied"] == 0
+
+
+def test_undo_moves_lines_back_and_keeps_the_rest_of_the_list(tmp_path):
+    path = _auto_setup(tmp_path)
+    voice_check.auto_apply(path, 0.7)
+    assert voice_check.undo_auto(path, [9.0])["undone"] == 1
+    data = json.loads(path.read_text())
+    assert [s["speaker_id"] for s in data["segments"]] == [0, 1, 0, 0]
+    assert [e["start"] for e in data[voice_check.AUTO_KEY]] == [5]
+    assert [l["start"] for l in voice_check.load_cache(path)["lines"]] == [14]
+
+
+def test_keep_all_clears_the_list(tmp_path):
+    path = _auto_setup(tmp_path)
+    voice_check.auto_apply(path, 0.7)
+    assert voice_check.keep_auto(path, None)["kept"] == 2
+    data = json.loads(path.read_text())
+    assert voice_check.AUTO_KEY not in data
+    assert [s["speaker_id"] for s in data["segments"]] == [0, 1, 1, 0]
+
+
+def test_a_line_moved_by_hand_since_drops_off_the_list(tmp_path):
+    path = _auto_setup(tmp_path)
+    voice_check.auto_apply(path, 0.7)
+    data = json.loads(path.read_text())
+    data["segments"][1]["speaker_id"] = 0   # reviewer moved it back by hand
+    path.write_text(json.dumps(data))
+    assert [e["start"] for e in voice_check.pending_auto(data)] == [9]
+    assert voice_check.undo_auto(path, [5.0])["undone"] == 0
+
+
+def test_undo_finds_the_original_person_after_their_id_changed(tmp_path):
+    path = _auto_setup(tmp_path)
+    voice_check.auto_apply(path, 0.7)
+    data = json.loads(path.read_text())
+    data["speaker_names"] = {"7": "Ann", "1": "Bob"}
+    for seg in data["segments"]:
+        if seg["speaker_id"] == 0:
+            seg["speaker_id"] = 7
+    path.write_text(json.dumps(data))
+    voice_check.undo_auto(path, None)
+    assert [s["speaker_id"] for s in json.loads(path.read_text())["segments"]] == [7, 7, 7, 7]

@@ -14,7 +14,10 @@ voice-identity library, restricted to the people in this meeting — its
 named speakers plus the calendar invitees — and proposes moves where another
 of those people clearly fits better. On Rec63, 47 of 59 proposals matched what
 the reviewer then did by hand, so they are *proposals*: the app shows them for
-the reviewer to accept, it never applies them on its own.
+the reviewer to accept. Since 2026-10-30 the confident line moves (score at
+least the app's cut-off, 0.7 by default) are applied automatically once the
+meeting is settled, and listed for the reviewer to undo or keep
+(`auto_apply`, `undo_auto`, `keep_auto`). Speaker-wide renames never are.
 
 Library samples taken from this same recording are left out, so a speaker the
 reviewer confirmed with the wrong lines in it can't vouch for itself.
@@ -239,12 +242,14 @@ def propose(
     return result
 
 
-def apply_moves(data: dict, moves: list[dict]) -> dict:
+def apply_moves(data: dict, moves: list[dict], *, confirm: bool = True) -> dict:
     """Move lines to named people the reviewer accepted.
 
     A name already in the transcript keeps its speaker id; a new one gets the
     next free id. Accepting a proposal is the reviewer's decision, so the
-    target is recorded as confirmed by the user.
+    target is recorded as confirmed by the user. An automatic move
+    (`confirm=False`) leaves the target's review state alone, and a new person
+    it adds is an unconfirmed automatic match.
     """
     names = data.setdefault("speaker_names", {})
     meta = data.setdefault("speaker_meta", {})
@@ -252,6 +257,7 @@ def apply_moves(data: dict, moves: list[dict]) -> dict:
     by_name = {str(n).casefold(): sid for sid, n in names.items()}
     moved = 0
     missing: list[dict] = []
+    done: list[dict] = []
     for move in moves:
         index, name = int(move["index"]), str(move["to_name"]).strip()
         if not name:
@@ -275,14 +281,19 @@ def apply_moves(data: dict, moves: list[dict]) -> dict:
             sid = str(max(used, default=-1) + 1)
             names[sid] = name
             by_name[name.casefold()] = sid
-        entry = meta.setdefault(sid, {})
-        entry["verified"] = True
-        entry.setdefault("source", "user")
+        if confirm:
+            entry = meta.setdefault(sid, {})
+            entry["verified"] = True
+            entry.setdefault("source", "user")
+        elif sid not in meta:
+            meta[sid] = {"source": "auto", "verified": False}
         if str(segments[index].get("speaker_id")) != sid:
+            from_id = segments[index].get("speaker_id")
             segments[index]["speaker_id"] = int(sid)
             segments[index].pop("speaker", None)
             moved += 1
-    return {"moved": moved, "requested": len(moves), "not_found": len(missing)}
+            done.append({**move, "index": index, "from_speaker_id": from_id})
+    return {"moved": moved, "requested": len(moves), "not_found": len(missing), "done": done}
 
 
 def run(json_path: Path, *, on_progress: Callable[[float], None] | None = None) -> dict:
@@ -427,3 +438,136 @@ def precompute(json_path: Path) -> dict:
                 "error": result.get("error")}
     except Exception as exc:  # a missing suggestion list must never fail a transcription
         return {"error": str(exc)}
+
+
+# --- Applied automatically ---------------------------------------------------
+#
+# The reviewer applied 95% of line suggestions (2026-10-13 – 2026-10-30), and
+# at 0.7 or higher only 6 of 210 were skipped. So confident line moves are
+# applied without asking and listed in the sidecar under `AUTO_KEY`. The
+# reviewer can undo any of them; keeping them is what teaches the voice
+# library, so a wrong automatic move never reaches anyone's saved voice.
+
+AUTO_KEY = "refine_auto_applied"
+
+
+def _segment_at(segments: list[dict], start: float) -> int | None:
+    return next((i for i, seg in enumerate(segments)
+                 if abs(float(seg.get("start", 0)) - float(start)) <= 0.05), None)
+
+
+def pending_auto(data: dict) -> list[dict]:
+    """Automatic moves still standing: the line is still with the person it
+    was moved to. One edited by hand since has been decided by the reviewer."""
+    segments = data.get("segments") or []
+    kept = []
+    for entry in data.get(AUTO_KEY) or []:
+        index = _segment_at(segments, float(entry.get("start", -1)))
+        if index is None:
+            continue
+        if _speaker_name(data, segments[index].get("speaker_id")).casefold() \
+                == str(entry.get("to_name", "")).casefold():
+            kept.append(entry)
+    return kept
+
+
+def _set_pending(data: dict, entries: list[dict]) -> None:
+    if entries:
+        data[AUTO_KEY] = entries
+    else:
+        data.pop(AUTO_KEY, None)
+
+
+def _write(json_path: Path, data: dict) -> None:
+    json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def auto_apply(json_path: Path, min_score: float) -> dict:
+    """Apply the saved line suggestions scoring at least `min_score`.
+
+    Only from a current saved check (`load_cache`), so a transcript edited
+    since is left alone. Speaker-wide suggestions are never applied here.
+    Nothing is learned and the decision log records them as `auto_applied`,
+    not as the reviewer's.
+    """
+    result = load_cache(json_path)
+    if result is None:
+        return {"auto_applied": 0, "reason": "no current Refine suggestions"}
+    picks = [line for line in result.get("lines") or [] if float(line.get("score") or 0) >= min_score]
+    if not picks:
+        return {"auto_applied": 0, "reason": f"no line suggestions at {min_score:.2f} or higher"}
+    digest_before = _digest(json_path)
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    moves = [{"index": int(line["index"]), "start": float(line["start"]), "to_name": line["to_name"],
+              "from_name": line.get("from_name"), "score": line.get("score"),
+              "current_score": line.get("current_score"), "kind": "line"} for line in picks]
+    summary = apply_moves(data, moves, confirm=False)
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).isoformat()
+    by_start = {round(float(line["start"]), 2): line for line in picks}
+    added = []
+    for move in summary["done"]:
+        line = by_start.get(round(float(move["start"]), 2)) or {}
+        added.append({
+            "start": float(move["start"]), "end": float(line.get("end", move["start"])),
+            "text": str(line.get("text") or ""), "from_speaker_id": move["from_speaker_id"],
+            "from_name": move.get("from_name"), "to_name": move["to_name"],
+            "score": move.get("score"), "current_score": move.get("current_score"), "at": stamp,
+        })
+    _set_pending(data, pending_auto(data) + added)
+    _write(json_path, data)
+    forget_suggestions(json_path, moves, digest_before=digest_before)
+    return {"auto_applied": len(added), "requested": len(moves), "min_score": min_score,
+            "moves": summary["done"]}
+
+
+def _matching(entries: list[dict], starts: list[float] | None) -> list[dict]:
+    if starts is None:
+        return list(entries)
+    return [e for e in entries if any(abs(float(e.get("start", -1)) - float(s)) <= 0.05 for s in starts)]
+
+
+def undo_auto(json_path: Path, starts: list[float] | None = None) -> dict:
+    """Move automatically applied lines back. `starts` None means all."""
+    digest_before = _digest(json_path)
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    pending = pending_auto(data)
+    chosen = _matching(pending, starts)
+    names = data.setdefault("speaker_names", {})
+    segments = data.get("segments") or []
+    undone = []
+    for entry in chosen:
+        index = _segment_at(segments, float(entry["start"]))
+        if index is None:
+            continue
+        from_name = str(entry.get("from_name") or "")
+        sid = str(entry.get("from_speaker_id"))
+        if names.get(sid, f"Speaker {int(sid) + 1}" if sid.lstrip("-").isdigit() else None) != from_name:
+            # The original speaker was renamed or merged since: go back to
+            # whoever carries the old name, or recreate them.
+            sid = next((k for k, n in names.items() if str(n).casefold() == from_name.casefold()), None)
+            if sid is None:
+                used = {int(k) for k in names if str(k).lstrip("-").isdigit()}
+                used |= {int(s.get("speaker_id", 0)) for s in segments}
+                sid = str(max(used, default=-1) + 1)
+                names[sid] = from_name
+        segments[index]["speaker_id"] = int(sid)
+        segments[index].pop("speaker", None)
+        undone.append(entry)
+    _set_pending(data, [e for e in pending if e not in undone])
+    _write(json_path, data)
+    forget_suggestions(json_path, [], digest_before=digest_before)
+    return {"undone": len(undone), "moves": undone}
+
+
+def keep_auto(json_path: Path, starts: list[float] | None = None) -> dict:
+    """The reviewer keeps automatically applied lines: take them off the
+    list. The caller learns the voices and logs the decision."""
+    digest_before = _digest(json_path)
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    pending = pending_auto(data)
+    kept = _matching(pending, starts)
+    _set_pending(data, [e for e in pending if e not in kept])
+    _write(json_path, data)
+    forget_suggestions(json_path, [], digest_before=digest_before)
+    return {"kept": len(kept), "moves": kept}

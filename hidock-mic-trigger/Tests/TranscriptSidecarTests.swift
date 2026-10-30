@@ -137,3 +137,31 @@ final class MarkAllSpeakersUnknownTests: XCTestCase {
         XCTAssertFalse(t.canMarkAllSpeakersUnknown)
     }
 }
+
+final class RefineAutoMoveTests: XCTestCase {
+
+    func testPendingDropsLinesMovedByHandSince() throws {
+        let json = """
+        {
+          "version": 1, "audio_file": "rec.mp3",
+          "speaker_names": {"0": "Jeff Chow", "1": "Ian Reay"},
+          "segments": [{"start": 4.0, "end": 9.0, "speaker_id": 1, "text": "moved and still there"},
+                       {"start": 10.0, "end": 14.0, "speaker_id": 0, "text": "moved back by hand"}],
+          "refine_auto_applied": [
+            {"start": 4.0, "end": 9.0, "text": "moved and still there", "from_name": "Jeff Chow",
+             "to_name": "Ian Reay", "score": 0.88, "current_score": 0.36, "from_speaker_id": 0},
+            {"start": 10.0, "end": 14.0, "text": "moved back by hand", "from_name": "Jeff Chow",
+             "to_name": "Ian Reay", "score": 0.81, "current_score": null, "from_speaker_id": 0}
+          ]
+        }
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("auto-\(UUID().uuidString)_diarized.json")
+        try Data(json.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let transcript = try JSONDecoder().decode(DiarizedTranscript.self, from: Data(json.utf8))
+        let pending = RefineAutoMove.pending(jsonPath: url.path, transcript: transcript)
+        XCTAssertEqual(pending.map(\.start), [4.0])
+        XCTAssertEqual(pending.first?.index, 0)
+        XCTAssertEqual(pending.first?.line.toName, "Ian Reay")
+    }
+}
