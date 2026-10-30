@@ -382,6 +382,49 @@ extension DiarizedTranscript {
         merged.merge(mine) { _, new in new }
         return try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
     }
+
+    /// True when "Mark all unknown" has something to do: more than one
+    /// speaker, and at least one of them not yet reviewed.
+    var canMarkAllSpeakersUnknown: Bool {
+        let ids = Set(segments.map(\.speakerId))
+        guard ids.count > 1 else { return false }
+        return ids.contains { speakerMeta?["\($0)"]?.verified != true }
+    }
+
+    /// Mark every unverified speaker as a reviewed guest: name → Speaker N,
+    /// meta → unknown + verified. Confirmed real names are untouched.
+    /// Result: ≥1 verified speaker ⇒ speakersTagged / orange nag clears.
+    /// Shared by the viewer's button and the recordings toolbar.
+    ///
+    /// Iterates **all** `speakerNames` keys (not only segment speaker ids) so
+    /// orphan name-table rows don't leave the meeting in "needs tagging".
+    /// Returns whether anything changed.
+    mutating func markAllSpeakersUnknown() -> Bool {
+        func isGeneric(_ name: String) -> Bool {
+            name.range(of: #"^Speaker \d+$"#, options: .regularExpression) != nil
+        }
+        var ids = Set(segments.map(\.speakerId))
+        for key in speakerNames.keys {
+            if let n = Int(key) { ids.insert(n) }
+        }
+        var changed = false
+        var meta = speakerMeta ?? [:]
+        for id in ids.sorted() {
+            let key = "\(id)"
+            let name = speakerNames[key] ?? "Speaker \(id + 1)"
+            if meta[key]?.verified == true, !isGeneric(name) {
+                continue   // keep locked-in people
+            }
+            let generic = "Speaker \(id + 1)"
+            if name != generic || meta[key]?.source != "unknown" || meta[key]?.verified != true {
+                speakerNames[key] = generic
+                meta[key] = SpeakerMeta(source: "unknown", confidence: nil, verified: true)
+                changed = true
+            }
+        }
+        if changed { speakerMeta = meta }
+        return changed
+    }
 }
 
 /// Pass-through for the `speaker_lineage` sidecar map produced when labels
@@ -957,6 +1000,8 @@ struct TranscriptViewerView: View {
     @State private var voiceCheckMoved = 0
     @State private var voiceCheckNotApplied = 0
     @State private var voiceCheckResult: VoiceCheckResult?
+    /// Lines Refine moved by itself, still waiting to be undone or kept.
+    @State private var autoRefineMoves: [RefineAutoMove] = []
     @State private var calendarCandidates: [CalendarMeetingCandidate] = []
     @State private var calendarLoading = false
     @State private var linkedCalendarEvent: CalendarMeetingCandidate?
@@ -1042,6 +1087,8 @@ struct TranscriptViewerView: View {
     var onApplyVoiceCheck: ((String, [VoiceCheckMove], @escaping (DiarizedTranscript?, Int) -> Void) -> Void)? = nil
     /// Remember skipped Refine suggestions so they aren't offered again.
     var onSkipVoiceCheck: ((String, [VoiceCheckMove]) -> Void)? = nil
+    /// Undo (keep = false) or keep Refine's automatic moves; nil starts = all.
+    var onDecideAutoRefine: ((String, Bool, [Double]?, @escaping (DiarizedTranscript?) -> Void) -> Void)? = nil
     /// Learn a person's voice from lines the reviewer moved to them by hand
     /// (verified against the naming library before anything is saved).
     var onLearnFromLines: ((String, String, [[Double]]) -> Void)? = nil
@@ -1162,6 +1209,37 @@ struct TranscriptViewerView: View {
         voiceCheckMoved = 0
         voiceCheckNotApplied = 0
         voiceCheckResult = saved
+    }
+
+    private func loadAutoRefineMoves() {
+        autoRefineMoves = RefineAutoMove.pending(jsonPath: filePath, transcript: transcript)
+    }
+
+    /// Refine opens what's already known — the automatic moves and any saved
+    /// suggestions — and only runs a fresh check when there is neither.
+    private func openRefine() {
+        loadAutoRefineMoves()
+        if !autoRefineMoves.isEmpty || VoiceCheckResult.saved(forTranscript: filePath)?.hasSuggestions == true {
+            voiceCheckMoved = 0
+            voiceCheckNotApplied = 0
+            voiceCheckResult = VoiceCheckResult.saved(forTranscript: filePath) ?? VoiceCheckResult()
+        } else {
+            startVoiceCheck()
+        }
+    }
+
+    private func decideAutoRefine(_ moves: [RefineAutoMove]?, keep: Bool) {
+        guard let decide = onDecideAutoRefine else { return }
+        decide(filePath, keep, moves?.map(\.start)) { updated in
+            DispatchQueue.main.async {
+                guard let updated else {
+                    rediarizeStatus = .failed("Refine couldn't \(keep ? "keep" : "undo") the automatic changes. The transcript is unchanged.")
+                    return
+                }
+                if !keep { applyRediarizedTranscript(updated) } else { transcript = updated }
+                loadAutoRefineMoves()
+            }
+        }
     }
 
     private func startVoiceCheck() {
@@ -1567,6 +1645,7 @@ struct TranscriptViewerView: View {
         .onAppear {
             syncRediarizeSpeakerCount()
             refreshLibraryNames()
+            loadAutoRefineMoves()
             showSavedVoiceCheck()
             // Recover transcripts made by the short-lived raw-ASR-first flow.
             // Meeting matching is deliberately not involved: the initial pass
@@ -2109,6 +2188,10 @@ struct TranscriptViewerView: View {
                 onShow: { start in pendingTranscriptRestoreTime = start },
                 onApply: { moves in applyVoiceCheck(moves) },
                 onSkip: { moves in onSkipVoiceCheck?(filePath, moves) },
+                autoMoves: autoRefineMoves,
+                onUndoAuto: { moves in decideAutoRefine(moves, keep: false) },
+                onKeepAuto: { moves in decideAutoRefine(moves, keep: true) },
+                onCheckAgain: { voiceCheckResult = nil; startVoiceCheck() },
                 onClose: { voiceCheckResult = nil }
             )
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
@@ -2130,13 +2213,17 @@ struct TranscriptViewerView: View {
                     // against the meeting's saved voices instead, which is what
                     // catches the errors left after names are confirmed.
                     Button {
-                        startVoiceCheck()
+                        openRefine()
                     } label: {
-                        Label(voiceCheckRunning ? "Checking voices…" : "Refine", systemImage: "wand.and.stars")
+                        Label(voiceCheckRunning ? "Checking voices…"
+                              : autoRefineMoves.isEmpty ? "Refine" : "Refine (\(autoRefineMoves.count) applied)",
+                              systemImage: "wand.and.stars")
                     }
                     .fixedSize()
                     .disabled(isRediarizing || voiceCheckRunning)
-                    .help("Check every line against the saved voices of the people in this meeting, and suggest lines (or whole speakers) that sound like someone else. Nothing changes until you apply the suggestions. Best after confirming names.")
+                    .help(autoRefineMoves.isEmpty
+                          ? "Check every line against the saved voices of the people in this meeting, and suggest lines (or whole speakers) that sound like someone else. Confident line moves are applied automatically once the meeting is settled; the rest wait for you."
+                          : "Refine moved \(autoRefineMoves.count) line(s) automatically. Open to review them: undo any that are wrong, or keep them to teach the voice library.")
                 }
                 if onRediarize != nil {
 
@@ -3713,42 +3800,10 @@ struct TranscriptViewerView: View {
 
     /// True when this multi-speaker meeting still has anyone not fully
     /// reviewed — so "Mark all unknown" can close the tagging loop.
-    private var canMarkAllUnknown: Bool {
-        guard uniqueSpeakerIds.count > 1 else { return false }
-        return uniqueSpeakerIds.contains { id in
-            !(speakerMeta(for: id)?.verified ?? false)
-        }
-    }
+    private var canMarkAllUnknown: Bool { transcript.canMarkAllSpeakersUnknown }
 
-    /// Mark every unverified speaker as a reviewed guest: name → Speaker N,
-    /// meta → unknown + verified. Confirmed real names are untouched.
-    /// Result: ≥1 verified speaker ⇒ speakersTagged / orange nag clears.
-    ///
-    /// Iterates **all** `speakerNames` keys (not only segment speaker ids) so
-    /// orphan name-table rows don't leave the meeting in "needs tagging".
     private func markAllSpeakersUnknown() {
-        var changed = false
-        let ids: [Int] = {
-            var set = Set(uniqueSpeakerIds)
-            for key in transcript.speakerNames.keys {
-                if let n = Int(key) { set.insert(n) }
-            }
-            return set.sorted()
-        }()
-        for id in ids {
-            if speakerMeta(for: id)?.verified == true,
-               !isGenericName(speakerName(for: id)) {
-                continue   // keep locked-in people
-            }
-            let generic = "Speaker \(id + 1)"
-            if speakerName(for: id) != generic
-                || speakerMeta(for: id)?.source != "unknown"
-                || speakerMeta(for: id)?.verified != true {
-                transcript.speakerNames["\(id)"] = generic
-                setMeta(id, source: "unknown", verified: true, confidence: nil)
-                changed = true
-            }
-        }
+        let changed = transcript.markAllSpeakersUnknown()
         if speakerFilter != nil { speakerFilter = nil }
         if editingSpeakerId != nil {
             editingSpeakerId = nil

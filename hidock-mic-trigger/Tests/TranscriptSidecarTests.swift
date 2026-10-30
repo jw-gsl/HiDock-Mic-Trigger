@@ -96,3 +96,72 @@ final class RefineScoreLabelTests: XCTestCase {
                        "Naming library (redimnet2_b6): George's voice NOT saved: too short")
     }
 }
+
+final class MarkAllSpeakersUnknownTests: XCTestCase {
+
+    private func transcript() throws -> DiarizedTranscript {
+        let json = """
+        {
+          "version": 1, "audio_file": "rec.mp3",
+          "speaker_names": {"0": "James Whiting", "1": "Jeff Chow", "2": "Speaker 3", "5": "Orphan"},
+          "speaker_meta": {"0": {"source": "user", "verified": true},
+                           "1": {"source": "auto", "confidence": 0.7, "verified": false}},
+          "segments": [{"start": 0.0, "end": 2.0, "speaker_id": 0, "text": "Hi"},
+                       {"start": 2.0, "end": 4.0, "speaker_id": 1, "text": "Hello"},
+                       {"start": 4.0, "end": 6.0, "speaker_id": 2, "text": "Hey"}]
+        }
+        """
+        return try JSONDecoder().decode(DiarizedTranscript.self, from: Data(json.utf8))
+    }
+
+    func testMarksEveryoneButConfirmedPeople() throws {
+        var t = try transcript()
+        XCTAssertTrue(t.canMarkAllSpeakersUnknown)
+        XCTAssertTrue(t.markAllSpeakersUnknown())
+        XCTAssertEqual(t.speakerNames["0"], "James Whiting")
+        XCTAssertEqual(t.speakerNames["1"], "Speaker 2")
+        XCTAssertEqual(t.speakerNames["2"], "Speaker 3")
+        XCTAssertEqual(t.speakerNames["5"], "Speaker 6")
+        for key in ["1", "2", "5"] {
+            XCTAssertEqual(t.speakerMeta?[key]?.source, "unknown")
+            XCTAssertEqual(t.speakerMeta?[key]?.verified, true)
+        }
+        XCTAssertEqual(t.speakerMeta?["0"]?.source, "user")
+        XCTAssertFalse(t.canMarkAllSpeakersUnknown)
+        XCTAssertFalse(t.markAllSpeakersUnknown(), "a second run changes nothing")
+    }
+
+    func testSingleSpeakerMeetingIsLeftAlone() throws {
+        var t = try transcript()
+        t.segments = t.segments.filter { $0.speakerId == 1 }
+        XCTAssertFalse(t.canMarkAllSpeakersUnknown)
+    }
+}
+
+final class RefineAutoMoveTests: XCTestCase {
+
+    func testPendingDropsLinesMovedByHandSince() throws {
+        let json = """
+        {
+          "version": 1, "audio_file": "rec.mp3",
+          "speaker_names": {"0": "Jeff Chow", "1": "Ian Reay"},
+          "segments": [{"start": 4.0, "end": 9.0, "speaker_id": 1, "text": "moved and still there"},
+                       {"start": 10.0, "end": 14.0, "speaker_id": 0, "text": "moved back by hand"}],
+          "refine_auto_applied": [
+            {"start": 4.0, "end": 9.0, "text": "moved and still there", "from_name": "Jeff Chow",
+             "to_name": "Ian Reay", "score": 0.88, "current_score": 0.36, "from_speaker_id": 0},
+            {"start": 10.0, "end": 14.0, "text": "moved back by hand", "from_name": "Jeff Chow",
+             "to_name": "Ian Reay", "score": 0.81, "current_score": null, "from_speaker_id": 0}
+          ]
+        }
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("auto-\(UUID().uuidString)_diarized.json")
+        try Data(json.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let transcript = try JSONDecoder().decode(DiarizedTranscript.self, from: Data(json.utf8))
+        let pending = RefineAutoMove.pending(jsonPath: url.path, transcript: transcript)
+        XCTAssertEqual(pending.map(\.start), [4.0])
+        XCTAssertEqual(pending.first?.index, 0)
+        XCTAssertEqual(pending.first?.line.toName, "Ian Reay")
+    }
+}
