@@ -11,7 +11,8 @@ struct VoiceCheckResult: Decodable {
         let fromName: String
         let toName: String
         let score: Double
-        let currentScore: Double
+        /// Nil when the current name has no saved voice to compare with.
+        let currentScore: Double?
         var id: Int { index }
     }
 
@@ -21,7 +22,7 @@ struct VoiceCheckResult: Decodable {
         let name: String
         let suggested: String
         let score: Double
-        let currentScore: Double
+        let currentScore: Double?
         let lines: Int
         /// The lines a rename moves: all of the speaker's, except `kept`.
         let moves: [Move]
@@ -32,6 +33,9 @@ struct VoiceCheckResult: Decodable {
 
     var people: [String]?
     var voicesKnown: [String]?
+    /// Named people with no saved voice outside this recording: their lines
+    /// aren't checked, because there is nothing to compare them with.
+    var noVoice: [String]?
     var lines: [Line]?
     var speakers: [Speaker]?
     var checked: Int?
@@ -150,8 +154,18 @@ struct VoiceCheckPanel: View {
         var text = "Checked \(result.checked ?? 0) lines against the saved voices of \(people) people in this meeting"
         if let short = result.skippedShort, short > 0 { text += " (\(short) too short to judge)" }
         text += ". Play a line to check it, then apply or skip it."
+        if let missing = result.noVoice, !missing.isEmpty {
+            text += " Not checked, no saved voice yet: \(missing.joined(separator: ", "))."
+        }
         if applied > 0 { text += " \(applied) applied so far." }
         return text
+    }
+
+    /// "Jeff Chow 0.57", or "David McGregor: no saved voice" when there is
+    /// nothing to compare (previously shown as 0.00, which read as a mismatch).
+    static func match(_ name: String, _ score: Double?) -> String {
+        guard let score else { return "\(name): no saved voice" }
+        return "\(name) " + String(format: "%.2f", score)
     }
 
     private static func time(_ seconds: Double) -> String {
@@ -238,9 +252,8 @@ struct VoiceCheckPanel: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Everyone labelled “\(speaker.name)” sounds like \(speaker.suggested)")
                     .font(.callout.weight(.medium))
-                Text(String(format: "Voice match: %@ %.2f, %@ %.2f · moves %d of %d lines",
-                            speaker.suggested, speaker.score, speaker.name, speaker.currentScore,
-                            speaker.moves.count, speaker.lines)
+                Text("Voice match: \(Self.match(speaker.suggested, speaker.score)), "
+                     + "\(Self.match(speaker.name, speaker.currentScore)) · moves \(speaker.moves.count) of \(speaker.lines) lines"
                      + (speaker.kept.isEmpty ? "" : " (keeps \(speaker.kept.count) that sound like \(speaker.name))"))
                     .font(.caption).foregroundColor(.secondary)
             }
@@ -284,8 +297,7 @@ struct VoiceCheckPanel: View {
                 .font(.caption)
                 Text(line.text).font(.callout).lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(String(format: "Voice match: %@ %.2f, %@ %.2f",
-                            line.toName, line.score, line.fromName, line.currentScore))
+                Text("Voice match: \(Self.match(line.toName, line.score)), \(Self.match(line.fromName, line.currentScore))")
                     .font(.caption2).foregroundColor(.secondary)
             }
             Spacer(minLength: 4)

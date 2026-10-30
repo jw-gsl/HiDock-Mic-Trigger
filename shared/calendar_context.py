@@ -88,6 +88,32 @@ class CalendarContext:
         }
 
 
+# Voices each diarisation backend can tell apart in one recording. The
+# Nemotron sidecar's channel count is fixed at 8 (see diarize_nemotron).
+BACKEND_MAX_SPEAKERS = {"nemotron": 8}
+
+
+def speaker_count_check(context: CalendarContext | None, diarized_result: dict) -> dict | None:
+    """Invitees vs voices found, so the viewer can flag an under-split meeting.
+
+    Rec77 (2026-10-29, an all-hands) came back with 7 voices for 18 people,
+    because Nemotron can't separate more than 8; nothing said so. Accepted
+    invitees are used when the calendar reports them, otherwise all invitees.
+    """
+    if context is None or context.ambiguous or context.selected_event_id is None:
+        return None
+    expected = context.accepted_names or context.candidate_names
+    found = {seg.get("speaker_id") for seg in diarized_result.get("segments") or []}
+    backend = str(diarized_result.get("backend") or "")
+    return {
+        "invitees": len(expected),
+        "invitee_basis": "accepted" if context.accepted_names else "invited",
+        "voices_found": len(found),
+        "backend": backend,
+        "backend_max_speakers": BACKEND_MAX_SPEAKERS.get(backend),
+    }
+
+
 def normalize_name(value: Any) -> str:
     """Collapse whitespace and case-fold a name for exact comparisons."""
     return _WHITESPACE.sub(" ", str(value or "").strip()).casefold()

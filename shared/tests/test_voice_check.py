@@ -200,3 +200,31 @@ def test_an_error_result_is_not_saved(tmp_path):
     path = _write_transcript(tmp_path, [0])
     voice_check.save_cache(path, {"error": "no library"})
     assert not voice_check.cache_path(path).exists()
+
+
+def test_nothing_is_moved_away_from_a_person_with_no_saved_voice():
+    # Rec77: Jordan's only voice came from this recording, so it can't be
+    # compared. His lines stay put instead of going to the best other voice.
+    lib = _library(**{
+        "Chris Wildsmith": [(CHRIS, "Rec1")], "Jeff Chow": [(JEFF, "Rec1")],
+        "Ian Reay": [(IAN, "Rec2")], "Jordan Di Scola": [(JORDAN, "RecX")],
+    })
+    result = _propose(lib, recording="RecX")
+    assert all(line["from_name"] != "Jordan Di Scola" for line in result["lines"])
+    assert all(s["name"] != "Jordan Di Scola" for s in result["speakers"])
+    assert result["no_voice"] == ["Jordan Di Scola"]
+    # Lines of people who can be compared are still checked.
+    assert {(line["index"], line["to_name"]) for line in result["lines"]} == {(3, "Jeff Chow")}
+
+
+def test_unnamed_speakers_are_still_checked_and_show_no_score_for_their_label():
+    data = _data()
+    data["speaker_names"]["0"] = "Speaker 1"
+    data["speaker_meta"]["0"] = {"verified": True}
+    lib = _library(**{"Chris Wildsmith": [(CHRIS, "Rec1")], "Jeff Chow": [(JEFF, "Rec1")], "Ian Reay": [(IAN, "Rec2")]})
+    result = voice_check.propose(
+        data, lambda s, e: VOICE_AT.get(s), lib, scorer="max", threshold=0.5, min_margin=0.2,
+        people=["Ian Reay", "Jeff Chow", "Chris Wildsmith"])
+    moved = [line for line in result["lines"] if line["from_name"] == "Speaker 1"]
+    assert moved and all(line["current_score"] is None for line in moved)
+    assert result["no_voice"] == []

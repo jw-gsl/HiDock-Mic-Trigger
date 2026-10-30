@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 19 changes (v4.1.0 to v4.1.18, 15 Oct 2026 – 29 Oct 2026)
+**Released 16 Oct 2026** · 20 changes (v4.1.0 to v4.1.19, 15 Oct 2026 – 30 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -21,6 +21,10 @@ This release brings every setting into one Settings window and makes setting up 
 - **Models pane.** Each model expands with an arrow, the models you're using are open by default, and there are Expand all, Collapse all and Show models in use buttons.
 - **Speaker detection falls back.** If Nemotron on a separate NVIDIA computer isn't available, speakers are detected on the Mac instead.
 - **Voice library corrected.** Voice samples filed under the wrong person are moved to whoever the transcript says was speaking, or set aside if that's not certain.
+- **Voices learned from all of a person's lines.** When you move lines to someone, the app now learns their voice from every line they have in that transcript, not just the ones you moved. Before, moving short lines one at a time taught it nothing, even once the person had longer lines.
+- **Refine is clearer about people it can't check.** Someone whose only saved voice comes from the meeting being checked shows "no saved voice" instead of 0.00, and Refine no longer suggests moving their lines to someone else on that alone. The panel lists who wasn't checked.
+- **Warning when a meeting may have more speakers than were found.** If the invite list is much longer than the number of voices found, or speaker detection hit its limit (Nemotron tells apart at most 8 voices), the transcript says so and suggests Redetect with a higher speaker count.
+- **The log says which voice library was taught.** Voices saved for automatic naming and Refine are logged as "Naming library", with the reason when one isn't saved; the older TitaNet library is labelled as such.
 - **LED ticker.** Events now scroll across the heatmap while it's at rest (before, they never showed). The display style, colour, brightness and speed apply straight away, and a "Send a test message" button lets you try it.
 
 ### Fixed
@@ -28,10 +32,12 @@ This release brings every setting into one Settings window and makes setting up 
 - **Long recordings stalling on Nemotron.** Audio is now sent to the Spark as lossless FLAC instead of uncompressed WAV, a quarter of the size, so a 3-hour recording no longer takes hours to upload over a slow connection.
 - **Plaud recordings downloaded twice when travelling.** Early-morning recordings landed in a different day folder when the Mac was in another time zone, so they were downloaded and transcribed again. The app now finds the existing copy.
 - **Recordings an hour out after the clocks changed.** The HiDock keeps its own clock and nothing set it, so after the switch to GMT it named recordings an hour late and they were matched to the wrong meetings. The app now checks the device clock whenever it talks to it and corrects it. Recordings already named an hour out can be marked with a correction, which moves their Created time and their calendar search back to the real start.
+- **Summaries and titles lost on edit.** Re-detecting speakers, renaming one or accepting Refine suggestions rewrote the transcript without its summary, so the title became the first line spoken and the key points, decisions and actions disappeared. Edits now keep them, and a transcript with no summary title uses its meeting's title.
+- **Meeting link and diarisation details dropped on edit.** Saving an edit in the transcript viewer removed fields it didn't know about from the transcript's data file, including the linked meeting and its invite list. They're now kept.
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (9)</summary>
+<details><summary>Every change (20)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -53,7 +59,8 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.15 | 21 Oct 2026 | Nemotron uploads are a quarter of the size (lossless FLAC), so long recordings over a slow connection finish (#141) |
 | v4.1.16 | 21 Oct 2026 | Plaud recordings already on disk aren't downloaded again when the Mac is in another time zone (#142) |
 | v4.1.17 | 29 Oct 2026 | HiDock clock kept on Mac time, so recordings aren't stamped an hour out after the clocks change (#143) |
-| v4.1.18 | 29 Oct 2026 | Created time shows the corrected start for recordings named while the HiDock's clock was wrong |
+| v4.1.18 | 29 Oct 2026 | Created time shows the corrected start for recordings named while the HiDock's clock was wrong (#144) |
+| v4.1.19 | 30 Oct 2026 | Edits keep the summary and the meeting link; voices learned from all of a person's lines; Refine and under-split warnings clearer |
 
 </details>
 

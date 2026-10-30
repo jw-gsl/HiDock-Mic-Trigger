@@ -3902,8 +3902,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? FileManager.default.removeItem(at: url)
             switch result {
             case .success(let output):
-                let line = String(decoding: output, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
-                self?.log("Voice learning from moved lines for \(name): \(line.prefix(200))")
+                self?.log(Self.namingLibraryOutcome(output, name: name))
             case .failure(let error):
                 self?.log("Voice learning from moved lines failed: \(error.localizedDescription)")
             }
@@ -3975,12 +3974,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         runTranscription(arguments: arguments, timeout: 300) { [weak self] result in
             switch result {
-            case .success:
+            case .success(let output):
                 self?.log("Recorded speaker review for speaker \(speakerId): \(action)")
+                if action == "confirmed" || action == "rejected", let finalName, !finalName.isEmpty {
+                    self?.log(Self.namingLibraryOutcome(output, name: finalName))
+                }
             case .failure(let error):
                 self?.log("Could not record speaker review: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// One log line saying whether a voice reached the naming library (the one
+    /// automatic naming and Refine use), from `learn-lines` or
+    /// `record-speaker-suggestion` output. Until 2026-10-30 the log only said
+    /// "Enrolled … in voice library", meaning the TitaNet library, so three
+    /// people in Rec77 looked learned when naming had nothing for them.
+    static func namingLibraryOutcome(_ output: Data, name: String) -> String {
+        let last = String(decoding: output, as: UTF8.self)
+            .split(separator: "\n").last.map(String.init) ?? ""
+        guard let payload = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] else {
+            return "Naming library: no result for \(name): \(last.prefix(200))"
+        }
+        let result = payload["event"] as? [String: Any] ?? payload
+        let library = (result["library"] ?? result["review_only_model"]) as? String ?? "naming"
+        if result["enrolled"] as? Bool == true {
+            var text = "Naming library (\(library)): saved \(name)'s voice"
+            if let start = result["clip_start"] as? Double, let end = result["clip_end"] as? Double {
+                text += String(format: " from %d:%02d–%d:%02d", Int(start) / 60, Int(start) % 60, Int(end) / 60, Int(end) % 60)
+            }
+            if let check = result["verification"] as? String { text += " (\(check))" }
+            return text
+        }
+        let reason = (result["reason"] ?? result["not_enrolled_reason"]) as? String ?? "no reason given"
+        return "Naming library (\(library)): \(name)'s voice NOT saved: \(reason)"
     }
 
     private func rediarizeTranscript(
@@ -7931,13 +7958,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 "--start", String(start),
                 "--end", String(end)
             ]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
             do {
                 try process.run()
                 process.waitUntilExit()
+                let ok = process.terminationStatus == 0
                 DispatchQueue.main.async {
-                    self?.log("Enrolled speaker '\(name)' in voice library")
+                    // TitaNet: kept for Reassign and clustering; naming uses
+                    // the naming library (see namingLibraryOutcome).
+                    self?.log(ok ? "TitaNet library: saved '\(name)' (not used for automatic naming)"
+                                 : "TitaNet library: could not save '\(name)' (exit \(process.terminationStatus))")
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -7977,7 +8008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     encoding: .utf8
                 ) ?? ""
                 if process.terminationStatus == 0 {
-                    DispatchQueue.main.async { self?.log("Enrolled '\(name)' in voice library") }
+                    DispatchQueue.main.async { self?.log("TitaNet library: saved '\(name)' (not used for automatic naming)") }
                 } else {
                     DispatchQueue.main.async {
                         self?.log("Failed to enroll '\(name)' from diarized: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))")

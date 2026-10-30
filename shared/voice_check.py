@@ -133,6 +133,24 @@ def propose(
     def score_of(ranks: list[tuple[str, float]], name: str) -> float:
         return next((s for n, s in ranks if n.casefold() == name.casefold()), 0.0)
 
+    # A named person with no saved voice outside this recording can't be
+    # compared, so nothing is moved away from them. Rec77 (2026-10-29): David
+    # McGregor's only voices came from that meeting, scored 0.00, and Jeff at
+    # 0.57 was proposed for his lines on that alone.
+    known_cf = {name.casefold() for name in known}
+
+    def no_voice(name: str) -> bool:
+        return name.casefold() not in known_cf
+
+    def comparable(name: str) -> bool:
+        return not no_voice(name) or is_generic_name(name)
+
+    result["no_voice"] = sorted(
+        {_speaker_name(data, sid) for sid in (data.get("speaker_names") or {})
+         if not is_generic_name(_speaker_name(data, sid)) and no_voice(_speaker_name(data, sid))},
+        key=str.casefold,
+    )
+
     segments = data.get("segments") or []
     by_speaker: dict[str, list[np.ndarray]] = {}
     line_ranks: dict[int, list[tuple[str, float]]] = {}
@@ -161,6 +179,8 @@ def propose(
             continue
         line_ranks[index] = ranks
         current = _speaker_name(data, speaker_id)
+        if not comparable(current):
+            continue
         top, top_score = ranks[0]
         current_score = score_of(ranks, current)
         if top.casefold() != current.casefold() and top_score >= threshold \
@@ -170,7 +190,7 @@ def propose(
                 "text": str(seg.get("text") or "").strip(),
                 "from_speaker_id": speaker_id, "from_name": current,
                 "to_name": top, "score": round(top_score, 3),
-                "current_score": round(current_score, 3),
+                "current_score": None if no_voice(current) else round(current_score, 3),
             })
 
     for speaker_id, vectors in sorted(by_speaker.items()):
@@ -185,7 +205,7 @@ def propose(
                 continue
             top, top_score = ranks[0]
             current_score = ranks[1][1] if len(ranks) > 1 else 0.0
-        elif check_lines:
+        elif check_lines and comparable(current):
             ranks = ranked(centroid)
             if not ranks:
                 continue
@@ -211,7 +231,9 @@ def propose(
                     moves.append({"index": index, "start": float(seg.get("start", 0))})
             result["speakers"].append({
                 "speaker_id": speaker_id, "name": current, "suggested": top,
-                "score": round(top_score, 3), "current_score": round(current_score, 3),
+                "score": round(top_score, 3),
+                "current_score": None if (speaker_id not in unnamed and no_voice(current))
+                else round(current_score, 3),
                 "lines": len(moves) + len(kept), "moves": moves, "kept": kept,
             })
     return result

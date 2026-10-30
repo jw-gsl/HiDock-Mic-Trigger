@@ -225,6 +225,38 @@ def auto_title(text: str, max_words: int = 10) -> str:
     return title
 
 
+_SUMMARY_HEADING = "\n## Summary\n"
+
+
+def existing_summary(md_path: Path) -> dict:
+    """The summary fields already in a transcript file, to carry into a rewrite.
+
+    A title the writer generated from the first line (`auto_title`) isn't a
+    summary title, so it isn't kept; a better fallback can replace it.
+    """
+    try:
+        text = Path(md_path).read_text(encoding="utf-8")
+    except (OSError, TypeError):
+        return {}
+    meta, body = parse_frontmatter(text)
+    if not meta:
+        return {}
+    kept = {key: meta.get(key) or [] for key in ("action_items", "decisions", "key_points", "tags")}
+    start = text.rfind(_SUMMARY_HEADING)
+    kept["summary_text"] = text[start + len(_SUMMARY_HEADING):].strip() if start >= 0 else ""
+    title = str(meta.get("title") or "").strip()
+    transcript = body.split("## Transcript", 1)[-1].split(_SUMMARY_HEADING, 1)[0]
+    if title and title != auto_title(transcript.strip()) and title != "Untitled recording":
+        kept["title"] = title
+    return kept
+
+
+def _calendar_title(diarized_result: dict | None) -> str:
+    """The linked meeting's title, a better fallback than a line of speech."""
+    context = (diarized_result or {}).get("calendar_context") or {}
+    return str(context.get("calendar_event_title") or "").strip()
+
+
 def extract_speakers_from_diarized(diarized_result: dict) -> list[str]:
     """Extract publishable speaker list from a diarization result dict.
 
@@ -353,9 +385,16 @@ def write_transcript(
         body = transcript_text
         speakers = []
 
-    # Build metadata from summary or defaults
+    # Build metadata from summary or defaults. A rewrite (speaker rename,
+    # re-diarisation, Refine) passes no summary: keep the one already in the
+    # file, or every edit drops the summary and the title falls back to the
+    # first line spoken (Rec77, 2026-10-29: "Team Strategy, Structure and
+    # Innovation Reset" became "Oh was it Riley the agent?" at re-diarisation).
+    # A summariser that failed returns an empty summary: keep the old one too.
+    if not summary or not any(summary.values()):
+        summary = existing_summary(output_path)
     summary = summary or {}
-    title = summary.get("title") or auto_title(body)
+    title = summary.get("title") or _calendar_title(diarized_result) or auto_title(body)
     action_items = summary.get("action_items", [])
     decisions = summary.get("decisions", [])
     key_points = summary.get("key_points", [])
