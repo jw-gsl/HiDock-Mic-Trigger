@@ -2,6 +2,8 @@
 
 Pathway, order of operations and validation checks. Drafted 2026-10-14 from a real migration (old Mac -> new Mac, same username `jameswhiting`). Figures below are from that Mac and will differ elsewhere.
 
+For what doesn't survive the move (Keychain tokens, model files, signing access, `gh` sign-in) and the app's own setup check, see [MIGRATING.md](MIGRATING.md).
+
 Nothing here deletes anything on the old Mac. Keep the old Mac intact until section 6 passes.
 
 ## 0. Principles
