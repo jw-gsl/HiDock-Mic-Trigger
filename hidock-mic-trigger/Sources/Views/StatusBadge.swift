@@ -119,10 +119,12 @@ struct TranscriptionIndicator: View {
                 }
             } label: {
                 Image(systemName: "questionmark.circle.fill")
-                    .foregroundColor(.blue)
+                    .foregroundColor(beforeTaggingCutoff ? .secondary : .blue)
             }
             .buttonStyle(.plain)
-            .help("Auto-tagged from your voice library — click to verify the speakers")
+            .help(beforeTaggingCutoff
+                  ? "Auto-tagged — older than your tagging start date, so not counted. Click to verify the speakers"
+                  : "Auto-tagged from your voice library — click to verify the speakers")
         } else if entry.transcribed && !entry.speakersTagged {
             // Transcribed but speakers need tagging — orange tag
             Button {
