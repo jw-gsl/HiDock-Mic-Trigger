@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 20 changes (v4.1.0 to v4.1.19, 15 Oct 2026 – 30 Oct 2026)
+**Released 16 Oct 2026** · 21 changes (v4.1.0 to v4.1.20, 15 Oct 2026 – 30 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -37,7 +37,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (20)</summary>
+<details><summary>Every change (21)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -60,7 +60,8 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.16 | 21 Oct 2026 | Plaud recordings already on disk aren't downloaded again when the Mac is in another time zone (#142) |
 | v4.1.17 | 29 Oct 2026 | HiDock clock kept on Mac time, so recordings aren't stamped an hour out after the clocks change (#143) |
 | v4.1.18 | 29 Oct 2026 | Created time shows the corrected start for recordings named while the HiDock's clock was wrong (#144) |
-| v4.1.19 | 30 Oct 2026 | Edits keep the summary and the meeting link; voices learned from all of a person's lines; Refine and under-split warnings clearer |
+| v4.1.19 | 30 Oct 2026 | Edits keep the summary and the meeting link; voices learned from all of a person's lines; Refine and under-split warnings clearer (#145) |
+| v4.1.20 | 30 Oct 2026 | The app's version label always matches the release number |
 
 </details>
 
