@@ -1297,7 +1297,14 @@ def cmd_voice_check(args):
     snapshot_transcript(json_path, "Before accepting voice-check suggestions")
     digest_before = voice_check._digest(json_path)
     data = _json.loads(json_path.read_text(encoding="utf-8"))
+    # Suggestions still waiting for the reviewer: their lines must keep their
+    # start times, so they're left out of the join below.
+    done = [float(m.get("start", -1)) for m in moves]
+    waiting = [float(line.get("start", 0))
+               for line in ((voice_check.load_cache(json_path) or {}).get("lines") or [])
+               if not any(abs(float(line.get("start", 0)) - s) <= 0.05 for s in done)]
     summary = voice_check.apply_moves(data, moves)
+    summary["joined"] = voice_check.merge_moved_lines(data, moves, keep_starts=waiting)
     json_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     voice_check.forget_suggestions(json_path, moves, digest_before=digest_before)
     review_feedback.record_refine(recording, "applied", moves)
@@ -1305,8 +1312,11 @@ def cmd_voice_check(args):
     learned = {}
     by_name: dict[str, list[tuple[float, float]]] = {}
     for move in moves:
+        # A moved line may now be part of a joined one, so look for the line
+        # that contains its start rather than one that begins there.
+        at = float(move.get("start", -1))
         seg = next((s for s in data.get("segments", [])
-                    if abs(float(s.get("start", 0)) - float(move.get("start", -1))) <= 0.05), None)
+                    if float(s.get("start", 0)) - 0.05 <= at <= float(s.get("end", 0))), None)
         if seg:
             by_name.setdefault(str(move["to_name"]), []).append((float(seg["start"]), float(seg["end"])))
     try:

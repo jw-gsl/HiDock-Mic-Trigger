@@ -285,6 +285,62 @@ def apply_moves(data: dict, moves: list[dict]) -> dict:
     return {"moved": moved, "requested": len(moves), "not_found": len(missing)}
 
 
+# Same limits the diarizers merge with, so a joined line looks like one they'd emit.
+_MERGE_MAX_GAP_SECONDS = 1.0
+_MERGE_MAX_SECONDS = 30.0
+
+
+def merge_moved_lines(data: dict, moves: list[dict], *, keep_starts: list[float] = ()) -> int:
+    """Join each moved line with neighbours that now have the same speaker.
+
+    Moving lines one by one leaves a person's speech in pieces: Rec79
+    (2026-10-29) had 19 fragments moved to one person and they stayed 19
+    lines, interleaved with the ones not moved. A line that still has a
+    suggestion waiting (`keep_starts`) is never joined — the reviewer
+    hasn't decided it, and joining would take its start time, which is how
+    the suggestion finds it. Returns the number of lines joined away.
+    """
+    segments = data.get("segments") or []
+    starts = [float(m["start"]) for m in moves if "start" in m]
+
+    def near(value: float, among) -> bool:
+        return any(abs(value - other) <= 0.05 for other in among)
+
+    # Runs of lines that could be one line; only runs holding a moved line
+    # are joined, so the rest of the transcript keeps the shape it had.
+    groups: list[list[dict]] = []
+    for seg in segments:
+        group = groups[-1] if groups else None
+        if (
+            group
+            and group[-1].get("speaker_id") == seg.get("speaker_id")
+            and not near(float(group[-1].get("start", 0)), keep_starts)
+            and not near(float(seg.get("start", 0)), keep_starts)
+            and float(seg["start"]) - float(group[-1]["end"]) < _MERGE_MAX_GAP_SECONDS
+            and float(seg["end"]) - float(group[0]["start"]) <= _MERGE_MAX_SECONDS
+        ):
+            group.append(seg)
+        else:
+            groups.append([seg])
+
+    out: list[dict] = []
+    for group in groups:
+        if len(group) == 1 or not any(near(float(s.get("start", 0)), starts) for s in group):
+            out.extend(group)
+            continue
+        line = dict(group[0])
+        line["end"] = max(float(s["end"]) for s in group)
+        line["text"] = " ".join(s.get("text", "").strip() for s in group).strip()
+        if all(s.get("words") for s in group):
+            line["words"] = [w for s in group for w in s["words"]]
+        else:
+            line.pop("words", None)
+        out.append(line)
+    joined = len(segments) - len(out)
+    data["segments"] = out
+    return joined
+
+
 def run(json_path: Path, *, on_progress: Callable[[float], None] | None = None) -> dict:
     """Load everything for one transcript and return its proposals."""
     from shared.audio_utils import extract_embedding, load_audio

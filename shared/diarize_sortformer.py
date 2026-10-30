@@ -734,7 +734,77 @@ def _assign_speakers_word_level(whisper_segments, turns):
             out.append(output)
         else:
             out.extend(runs)
-    return out
+    return _smooth_label_flicker(out)
+
+
+# A run this short, butted against speech on both sides, is the diarizer
+# changing its mind mid-sentence rather than someone else talking: a real
+# interjection is set off by a pause.
+_FLICKER_MAX_SECONDS = 1.0
+_FLICKER_MAX_GAP_SECONDS = 0.5
+
+
+def _smooth_label_flicker(
+    runs: list[dict],
+    *,
+    max_seconds: float = _FLICKER_MAX_SECONDS,
+    max_gap: float = _FLICKER_MAX_GAP_SECONDS,
+) -> list[dict]:
+    """Fold sub-second label flips inside continuous speech into a neighbour.
+
+    Word-level assignment follows the diarizer word by word, so when it
+    wavers between labels over one person's speech the transcript is cut
+    into one- and two-word lines that alternate between people. Rec79
+    (2026-10-29) got about 30 of those over a 90-second answer from one
+    person: "don't" / "kind of" / "want to" / "say right now", alternating
+    between two names.
+
+    Repeatedly takes the shortest run under `max_seconds` that has speech on
+    both sides within `max_gap` and gives its words to a neighbour: the one
+    on both sides when they agree, otherwise the closer one, then the longer.
+    Shortest first, so a flicker zone collapses toward whoever holds most of
+    it. A run next to a pause is never touched — that is where real short
+    replies ("yeah", "I agree") sit.
+    """
+    runs = [dict(run) for run in runs]
+
+    def duration(run: dict) -> float:
+        return float(run["end"]) - float(run["start"])
+
+    def gap(left: dict, right: dict) -> float:
+        return float(right["start"]) - float(left["end"])
+
+    def join(left: dict, right: dict) -> dict:
+        joined = dict(left)
+        joined["end"] = max(float(left["end"]), float(right["end"]))
+        left_words, right_words = timed_words(left), timed_words(right)
+        if left_words and right_words:
+            joined["words"] = left_words + right_words
+            joined["text"] = words_to_text(joined["words"])
+        else:
+            joined.pop("words", None)
+            joined["text"] = f"{left.get('text', '')} {right.get('text', '')}".strip()
+        return joined
+
+    while True:
+        candidates = [
+            i for i in range(1, len(runs) - 1)
+            if duration(runs[i]) < max_seconds
+            and runs[i - 1]["speaker"] != runs[i]["speaker"]
+            and runs[i + 1]["speaker"] != runs[i]["speaker"]
+            and gap(runs[i - 1], runs[i]) <= max_gap
+            and gap(runs[i], runs[i + 1]) <= max_gap
+        ]
+        if not candidates:
+            return runs
+        i = min(candidates, key=lambda k: (duration(runs[k]), k))
+        before, run, after = runs[i - 1], runs[i], runs[i + 1]
+        if before["speaker"] == after["speaker"]:
+            runs[i - 1:i + 2] = [join(join(before, run), after)]
+        elif (gap(before, run), -duration(before)) <= (gap(run, after), -duration(after)):
+            runs[i - 1:i + 1] = [join(before, run)]
+        else:
+            runs[i:i + 2] = [join({**run, "speaker": after["speaker"]}, after)]
 
 
 def _collect_speaker_audio(audio: np.ndarray, turns, label: str, sr: int = 16000,
