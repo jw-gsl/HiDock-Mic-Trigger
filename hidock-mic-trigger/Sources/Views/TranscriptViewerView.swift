@@ -302,8 +302,10 @@ struct DiarizedTranscript: Codable {
     var preservedSpeakerLabels: [String]?
     /// Cluster-merge lineage from label preservation. Pass-through only.
     var speakerLineage: [String: SpeakerLineageEntry]?
+    /// Invitees vs voices found at diarisation, for the under-split warning.
+    var speakerCountCheck: SpeakerCountCheck?
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case version
         case audioFile = "audio_file"
         case segments
@@ -313,6 +315,72 @@ struct DiarizedTranscript: Codable {
         case backend
         case preservedSpeakerLabels = "preserved_speaker_labels"
         case speakerLineage = "speaker_lineage"
+        case speakerCountCheck = "speaker_count_check"
+    }
+}
+
+/// `speaker_count_check` in the sidecar (shared.calendar_context).
+struct SpeakerCountCheck: Codable {
+    var invitees: Int
+    var inviteeBasis: String?
+    var voicesFound: Int
+    var backend: String?
+    var backendMaxSpeakers: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case invitees
+        case inviteeBasis = "invitee_basis"
+        case voicesFound = "voices_found"
+        case backend
+        case backendMaxSpeakers = "backend_max_speakers"
+    }
+
+    /// A warning when the meeting looks under-split, or nil. Clears itself
+    /// once the reviewer has split out enough speakers.
+    ///
+    /// Rec77 (2026-10-29): 7 voices for an all-hands of 18 speakers, because
+    /// Nemotron separates at most 8. Shown when detection hit its limit with
+    /// more people invited, or when fewer than half the invitees were found
+    /// and at least four are missing.
+    func warning(speakersNow: Int) -> String? {
+        guard invitees > speakersNow else { return nil }
+        let atLimit = backendMaxSpeakers.map { voicesFound >= $0 - 1 && speakersNow <= $0 } ?? false
+        let farShort = invitees - speakersNow >= 4 && speakersNow * 2 <= invitees
+        guard atLimit || farShort else { return nil }
+        let who = inviteeBasis == "accepted" ? "accepted the invite" : "were invited"
+        var text = "\(speakersNow) voice\(speakersNow == 1 ? "" : "s") here, but \(invitees) people \(who)."
+        if atLimit, let limit = backendMaxSpeakers {
+            text += " Speaker detection (\(backend ?? "this model")) can tell apart at most \(limit) voices,"
+                + " so if more people spoke, some of their lines are under someone else's name."
+        } else {
+            text += " If more people spoke, some of their lines may be under someone else's name."
+        }
+        return text + " Use Redetect with a higher speaker count, or move lines to the right person."
+    }
+}
+
+extension DiarizedTranscript {
+    /// The sidecar to write: this transcript's fields over the file's current
+    /// ones, keeping every top-level key the viewer doesn't model.
+    ///
+    /// Encoding the struct alone dropped them. Rec77 (2026-10-29) lost its
+    /// `calendar_context` (the linked meeting and invite list),
+    /// `speaker_embedding_model`, `speaker_count_strategy` and the Nemotron
+    /// timings at the first edit in the viewer. Keys the struct does model are
+    /// always taken from it, so clearing one (e.g. no `speaker_meta`) still
+    /// removes it.
+    static func sidecarData(for transcript: DiarizedTranscript, existing: Data?) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let encoded = try encoder.encode(transcript)
+        guard let existing,
+              let current = (try? JSONSerialization.jsonObject(with: existing)) as? [String: Any],
+              let mine = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else { return encoded }
+        let modelled = Set(CodingKeys.allCases.map(\.rawValue))
+        var merged = current.filter { !modelled.contains($0.key) }
+        merged.merge(mine) { _, new in new }
+        return try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
     }
 }
 
@@ -932,6 +1000,8 @@ struct TranscriptViewerView: View {
     /// call can run for minutes with no CLI output until it completes.
     @State private var transcriptAssistantStartedAt: Date?
     @State private var showTranscriptHistory = false
+    /// Hides the under-split warning for this viewing.
+    @State private var underSplitDismissed = false
     @State private var transcriptVersions: [TranscriptVersion] = []
     @State private var pendingTranscriptRestore: TranscriptVersion?
     /// Which history row is expanded, and the detail read for each one so far.
@@ -1109,7 +1179,9 @@ struct TranscriptViewerView: View {
                 } else if let note = result.note {
                     rediarizeStatus = .info("Refine: \(note)")
                 } else if (result.lines ?? []).isEmpty && (result.speakers ?? []).isEmpty {
-                    rediarizeStatus = .skipped("Refine: all \(result.checked ?? 0) lines checked sound like the person they're assigned to.")
+                    let missing = result.noVoice ?? []
+                    rediarizeStatus = .skipped("Refine: all \(result.checked ?? 0) lines checked sound like the person they're assigned to."
+                        + (missing.isEmpty ? "" : " Not checked, no saved voice yet: \(missing.joined(separator: ", "))."))
                 } else {
                     voiceCheckResult = result
                 }
@@ -1407,6 +1479,25 @@ struct TranscriptViewerView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
 
+                Divider()
+            }
+
+            if !underSplitDismissed,
+               let warning = transcript.speakerCountCheck?.warning(speakersNow: uniqueSpeakerIds.count) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "person.3.sequence")
+                        .foregroundColor(.orange)
+                    Text(warning)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("Dismiss") { underSplitDismissed = true }
+                        .font(.caption2)
+                        .buttonStyle(.borderless)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.08))
                 Divider()
             }
 
@@ -4268,10 +4359,9 @@ struct TranscriptViewerView: View {
     private func saveTranscript(_ reason: String = "Before speaker edit") {
         do {
             onSnapshotTranscript?(filePath, reason)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(transcript)
-            try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+            let url = URL(fileURLWithPath: filePath)
+            let data = try DiarizedTranscript.sidecarData(for: transcript, existing: try? Data(contentsOf: url))
+            try data.write(to: url, options: .atomic)
             // Persist first, then notify the owner. The owner re-reads the
             // sidecar and updates the table's cached icon immediately.
             onSpeakerReviewChanged?(filePath)

@@ -308,6 +308,8 @@ def transcribe_file(
 
                 if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
                     diarized_result["calendar_context"] = calendar_context.to_metadata()
+                    from shared.calendar_context import speaker_count_check
+                    diarized_result["speaker_count_check"] = speaker_count_check(calendar_context, diarized_result)
 
                 # Write diarized JSON sidecar
                 diarized_path = config.RAW_TRANSCRIPTS_DIR / f"{basename}_diarized.json"

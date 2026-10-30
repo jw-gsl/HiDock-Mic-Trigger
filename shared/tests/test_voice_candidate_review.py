@@ -5,6 +5,7 @@ from unittest.mock import patch
 import numpy as np
 
 from shared.voice_candidate_review import (
+    _person_ranges,
     activate_candidate,
     list_candidate_speakers,
     load_candidate_config,
@@ -350,3 +351,19 @@ def test_merge_requires_existing_source(tmp_path):
             raise AssertionError(f"merge {source!r} -> {target!r} should fail")
     library = json.loads((tmp_path / "library.json").read_text())
     assert set(library["speakers"]) == {"James Whiting", "Chris Wildsmith"}
+
+
+def test_learning_uses_all_of_the_persons_lines_not_just_the_moved_ones():
+    data = {
+        "speaker_names": {"0": "George Mylonas", "1": "James Whiting"},
+        "segments": [
+            {"speaker_id": 0, "start": 100.0, "end": 130.0},
+            {"speaker_id": 1, "start": 130.0, "end": 140.0},
+            {"speaker_id": 0, "start": 150.0, "end": 154.0},
+        ],
+    }
+    # Only a 4 s line was moved this time; the 30 s line he already has counts too.
+    assert _person_ranges(data, "George  Mylonas", [(150.0, 154.0)]) == [(100.0, 130.0), (150.0, 154.0)]
+    # A moved range not yet in the sidecar is still included.
+    assert (200.0, 210.0) in _person_ranges(data, "George Mylonas", [(200.0, 210.0)])
+    assert _person_ranges(data, "Nobody", []) == []

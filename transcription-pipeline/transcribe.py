@@ -535,6 +535,8 @@ def transcribe_file(
                         )
                 if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
                     diarized_result["calendar_context"] = calendar_context.to_metadata()
+                    from shared.calendar_context import speaker_count_check
+                    diarized_result["speaker_count_check"] = speaker_count_check(calendar_context, diarized_result)
             except ModuleNotFoundError as e:
                 # Selected backend's pip package missing — keep going
                 # with the transcript even if diarization fails, so the
@@ -1131,6 +1133,8 @@ def cmd_rediarize(args):
         print(f"WARN: could not preserve existing speaker labels: {exc}", file=sys.stderr)
     if calendar_context is not None and hasattr(calendar_context, "to_metadata"):
         diarized_result["calendar_context"] = calendar_context.to_metadata()
+        from shared.calendar_context import speaker_count_check
+        diarized_result["speaker_count_check"] = speaker_count_check(calendar_context, diarized_result)
     progress(90)
 
     # Apply corrections
