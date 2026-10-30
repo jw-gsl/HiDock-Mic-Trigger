@@ -774,6 +774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onSummariseSelected = { [weak self] in self?.summariseSelectedRecordings() }
+        viewModel.onMarkSelectedSpeakersUnknown = { [weak self] in self?.markSelectedSpeakersUnknown() }
         viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
         viewModel.onRevealRecording = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -6619,7 +6620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// A speaker save must not silently leave a stale publishable transcript:
     /// report readiness failures, subprocess failures, and stale output in the
     /// same status surface used by the rest of the app.
-    private func rewriteTranscriptMarkdown(diarizedPath: String) {
+    private func rewriteTranscriptMarkdown(diarizedPath: String, completion: (() -> Void)? = nil) {
         let mdPath = transcriptMarkdownPath(forDiarizedPath: diarizedPath)
         let fm = FileManager.default
         guard fm.fileExists(atPath: diarizedPath) else {
@@ -6627,6 +6628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatusLevel = .error
             syncViewModelState()
             log("rewrite-md skipped: sidecar not found at \(diarizedPath)")
+            completion?()
             return
         }
         guard ensureTranscriptionReady() else {
@@ -6634,6 +6636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatusLevel = .error
             syncViewModelState()
             log("rewrite-md unavailable for \(diarizedPath): transcription pipeline is not ready")
+            completion?()
             return
         }
 
@@ -6643,7 +6646,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("rewrite-md queued for \(diarizedPath) → \(mdPath)")
 
         runTranscription(arguments: ["rewrite-md", diarizedPath]) { [weak self] result in
-            guard let self = self else { return }
+            guard let self = self else { completion?(); return }
+            defer { completion?() }
             switch result {
             case .success:
                 guard self.transcriptMarkdownIsCurrent(diarizedPath: diarizedPath) else {
@@ -8338,6 +8342,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("Summarise selected: \(toRun.count) recording(s)")
         enqueueSummaries(toRun)
+    }
+
+    /// "Mark unknown" toolbar button: the viewer's Mark all unknown, applied
+    /// to every selected transcript, so a run of guest-only meetings can be
+    /// closed off without opening each one.
+    private func markSelectedSpeakersUnknown() {
+        var targets: [(path: String, transcript: DiarizedTranscript)] = []
+        for entry in selectedSyncEntries() {
+            guard let md = entry.transcriptPath, !md.isEmpty else { continue }
+            let path = md.replacingOccurrences(of: ".md", with: "_diarized.json")
+            guard var transcript = loadDiarizedTranscript(at: path),
+                  transcript.canMarkAllSpeakersUnknown,
+                  transcript.markAllSpeakersUnknown() else { continue }
+            targets.append((path, transcript))
+        }
+        guard !targets.isEmpty else {
+            viewModel.syncStatus = "No selected transcripts have speakers left to review"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Mark all remaining speakers unknown in \(targets.count) recording\(targets.count == 1 ? "" : "s")?"
+        alert.informativeText = "Sets every unconfirmed speaker to Speaker N and marks them reviewed. Confirmed real names stay. Nothing is enrolled in the voice library."
+        alert.addButton(withTitle: "Mark all unknown")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var written: [String] = []
+        for target in targets {
+            let url = URL(fileURLWithPath: target.path)
+            snapshotTranscriptArtifacts(target.path, reason: "Before marking all speakers unknown")
+            do {
+                let data = try DiarizedTranscript.sidecarData(for: target.transcript,
+                                                              existing: try? Data(contentsOf: url))
+                try data.write(to: url, options: .atomic)
+                written.append(target.path)
+            } catch {
+                log("Mark unknown: could not save \(target.path): \(error.localizedDescription)")
+            }
+        }
+        log("Mark unknown: marked all speakers unknown in \(written.count) of \(targets.count) transcript(s)")
+        for path in written {
+            speakerReviewChangedImmediately(jsonPath: path)
+            reloadOpenTranscriptViewer(diarizedPath: path)
+        }
+        // One rewrite at a time rather than a burst of pipeline processes.
+        func rewrite(_ remaining: ArraySlice<String>) {
+            guard let path = remaining.first else {
+                viewModel.syncStatus = "Marked speakers unknown in \(written.count) recording\(written.count == 1 ? "" : "s")"
+                viewModel.syncStatusLevel = written.count == targets.count ? .success : .warning
+                syncViewModelState()
+                return
+            }
+            rewriteTranscriptMarkdown(diarizedPath: path) { rewrite(remaining.dropFirst()) }
+        }
+        rewrite(written[...])
     }
 
     /// Add transcribed entries to the serial summarise queue (deduped

@@ -96,3 +96,44 @@ final class RefineScoreLabelTests: XCTestCase {
                        "Naming library (redimnet2_b6): George's voice NOT saved: too short")
     }
 }
+
+final class MarkAllSpeakersUnknownTests: XCTestCase {
+
+    private func transcript() throws -> DiarizedTranscript {
+        let json = """
+        {
+          "version": 1, "audio_file": "rec.mp3",
+          "speaker_names": {"0": "James Whiting", "1": "Jeff Chow", "2": "Speaker 3", "5": "Orphan"},
+          "speaker_meta": {"0": {"source": "user", "verified": true},
+                           "1": {"source": "auto", "confidence": 0.7, "verified": false}},
+          "segments": [{"start": 0.0, "end": 2.0, "speaker_id": 0, "text": "Hi"},
+                       {"start": 2.0, "end": 4.0, "speaker_id": 1, "text": "Hello"},
+                       {"start": 4.0, "end": 6.0, "speaker_id": 2, "text": "Hey"}]
+        }
+        """
+        return try JSONDecoder().decode(DiarizedTranscript.self, from: Data(json.utf8))
+    }
+
+    func testMarksEveryoneButConfirmedPeople() throws {
+        var t = try transcript()
+        XCTAssertTrue(t.canMarkAllSpeakersUnknown)
+        XCTAssertTrue(t.markAllSpeakersUnknown())
+        XCTAssertEqual(t.speakerNames["0"], "James Whiting")
+        XCTAssertEqual(t.speakerNames["1"], "Speaker 2")
+        XCTAssertEqual(t.speakerNames["2"], "Speaker 3")
+        XCTAssertEqual(t.speakerNames["5"], "Speaker 6")
+        for key in ["1", "2", "5"] {
+            XCTAssertEqual(t.speakerMeta?[key]?.source, "unknown")
+            XCTAssertEqual(t.speakerMeta?[key]?.verified, true)
+        }
+        XCTAssertEqual(t.speakerMeta?["0"]?.source, "user")
+        XCTAssertFalse(t.canMarkAllSpeakersUnknown)
+        XCTAssertFalse(t.markAllSpeakersUnknown(), "a second run changes nothing")
+    }
+
+    func testSingleSpeakerMeetingIsLeftAlone() throws {
+        var t = try transcript()
+        t.segments = t.segments.filter { $0.speakerId == 1 }
+        XCTAssertFalse(t.canMarkAllSpeakersUnknown)
+    }
+}

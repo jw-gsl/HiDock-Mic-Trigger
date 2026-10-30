@@ -1160,6 +1160,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleMergeExpand: (String) -> Void = { _ in }
     var onTranscribeSelected: () -> Void = {}
     var onSummariseSelected: () -> Void = {}
+    var onMarkSelectedSpeakersUnknown: () -> Void = {}
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }
