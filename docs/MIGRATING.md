@@ -13,6 +13,8 @@ cd ~/_git/hidock-tools/transcription-pipeline
 .venv/bin/python3 transcribe.py doctor
 ```
 
+For the move itself (what lives where, copy order over SSH, and checks before the old Mac is touched), see [MIGRATION-new-mac.md](MIGRATION-new-mac.md).
+
 ## What doesn't come across, and how to fix it
 
 | What | Why it's missing | Symptom | Fix |
