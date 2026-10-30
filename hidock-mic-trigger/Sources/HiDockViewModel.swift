@@ -155,6 +155,20 @@ final class HiDockViewModel: ObservableObject {
     /// Runtime heatmap ↔ LED toggle (seeded from the persisted default view).
     @Published var heatmapLEDMode: Bool =
         (UserDefaults.standard.string(forKey: "led.defaultView") == "led")
+    /// An event has temporarily taken over the resting heatmap (mirrors
+    /// `ledMatrix.takeoverActive`, so the heatmap needn't observe the matrix).
+    @Published var ledTakeover = false
+    private var ledWatches: [AnyCancellable] = []
+
+    /// Keep the heatmap in step with the LED settings while the app runs:
+    /// "At rest" used to be read once at launch, and takeover had no effect.
+    func watchLEDSettings() {
+        guard ledWatches.isEmpty else { return }
+        ledWatches.append(ledSettings.$defaultView.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] view in self?.heatmapLEDMode = (view == .led) })
+        ledWatches.append(ledMatrix.$takeoverActive.receive(on: DispatchQueue.main)
+            .sink { [weak self] active in self?.ledTakeover = active })
+    }
     @Published var mergeGroups: [MergeGroup] = [] { didSet { markDerivedDirty() } }
     /// Output paths of recordings that have been split into parts. They stay on
     /// disk but must not appear as rows, or a later merge re-absorbs the source
@@ -1194,6 +1208,7 @@ final class HiDockViewModel: ObservableObject {
     var onToggleMergeExpand: (String) -> Void = { _ in }
     var onTranscribeSelected: () -> Void = {}
     var onSummariseSelected: () -> Void = {}
+    var onMarkSelectedSpeakersUnknown: () -> Void = {}
     var onToggleDiarize: () -> Void = {}
     var onRevealRecording: (String) -> Void = { _ in }
     var onRevealTranscript: (String) -> Void = { _ in }

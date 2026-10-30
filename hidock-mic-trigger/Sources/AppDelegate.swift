@@ -774,6 +774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onToggleMergeExpand = { [weak self] id in self?.toggleMergeExpand(id) }
         viewModel.onTranscribeSelected = { [weak self] in self?.transcribeSelectedRecordings() }
         viewModel.onSummariseSelected = { [weak self] in self?.summariseSelectedRecordings() }
+        viewModel.onMarkSelectedSpeakersUnknown = { [weak self] in self?.markSelectedSpeakersUnknown() }
         viewModel.onToggleDiarize = { [weak self] in self?.toggleDiarize() }
         viewModel.onRevealRecording = { path in
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -791,6 +792,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         viewModel.onAskClaudeRecording = { [weak self] entry in self?.askClaudeAboutRecording(entry) }
         viewModel.onSendChat = { [weak self] text in self?.runChatTurn(text) }
         viewModel.onOpenRawTerminal = { [weak self] in self?.openRawTerminalPane() }
+        viewModel.watchLEDSettings()
         // LED idle ticker — supply live stats on demand.
         viewModel.ledMatrix.idleProvider = { [weak self] content in
             guard let self = self else { return nil }
@@ -3718,6 +3720,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    /// Refine line moves at or above this score are applied without asking
+    /// (Settings → Speakers). 0 turns it off. 0.7 by default: of 210 such
+    /// suggestions up to 2026-10-30, the reviewer skipped 6.
+    static let refineAutoApplyKey = "refineAutoApplyMinScore"
+    private var refineAutoApplyMinScore: Double {
+        UserDefaults.standard.object(forKey: Self.refineAutoApplyKey) as? Double ?? 0.7
+    }
+
+    /// Whether whose voices Refine compared against is settled: the meeting is
+    /// confirmed, or it's an ad-hoc call (declined, or no meeting found). A
+    /// suggested meeting still waiting for a tick, or a lookup still running,
+    /// may yet change the invite list, so automatic moves wait for it.
+    private func refineMeetingSettled(audioPath: String) -> Bool {
+        if calendarLinkedEvent(for: audioPath) != nil || hasCalendarRejection(for: audioPath) { return true }
+        if suggestedCalendarEvent(for: audioPath) != nil || calendarPrelookups[audioPath] != nil { return false }
+        return true
+    }
+
+    /// Apply the saved Refine line suggestions that clear the cut-off, once
+    /// the meeting is settled. They're listed under Refine to undo or keep;
+    /// nothing is learned until they're kept. Speaker-wide renames are never
+    /// applied this way. Called after the background check, and when the
+    /// meeting is confirmed or declined without a new speaker detection.
+    private func autoApplyRefineIfReady(jsonPath: String) {
+        let minScore = refineAutoApplyMinScore
+        guard minScore > 0,
+              let saved = VoiceCheckResult.saved(forTranscript: jsonPath),
+              (saved.lines ?? []).contains(where: { $0.score >= minScore }),
+              let transcript = loadDiarizedTranscript(at: jsonPath) else { return }
+        let name = (jsonPath as NSString).lastPathComponent
+        guard refineMeetingSettled(audioPath: transcript.audioFile) else {
+            log("Refine: not applying suggestions to \(name) automatically until its meeting is confirmed or marked ad-hoc")
+            return
+        }
+        snapshotTranscriptArtifacts(jsonPath, reason: "Before Refine applied its confident suggestions")
+        runTranscription(arguments: ["voice-check", jsonPath, "--auto-apply", String(format: "%.2f", minScore)]) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let output):
+                    let summary = Self.lastJSONObject(output)
+                    let applied = summary["auto_applied"] as? Int ?? 0
+                    guard applied > 0 else {
+                        self.log("Refine: nothing applied automatically to \(name) (\(summary["reason"] as? String ?? "no result"))")
+                        return
+                    }
+                    self.log("Refine applied \(applied) line move(s) automatically to \(name) (score \(String(format: "%.2f", minScore)) or higher); review them under Refine")
+                    self.refreshSpeakerReview(forDiarizedPath: jsonPath)
+                    self.reloadOpenTranscriptViewer(diarizedPath: jsonPath)
+                case .failure(let error):
+                    self.log("Refine automatic apply failed for \(name): \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Undo (`--undo-auto`) or keep (`--keep-auto`) Refine's automatic moves;
+    /// nil starts means all of them. Keeping teaches the voice library.
+    private func decideAutoRefine(jsonPath: String, keep: Bool, starts: [Double]?,
+                                  completion: @escaping (DiarizedTranscript?) -> Void) {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hidock-refine-auto-\(UUID().uuidString).json")
+        let payload: Any = starts.map { $0 as Any } ?? "all"
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.fragmentsAllowed]),
+              (try? data.write(to: url)) != nil else {
+            completion(nil)
+            return
+        }
+        if !keep { snapshotTranscriptArtifacts(jsonPath, reason: "Before undoing Refine's automatic changes") }
+        runTranscription(arguments: ["voice-check", jsonPath, keep ? "--keep-auto" : "--undo-auto", url.path], timeout: 300) { [weak self] result in
+            try? FileManager.default.removeItem(at: url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let output):
+                    let summary = Self.lastJSONObject(output)
+                    let name = (jsonPath as NSString).lastPathComponent
+                    if keep {
+                        self.log("Refine: kept \(summary["kept"] as? Int ?? 0) automatic move(s) in \(name)")
+                        for (person, outcome) in summary["learned"] as? [String: Any] ?? [:] {
+                            guard let outcomeData = try? JSONSerialization.data(withJSONObject: outcome) else { continue }
+                            self.log(Self.namingLibraryOutcome(outcomeData, name: person))
+                        }
+                    } else {
+                        self.log("Refine: undid \(summary["undone"] as? Int ?? 0) automatic move(s) in \(name)")
+                        self.refreshSpeakerReview(forDiarizedPath: jsonPath)
+                        TranscriptPublish.shared.schedule(diarizedPath: jsonPath, reason: "Undid Refine's automatic changes")
+                    }
+                    completion(self.loadDiarizedTranscript(at: jsonPath))
+                case .failure(let error):
+                    self.log("Refine \(keep ? "keep" : "undo") failed: \(error.localizedDescription)")
+                    completion(nil)
+                }
+            }
+        }
+    }
+
+    /// The last `{…}` line of a pipeline command's output, as a dictionary.
+    static func lastJSONObject(_ output: Data) -> [String: Any] {
+        let line = String(decoding: output, as: UTF8.self)
+            .split(separator: "\n").last(where: { $0.hasPrefix("{") }).map(String.init) ?? "{}"
+        return (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] ?? [:]
+    }
+
     /// Run Refine on a freshly written transcript and save its suggestions
     /// beside it (`_refine.json`), so they are waiting when it is opened.
     ///
@@ -3758,7 +3863,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.log("Refine check for \(name): \(summary)")
                 let rerun = self.refinePrecomputes.removeValue(forKey: jsonPath) == true
                 NotificationCenter.default.post(name: .refineSuggestionsUpdated, object: jsonPath)
-                if rerun { self.precomputeRefine(jsonPath: jsonPath) }
+                if rerun { self.precomputeRefine(jsonPath: jsonPath) } else { self.autoApplyRefineIfReady(jsonPath: jsonPath) }
             }
         }
         do {
@@ -3901,8 +4006,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? FileManager.default.removeItem(at: url)
             switch result {
             case .success(let output):
-                let line = String(decoding: output, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
-                self?.log("Voice learning from moved lines for \(name): \(line.prefix(200))")
+                self?.log(Self.namingLibraryOutcome(output, name: name))
             case .failure(let error):
                 self?.log("Voice learning from moved lines failed: \(error.localizedDescription)")
             }
@@ -3974,12 +4078,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         runTranscription(arguments: arguments, timeout: 300) { [weak self] result in
             switch result {
-            case .success:
+            case .success(let output):
                 self?.log("Recorded speaker review for speaker \(speakerId): \(action)")
+                if action == "confirmed" || action == "rejected", let finalName, !finalName.isEmpty {
+                    self?.log(Self.namingLibraryOutcome(output, name: finalName))
+                }
             case .failure(let error):
                 self?.log("Could not record speaker review: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// One log line saying whether a voice reached the naming library (the one
+    /// automatic naming and Refine use), from `learn-lines` or
+    /// `record-speaker-suggestion` output. Until 2026-10-30 the log only said
+    /// "Enrolled … in voice library", meaning the TitaNet library, so three
+    /// people in Rec77 looked learned when naming had nothing for them.
+    static func namingLibraryOutcome(_ output: Data, name: String) -> String {
+        let last = String(decoding: output, as: UTF8.self)
+            .split(separator: "\n").last.map(String.init) ?? ""
+        guard let payload = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] else {
+            return "Naming library: no result for \(name): \(last.prefix(200))"
+        }
+        let result = payload["event"] as? [String: Any] ?? payload
+        let library = (result["library"] ?? result["review_only_model"]) as? String ?? "naming"
+        if result["enrolled"] as? Bool == true {
+            var text = "Naming library (\(library)): saved \(name)'s voice"
+            if let start = result["clip_start"] as? Double, let end = result["clip_end"] as? Double {
+                text += String(format: " from %d:%02d–%d:%02d", Int(start) / 60, Int(start) % 60, Int(end) / 60, Int(end) % 60)
+            }
+            if let check = result["verification"] as? String { text += " (\(check))" }
+            return text
+        }
+        let reason = (result["reason"] ?? result["not_enrolled_reason"]) as? String ?? "no reason given"
+        return "Naming library (\(library)): \(name)'s voice NOT saved: \(reason)"
     }
 
     private func rediarizeTranscript(
@@ -4402,7 +4534,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = recordingTimeZone(for: timeZonePath)
         formatter.dateFormat = "yyyyMMMdd-HHmmss"
-        return formatter.date(from: String(stem.prefix(16)))
+        guard let stamped = formatter.date(from: String(stem.prefix(16))) else { return nil }
+        return stamped.addingTimeInterval(-recordingClockOffset(for: timeZonePath))
+    }
+
+    /// Seconds the recorder's clock was ahead when it named this recording
+    /// (`clock_offset_seconds` in the `_recording_time.json` sidecar; 0 if
+    /// none). The HiDock keeps local time with no time zone, so after the
+    /// clocks change it stamps recordings an hour out until it is set again.
+    private func recordingClockOffset(for audioPath: String) -> TimeInterval {
+        guard let data = try? Data(contentsOf: recordingTimeContextURL(for: audioPath)),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let offset = payload["clock_offset_seconds"] as? Double else { return 0 }
+        return offset
     }
 
     private func findMacCalendarEvents(
@@ -4839,6 +4983,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     // second pass would only redo the same work — and clash with
                     // the names the reviewer is confirming in the sidecar.
                     log("Calendar linked without re-diarising \(audioURL.lastPathComponent): already diarised against '\(event.title)'")
+                    autoApplyRefineIfReady(jsonPath: diarized)
                     viewModel.syncStatus = "Calendar linked — speakers already matched to this meeting"
                     viewModel.syncStatusLevel = .success
                     syncViewModelState()
@@ -4856,6 +5001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     rediarizeTranscript(jsonPath: diarized, nSpeakers: nil) { _ in }
                 } else {
                     log("Calendar linked without re-diarising \(audioURL.lastPathComponent): all speakers are confirmed")
+                    autoApplyRefineIfReady(jsonPath: diarized)
                     viewModel.syncStatus = "Calendar linked — confirmed speakers unchanged"
                     viewModel.syncStatusLevel = .success
                     syncViewModelState()
@@ -5475,6 +5621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         log("Calendar suggestion declined for \((audioPath as NSString).lastPathComponent); keeping initial speaker detection")
+        autoApplyRefineIfReady(jsonPath: diarized)
     }
 
     /// Append the reviewer's meeting decision to the review-feedback log:
@@ -6401,6 +6548,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             onSkipVoiceCheck: { [weak self] jsonPath, moves in
                 self?.recordVoiceCheckSkips(jsonPath: jsonPath, moves: moves)
             },
+            onDecideAutoRefine: { [weak self] jsonPath, keep, starts, completion in
+                self?.decideAutoRefine(jsonPath: jsonPath, keep: keep, starts: starts, completion: completion)
+            },
             onLearnFromLines: { [weak self] jsonPath, name, ranges in
                 self?.learnFromLines(jsonPath: jsonPath, name: name, ranges: ranges)
             },
@@ -6579,7 +6729,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// A speaker save must not silently leave a stale publishable transcript:
     /// report readiness failures, subprocess failures, and stale output in the
     /// same status surface used by the rest of the app.
-    private func rewriteTranscriptMarkdown(diarizedPath: String) {
+    private func rewriteTranscriptMarkdown(diarizedPath: String, completion: (() -> Void)? = nil) {
         let mdPath = transcriptMarkdownPath(forDiarizedPath: diarizedPath)
         let fm = FileManager.default
         guard fm.fileExists(atPath: diarizedPath) else {
@@ -6587,6 +6737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatusLevel = .error
             syncViewModelState()
             log("rewrite-md skipped: sidecar not found at \(diarizedPath)")
+            completion?()
             return
         }
         guard ensureTranscriptionReady() else {
@@ -6594,6 +6745,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             viewModel.syncStatusLevel = .error
             syncViewModelState()
             log("rewrite-md unavailable for \(diarizedPath): transcription pipeline is not ready")
+            completion?()
             return
         }
 
@@ -6603,7 +6755,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         log("rewrite-md queued for \(diarizedPath) → \(mdPath)")
 
         runTranscription(arguments: ["rewrite-md", diarizedPath]) { [weak self] result in
-            guard let self = self else { return }
+            guard let self = self else { completion?(); return }
+            defer { completion?() }
             switch result {
             case .success:
                 guard self.transcriptMarkdownIsCurrent(diarizedPath: diarizedPath) else {
@@ -7918,13 +8071,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 "--start", String(start),
                 "--end", String(end)
             ]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
             do {
                 try process.run()
                 process.waitUntilExit()
+                let ok = process.terminationStatus == 0
                 DispatchQueue.main.async {
-                    self?.log("Enrolled speaker '\(name)' in voice library")
+                    // TitaNet: kept for Reassign and clustering; naming uses
+                    // the naming library (see namingLibraryOutcome).
+                    self?.log(ok ? "TitaNet library: saved '\(name)' (not used for automatic naming)"
+                                 : "TitaNet library: could not save '\(name)' (exit \(process.terminationStatus))")
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -7964,7 +8121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     encoding: .utf8
                 ) ?? ""
                 if process.terminationStatus == 0 {
-                    DispatchQueue.main.async { self?.log("Enrolled '\(name)' in voice library") }
+                    DispatchQueue.main.async { self?.log("TitaNet library: saved '\(name)' (not used for automatic naming)") }
                 } else {
                     DispatchQueue.main.async {
                         self?.log("Failed to enroll '\(name)' from diarized: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -8294,6 +8451,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         log("Summarise selected: \(toRun.count) recording(s)")
         enqueueSummaries(toRun)
+    }
+
+    /// "Mark unknown" toolbar button: the viewer's Mark all unknown, applied
+    /// to every selected transcript, so a run of guest-only meetings can be
+    /// closed off without opening each one.
+    private func markSelectedSpeakersUnknown() {
+        var targets: [(path: String, transcript: DiarizedTranscript)] = []
+        for entry in selectedSyncEntries() {
+            guard let md = entry.transcriptPath, !md.isEmpty else { continue }
+            let path = md.replacingOccurrences(of: ".md", with: "_diarized.json")
+            guard var transcript = loadDiarizedTranscript(at: path),
+                  transcript.canMarkAllSpeakersUnknown,
+                  transcript.markAllSpeakersUnknown() else { continue }
+            targets.append((path, transcript))
+        }
+        guard !targets.isEmpty else {
+            viewModel.syncStatus = "No selected transcripts have speakers left to review"
+            viewModel.syncStatusLevel = .warning
+            syncViewModelState()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Mark all remaining speakers unknown in \(targets.count) recording\(targets.count == 1 ? "" : "s")?"
+        alert.informativeText = "Sets every unconfirmed speaker to Speaker N and marks them reviewed. Confirmed real names stay. Nothing is enrolled in the voice library."
+        alert.addButton(withTitle: "Mark all unknown")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var written: [String] = []
+        for target in targets {
+            let url = URL(fileURLWithPath: target.path)
+            snapshotTranscriptArtifacts(target.path, reason: "Before marking all speakers unknown")
+            do {
+                let data = try DiarizedTranscript.sidecarData(for: target.transcript,
+                                                              existing: try? Data(contentsOf: url))
+                try data.write(to: url, options: .atomic)
+                written.append(target.path)
+            } catch {
+                log("Mark unknown: could not save \(target.path): \(error.localizedDescription)")
+            }
+        }
+        log("Mark unknown: marked all speakers unknown in \(written.count) of \(targets.count) transcript(s)")
+        for path in written {
+            speakerReviewChangedImmediately(jsonPath: path)
+            reloadOpenTranscriptViewer(diarizedPath: path)
+        }
+        // One rewrite at a time rather than a burst of pipeline processes.
+        func rewrite(_ remaining: ArraySlice<String>) {
+            guard let path = remaining.first else {
+                viewModel.syncStatus = "Marked speakers unknown in \(written.count) recording\(written.count == 1 ? "" : "s")"
+                viewModel.syncStatusLevel = written.count == targets.count ? .success : .warning
+                syncViewModelState()
+                return
+            }
+            rewriteTranscriptMarkdown(diarizedPath: path) { rewrite(remaining.dropFirst()) }
+        }
+        rewrite(written[...])
     }
 
     /// Add transcribed entries to the serial summarise queue (deduped

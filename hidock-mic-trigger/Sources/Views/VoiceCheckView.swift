@@ -11,7 +11,8 @@ struct VoiceCheckResult: Decodable {
         let fromName: String
         let toName: String
         let score: Double
-        let currentScore: Double
+        /// Nil when the current name has no saved voice to compare with.
+        let currentScore: Double?
         var id: Int { index }
     }
 
@@ -21,7 +22,7 @@ struct VoiceCheckResult: Decodable {
         let name: String
         let suggested: String
         let score: Double
-        let currentScore: Double
+        let currentScore: Double?
         let lines: Int
         /// The lines a rename moves: all of the speaker's, except `kept`.
         let moves: [Move]
@@ -32,6 +33,9 @@ struct VoiceCheckResult: Decodable {
 
     var people: [String]?
     var voicesKnown: [String]?
+    /// Named people with no saved voice outside this recording: their lines
+    /// aren't checked, because there is nothing to compare them with.
+    var noVoice: [String]?
     var lines: [Line]?
     var speakers: [Speaker]?
     var checked: Int?
@@ -63,6 +67,52 @@ struct VoiceCheckResult: Decodable {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try? decoder.decode(VoiceCheckResult.self, from: resultData)
+    }
+}
+
+/// A line Refine moved by itself (`refine_auto_applied` in the sidecar),
+/// waiting for the reviewer to undo or keep it.
+struct RefineAutoMove: Decodable, Identifiable, Equatable {
+    let start: Double
+    let end: Double
+    let text: String
+    let fromName: String
+    let toName: String
+    let score: Double
+    let currentScore: Double?
+    /// The line's row in the transcript now; set when loaded.
+    var index: Int = -1
+    var id: Double { start }
+
+    private enum CodingKeys: String, CodingKey {
+        case start, end, text, fromName, toName, score, currentScore
+    }
+
+    /// The automatic moves still standing in this transcript: a line moved by
+    /// hand since has been decided by the reviewer and drops off.
+    static func pending(jsonPath: String, transcript: DiarizedTranscript) -> [RefineAutoMove] {
+        guard let data = FileManager.default.contents(atPath: jsonPath),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = object["refine_auto_applied"],
+              let rawData = try? JSONSerialization.data(withJSONObject: raw) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let moves = (try? decoder.decode([RefineAutoMove].self, from: rawData)) ?? []
+        return moves.compactMap { move in
+            guard let index = transcript.segments.firstIndex(where: { abs($0.start - move.start) <= 0.05 }) else { return nil }
+            let id = transcript.segments[index].speakerId
+            let current = transcript.speakerNames["\(id)"] ?? "Speaker \(id + 1)"
+            guard current.caseInsensitiveCompare(move.toName) == .orderedSame else { return nil }
+            var placed = move
+            placed.index = index
+            return placed
+        }
+    }
+
+    /// As a suggestion row, for playing and showing it.
+    var line: VoiceCheckResult.Line {
+        VoiceCheckResult.Line(index: index, start: start, end: end, text: text, fromName: fromName,
+                              toName: toName, score: score, currentScore: currentScore)
     }
 }
 
@@ -109,8 +159,15 @@ struct VoiceCheckPanel: View {
     let onApply: ([VoiceCheckMove]) -> Void
     /// Skipped suggestions, remembered so they aren't offered again.
     let onSkip: ([VoiceCheckMove]) -> Void
+    /// Undo Refine's automatic moves (nil = all of them).
+    let onUndoAuto: ([RefineAutoMove]?) -> Void
+    /// Keep them (nil = all): takes them off the list and teaches the voices.
+    let onKeepAuto: ([RefineAutoMove]?) -> Void
+    /// Run the check again from the audio.
+    let onCheckAgain: (() -> Void)?
     let onClose: () -> Void
 
+    @State private var autoMoves: [RefineAutoMove]
     @State private var lines: [VoiceCheckResult.Line]
     @State private var speakers: [VoiceCheckResult.Speaker]
     @State private var applied = 0
@@ -122,6 +179,10 @@ struct VoiceCheckPanel: View {
          onShow: ((Double) -> Void)? = nil,
          onApply: @escaping ([VoiceCheckMove]) -> Void,
          onSkip: @escaping ([VoiceCheckMove]) -> Void = { _ in },
+         autoMoves: [RefineAutoMove] = [],
+         onUndoAuto: @escaping ([RefineAutoMove]?) -> Void = { _ in },
+         onKeepAuto: @escaping ([RefineAutoMove]?) -> Void = { _ in },
+         onCheckAgain: (() -> Void)? = nil,
          onClose: @escaping () -> Void) {
         self.result = result
         self.onPlay = onPlay
@@ -130,7 +191,11 @@ struct VoiceCheckPanel: View {
         self.onShow = onShow
         self.onApply = onApply
         self.onSkip = onSkip
+        self.onUndoAuto = onUndoAuto
+        self.onKeepAuto = onKeepAuto
+        self.onCheckAgain = onCheckAgain
         self.onClose = onClose
+        _autoMoves = State(initialValue: autoMoves)
         _lines = State(initialValue: result.lines ?? [])
         _speakers = State(initialValue: result.speakers ?? [])
     }
@@ -138,20 +203,36 @@ struct VoiceCheckPanel: View {
     private var remaining: Int { lines.count + speakers.count }
 
     private var headline: String {
-        if remaining == 0 { return "Refine: all suggestions dealt with" }
+        if remaining == 0 && autoMoves.isEmpty { return "Refine: all suggestions dealt with" }
         var parts: [String] = []
         if !speakers.isEmpty { parts.append("\(speakers.count) speaker\(speakers.count == 1 ? "" : "s")") }
         if !lines.isEmpty { parts.append("\(lines.count) line\(lines.count == 1 ? "" : "s")") }
+        if remaining == 0 {
+            return "Refine moved \(autoMoves.count) line\(autoMoves.count == 1 ? "" : "s") automatically"
+        }
         return "Refine suggests changing " + parts.joined(separator: " and ")
     }
 
     private var summary: String {
+        if result.checked == nil {
+            return "These lines clearly matched another of this meeting's people, so Refine moved them. Play any you're unsure of and undo it. Keep them to teach the voice library."
+        }
         let people = result.voicesKnown?.count ?? 0
         var text = "Checked \(result.checked ?? 0) lines against the saved voices of \(people) people in this meeting"
         if let short = result.skippedShort, short > 0 { text += " (\(short) too short to judge)" }
         text += ". Play a line to check it, then apply or skip it."
+        if let missing = result.noVoice, !missing.isEmpty {
+            text += " Not checked, no saved voice yet: \(missing.joined(separator: ", "))."
+        }
         if applied > 0 { text += " \(applied) applied so far." }
         return text
+    }
+
+    /// "Jeff Chow 0.57", or "David McGregor: no saved voice" when there is
+    /// nothing to compare (previously shown as 0.00, which read as a mismatch).
+    static func match(_ name: String, _ score: Double?) -> String {
+        guard let score else { return "\(name): no saved voice" }
+        return "\(name) " + String(format: "%.2f", score)
     }
 
     private static func time(_ seconds: Double) -> String {
@@ -175,7 +256,7 @@ struct VoiceCheckPanel: View {
     }
 
     private func finishIfEmpty() {
-        if remaining == 0 { onClose() }
+        if remaining == 0 && autoMoves.isEmpty { onClose() }
     }
 
     var body: some View {
@@ -183,6 +264,11 @@ struct VoiceCheckPanel: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(headline).font(.headline)
                 Spacer()
+                if let onCheckAgain {
+                    Button("Check again", action: onCheckAgain)
+                        .buttonStyle(.borderless)
+                        .help("Check every line against the saved voices again, from the audio")
+                }
                 Button("Close", action: onClose)
                     .buttonStyle(.borderless)
                     .help("Close without applying the rest")
@@ -194,6 +280,15 @@ struct VoiceCheckPanel: View {
             // collapsed to zero inside the sidecar.
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if !autoMoves.isEmpty {
+                        autoSection
+                    }
+                    if !autoMoves.isEmpty && remaining > 0 {
+                        Text("Needs a look (\(remaining))")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.top, 10)
+                        Divider()
+                    }
                     ForEach(speakers) { speaker in
                         speakerRow(speaker)
                         Divider()
@@ -204,7 +299,8 @@ struct VoiceCheckPanel: View {
                     }
                 }
             }
-            .frame(minHeight: min(CGFloat(remaining) * 84, 340), maxHeight: 340)
+            .frame(minHeight: min(CGFloat(remaining + autoMoves.count + (autoMoves.isEmpty ? 0 : 1)) * 84, 340),
+                   maxHeight: 340)
 
             if remaining > 0 {
                 HStack {
@@ -212,7 +308,7 @@ struct VoiceCheckPanel: View {
                     Button("Skip all") {
                         onSkip(speakers.flatMap(moves) + lines.map(move))
                         lines = []; speakers = []
-                        onClose()
+                        finishIfEmpty()
                     }
                     Button("Apply all \(remaining)") {
                         var all = speakers.flatMap(moves)
@@ -220,7 +316,7 @@ struct VoiceCheckPanel: View {
                         applied += remaining
                         lines = []; speakers = []
                         onApply(all)
-                        onClose()
+                        finishIfEmpty()
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -231,6 +327,83 @@ struct VoiceCheckPanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var autoSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Applied automatically (\(autoMoves.count))")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Undo all") {
+                    onUndoAuto(nil)
+                    autoMoves = []
+                    finishIfEmpty()
+                }
+                .help("Move every one of these lines back to who it was with before")
+                Button("Keep all") {
+                    onKeepAuto(nil)
+                    autoMoves = []
+                    finishIfEmpty()
+                }
+                .buttonStyle(.borderedProminent)
+                .help("These are right: take them off the list and learn the voices from them")
+            }
+            .controlSize(.small)
+            .padding(.bottom, 4)
+            Divider()
+            ForEach(autoMoves) { move in
+                autoRow(move)
+                Divider()
+            }
+        }
+    }
+
+    private func autoRow(_ move: RefineAutoMove) -> some View {
+        let line = move.line
+        return HStack(alignment: .top, spacing: 8) {
+            playButton(line)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Button(Self.time(line.start)) { onShow?(line.start) }
+                        .buttonStyle(.borderless)
+                        .font(.caption.monospacedDigit())
+                        .help("Show this line in the transcript")
+                    Text(line.fromName).strikethrough().foregroundColor(.secondary)
+                    Image(systemName: "arrow.right").font(.caption2).foregroundColor(.secondary)
+                    Text(line.toName).fontWeight(.semibold)
+                }
+                .font(.caption)
+                Text(line.text).font(.callout).lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Voice match: \(Self.match(line.toName, line.score)), \(Self.match(line.fromName, line.currentScore))")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 4)
+            Button("Undo") {
+                onUndoAuto([move])
+                autoMoves.removeAll { $0.id == move.id }
+                finishIfEmpty()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Move this line back to \(line.fromName)")
+        }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func playButton(_ line: VoiceCheckResult.Line) -> some View {
+        if let onPlay {
+            let playing = player.playingSegmentId == playbackId(line)
+            Button {
+                if playing { player.stop() } else { onPlay(line) }
+            } label: {
+                Image(systemName: playing ? "stop.circle.fill" : "play.circle").font(.title3)
+            }
+            .buttonStyle(.borderless)
+            .help(playing ? "Stop" : "Play this line and show it in the transcript")
+        }
+    }
+
     private func speakerRow(_ speaker: VoiceCheckResult.Speaker) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "person.crop.circle.badge.questionmark")
@@ -238,9 +411,8 @@ struct VoiceCheckPanel: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Everyone labelled “\(speaker.name)” sounds like \(speaker.suggested)")
                     .font(.callout.weight(.medium))
-                Text(String(format: "Voice match: %@ %.2f, %@ %.2f · moves %d of %d lines",
-                            speaker.suggested, speaker.score, speaker.name, speaker.currentScore,
-                            speaker.moves.count, speaker.lines)
+                Text("Voice match: \(Self.match(speaker.suggested, speaker.score)), "
+                     + "\(Self.match(speaker.name, speaker.currentScore)) · moves \(speaker.moves.count) of \(speaker.lines) lines"
                      + (speaker.kept.isEmpty ? "" : " (keeps \(speaker.kept.count) that sound like \(speaker.name))"))
                     .font(.caption).foregroundColor(.secondary)
             }
@@ -261,16 +433,7 @@ struct VoiceCheckPanel: View {
 
     private func lineRow(_ line: VoiceCheckResult.Line) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            if let onPlay {
-                let playing = player.playingSegmentId == playbackId(line)
-                Button {
-                    if playing { player.stop() } else { onPlay(line) }
-                } label: {
-                    Image(systemName: playing ? "stop.circle.fill" : "play.circle").font(.title3)
-                }
-                .buttonStyle(.borderless)
-                .help(playing ? "Stop" : "Play this line and show it in the transcript")
-            }
+            playButton(line)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Button(Self.time(line.start)) { onShow?(line.start) }
@@ -284,8 +447,7 @@ struct VoiceCheckPanel: View {
                 .font(.caption)
                 Text(line.text).font(.callout).lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(String(format: "Voice match: %@ %.2f, %@ %.2f",
-                            line.toName, line.score, line.fromName, line.currentScore))
+                Text("Voice match: \(Self.match(line.toName, line.score)), \(Self.match(line.fromName, line.currentScore))")
                     .font(.caption2).foregroundColor(.secondary)
             }
             Spacer(minLength: 4)

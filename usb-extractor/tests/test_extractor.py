@@ -1,6 +1,7 @@
 """Unit tests for extractor.py pure functions."""
 from __future__ import annotations
 
+import json
 import struct
 from pathlib import Path
 
@@ -342,6 +343,48 @@ class TestBuildRecordingStatusItems:
         assert items[0]["downloaded"] is True
         assert items[0]["localExists"] is True
 
+    def test_clock_offset_sidecar_shifts_created_time(self, tmp_path):
+        # Named an hour late by a HiDock still on BST after the clocks went back.
+        (tmp_path / "2026Oct29-110046-Rec74.mp3").write_bytes(b"\xff\xf3" * 100)
+        (tmp_path / "2026Oct29-110046-Rec74_recording_time.json").write_text(
+            json.dumps({"clock_offset_seconds": 3600})
+        )
+        recordings = [
+            {
+                "name": "2026Oct29-110046-Rec74.hda",
+                "createDate": "2026/10/29",
+                "createTime": "11:00:46",
+                "length": 200,
+                "signature": "abc123",
+            },
+            {
+                "name": "2026Oct29-143501-Rec78.hda",
+                "createDate": "2026/10/29",
+                "createTime": "14:35:01",
+                "length": 200,
+                "signature": "def456",
+            },
+        ]
+        items = build_recording_status_items(recordings, {"downloads": {}}, tmp_path)
+        by_name = {item["name"]: item for item in items}
+        shifted = by_name["2026Oct29-110046-Rec74.hda"]
+        assert (shifted["createDate"], shifted["createTime"]) == ("2026/10/29", "10:00:46")
+        assert shifted["clockOffsetSeconds"] == 3600
+        untouched = by_name["2026Oct29-143501-Rec78.hda"]
+        assert untouched["createTime"] == "14:35:01"
+        assert "clockOffsetSeconds" not in untouched
+
+    def test_clock_offset_applies_to_orphan_downloads(self, tmp_path):
+        mp3_path = tmp_path / "2026Oct29-000500-Rec70.mp3"
+        mp3_path.write_bytes(b"\xff\xf3" * 100)
+        (tmp_path / "2026Oct29-000500-Rec70_recording_time.json").write_text(
+            json.dumps({"clock_offset_seconds": 3600})
+        )
+        state = {"downloads": {"2026Oct29-000500-Rec70.hda": {"downloaded": True, "output_path": str(mp3_path)}}}
+        items = build_recording_status_items([], state, tmp_path)
+        # Crosses midnight: the date moves back too.
+        assert (items[0]["createDate"], items[0]["createTime"]) == ("2026/10/28", "23:05:00")
+
     def test_marked_as_downloaded_no_local_file(self, tmp_path):
         recordings = [
             {
@@ -480,3 +523,34 @@ class TestUtcNowIso:
         assert "T" in result
         assert result.endswith("+00:00")
         assert "." not in result  # no microseconds
+
+
+def _fake_clock(monkeypatch, device_text):
+    import extractor
+    sent = []
+
+    def fake_send(dev, command, request_id, payload=b"", timeout_ms=0, max_reads=0):
+        sent.append((command, payload))
+        if command == extractor.CMD_QUERY_TIME:
+            return [(command, request_id, bytes.fromhex(device_text))]
+        return [(command, request_id, b"\x00")]
+
+    monkeypatch.setattr(extractor, "send_and_collect", fake_send)
+    return extractor, sent
+
+
+def test_clock_an_hour_ahead_is_set_to_mac_time(monkeypatch):
+    from datetime import datetime, timedelta
+    ahead = (datetime.now() + timedelta(hours=1)).strftime("%Y%m%d%H%M%S")
+    extractor, sent = _fake_clock(monkeypatch, ahead)
+    info = extractor.sync_device_clock(object())
+    assert info["corrected"] is True and 3590 <= info["drift_s"] <= 3610
+    assert sent[-1][0] == extractor.CMD_SET_TIME and len(sent[-1][1]) == 7
+
+
+def test_clock_within_tolerance_is_left_alone(monkeypatch):
+    from datetime import datetime
+    extractor, sent = _fake_clock(monkeypatch, datetime.now().strftime("%Y%m%d%H%M%S"))
+    info = extractor.sync_device_clock(object())
+    assert info["corrected"] is False
+    assert all(cmd != extractor.CMD_SET_TIME for cmd, _ in sent)

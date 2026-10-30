@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Make `shared/` importable regardless of where the extractor is invoked
@@ -62,6 +62,9 @@ USB_READ_SIZE = 512000
 HEADER = b"\x12\x34"
 CMD_TRANSFER = 0x0005
 CMD_QUERY_TIME = 0x0002
+CMD_SET_TIME = 0x0003
+# Device clock drift tolerated before it is corrected, in seconds.
+CLOCK_SYNC_THRESHOLD_S = 120
 CMD_QUERY_FILE_LIST = 0x0004
 CMD_QUERY_FILE_COUNT = 0x0006
 CMD_GET_FILE_BLOCK = 0x000D
@@ -1164,6 +1167,40 @@ def probe_device(timeout_ms: int = 2000) -> dict:
         release_device(dev, interface_number)
 
 
+def clock_offset_seconds(output_path: Path) -> float:
+    """Seconds the recorder's clock was ahead when it named this recording.
+
+    Read from `clock_offset_seconds` in the `<stem>_recording_time.json`
+    sidecar beside the audio (0 if absent). The HiDock keeps local time with
+    no time zone, so after the clocks change it names recordings an hour out
+    until its clock is set again.
+    """
+    sidecar = output_path.with_name(f"{output_path.stem}_recording_time.json")
+    try:
+        offset = json.loads(sidecar.read_text()).get("clock_offset_seconds", 0)
+        return float(offset or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def with_clock_offset(item: dict, output_path: Path) -> dict:
+    """Shift an item's createDate/createTime back by its recorded clock offset."""
+    offset = clock_offset_seconds(output_path)
+    if not offset:
+        return item
+    try:
+        stamped = datetime.strptime(f'{item["createDate"]} {item["createTime"]}', "%Y/%m/%d %H:%M:%S")
+    except (KeyError, ValueError):
+        return item
+    corrected = stamped - timedelta(seconds=offset)
+    return {
+        **item,
+        "createDate": corrected.strftime("%Y/%m/%d"),
+        "createTime": corrected.strftime("%H:%M:%S"),
+        "clockOffsetSeconds": offset,
+    }
+
+
 def build_recording_status_items(recordings: list[dict], state: dict, output_dir: Path, product_id: int | None = None) -> list[dict]:
     downloads = state.get("downloads", {})
     items: list[dict] = []
@@ -1267,6 +1304,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "removed": bool(stored.get("removed")),
             }
         )
+        items[-1] = with_clock_offset(items[-1], output_path)
 
     for name, stored in downloads.items():
         if name in seen_names:
@@ -1327,6 +1365,7 @@ def build_recording_status_items(recordings: list[dict], state: dict, output_dir
                 "removed": bool(stored.get("removed")),
             }
         )
+        items[-1] = with_clock_offset(items[-1], output_path)
     items.sort(key=lambda item: f'{item["createDate"]} {item["createTime"]}', reverse=True)
     return items
 
@@ -1359,6 +1398,36 @@ def cached_status_payload(
         ),
         "cached": True,
     }
+
+
+def sync_device_clock(dev, request_id: int = 90) -> dict | None:
+    """Set the HiDock's clock to the Mac's local time when it has drifted.
+
+    The device stamps each recording's file name with its own wall-clock
+    time and nothing ever set it, so after the clocks went back (BST -> GMT,
+    25 Oct 2026) every recording was named an hour late and matched the wrong
+    calendar meeting. The device has no time zone: it keeps local time, so it
+    needs correcting at each change. Best-effort; never raises.
+    Returns {device, mac, drift_s, corrected} or None if the clock can't be read.
+    """
+    try:
+        frames = send_and_collect(dev, CMD_QUERY_TIME, request_id, timeout_ms=1000, max_reads=4)
+        body = next((b for c, _r, b in frames if c == CMD_QUERY_TIME and len(b) >= 7), None)
+        if body is None:
+            return None
+        device_text = body[:7].hex()
+        device_time = datetime.strptime(device_text, "%Y%m%d%H%M%S")
+        now = datetime.now()
+        drift = round((device_time - now).total_seconds())
+        info = {"device": device_time.isoformat(), "mac": now.replace(microsecond=0).isoformat(),
+                "drift_s": drift, "corrected": False}
+        if abs(drift) > CLOCK_SYNC_THRESHOLD_S:
+            stamp = bytes.fromhex(datetime.now().strftime("%Y%m%d%H%M%S"))
+            reply = send_and_collect(dev, CMD_SET_TIME, request_id + 1, payload=stamp, timeout_ms=1000, max_reads=4)
+            info["corrected"] = any(c == CMD_SET_TIME and b[:1] == b"\x00" for c, _r, b in reply)
+        return info
+    except Exception:
+        return None
 
 
 def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PATH, state_path: Path = DEFAULT_STATE_PATH, product_id: int | None = None) -> dict:
@@ -1433,6 +1502,13 @@ def status_payload(timeout_ms: int = 5000, config_path: Path = DEFAULT_CONFIG_PA
                 declared = retry_declared
         if attempt > 1:
             print(f"file-list: read {len(recordings)}/{declared} after {attempt} attempt(s)", file=sys.stderr, flush=True)
+
+        # Keep the device's clock (which names its recordings) on Mac time.
+        clock = sync_device_clock(dev)
+        if clock is not None:
+            payload["clock"] = clock
+            if clock["corrected"]:
+                print(f"device clock was {clock['drift_s']:+d}s off; set to Mac time", file=sys.stderr, flush=True)
 
         # Persist the catalog under the cross-process lock. The USB read above
         # can take tens of seconds, during which a concurrent download process

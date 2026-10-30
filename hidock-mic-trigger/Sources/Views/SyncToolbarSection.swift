@@ -121,6 +121,15 @@ struct SyncToolbarSection: View {
                 .disabled(viewModel.transcriptionBusy || viewModel.syncDownloading || !viewModel.hasSelection)
 
                 Button {
+                    viewModel.onMarkSelectedSpeakersUnknown()
+                } label: {
+                    Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
+                }
+                .labelStyle(ToolbarActionLabelStyle())
+                .disabled(viewModel.syncDownloading || !viewModel.hasSelection)
+                .help("Mark all unknown in each selected transcript: every unconfirmed speaker becomes Speaker N and counts as reviewed. Confirmed names stay. Nothing is added to the voice library.")
+
+                Button {
                     viewModel.onSummariseSelected()
                 } label: {
                     Label("Summarise", systemImage: "sparkles")

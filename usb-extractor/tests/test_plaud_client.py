@@ -167,3 +167,20 @@ def test_cached_status_payload_empty_when_nothing_cached(tmp_path):
     payload = pc.cached_status_payload(tmp_path, {"downloads": {}}, account_id="acct")
     assert payload["recordings"] == []
     assert payload["connected"] is False
+
+
+def test_existing_recording_in_another_day_folder_is_not_downloaded_again(tmp_path):
+    """A Mac in another time zone maps an early-morning recording to a
+    different day folder; the copy already on disk must still count."""
+    from plaud_client import _matching_existing_file
+    original = tmp_path / "Plaud" / "2026-06-12" / "2026-06-12 05-29-02.mp3"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"audio")
+    expected_now = tmp_path / "Plaud" / "2026-06-11" / "2026-06-12 05-29-02.mp3"
+    assert _matching_existing_file(expected_now) == original
+
+
+def test_a_genuinely_new_recording_is_still_new(tmp_path):
+    from plaud_client import _matching_existing_file
+    (tmp_path / "Plaud" / "2026-06-12").mkdir(parents=True)
+    assert _matching_existing_file(tmp_path / "Plaud" / "2026-06-12" / "2026-06-12 09-00-00.mp3") is None

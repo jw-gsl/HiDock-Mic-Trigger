@@ -21,7 +21,32 @@ final class UpdateChecker {
     }
 
     /// Checks GitHub for a newer release. Calls `completion` on the main thread only if an update is available.
+    /// True for a build deployed from a repo checkout (`HIDOCK_DEPLOY=1`): it
+    /// runs the repo's own pipeline, whereas a GitHub release is a standalone
+    /// bundle with its own Python. Offering the release to a developer build
+    /// replaced it with a different app (2026-10-15: the release's bundled
+    /// Python couldn't start, so every device check and transcription failed).
+    static var isDeveloperBuild: Bool {
+        guard let res = Bundle.main.resourcePath else { return true }
+        return !FileManager.default.fileExists(atPath: "\(res)/usb-extractor/extractor.py")
+    }
+
+    /// The latest release's version (without the "v"), or nil. Blocks; call
+    /// off the main thread.
+    static func latestReleaseVersion() -> String? {
+        let done = DispatchSemaphore(value: 0)
+        var version: String?
+        fetchLatestRelease { release in
+            if let tag = release?.tag_name { version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag }
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 15)
+        return version
+    }
+
     static func checkForUpdate(completion: @escaping (_ title: String, _ body: String, _ release: GitHubRelease) -> Void) {
+        // A developer build updates from its checkout instead (RepoUpdater).
+        guard !isDeveloperBuild else { RepoUpdater.backgroundCheck(); return }
         guard let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else {
             return
         }
@@ -50,6 +75,11 @@ final class UpdateChecker {
 
     /// Manual check — always shows a result.
     static func manualCheck() {
+        if isDeveloperBuild {
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+            RepoUpdater.manualCheck(currentVersion: version)
+            return
+        }
         guard let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else {
             showUpToDateAlert()
             return

@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 1.0.0
-  CURRENT_PROJECT_VERSION: 1
+  MARKETING_VERSION: 4.1.22
+  CURRENT_PROJECT_VERSION: 25
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -67,6 +67,21 @@ targets:
           if [ "${HIDOCK_DEPLOY:-}" != "1" ] && [ "${HIDOCK_DEPLOY:-}" != "force" ]; then
             echo "note: HIDOCK_DEPLOY not set — compiled only, installed app untouched"
             exit 0
+          fi
+
+          # Record the commit this app is built from, so Check for Updates can
+          # compare the installed app (not just the checkout) with GitHub.
+          COMMIT=$(git -C "$SRCROOT/.." rev-parse HEAD 2>/dev/null || echo "")
+          if [ -n "$COMMIT" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :HiDockGitCommit" "$TARGET_BUILD_DIR/$INFOPLIST_PATH" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :HiDockGitCommit string $COMMIT" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          fi
+
+          # Never install an app whose label doesn't match the project.
+          BUILT_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$TARGET_BUILD_DIR/$INFOPLIST_PATH")
+          if [ "$BUILT_VERSION" != "$MARKETING_VERSION" ]; then
+            echo "error: built app says $BUILT_VERSION but the project is $MARKETING_VERSION; not deploying (rebuild)"
+            exit 1
           fi
           if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
             echo "note: GitHub Actions — never deploys"
@@ -197,7 +212,10 @@ targets:
           codesign --verify --deep --strict --verbose=2 "$STAGED_APP"
 
           # Kill running instance only after the replacement has been signed.
-          pkill -f "hidock-mic-trigger" 2>/dev/null || true
+          # -x: the process *name*. `-f` matched any command line containing the
+          # text — including an xcodebuild started by the app's own "Update
+          # now" (its arguments name the hidock-mic-trigger project).
+          pkill -x "hidock-mic-trigger" 2>/dev/null || true
           sleep 1
 
           # Remove stale copies (including the legacy Dev.app split, the old
@@ -214,6 +232,11 @@ targets:
 
           open -a "$INSTALL_DIR/$APP_NAME"
           echo "Deployed signed $APP_NAME ($CONFIGURATION) to $INSTALL_DIR"
+        # Run after the Info.plist is written. Without an input, Xcode was free
+        # to run this alongside ProcessInfoPlistFile, and once installed an app
+        # labelled with the previous build's version (4.1.11 for 4.1.12).
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
         basedOnDependencyAnalysis: false
     sources:
       - Sources
@@ -238,8 +261,10 @@ targets:
         CFBundleDisplayName: HiDock Mic Trigger
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleExecutable: hidock-mic-trigger
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        # From MARKETING_VERSION / CURRENT_PROJECT_VERSION above: a literal here
+        # went stale (4.1.18 and 4.1.19 built as "4.1.17").
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSUIElement: true
         NSMicrophoneUsageDescription: "This app launches hidock-mic-trigger to keep the HiDock mic active when your USB mic is in use."
         # EventKit matches a recording to its meeting. macOS 14+ asks for the

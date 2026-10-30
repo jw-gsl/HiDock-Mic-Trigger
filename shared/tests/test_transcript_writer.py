@@ -362,3 +362,50 @@ class TestYamlRoundTripEdgeCases:
         title = 'Path C:\\temp with "quotes"'
         meta = self._roundtrip(title=title)
         assert meta["title"] == title
+
+
+class TestRewriteKeepsSummary:
+    """Rec77 (2026-10-29): re-diarisation rewrote the .md without its summary,
+    so the title became the first line spoken."""
+
+    @staticmethod
+    def _diarized(first="Oh was it Riley the agent?", calendar=None):
+        data = {
+            "speaker_names": {"0": "Chris Wildsmith"},
+            "segments": [{"start": 0.0, "end": 2.0, "speaker_id": 0, "text": first}],
+        }
+        if calendar:
+            data["calendar_context"] = {"calendar_event_title": calendar}
+        return data
+
+    def test_rewrite_without_summary_keeps_the_existing_one(self, tmp_path):
+        md = tmp_path / "rec.md"
+        summary = {
+            "title": "Team Strategy, Structure and Innovation Reset",
+            "decisions": [{"text": "Create an innovation team"}],
+            "key_points": ["The team has grown to 13 people"],
+            "tags": ["team strategy"],
+            "action_items": [{"task": "Find a live demo slot", "assignee": "Hannah"}],
+            "summary_text": "The meeting opened with a two-year history.",
+        }
+        write_transcript(md, "", diarized_result=self._diarized(), summary=summary)
+        write_transcript(md, "", diarized_result=self._diarized())  # e.g. a speaker rename
+        meta, _ = parse_frontmatter(md.read_text())
+        assert meta["title"] == "Team Strategy, Structure and Innovation Reset"
+        assert meta["key_points"] == ["The team has grown to 13 people"]
+        assert meta["decisions"][0]["text"] == "Create an innovation team"
+        assert meta["action_items"][0]["task"] == "Find a live demo slot"
+        assert "two-year history" in md.read_text().split("## Summary", 1)[1]
+
+    def test_a_first_line_title_is_replaced_by_the_meeting_title(self, tmp_path):
+        md = tmp_path / "rec.md"
+        write_transcript(md, "", diarized_result=self._diarized())
+        assert parse_frontmatter(md.read_text())[0]["title"] == "Oh was it Riley the agent?"
+        write_transcript(md, "", diarized_result=self._diarized(calendar="[BT] All-hands quarterly"))
+        assert parse_frontmatter(md.read_text())[0]["title"] == "[BT] All-hands quarterly"
+
+    def test_a_new_summary_replaces_the_old_one(self, tmp_path):
+        md = tmp_path / "rec.md"
+        write_transcript(md, "", diarized_result=self._diarized(), summary={"title": "Old"})
+        write_transcript(md, "", diarized_result=self._diarized(), summary={"title": "New", "key_points": []})
+        assert parse_frontmatter(md.read_text())[0]["title"] == "New"

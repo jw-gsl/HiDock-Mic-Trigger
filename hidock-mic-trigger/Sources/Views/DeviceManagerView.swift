@@ -12,11 +12,11 @@ struct DeviceManagerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Text("Device Manager")
-                    .font(.title2)
-                    .fontWeight(.semibold)
+            // Header: the Settings window titles the pane, so this is just
+            // the actions.
+            HStack(spacing: 8) {
+                Text("Paired devices")
+                    .font(.headline)
                 Spacer()
                 Button {
                     viewModel.onPairDock()
@@ -28,82 +28,71 @@ struct DeviceManagerView: View {
                 PairPlaudButton(viewModel: viewModel)
             }
             .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 12)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
 
-            Divider()
-
-            // Toolbar: one control per row so nothing competes for width in
-            // the detail pane. Segmented pickers stretch to fill their row.
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("Search devices...", text: $searchText)
-                        .textFieldStyle(.roundedBorder)
+            // One compact row: search, then small menus for type, sort and
+            // the Plaud check interval. (Full-width segmented pickers on their
+            // own rows took half the pane.)
+            HStack(spacing: 10) {
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                    TextField("Search", text: $searchText)
+                        .textFieldStyle(.plain)
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
+                .frame(minWidth: 120)
 
-                HStack(spacing: 8) {
-                    Text("Type:")
-                        .font(.caption.weight(.medium))
-                        .frame(width: 38, alignment: .leading)
-                    Picker("", selection: $filterType) {
-                        Text("All").tag("all")
-                        Text("HiDock").tag("hidock")
-                        Text("Volume").tag("volume")
-                        Text("Plaud").tag("plaud")
+                Picker("Type", selection: $filterType) {
+                    Text("All types").tag("all")
+                    Text("HiDock").tag("hidock")
+                    Text("Volume").tag("volume")
+                    Text("Plaud").tag("plaud")
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+
+                Picker("Sort", selection: $sortOrder) {
+                    Text("By name").tag(DeviceSortKey.name)
+                    Text("By type").tag(DeviceSortKey.type)
+                    Text("By date paired").tag(DeviceSortKey.pairedAt)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+
+                if viewModel.hasPlaudAccount {
+                    // Plaud is an API (not USB), so a background poll is the
+                    // only thing that surfaces new Plaud recordings.
+                    Picker("Check Plaud", selection: Binding(
+                        get: { viewModel.plaudPollIntervalSeconds },
+                        set: { viewModel.onSetPlaudPollInterval($0) }
+                    )) {
+                        Text("Plaud: never").tag(0.0)
+                        Text("Plaud: every 1m").tag(60.0)
+                        Text("Plaud: every 2m").tag(120.0)
+                        Text("Plaud: every 5m").tag(300.0)
+                        Text("Plaud: every 15m").tag(900.0)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: .infinity)
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("How often to check your Plaud account for new recordings in the background.")
                 }
 
                 if !viewModel.hiddenDeviceIds.isEmpty {
-                    Toggle(isOn: $showHidden) {
-                        Text("Show hidden (\(viewModel.hiddenDeviceIds.count))")
-                            .font(.caption)
-                    }
-                    .toggleStyle(.checkbox)
-                }
-
-                HStack(spacing: 8) {
-                    Text("Sort:")
-                        .font(.caption.weight(.medium))
-                        .frame(width: 38, alignment: .leading)
-                    Picker("", selection: $sortOrder) {
-                        Text("Name").tag(DeviceSortKey.name)
-                        Text("Type").tag(DeviceSortKey.type)
-                        Text("Paired").tag(DeviceSortKey.pairedAt)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: .infinity)
-
-                    // Plaud is an API (not USB), so a background poll is the only
-                    // thing that surfaces new Plaud recordings. Shown only when
-                    // a Plaud account exists.
-                    if viewModel.hasPlaudAccount {
-                        Divider().frame(height: 16)
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .foregroundColor(.secondary)
-                        Text("Check:")
-                            .font(.caption.weight(.medium))
-                        Picker("", selection: Binding(
-                            get: { viewModel.plaudPollIntervalSeconds },
-                            set: { viewModel.onSetPlaudPollInterval($0) }
-                        )) {
-                            Text("Off").tag(0.0)
-                            Text("1m").tag(60.0)
-                            Text("2m").tag(120.0)
-                            Text("5m").tag(300.0)
-                            Text("15m").tag(900.0)
-                        }
-                        .pickerStyle(.menu)
+                    Toggle("Hidden (\(viewModel.hiddenDeviceIds.count))", isOn: $showHidden)
+                        .toggleStyle(.checkbox)
                         .fixedSize()
-                        .help("How often to check your Plaud account for new recordings in the background.")
-                    }
                 }
             }
+            .controlSize(.small)
+            .font(.caption)
             .padding(.horizontal, 20)
-            .padding(.vertical, 8)
+            .padding(.bottom, 8)
 
             Divider()
 

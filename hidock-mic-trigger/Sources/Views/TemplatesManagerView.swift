@@ -15,6 +15,9 @@ struct TemplateItem: Identifiable, Hashable {
 /// editing happens via Claude Code or the user's default editor.
 struct TemplatesManagerView: View {
     @ObservedObject var viewModel: HiDockViewModel
+    /// Render as a Section of a grouped Form (the Settings window's Summaries
+    /// pane) instead of a standalone panel with its own scrolling list.
+    var asFormSection = false
     @State private var templates: [TemplateItem] = []
     @State private var showDeleteConfirm = false
     @State private var pendingDelete: TemplateItem?
@@ -24,6 +27,96 @@ struct TemplatesManagerView: View {
     }
 
     var body: some View {
+        Group {
+            if asFormSection { formSection } else { panel }
+        }
+        .onAppear(perform: reload)
+        .confirmationDialog("Delete this template?",
+                            isPresented: $showDeleteConfirm,
+                            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                if let t = pendingDelete {
+                    try? FileManager.default.removeItem(at: t.url)
+                    reload()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(pendingDelete?.displayName ?? "")
+        }
+    }
+
+    private var formSection: some View {
+        Section {
+            if templates.isEmpty {
+                Text("No templates yet. Import a .md template, or create one with AI.")
+                    .foregroundColor(.secondary)
+            }
+            ForEach(templates) { t in templateRow(t) }
+            actions
+        } header: {
+            Text("Summary templates (\(templates.count))")
+        }
+    }
+
+    private func templateRow(_ t: TemplateItem) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.text.fill").foregroundColor(.indigo)
+            Text(t.displayName).lineLimit(1)
+            Spacer()
+            Button {
+                viewModel.onIterateTemplate(t.url)
+            } label: {
+                Label("Iterate", systemImage: "sparkles")
+            }
+            .buttonStyle(.borderless)
+            .help("Open the AI CLI in the pane to refine this template")
+            Menu {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([t.url])
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder")
+                }
+                Button {
+                    NSWorkspace.shared.open(t.url)
+                } label: {
+                    Label("Open in Editor", systemImage: "square.and.pencil")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    pendingDelete = t
+                    showDeleteConfirm = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Button { importTemplates() } label: {
+                Label("Import…", systemImage: "square.and.arrow.down")
+            }
+            Button { viewModel.onCreateTemplate() } label: {
+                Label("New via AI", systemImage: "sparkles")
+            }
+            Spacer()
+            Button {
+                try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+                NSWorkspace.shared.activateFileViewerSelecting([dirURL])
+            } label: {
+                Label("Open Folder", systemImage: "folder")
+            }
+        }
+        .controlSize(.small)
+    }
+
+    private var panel: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "doc.text")
@@ -49,41 +142,7 @@ struct TemplatesManagerView: View {
             } else {
                 List {
                     ForEach(templates) { t in
-                        HStack(spacing: 8) {
-                            Image(systemName: "doc.text.fill").foregroundColor(.indigo)
-                            Text(t.displayName).lineLimit(1)
-                            Spacer()
-                            Button {
-                                viewModel.onIterateTemplate(t.url)
-                            } label: {
-                                Label("Iterate", systemImage: "sparkles")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Open the AI CLI in the pane to refine this template")
-                            Menu {
-                                Button {
-                                    NSWorkspace.shared.activateFileViewerSelecting([t.url])
-                                } label: {
-                                    Label("Reveal in Finder", systemImage: "folder")
-                                }
-                                Button {
-                                    NSWorkspace.shared.open(t.url)
-                                } label: {
-                                    Label("Open in Editor", systemImage: "square.and.pencil")
-                                }
-                                Divider()
-                                Button(role: .destructive) {
-                                    pendingDelete = t
-                                    showDeleteConfirm = true
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                            }
-                            .menuStyle(.borderlessButton)
-                            .fixedSize()
-                        }
+                        templateRow(t)
                         .padding(.vertical, 2)
                     }
                 }
@@ -91,39 +150,10 @@ struct TemplatesManagerView: View {
             }
 
             Divider()
-            HStack(spacing: 8) {
-                Button { importTemplates() } label: {
-                    Label("Import…", systemImage: "square.and.arrow.down")
-                }
-                Button { viewModel.onCreateTemplate() } label: {
-                    Label("New via AI", systemImage: "sparkles")
-                }
-                Spacer()
-                Button {
-                    try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
-                    NSWorkspace.shared.activateFileViewerSelecting([dirURL])
-                } label: {
-                    Label("Open Folder", systemImage: "folder")
-                }
-            }
-            .controlSize(.small)
-            .padding(.horizontal, 14).padding(.vertical, 10)
+            actions
+                .padding(.horizontal, 14).padding(.vertical, 10)
         }
         .frame(minWidth: 460, minHeight: 360)
-        .onAppear(perform: reload)
-        .confirmationDialog("Delete this template?",
-                            isPresented: $showDeleteConfirm,
-                            titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                if let t = pendingDelete {
-                    try? FileManager.default.removeItem(at: t.url)
-                    reload()
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(pendingDelete?.displayName ?? "")
-        }
     }
 
     private func reload() {

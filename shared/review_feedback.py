@@ -59,6 +59,9 @@ def record_refine(recording: str, action: str, moves: list[dict], directory: Pat
         "start": float(m.get("start", 0)), "from_name": m.get("from_name"),
         "to_name": m.get("to_name"), "score": m.get("score"),
         "current_score": m.get("current_score"), "kind": m.get("kind", "line"),
+        # Decisions on lines Refine applied by itself (undo = skipped, keep =
+        # applied), so they count towards its accuracy like any other.
+        **({"auto": True} if m.get("auto") else {}),
     } for m in moves], directory)
 
 

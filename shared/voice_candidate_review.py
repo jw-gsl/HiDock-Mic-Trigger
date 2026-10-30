@@ -679,6 +679,25 @@ def record_suggestion_outcome(
     return event
 
 
+def _person_ranges(data: dict, name: str, ranges) -> list[tuple[float, float]]:
+    """The lines just given to `name` plus every line they already have here.
+
+    Learning from the moved lines alone missed people built up a line at a
+    time (Rec77, 2026-10-29): each move was under the 8 s minimum clip, so
+    George Mylonas learned nothing even after he had a 30 s line. The rest
+    of their lines in this transcript are the same reviewer's labels.
+    """
+    names = data.get("speaker_names") or {}
+    wanted = " ".join(name.split()).casefold()
+    spans = {(float(a), float(b)) for a, b in ranges if float(b) > float(a)}
+    for seg in data.get("segments") or []:
+        label = str(names.get(str(seg.get("speaker_id")), ""))
+        start, end = float(seg.get("start", 0)), float(seg.get("end", 0))
+        if " ".join(label.split()).casefold() == wanted and end > start:
+            spans.add((start, end))
+    return sorted(spans)
+
+
 def learn_from_lines(
     sidecar_path: str | Path,
     name: str,
@@ -708,7 +727,7 @@ def learn_from_lines(
     audio = _resolve_audio(sidecar, data)
     if audio is None or not audio.exists():
         return {"enrolled": False, "reason": "source audio missing"}
-    turns = [LegacyTurn(float(a), float(b), final) for a, b in ranges if float(b) > float(a)]
+    turns = [LegacyTurn(a, b, final) for a, b in _person_ranges(data, final, ranges)]
     model_path = Path(config["model_path"])
     session = session or _get_speaker_embed_session(config["model_key"], model_path)
     if session is None:
@@ -725,7 +744,7 @@ def learn_from_lines(
         recording=audio.stem,
     )
     if selected is None:
-        return {"enrolled": False, "reason": refusal}
+        return {"enrolled": False, "reason": refusal, "library": config["model_key"]}
     quality = _audio_quality_from_path(
         audio, segment_start=selected["segment_start"], segment_end=selected["segment_end"])
     _enroll_into(
@@ -741,7 +760,8 @@ def learn_from_lines(
     )
     _atomic_write(library_path, library)
     return {"enrolled": True, "name": final, "clip_start": selected["segment_start"],
-            "clip_end": selected["segment_end"], "verification": selected.get("verification")}
+            "clip_end": selected["segment_end"], "verification": selected.get("verification"),
+            "library": config["model_key"]}
 
 
 def list_candidate_speakers(
