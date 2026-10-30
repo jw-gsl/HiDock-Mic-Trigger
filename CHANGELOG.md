@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 25 changes (v4.1.0 to v4.1.24, 15 Oct 2026 – 30 Oct 2026)
+**Released 16 Oct 2026** · 26 changes (v4.1.0 to v4.1.25, 15 Oct 2026 – 30 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -31,6 +31,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **LED ticker.** Events now scroll across the heatmap while it's at rest (before, they never showed). The display style, colour, brightness and speed apply straight away, and a "Send a test message" button lets you try it.
 
 ### Fixed
+- **Speech chopped into one-word lines.** When speaker detection flickered between people for under a second in the middle of someone talking, each flicker started a new line, so one 90-second answer could become 30 one- and two-word lines. Flickers like that are now folded into the person speaking, and lines Refine moves are joined back up with their neighbours.
 - **Trimmed recordings.** Trimming a recording now trims its transcript too, instead of leaving the full-length text.
 - **Long recordings stalling on Nemotron.** Audio is now sent to the Spark as lossless FLAC instead of uncompressed WAV, a quarter of the size, so a 3-hour recording no longer takes hours to upload over a slow connection.
 - **Plaud recordings downloaded twice when travelling.** Early-morning recordings landed in a different day folder when the Mac was in another time zone, so they were downloaded and transcribed again. The app now finds the existing copy.
@@ -40,7 +41,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (25)</summary>
+<details><summary>Every change (26)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -69,6 +70,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.22 | 30 Oct 2026 | Refine applies line moves it is sure of (0.7+) once the meeting is settled, for you to undo or keep (#149) |
 | v4.1.23 | 30 Oct 2026 | New-Mac migration runbook: what to copy, in what order, and how to check it (#120) |
 | v4.1.24 | 30 Oct 2026 | Clickable "to tag" and "to confirm" counts that filter the list (#128) |
+| v4.1.25 | 30 Oct 2026 | Sub-second speaker flicker folded into the person speaking; Refine joins the lines it moves (#148) |
 
 </details>
 

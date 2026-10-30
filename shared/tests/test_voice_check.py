@@ -230,6 +230,59 @@ def test_unnamed_speakers_are_still_checked_and_show_no_score_for_their_label():
     assert result["no_voice"] == []
 
 
+def _fragments():
+    # Rec79: one person's answer left in pieces, some under the wrong names.
+    return {
+        "speaker_names": {"0": "Joe Kraft", "1": "Ian Reay"},
+        "speaker_meta": {},
+        "segments": [
+            {"start": 0.0, "end": 2.0, "speaker_id": 1, "text": "i want"},
+            {"start": 2.1, "end": 2.4, "speaker_id": 0, "text": "to"},
+            {"start": 2.5, "end": 4.0, "speaker_id": 1, "text": "see how"},
+            {"start": 4.1, "end": 4.4, "speaker_id": 0, "text": "people"},
+            {"start": 4.5, "end": 6.0, "speaker_id": 1, "text": "use it"},
+            {"start": 9.0, "end": 10.0, "speaker_id": 1, "text": "after a pause"},
+        ],
+    }
+
+
+def test_moved_lines_are_joined_with_the_same_persons_neighbours():
+    data = _fragments()
+    moves = [{"index": 1, "to_name": "Ian Reay", "start": 2.1},
+             {"index": 3, "to_name": "Ian Reay", "start": 4.1}]
+    voice_check.apply_moves(data, moves)
+
+    assert voice_check.merge_moved_lines(data, moves) == 4
+    assert [(s["start"], s["end"], s["text"]) for s in data["segments"]] == [
+        (0.0, 6.0, "i want to see how people use it"),
+        (9.0, 10.0, "after a pause"),
+    ]
+
+
+def test_a_line_with_a_suggestion_still_waiting_is_not_joined():
+    data = _fragments()
+    moves = [{"index": 1, "to_name": "Ian Reay", "start": 2.1}]
+    voice_check.apply_moves(data, moves)
+
+    voice_check.merge_moved_lines(data, moves, keep_starts=[2.5])
+
+    assert [s["text"] for s in data["segments"]] == ["i want to", "see how", "people", "use it", "after a pause"]
+
+
+def test_lines_not_moved_are_left_alone():
+    data = _fragments()
+    # Two of Joe's lines back to back, nowhere near a move.
+    data["segments"] += [{"start": 20.0, "end": 21.0, "speaker_id": 0, "text": "joe one"},
+                         {"start": 21.2, "end": 22.0, "speaker_id": 0, "text": "joe two"}]
+    moves = [{"index": 1, "to_name": "Ian Reay", "start": 2.1}]
+    voice_check.apply_moves(data, moves)
+
+    voice_check.merge_moved_lines(data, moves)
+
+    assert [s["text"] for s in data["segments"]] == [
+        "i want to see how", "people", "use it", "after a pause", "joe one", "joe two"]
+
+
 def _auto_setup(tmp_path):
     path = _write_transcript(tmp_path, [0, 5, 9, 14])
     data = json.loads(path.read_text())
@@ -304,3 +357,25 @@ def test_undo_finds_the_original_person_after_their_id_changed(tmp_path):
     path.write_text(json.dumps(data))
     voice_check.undo_auto(path, None)
     assert [s["speaker_id"] for s in json.loads(path.read_text())["segments"]] == [7, 7, 7, 7]
+
+
+def test_a_line_refine_moved_by_itself_is_not_joined_away():
+    # A manual apply joins moved lines with their neighbours; a line still on
+    # the automatic list must keep its start, or it drops off unkept.
+    data = {
+        "speaker_names": {"0": "Ann", "1": "Bob"},
+        "segments": [{"start": 0.0, "end": 2.0, "speaker_id": 0, "text": "a"},
+                     {"start": 2.2, "end": 4.0, "speaker_id": 1, "text": "b"},
+                     {"start": 4.2, "end": 6.0, "speaker_id": 1, "text": "c"}],
+        voice_check.AUTO_KEY: [{"start": 2.2, "to_name": "Bob", "from_name": "Ann"}],
+    }
+    moves = [{"index": 0, "start": 0.0, "to_name": "Bob"}]
+    voice_check.apply_moves(data, moves)
+    keep = [float(e["start"]) for e in voice_check.pending_auto(data)]
+    voice_check.merge_moved_lines(data, moves, keep_starts=keep)
+    assert [s["start"] for s in data["segments"]] == [0.0, 2.2, 4.2]
+    assert [e["start"] for e in voice_check.pending_auto(data)] == [2.2]
+    # Without the protection the three would become one line.
+    unprotected = json.loads(json.dumps(data))
+    voice_check.merge_moved_lines(unprotected, moves)
+    assert len(unprotected["segments"]) == 1
