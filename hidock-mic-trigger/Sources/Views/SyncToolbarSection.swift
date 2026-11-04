@@ -191,7 +191,7 @@ struct SyncToolbarSection: View {
                 // wider than the window. (People filter moved to the filter row.)
                 reviewCount(viewModel.needsTaggingCount, "to tag", icon: "tag.fill",
                             color: .orange, filter: .needsTagging,
-                            what: "transcribed recordings still need speaker tagging")
+                            what: "transcribed recordings still need speakers tagged or confirmed (orange tag or blue ?)")
                 reviewCount(viewModel.needsConfirmingCount, "to confirm", icon: "questionmark.circle.fill",
                             color: .blue, filter: .needsConfirming,
                             what: "recordings were auto-tagged from your voice library and need confirming")

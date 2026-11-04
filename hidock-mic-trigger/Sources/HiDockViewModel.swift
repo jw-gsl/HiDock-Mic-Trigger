@@ -305,11 +305,14 @@ final class HiDockViewModel: ObservableObject {
         case .merged:
             return mergeGroups.contains { $0.childNames.contains(e.recording.name) }
         case .needsTagging:
-            if needsTagging(e) { return true }
+            // Everything awaiting review: untagged (orange) and auto-tagged
+            // waiting for a tick (blue ?).
+            if needsTagging(e) || needsConfirming(e) { return true }
             // A merged recording is tagged as one file; show its pieces so the
             // merge row appears.
             return mergeGroups.contains {
-                $0.childNames.contains(e.recording.name) && mergedFileNeedsTagging($0.outputName)
+                $0.childNames.contains(e.recording.name)
+                    && (mergedFileNeedsTagging($0.outputName) || mergedFileNeedsConfirming($0.outputName))
             }
         case .needsConfirming:
             if needsConfirming(e) { return true }
@@ -901,9 +904,12 @@ final class HiDockViewModel: ObservableObject {
             && !mergedFileAutoMatched.contains(name) && !isMergeBeforeTaggingCutoff(name)
     }
 
+    /// The toolbar's "N to tag": every recording still awaiting speaker
+    /// review — untagged (orange tag) plus auto-tagged and not yet confirmed
+    /// (blue ?). "N to confirm" is the blue part on its own.
     var needsTaggingCount: Int {
-        syncEntries.filter(needsTagging).count
-            + mergedFileTranscribed.filter(mergedFileNeedsTagging).count
+        syncEntries.filter { needsTagging($0) || needsConfirming($0) }.count
+            + mergedFileTranscribed.filter { mergedFileNeedsTagging($0) || mergedFileNeedsConfirming($0) }.count
     }
 
     /// Auto-tagged from the voice library but not confirmed (the blue
