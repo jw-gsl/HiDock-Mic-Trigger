@@ -55,11 +55,12 @@ final class ToTagFilterTests: XCTestCase {
 
     func testCountAndFilterAgreeAndRespectCutoff() {
         let model = makeModel()
-        XCTAssertEqual(model.needsTaggingCount, 1)
+        // Untagged and auto-tagged-unconfirmed both count; old ones don't.
+        XCTAssertEqual(model.needsTaggingCount, 2)
         XCTAssertEqual(model.visibleEntries.count, 6, "the cutoff never hides rows")
 
         model.toggleReviewFilter(.needsTagging)
-        XCTAssertEqual(model.visibleEntries.map(\.recording.name), ["new-untagged"])
+        XCTAssertEqual(Set(model.visibleEntries.map(\.recording.name)), ["new-untagged", "new-auto"])
 
         model.toggleReviewFilter(.needsTagging)
         XCTAssertEqual(model.visibleEntries.count, 6)
@@ -71,22 +72,23 @@ final class ToTagFilterTests: XCTestCase {
         model.hiddenStatuses = [model.syncEntries[0].statusText]
         model.toggleReviewFilter(.needsTagging)
         XCTAssertEqual(model.statusFilters, [.needsTagging])
-        XCTAssertEqual(model.visibleEntries.map(\.recording.name), ["new-untagged"])
+        XCTAssertEqual(Set(model.visibleEntries.map(\.recording.name)), ["new-untagged", "new-auto"])
     }
 
     func testTaggingARowRemovesItFromTheView() {
         let model = makeModel()
         model.toggleReviewFilter(.needsTagging)
         model.syncEntries[0].speakersTagged = true
+        model.syncEntries[4].speakersTagged = true   // confirming the blue one
         XCTAssertTrue(model.visibleEntries.isEmpty)
     }
 
-    func testToConfirmShowsOnlyRecentAutoTaggedAndStacksWithToTag() {
+    func testToConfirmIsTheBluePartOfToTag() {
         let model = makeModel()
         XCTAssertEqual(model.needsConfirmingCount, 1)
         model.toggleReviewFilter(.needsConfirming)
         XCTAssertEqual(model.visibleEntries.map(\.recording.name), ["new-auto"])
-        // Ticking both in the Filter menu gives everything awaiting review.
+        // "To tag" already includes them; ticking both changes nothing.
         model.statusFilters = [.needsTagging, .needsConfirming]
         XCTAssertEqual(Set(model.visibleEntries.map(\.recording.name)), ["new-untagged", "new-auto"])
     }
