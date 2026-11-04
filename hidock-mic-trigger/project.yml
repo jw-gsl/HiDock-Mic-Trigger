@@ -4,8 +4,8 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.26
-  CURRENT_PROJECT_VERSION: 29
+  MARKETING_VERSION: 4.1.27
+  CURRENT_PROJECT_VERSION: 30
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -92,7 +92,12 @@ targets:
           # relaunched. If it is not running there is nothing to interrupt, so asking
           # would be the same empty ceremony the old build-approval dialog was.
           APP_RUNNING="false"
-          if /usr/bin/pgrep -f "/Applications/HiDock Mic Trigger.app" > /dev/null 2>&1; then
+          # -a: include this script's own ancestors. pgrep/pkill skip them by
+          # default, and "Update now" runs this build as a child of the app, so
+          # without -a the app was never found: no approval was asked, it was
+          # never quit, and `open -a` just brought the old copy forward
+          # (2026-11-04: 4.1.26 installed while 4.1.22 kept running).
+          if /usr/bin/pgrep -a -f "/Applications/HiDock Mic Trigger.app" > /dev/null 2>&1; then
             APP_RUNNING="true"
           fi
 
@@ -215,7 +220,8 @@ targets:
           # -x: the process *name*. `-f` matched any command line containing the
           # text — including an xcodebuild started by the app's own "Update
           # now" (its arguments name the hidock-mic-trigger project).
-          pkill -x "hidock-mic-trigger" 2>/dev/null || true
+          # -a for the same reason as the APP_RUNNING check above.
+          pkill -a -x "hidock-mic-trigger" 2>/dev/null || true
           sleep 1
 
           # Remove stale copies (including the legacy Dev.app split, the old
