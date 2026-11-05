@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 28 changes (v4.1.0 to v4.1.27, 15 Oct 2026 – 30 Oct 2026)
+**Released 16 Oct 2026** · 29 changes (v4.1.0 to v4.1.28, 15 Oct 2026 – 30 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -20,6 +20,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **"Only count from" date for speaker tagging.** In Settings → Speakers, tick "Only count recordings from a date" and pick one; older recordings stop counting towards the "to tag" count and their tag icon turns grey (still clickable).
 
 ### Improved
+- **Updates has its own place in Settings.** Check for Updates moved from General to a new Updates pane at the bottom of the sidebar, which also shows the installed version and where it came from.
 - **Check for Updates in a build from the code.** It now shows your version, the latest release, and the changes waiting on GitHub, and Update now pulls them and rebuilds (you approve the restart). You're also told at launch when there's something new.
 - **Models pane.** Each model expands with an arrow, the models you're using are open by default, and there are Expand all, Collapse all and Show models in use buttons.
 - **Speaker detection falls back.** If Nemotron on a separate NVIDIA computer isn't available, speakers are detected on the Mac instead.
@@ -42,7 +43,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (28)</summary>
+<details><summary>Every change (29)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -73,7 +74,8 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.24 | 30 Oct 2026 | Clickable "to tag" and "to confirm" counts that filter the list (#128) |
 | v4.1.25 | 30 Oct 2026 | Sub-second speaker flicker folded into the person speaking; Refine joins the lines it moves (#148) |
 | v4.1.26 | 4 Nov 2026 | "To tag" also counts recordings auto-tagged and waiting to be confirmed (blue ?) (#150) |
-| v4.1.27 | 4 Nov 2026 | Update now restarts the app after installing, instead of leaving the old version running |
+| v4.1.27 | 4 Nov 2026 | Update now restarts the app after installing, instead of leaving the old version running (#151) |
+| v4.1.28 | 5 Nov 2026 | Updates moved into its own Settings pane, at the bottom |
 
 </details>
 

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The panes of the Settings window, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, microphone, devices, transcription, speakers, models, summaries, calendar, github, led
+    case general, microphone, devices, transcription, speakers, models, summaries, calendar, github, led, updates
 
     var id: String { rawValue }
 
@@ -18,6 +18,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .calendar: return "Calendar"
         case .github: return "GitHub"
         case .led: return "LED Ticker"
+        case .updates: return "Updates"
         }
     }
 
@@ -33,6 +34,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .calendar: return "calendar"
         case .github: return "icloud.and.arrow.up"
         case .led: return "square.grid.3x3.fill"
+        case .updates: return "arrow.down.circle"
         }
     }
 
@@ -97,6 +99,7 @@ struct SettingsView: View {
             LEDSettingsView(settings: viewModel.ledSettings) {
                 viewModel.ledMatrix.notify(LEDEvent(kind: .syncComplete, text: "\(LEDFont.check) LED TEST"))
             }
+        case .updates: UpdatesSettingsPane(viewModel: viewModel)
         }
     }
 
@@ -172,15 +175,6 @@ private struct GeneralSettingsPane: View {
                     set: { _ in viewModel.onToggleNotifyMicChanges() }
                 ))
             }
-            Section("Updates") {
-                HStack {
-                    Text(viewModel.updateStatusText.isEmpty ? "HiDock checks for updates automatically."
-                                                           : viewModel.updateStatusText)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button("Check for Updates") { viewModel.onCheckForUpdates() }
-                }
-            }
             Section {
                 if viewModel.setupProblems.isEmpty {
                     Label("Everything the pipeline needs is in place.", systemImage: "checkmark.circle")
@@ -209,6 +203,42 @@ private struct GeneralSettingsPane: View {
                 Text("Setup check")
             } footer: {
                 Text("Checks tokens, models, Python packages and GitHub sign-in a minute after launch and every 6 hours.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Which version is installed, and checking for a newer one. Moved out of
+/// General into its own pane, last in the sidebar.
+private struct UpdatesSettingsPane: View {
+    @ObservedObject var viewModel: HiDockViewModel
+
+    private var version: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let number = info["CFBundleShortVersionString"] as? String ?? "?"
+        guard let commit = info["HiDockGitCommit"] as? String, !commit.isEmpty else { return number }
+        return "\(number) (\(commit.prefix(7)))"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Installed", value: version)
+                LabeledContent("Kind", value: UpdateChecker.isDeveloperBuild
+                               ? "Built from the code in \((RepoUpdater.repoRoot as NSString).abbreviatingWithTildeInPath)"
+                               : "Downloaded release")
+                HStack {
+                    Text(viewModel.updateStatusText.isEmpty ? "HiDock checks for updates automatically."
+                                                           : viewModel.updateStatusText)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Check for Updates") { viewModel.onCheckForUpdates() }
+                }
+            } footer: {
+                Text(UpdateChecker.isDeveloperBuild
+                     ? "Update now pulls the latest code from GitHub and rebuilds the app, then asks before restarting it. Its log is at ~/Library/Logs/hidock-self-update.log."
+                     : "Updates come from the Releases page on GitHub.")
             }
         }
         .formStyle(.grouped)
