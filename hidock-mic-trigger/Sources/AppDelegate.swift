@@ -84,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private enum CalendarPrelookup { case pending, done([CalendarMeetingCandidate]) }
     /// Calendar lookups started alongside transcription, by audio path.
     private var calendarPrelookups: [String: CalendarPrelookup] = [:]
+    /// True while the one-voice H1 warning is on screen, so a backlog of
+    /// affected recordings raises one popup rather than a stack of them.
+    private var farEndAudioAlertShowing = false
     /// Transcribed before their lookup finished; resolved when it does.
     private var calendarAwaitingTranscript: Set<String> = []
     /// Background Refine checks by transcript path; true = run again when done.
@@ -5716,6 +5719,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         return provisional.path
+    }
+
+    /// Pop up a warning when a fresh H1 call recording has only one voice:
+    /// the dock has probably stopped recording the call audio played through
+    /// it, and turning it off and on fixes that (see `FarEndAudioCheck`).
+    ///
+    /// Called only from the automatic transcription paths. Transcribing with
+    /// a chosen speaker count skips it, because the count is the user's.
+    /// Each recording warns once; a popup already on screen isn't stacked.
+    private func warnIfFarEndAudioMissing(afterTranscriptionOf audioPath: String) {
+        guard FarEndAudioCheck.isEnabled, !farEndAudioAlertShowing else { return }
+        guard let entry = viewModel.syncEntries.first(where: { $0.recording.outputPath == audioPath }) else { return }
+        let name = entry.recording.outputName
+        guard !FarEndAudioCheck.alreadyWarned(name),
+              let transcript = loadDiarizedTranscript(at: diarizedTranscriptPath(forAudioPath: audioPath)) else { return }
+        let speakerIds = Set(transcript.segments
+            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map(\.speakerId))
+        let typePrefix = entry.deviceId.split(separator: ":").first.map(String.init) ?? ""
+        let duration = entry.recording.duration > 0
+            ? entry.recording.duration
+            : ImportedRecordingsStore.probeDuration(at: audioPath)
+        guard FarEndAudioCheck.shouldWarn(
+            deviceName: entry.deviceName,
+            deviceType: DeviceType(rawValue: typePrefix) ?? .hidock,
+            duration: duration,
+            speakerIds: speakerIds,
+            recordedAt: FarEndAudioCheck.recordedAt(createDate: entry.recording.createDate,
+                                                    createTime: entry.recording.createTime)
+        ) else { return }
+
+        FarEndAudioCheck.markWarned(name)
+        log("Far-end audio check: \(name) (\(Int(duration))s, \(entry.deviceName)) has one speaker — warning to power-cycle the H1")
+        farEndAudioAlertShowing = true
+        // Next turn of the main queue: the caller is a transcription
+        // completion handler that goes on to start the next queued recording,
+        // which a modal opened here would hold up until it was dismissed.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = FarEndAudioCheck.alertTitle()
+            alert.informativeText = FarEndAudioCheck.alertText(recordingName: name, duration: duration)
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Don't Warn Again")
+            let response = alert.runModal()
+            self.farEndAudioAlertShowing = false
+            if response == .alertSecondButtonReturn {
+                UserDefaults.standard.set(false, forKey: FarEndAudioCheck.enabledKey)
+                self.log("Far-end audio check turned off from the popup (Settings → Transcription turns it back on)")
+            }
+        }
     }
 
     /// Settle the suggestion once the transcript is written.
@@ -12137,6 +12193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     }
                     if self.syncAutoSummarise { self.pendingAutoSummariseNames.insert(filename) }
                     self.suggestCalendarMeeting(afterTranscriptionOf: mp3Path)
+                    self.warnIfFarEndAudioMissing(afterTranscriptionOf: mp3Path)
                 } else {
                     let errorMsg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String ?? "Unknown error"
                     self.log("Transcription failed for \(filename): \(errorMsg)")
@@ -12475,6 +12532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     // queues the typed summary for these names.
                     if self.syncAutoSummarise { self.pendingAutoSummariseNames.insert(filename) }
                     self.suggestCalendarMeeting(afterTranscriptionOf: item.path)
+                    self.warnIfFarEndAudioMissing(afterTranscriptionOf: item.path)
                 case .failure(let err):
                     self.pendingTranscriptionQueue[idx].status = .failed
                     self.viewModel.ledMatrix.notify(LEDEvent(kind: .error, text: "\(LEDFont.cross) TRANSCRIBE FAILED"))

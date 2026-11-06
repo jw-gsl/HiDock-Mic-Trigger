@@ -296,6 +296,7 @@ private struct DevicesSettingsPane: View {
 
 private struct TranscriptionSettingsPane: View {
     @ObservedObject var viewModel: HiDockViewModel
+    @AppStorage(FarEndAudioCheck.enabledKey) private var farEndAudioWarning = true
 
     var body: some View {
         Form {
@@ -320,8 +321,9 @@ private struct TranscriptionSettingsPane: View {
                     get: { viewModel.diarizeEnabled },
                     set: { _ in viewModel.onToggleDiarize() }
                 ))
+                Toggle("Warn when an H1 call has only one voice", isOn: $farEndAudioWarning)
             } footer: {
-                Text("Which models do the work is chosen under Models.")
+                Text("Which models do the work is chosen under Models. The warning appears after a recording of 10 minutes or more from the HiDock H1 is transcribed with only one speaker, a sign that the dock has stopped recording the call audio. Turning the H1 off and on fixes that.")
             }
             Section("Folders") {
                 LabeledContent("Recordings") {

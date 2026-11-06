@@ -6,11 +6,12 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 29 changes (v4.1.0 to v4.1.28, 15 Oct 2026 – 30 Oct 2026)
+**Released 16 Oct 2026** · 30 changes (v4.1.0 to v4.1.29, 15 Oct 2026 – 30 Oct 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
 ### New
+- **Warning when an H1 call has only one voice.** After a HiDock H1 recording of 10 minutes or more is transcribed with only one speaker, a popup says the dock has probably stopped recording the call audio and tells you to turn it off and on again (unplug power and USB for about 10 seconds), then check with a Teams test call. The H1 can get stuck recording your side but not the other people, and nothing else shows it. Each recording warns once, recordings over a day old are skipped, and Settings → Transcription turns it off.
 - **Settings window.** Press ⌘, to open one Settings window with a sidebar of panes, instead of settings spread across menus and the footer. The footer is down to five buttons.
 - **Setup check.** If something the app needs is missing, such as a token, a model or your GitHub sign-in, a "Setup needs attention" banner says so and links to the right Settings pane.
 - **Moving to a new Mac.** A migration guide (docs/MIGRATING.md) covers moving the app to a new Mac, including fixing code-signing access. A step-by-step runbook (docs/MIGRATION-new-mac.md) covers what to copy, in what order, and how to check it before the old Mac is touched.
@@ -43,7 +44,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (29)</summary>
+<details><summary>Every change (30)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -76,6 +77,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.26 | 4 Nov 2026 | "To tag" also counts recordings auto-tagged and waiting to be confirmed (blue ?) (#150) |
 | v4.1.27 | 4 Nov 2026 | Update now restarts the app after installing, instead of leaving the old version running (#151) |
 | v4.1.28 | 5 Nov 2026 | Updates moved into its own Settings pane, at the bottom |
+| v4.1.29 | 6 Nov 2026 | Popup when an H1 call is transcribed with only one voice, telling you to turn the dock off and on |
 
 </details>
 
