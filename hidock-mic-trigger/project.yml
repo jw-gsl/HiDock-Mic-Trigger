@@ -4,7 +4,7 @@ options:
   deploymentTarget:
     macOS: 13.0
 settings:
-  MARKETING_VERSION: 4.1.29
+  MARKETING_VERSION: 4.1.30
   CURRENT_PROJECT_VERSION: 32
 packages:
   SwiftTerm:

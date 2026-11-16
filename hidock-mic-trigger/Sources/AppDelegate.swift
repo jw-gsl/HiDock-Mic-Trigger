@@ -4522,22 +4522,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func calendarRecordingStart(for audioPath: String) -> Date? {
         let url = URL(fileURLWithPath: audioPath)
-        let stem = timestampBearingStem(url.deletingPathExtension().lastPathComponent)
-        guard stem.count >= 16 else { return nil }
+        let fullStem = url.deletingPathExtension().lastPathComponent
+        let stem = timestampBearingStem(fullStem)
         // Resolve the timezone against whichever piece the timestamp came from.
         // A merge has no captured zone of its own (nothing calls
         // captureRecordingTimeZone at merge time), so reading the merged path
         // would fall back to whatever the Mac is set to *now* — hours out for a
         // recording made in another timezone, which lands the search window on
         // the wrong part of the day. Its first child does have one.
-        let timeZonePath = stem == url.deletingPathExtension().lastPathComponent
+        let timeZonePath = stem == fullStem
             ? audioPath
-            : url.deletingLastPathComponent().appendingPathComponent("\(stem).mp3").path
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = recordingTimeZone(for: timeZonePath)
-        formatter.dateFormat = "yyyyMMMdd-HHmmss"
-        guard let stamped = formatter.date(from: String(stem.prefix(16))) else { return nil }
+            : url.deletingLastPathComponent().appendingPathComponent("\(stem).\(url.pathExtension)").path
+        let zone = recordingTimeZone(for: timeZonePath)
+        // The filename first; then the device record, for a name with no
+        // timestamp (a Plaud recording renamed with a title).
+        let entry = syncEntries.first { $0.recording.outputPath == audioPath }
+        guard let stamped = recordingStart(fromStem: stem, timeZone: zone)
+                ?? entry.flatMap({ recordingStart(createDate: $0.recording.createDate,
+                                                  createTime: $0.recording.createTime, timeZone: zone) })
+        else {
+            log("Calendar: can't tell when \(url.lastPathComponent) started (no timestamp in its name or device record)")
+            return nil
+        }
         return stamped.addingTimeInterval(-recordingClockOffset(for: timeZonePath))
     }
 
@@ -6004,7 +6010,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         onEvent: @escaping (CalendarAssistantEvent) -> Void
     ) {
         guard let start = calendarRecordingStart(for: audioPath) else {
-            onEvent(.finished(reply: "I couldn't determine this recording's start time.",
+            onEvent(.finished(reply: "I couldn't tell when this recording started: its name has no date and time, and the device didn't give one. Try Match meeting, or tell me the date and time it started.",
                               sessionId: sessionId, candidates: []))
             return
         }
