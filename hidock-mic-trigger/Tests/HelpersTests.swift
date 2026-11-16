@@ -685,3 +685,44 @@ final class CalendarDiarisedAgainstTests: XCTestCase {
         XCTAssertNil(calendarEventIdDiarisedAgainst(diarizedJSONPath: "/nonexistent/x_diarized.json"))
     }
 }
+
+
+final class RecordingStartTests: XCTestCase {
+    private let london = TimeZone(identifier: "Europe/London")!
+
+    private func utc(_ text: String) -> Date {
+        let f = ISO8601DateFormatter()
+        return f.date(from: text)!
+    }
+
+    func testHiDockName() {
+        XCTAssertEqual(recordingStart(fromStem: "2026Nov05-144453-Rec05", timeZone: london), utc("2026-11-05T14:44:53Z"))
+    }
+
+    /// The calendar assistant gave up on this one (2026-11-16).
+    func testPlaudName() {
+        XCTAssertEqual(recordingStart(fromStem: "2026-11-12 17-38-24", timeZone: london), utc("2026-11-12T17:38:24Z"))
+        // Summer time: the name is local, so it's an hour ahead of UTC.
+        XCTAssertEqual(recordingStart(fromStem: "2026-07-01 09-00-00", timeZone: london), utc("2026-07-01T08:00:00Z"))
+    }
+
+    func testOlderHiDockName() {
+        XCTAssertEqual(recordingStart(fromStem: "20250910-145251-Rec58", timeZone: london), utc("2025-09-10T13:52:51Z"))
+    }
+
+    func testMergedPlaudName() {
+        let stem = timestampBearingStem("Merged-2026-11-12 17-38-24-to-2026-11-12 18-10-00")
+        XCTAssertEqual(recordingStart(fromStem: stem, timeZone: london), utc("2026-11-12T17:38:24Z"))
+    }
+
+    func testNamesWithoutATimestamp() {
+        XCTAssertNil(recordingStart(fromStem: "GaryLucy-Monthly-Catch-Up", timeZone: london))
+        XCTAssertNil(recordingStart(fromStem: "1-2-1-AdamJames-24042025", timeZone: london))
+    }
+
+    func testDeviceRecordFallback() {
+        XCTAssertEqual(recordingStart(createDate: "2026/11/12", createTime: "17:38:24", timeZone: london),
+                       utc("2026-11-12T17:38:24Z"))
+        XCTAssertNil(recordingStart(createDate: "", createTime: "17:38:24", timeZone: london))
+    }
+}

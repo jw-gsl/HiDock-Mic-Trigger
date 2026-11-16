@@ -228,6 +228,50 @@ func timestampBearingStem(_ stem: String) -> String {
     return String(body[body.startIndex..<range.lowerBound])
 }
 
+/// When a recording started, from the timestamp at the front of its filename
+/// stem (after `timestampBearingStem`), read in `timeZone`.
+///
+/// Three namings carry one:
+/// - HiDock: `2026Nov05-144453-Rec05` (`yyyyMMMdd-HHmmss`);
+/// - Plaud: `2026-11-12 17-38-24` (`yyyy-MM-dd HH-mm-ss`);
+/// - older HiDock firmware: `20250910-145251-Rec58` (`yyyyMMdd-HHmmss`).
+///
+/// Only the HiDock form used to be read, so every calendar feature gave up on
+/// Plaud recordings: the calendar assistant answered "I couldn't determine
+/// this recording's start time" (2026-11-16, `2026-11-12 17-38-24`). The
+/// shape is checked first because DateFormatter alone is lenient about
+/// trailing text and digit counts.
+func recordingStart(fromStem stem: String, timeZone: TimeZone) -> Date? {
+    let shapes: [(pattern: String, format: String, length: Int)] = [
+        (#"^\d{4}[A-Z][a-z]{2}\d{2}-\d{6}"#, "yyyyMMMdd-HHmmss", 16),
+        (#"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}"#, "yyyy-MM-dd HH-mm-ss", 19),
+        (#"^\d{8}-\d{6}"#, "yyyyMMdd-HHmmss", 15),
+    ]
+    for shape in shapes where stem.range(of: shape.pattern, options: .regularExpression) != nil {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = shape.format
+        if let date = formatter.date(from: String(stem.prefix(shape.length))) { return date }
+    }
+    return nil
+}
+
+/// A recording's start from its device record (`createDate` "yyyy/MM/dd",
+/// `createTime` "HH:mm:ss"), for a file whose name carries no timestamp, such
+/// as a Plaud recording renamed with a title.
+func recordingStart(createDate: String, createTime: String, timeZone: TimeZone) -> Date? {
+    let date = createDate.trimmingCharacters(in: .whitespaces)
+    let time = createTime.trimmingCharacters(in: .whitespaces)
+    guard date.range(of: #"^\d{4}/\d{2}/\d{2}$"#, options: .regularExpression) != nil,
+          time.range(of: #"^\d{2}:\d{2}:\d{2}$"#, options: .regularExpression) != nil else { return nil }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
+    formatter.dateFormat = "yyyy/MM/dd HH:mm:ss"
+    return formatter.date(from: "\(date) \(time)")
+}
+
 /// "Robins, Justin" → "Justin Robins". Outlook/Exchange directories list people
 /// surname-first; everywhere else in the app (voice library, transcript
 /// speakers) names are "First Last", so a surname-first attendee would never
