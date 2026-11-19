@@ -6,7 +6,7 @@ Releases before 4.1 were written up on 15 Oct 2026 from the merged pull requests
 
 ## 4.1 — Settings window
 
-**Released 16 Oct 2026** · 31 changes (v4.1.0 to v4.1.30, 15 Oct 2026 – 30 Oct 2026)
+**Released 16 Oct 2026** · 32 changes (v4.1.0 to v4.1.31, 15 Oct 2026 – 19 Nov 2026)
 
 This release brings every setting into one Settings window and makes setting up on a new Mac safer, warning you about missing pieces before they cost you a transcript.
 
@@ -33,6 +33,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **LED ticker.** Events now scroll across the heatmap while it's at rest (before, they never showed). The display style, colour, brightness and speed apply straight away, and a "Send a test message" button lets you try it.
 
 ### Fixed
+- **Requests for Photos and Apple Music.** The calendar features started Claude Code from the top of the disk, where it could look through your home folder, so macOS kept asking on HiDock's behalf for access to Photos, Apple Music and other private folders. It now starts in an empty folder of its own (`~/HiDock/.assistant`). HiDock never needs Photos or Apple Music, so Don't Allow is the right answer if you're asked.
 - **Calendar features on Plaud recordings.** The calendar assistant, Match meeting and the automatic meeting lookup couldn't tell when a Plaud recording started (the assistant said "I couldn't determine this recording's start time"), because only HiDock-style file names were read. Plaud names, older HiDock names, and the device's own start time for renamed recordings now work.
 - **Update now didn't restart the app.** In a build from the code, Update now installed the new version but left the old one running, without asking to restart, so nothing changed until you quit and reopened it. It now asks, then restarts the app.
 - **Speech chopped into one-word lines.** When speaker detection flickered between people for under a second in the middle of someone talking, each flicker started a new line, so one 90-second answer could become 30 one- and two-word lines. Flickers like that are now folded into the person speaking, and lines Refine moves are joined back up with their neighbours.
@@ -45,7 +46,7 @@ This release brings every setting into one Settings window and makes setting up 
 - **Voice model install on a fresh Mac.** The TitaNet voice model downloads correctly again on a new Mac.
 - **Downloaded app couldn't sync or transcribe.** The app on this page now includes its own Python and every file its device sync and transcription need, and each release is checked before publishing. Earlier downloads were missing parts: device sync stopped at start-up and transcription couldn't run. This didn't affect copies built from the code.
 
-<details><summary>Every change (31)</summary>
+<details><summary>Every change (32)</summary>
 
 | Version | Date | Change |
 |---|---|---|
@@ -80,6 +81,7 @@ This release brings every setting into one Settings window and makes setting up 
 | v4.1.28 | 5 Nov 2026 | Updates moved into its own Settings pane, at the bottom |
 | v4.1.29 | 6 Nov 2026 | Popup when an H1 call is transcribed with only one voice, telling you to turn the dock off and on |
 | v4.1.30 | 16 Nov 2026 | Calendar assistant, Match meeting and meeting lookup work on Plaud recordings |
+| v4.1.31 | 19 Nov 2026 | Calendar features run Claude Code in an empty folder of their own, so macOS stops asking for Photos and Apple Music |
 
 </details>
 
