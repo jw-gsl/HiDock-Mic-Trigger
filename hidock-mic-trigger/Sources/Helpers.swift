@@ -489,3 +489,19 @@ func chooseCalendarEventFromTranscript(
     }
     return CalendarMatchDecision(event: best.event, reason: "transcript: \(summary)")
 }
+
+/// The folder the calendar features start Claude Code in: an empty one of
+/// their own, created if missing.
+///
+/// Without it, Claude Code started in the app's own working folder, which is
+/// `/` for an app opened from the Finder or at login. From there it could
+/// look through the whole home folder, and macOS asked, on HiDock's behalf,
+/// for access to Photos, Apple Music and other protected folders (2026-11-18).
+/// It also kept those sessions under `~/.claude/projects/-`, mixed in with
+/// anything else started from `/`.
+@discardableResult
+func assistantWorkingDirectory(home: String = NSHomeDirectory()) -> URL {
+    let url = URL(fileURLWithPath: home).appendingPathComponent("HiDock/.assistant", isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}

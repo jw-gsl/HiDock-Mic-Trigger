@@ -726,3 +726,21 @@ final class RecordingStartTests: XCTestCase {
         XCTAssertNil(recordingStart(createDate: "", createTime: "17:38:24", timeZone: london))
     }
 }
+
+/// Claude Code started by the calendar features gets an empty folder of its
+/// own, not `/`, so it can't wander into Photos or Music.
+final class AssistantWorkingDirectoryTests: XCTestCase {
+    func testCreatesAnEmptyFolderUnderHiDock() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-wd-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let url = assistantWorkingDirectory(home: home)
+        XCTAssertEqual(url.path, "\(home)/HiDock/.assistant")
+        var isDir: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir))
+        XCTAssertTrue(isDir.boolValue)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: url.path), [])
+        // Calling it again is harmless.
+        XCTAssertEqual(assistantWorkingDirectory(home: home), url)
+    }
+}

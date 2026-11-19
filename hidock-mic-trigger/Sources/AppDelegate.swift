@@ -4791,6 +4791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let process = Process()
             process.executableURL = URL(fileURLWithPath: claudePath)
             process.arguments = ["--print", "--output-format", "json", prompt]
+            process.currentDirectoryURL = assistantWorkingDirectory()
             let output = Pipe()
             process.standardOutput = output
             process.standardError = Pipe()
@@ -5236,6 +5237,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 "--print", "--output-format", "json",
                 prompt,
             ]
+            // An empty folder of its own, not the app's `/`: from there it
+            // reached into Photos and Music and macOS asked on HiDock's behalf.
+            process.currentDirectoryURL = assistantWorkingDirectory()
             // Same fix as the interactive calendar assistant: the app's own
             // PATH (launchd-inherited, no Homebrew/Node) would otherwise be
             // handed down to this CLI and then to any npx-based MCP server.
@@ -5944,7 +5948,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
           3. Finish signing in in the browser\\n\
           4. Type /exit, then press Check again on the HiDock calendar banner\\n\\n'
         """
-        viewModel.terminalController.runCommand("\(steps); \(claude)")
+        // Same empty folder as the calendar calls: the terminal's shell
+        // starts in the app's `/` otherwise.
+        let folder = assistantWorkingDirectory().path.replacingOccurrences(of: "'", with: "'\\''")
+        viewModel.terminalController.runCommand("\(steps); cd '\(folder)' && \(claude)")
     }
 
     /// Re-run the lookups that failed during the outage, one at a time, and
@@ -6064,6 +6071,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if let sessionId, !sessionId.isEmpty { arguments += ["--resume", sessionId] }
             arguments.append(context)
             process.arguments = arguments
+            process.currentDirectoryURL = assistantWorkingDirectory()
             // The app itself runs with launchd's bare PATH (no Homebrew, no
             // Node), which this CLI process would otherwise inherit — and then
             // hand down again to any MCP server it spawns via npx. Without this,
